@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Xcode / Tuist (generated project — Project.swift is the source of truth)
+*.xcodeproj
+*.xcworkspace
+.build/
+DerivedData/
+Tuist/.build/
+*.xcuserstate
+xcuserdata/
+
+# Swift Package Manager
+.swiftpm/
+
+# M0 probe artifacts — regenerable, and the captured session.info frame contains
+# the local machine's skills/tools inventory + home paths. Keep out of git.
+Probe/fixtures/
+/tmp/hermes-probe

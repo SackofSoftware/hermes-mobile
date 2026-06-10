@@ -80,6 +80,42 @@ Swift code yet. Reference desktop/gateway source lives in a sibling clone at
   `tool.generating`, `background.complete`, `skin.changed`. Unknown event types must
   also be tolerated — **never crash on an unknown `type`**.
 
+### M0 findings — corrections from the live probe (2026-06-10)
+
+The M0 probe ran successfully against a real server over Tailscale
+(`Probe/main.swift`, fixture at `Probe/fixtures/session-events.jsonl`). Model A is
+confirmed. These details **differ from the assumptions above** and override them:
+
+- **`session_id` is on the event frame, not the payload.** Events are
+  `{method:"event", params:{type, session_id, payload}}` — read `session_id` from
+  `params`. `message.start` carries **no `payload` key at all**.
+- **No per-message id in streaming events.** `message.start` = `{}` payload (absent);
+  `message.delta` = `{text}`; `message.complete` = `{text, usage, status}`. There is
+  **nothing to key an assistant row by** → reduction tracks a single *in-flight
+  assistant row* (open on `message.start`, append on `message.delta`, finalize on
+  `message.complete`). This overrides the "keyed by id" fold rule below.
+- **Two session IDs from `session.create`/`session.resume`.** Result shape:
+  `{session_id, stored_session_id, message_count, messages[], info{model,cwd,profile_name,…}}`.
+  - `session_id` (e.g. `8680ce37`) = short **live/runtime handle**; used in all WS
+    calls and event routing.
+  - `stored_session_id` (e.g. `20260610_120231_afcca6`) = **persisted id**; almost
+    certainly what REST `/api/sessions` lists and `/api/sessions/{id}/messages` uses.
+  - ⚠️ **Open question for M1:** does `session.resume` take the `session_id` or the
+    `stored_session_id`? And the inline `messages[]` means **WS resume may hydrate
+    history directly** — possibly making the separate REST history call optional.
+- **`prompt.submit` result is `{status:"streaming"}`** (not `{ok:true}`).
+- **`message.delta` carries only `text`** (no `rendered` HTML in this run) → native
+  `AttributedString` markdown is required, not just preferred.
+- **`status.update.kind` is an open string** — saw `"lifecycle"` (plus expected
+  `process`/`warn`/`error`). Render generically off `text`.
+- **`thinking.delta`** can be empty/decorative (`"(◔_◔) synthesizing..."`); also saw
+  **`reasoning.available`** `{text}` (full transcript) near turn end. Both fold into
+  the collapsible thinking row (or ignore for MVP); tolerate empty text.
+- **`session.info`** event is large (model, usage/context/cost, version, tools, skills,
+  running, yolo, …). Decode **leniently** — model only the few fields the UI needs.
+- `message.complete.usage` carries token/context/cost — a possible later usage
+  indicator; not MVP.
+
 ### Reference files (hermes-agent repo)
 
 - `apps/desktop/src/hermes.ts` — REST client wrapper (endpoint shapes)
@@ -162,10 +198,12 @@ attaching the token header.)
 
 ### Key design decisions & rationale
 
-- **REST hydrates, socket goes live.** Lists and history come over REST; everything
-  during a turn comes over the WebSocket. Resume loads history via
-  `GET /api/sessions/{id}/messages` then connects the socket; "new chat" opens
-  ChatFeature, connects the socket, and calls `session.create`.
+- **REST hydrates, socket goes live.** Lists come over REST; everything during a turn
+  comes over the WebSocket. "New chat" opens ChatFeature, connects the socket, and
+  calls `session.create`. Resume: the M0 probe showed `session.create`/`session.resume`
+  return an inline `messages[]` array, so **resume may hydrate history straight from the
+  WS result** — preferred if it carries full history; fall back to
+  `GET /api/sessions/{id}/messages` otherwise (resolve in M1, Task 8).
 - **One inbound stream, discrete outbound effects.** The WS connection is a single
   long-running cancellable TCA effect that funnels every event through one
   `.gatewayEvent` action. Outbound JSON-RPC calls (`prompt.submit`,
@@ -188,9 +226,12 @@ attaching the token header.)
 One Swift enum decoded from `{type, payload}` frames, with an `unknown(type:, raw:)`
 case for forward-compatibility:
 
+Each event also carries a frame-level `sessionID` (from `params.session_id`). The
+streaming message events carry **no message id** (confirmed by M0):
+
 ```
-ready | sessionInfo | messageStart(id) | messageDelta(id, text)
-| messageComplete(id, text, role) | thinkingDelta(text) | reasoningDelta(text)
+ready | sessionInfo(SessionInfo) | messageStart | messageDelta(text)
+| messageComplete(text, usage) | thinkingDelta(text) | reasoningAvailable(text)
 | statusUpdate(kind, text) | toolStart(toolID, name, args) | toolComplete(toolID, result, durationS)
 | approvalRequest(ApprovalRequest) | clarifyRequest(ClarifyRequest)
 | sudoRequest(SecretPrompt) | secretRequest(SecretPrompt) | error(message)
@@ -202,14 +243,17 @@ ready | sessionInfo | messageStart(id) | messageDelta(id, text)
 State holds `IdentifiedArrayOf<ChatRow>` where a row is `.message` / `.tool` /
 `.thinking` / `.status`. Fold rules:
 
-- `message.start` → append empty assistant row (remember its id).
-- `message.delta` → append `text` to the row with that id (the streaming effect).
-- `message.complete` → finalize the row (store text, stop the cursor animation).
+- `message.start` → open a single **in-flight assistant row** (track its index in
+  state; there is no message id to key by).
+- `message.delta` → append `text` to the in-flight row (the streaming effect).
+- `message.complete` → finalize the in-flight row (store text, stop the cursor
+  animation, clear the in-flight pointer; optionally stash `usage`).
 - `tool.start` → append a collapsed tool row; `tool.complete` → fill result + duration.
 - `thinking.delta` / `reasoning.delta` → append to a collapsible "thinking" row, hidden by default.
 - `status.update` → transient line that clears on the next message.
 - Composer submit → optimistic `.message` user row + `prompt.submit` effect (result is
-  just `{ok}`; the response arrives via events). Interrupt button → `session.interrupt`.
+  `{status:"streaming"}`; the response arrives via events). Interrupt button →
+  `session.interrupt`.
 
 ### Approval / clarify flow
 
@@ -245,16 +289,19 @@ sanity check, not a week of research.)
 - Create: `Probe/main.swift` (throwaway Swift executable or a single XCTest)
 - Create: `Probe/README.md`
 
-- [ ] write a minimal `URLSessionWebSocketTask` client that connects to
+- [x] write a minimal `URLSessionWebSocketTask` client that connects to
   `<server>/api/ws?token=<stable>` and reads newline-delimited JSON-RPC frames
-- [ ] call `session.create`, then `prompt.submit`, and log every inbound
+- [x] call `session.create`, then `prompt.submit`, and log every inbound
   `{method:"event", params:{type,…}}` frame (raw)
-- [ ] verify against the live server: `gateway.ready`, `message.start/delta/complete`,
-  `tool.start/complete`, `status.update` arrive with the documented shapes
-- [ ] record one real event sequence to a JSON fixture file for later reduction tests
-- [ ] note any payload-shape surprises in `Probe/README.md` and update this plan's
-  "Verified WebSocket protocol" section if reality differs
-- [ ] run the probe — must successfully stream one full prompt/response before M1
+- [x] verify against the live server: `gateway.ready`, `message.start/delta/complete`,
+  `status.update` arrive (tool events not exercised by the simple prompt — fine)
+- [x] record one real event sequence to a JSON fixture file for later reduction tests
+  (`Probe/fixtures/session-events.jsonl`)
+- [x] note payload-shape surprises and update the plan's "Verified WebSocket protocol"
+  section (see **M0 findings** above — 5 corrections captured)
+- [x] run the probe — streamed a full prompt/response (`✅ streaming loop confirmed`)
+- ➕ ⚠️ follow-up for M1: resolve the two-session-id resume question (Task 8) and
+  whether tool events need a separate probe with a tool-invoking prompt
 
 ### Milestone M1 — Vertical slice (send a prompt, watch it stream)
 
@@ -359,10 +406,14 @@ sanity check, not a week of research.)
 
 - [ ] long-running cancellable connect effect funneling every event through
   `.gatewayEvent`; reconnect/backoff driven in the reducer
-- [ ] resume path: REST `messages(sessionID:)` hydrate → connect socket; new path:
+- [ ] resolve the two-session-id question: confirm whether `session.resume` takes
+  `session_id` or `stored_session_id`, and whether its inline `messages[]` is full
+  history (hydrate from WS) or partial (fall back to REST `messages(sessionID:)`)
+- [ ] resume path: hydrate from the resolved source → connect socket; new path:
   connect socket → `session.create`
-- [ ] fold rules for `message.*`, `tool.*`, `thinking/reasoning.delta`, `status.update`
-  into `IdentifiedArrayOf<ChatRow>`
+- [ ] fold rules: single in-flight assistant row for `message.*` (no message id),
+  `tool.*`, `thinking.delta`/`reasoning.available`, open-string `status.update` kind →
+  `IdentifiedArrayOf<ChatRow>`
 - [ ] composer submit → optimistic user row + `prompt.submit` effect; interrupt →
   `session.interrupt`
 - [ ] native `AttributedString` markdown rendering from `text`

@@ -6,9 +6,13 @@
 *.xcworkspace
 .build/
 DerivedData/
+Derived/
 Tuist/.build/
 *.xcuserstate
 xcuserdata/
+
+# Local generation overrides (e.g. HERMES_DEFAULT_SERVER_URL baked in at generate time)
+*.local.xcconfig
 
 # Swift Package Manager
 .swiftpm/

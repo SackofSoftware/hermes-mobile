@@ -313,14 +313,17 @@ sanity check, not a week of research.)
 - Create: `HermesKit/Sources/HermesKit/` (module entry), `HermesKit/Tests/HermesKitTests/`
 - Create: `HermesMobile/Sources/HermesMobileApp.swift`
 
-- [ ] define `Project.swift`: app target `HermesMobile`, Debug/Release configs, Debug
-  Tailscale server preset; depend on local `HermesKit` package
-- [ ] add SPM deps via Tuist/SPM: `swift-composable-architecture`,
-  `swift-dependencies`, `swift-navigation` (see `pfw-spm`)
-- [ ] gitignore generated `*.xcodeproj`/`*.xcworkspace`; commit `Project.swift`
-- [ ] add a placeholder `AppFeature` reducer + root `App` so `tuist generate` builds
-- [ ] write a smoke test that builds `AppFeature` state and asserts initial state
-- [ ] run `tuist generate` + tests — must pass before next task
+- [x] define `Project.swift`: app target `HermesMobile` (`.iPhone`, iOS 17), Debug/Release
+  configs, Debug server preset via `HERMES_DEFAULT_SERVER_URL` env at generate time
+  (leak-free — empty unless set); depends on local `HermesKit` package via `.local`
+- [x] add SPM deps in `HermesKit/Package.swift`: `swift-composable-architecture` +
+  `swift-dependencies` (for `DependenciesMacros`/`@DependencyClient`). `swift-navigation`
+  is **available transitively via TCA** — add explicitly only if a non-TCA usage appears.
+- [x] gitignore generated `*.xcodeproj`/`*.xcworkspace`/`Derived/`; commit `Project.swift`
+- [x] add a placeholder `AppFeature` reducer + root `App`/`AppView` so generation builds
+- [x] write a smoke test (`AppFeatureTests`) asserting initial state + lifecycle no-op
+- [x] verified: `swift test` (1 passed), `tuist generate`, and `xcodebuild` for iOS
+  Simulator → **BUILD SUCCEEDED**
 
 #### Task 3: Models + `GatewayEvent` decoding
 

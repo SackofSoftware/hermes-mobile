@@ -353,12 +353,20 @@ sanity check, not a week of research.)
 - Create: `HermesKit/Sources/HermesKit/Clients/{KeychainClient,HermesRESTClient}.swift`
 - Create: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift`
 
-- [ ] `@DependencyClient KeychainClient` (save/load/delete token) with live + test values
-- [ ] `@DependencyClient HermesRESTClient`: `status()`, `sessions(limit:offset:order:)`,
-  `search(query:)`, `messages(sessionID:)`; attaches `X-Hermes-Session-Token` header
-- [ ] map non-2xx to typed errors (401 → unauthorized, transport → unreachable)
-- [ ] write tests with a mocked `URLProtocol` for status + sessions + 401 path
-- [ ] run tests — must pass before next task
+- [x] verified REST JSON shapes against the real source (`web_server.py` + `hermes_state.py`)
+  before writing DTOs — status, sessions list (`s.*` + computed `preview`/`last_active`),
+  search (`{results}` with `snippet`, **no title**), messages (`messages` table columns)
+- [x] `@DependencyClient KeychainClient` (load/save/delete) — live (Security/Keychain)
+  + `inMemory()` for previews/tests; `testValue` = in-memory
+- [x] `@DependencyClient HermesRESTClient`: `status(baseURL:)` (unauthenticated probe),
+  `sessions`, `search`, `messages`; attaches `X-Hermes-Session-Token`; injectable
+  `URLSession` for tests; `testValue` = unimplemented (calls must be stubbed)
+- [x] typed `RESTError`: 401→`.unauthorized`, 404→`.notFound`, other→`.server`,
+  transport→`.unreachable`, bad body→`.decoding`
+- [x] tests with a `URLProtocol` mock: status decode, sessions/search mapping, messages,
+  header+query attachment, no-token-on-probe, 401, transport-fail, malformed body;
+  + keychain in-memory round-trip
+- [x] run tests — **39 passed** (`swift test`)
 
 #### Task 5: `HermesGatewayClient` (WebSocket JSON-RPC)
 

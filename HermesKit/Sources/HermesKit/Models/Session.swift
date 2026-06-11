@@ -43,3 +43,26 @@ public struct SessionHandle: Equatable, Sendable, Decodable {
     self.messageCount = messageCount
   }
 }
+
+/// A stored message from `GET /api/sessions/{id}/messages`. Columns verified against
+/// the `messages` table schema. Mapped to `ChatRow` during resume hydration (Task 8).
+public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
+  public var id: Int
+  public var role: String
+  public var content: String?
+  public var timestamp: Double?
+  public var toolName: String?
+
+  enum CodingKeys: String, CodingKey {
+    case id, role, content, timestamp
+    case toolName = "tool_name"
+  }
+
+  public init(id: Int, role: String, content: String? = nil, timestamp: Double? = nil, toolName: String? = nil) {
+    self.id = id
+    self.role = role
+    self.content = content
+    self.timestamp = timestamp
+    self.toolName = toolName
+  }
+}

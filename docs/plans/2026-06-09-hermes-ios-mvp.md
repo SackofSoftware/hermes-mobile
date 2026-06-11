@@ -331,15 +331,19 @@ sanity check, not a week of research.)
 - Create: `HermesKit/Sources/HermesKit/Models/{Session,ChatRow,GatewayEvent,JSONRPC,ApprovalRequest,ClarifyRequest}.swift`
 - Create: `HermesKit/Tests/HermesKitTests/GatewayEventDecodingTests.swift`
 
-- [ ] define `Session`, `ChatRow` (`.message/.tool/.thinking/.status`), request models
-- [ ] define `GatewayEvent` enum incl. `unknown(type:, raw:)`; decode from
-  `{type, payload}` frames
-- [ ] define JSON-RPC envelope types (request `{jsonrpc,id,method,params}`, response
-  `{id,result|error}`, event `{method:"event",params}`)
-- [ ] write decoding tests for each handled event type using the M0 fixture
-- [ ] write a decoding test asserting an **unknown event type** decodes to
-  `.unknown` and never throws
-- [ ] run tests — must pass before next task
+- [x] define `Session` (domain) + `SessionHandle` (verified create/resume result with
+  both ids), `ChatRow` (`.message/.tool/.thinking/.status`), `ApprovalRequest`/
+  `ClarifyRequest`/`SecretPrompt` request models
+- [x] define `GatewayEvent` enum incl. `unknown(type:, raw:)`; map from `{type, payload}`
+  with `session_id` read at the **frame** level (per M0); `reasoning.delta` folds into
+  `.thinkingDelta`
+- [x] define JSON-RPC envelope types: `JSONRPCRequest` (outbound) + `InboundFrame`
+  classifier (`.event`/`.response`/`.failure`/`.ignored`) + a `JSONValue` for
+  loosely-typed surfaces (tool args, unknown payloads, raw results)
+- [x] decoding tests for every handled event type, using trimmed inlined M0 frame
+  shapes (fixture is gitignored, so frames are inlined to keep the suite hermetic)
+- [x] test: unknown event type → `.unknown` and never throws (+ unknown without payload)
+- [x] run tests — **21 passed** (`swift test`)
 
 #### Task 4: `KeychainClient` + `HermesRESTClient`
 

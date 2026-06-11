@@ -343,7 +343,9 @@ sanity check, not a week of research.)
 - [x] decoding tests for every handled event type, using trimmed inlined M0 frame
   shapes (fixture is gitignored, so frames are inlined to keep the suite hermetic)
 - [x] test: unknown event type → `.unknown` and never throws (+ unknown without payload)
-- [x] run tests — **21 passed** (`swift test`)
+- [x] direct tests for the outbound `JSONRPCRequest` wire shape and `JSONValue`
+  Codable (bool-vs-number disambiguation, round-trips, accessors, malformed-throws)
+- [x] run tests — **29 passed** (`swift test`)
 
 #### Task 4: `KeychainClient` + `HermesRESTClient`
 

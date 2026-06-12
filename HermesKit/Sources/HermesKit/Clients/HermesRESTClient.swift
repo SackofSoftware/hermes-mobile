@@ -42,6 +42,16 @@ public enum RESTError: Error, Equatable, Sendable {
   case server(status: Int)   // other non-2xx
   case unreachable           // transport failure / non-HTTP response
   case decoding              // 2xx body didn't match the expected shape
+
+  public var message: String {
+    switch self {
+    case .unauthorized: "Invalid or missing token."
+    case .notFound: "Not found."
+    case let .server(status): "Server error (\(status))."
+    case .unreachable: "Couldn’t reach the server."
+    case .decoding: "Unexpected response — is this a Hermes server?"
+    }
+  }
 }
 
 // MARK: - Client

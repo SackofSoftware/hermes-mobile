@@ -394,14 +394,16 @@ sanity check, not a week of research.)
 - Create: `HermesMobile/Sources/Features/ConnectionView.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ConnectionFeatureTests.swift`
 
-- [ ] staged flow: (1) `GET /api/status` reachability (distinguish unreachable vs.
-  not-Hermes), (2) paste token, (3) one authed `GET /api/sessions?limit=1` to validate,
-  (4) store token in Keychain and advance
-- [ ] SwiftUI view: server URL + token fields, per-stage status/error display
-  (see `pfw-modern-swiftui`)
-- [ ] write reducer tests: reachable→valid-token→stored happy path; unreachable;
-  reachable-but-401 token
-- [ ] run tests — must pass before next task
+- [x] staged flow with a `Status` enum (idle/checking/invalidURL/unreachable/notHermes/
+  reachable/validating/invalidToken/failed): `GET /api/status` distinguishes unreachable
+  (`.unreachable`) vs. not-Hermes (`.decoding`); token validated via authed
+  `GET /api/sessions?limit=1`; on success persist to Keychain + `.delegate(.connected)`
+- [x] lenient URL parsing (defaults `http://`); editing the URL resets status to idle
+- [x] SwiftUI `ConnectionView`: URL + secure token fields, gated buttons (`canCheck`/
+  `canConnect`), per-status footer messaging
+- [x] reducer tests: happy path (stores token), unreachable, not-Hermes, invalid-token
+  (no store), empty-URL, edit-resets-status
+- [x] run tests — **52 passed**; `xcodebuild` app target → **BUILD SUCCEEDED**
 
 #### Task 7: `SessionListFeature` (list / search / create)
 

@@ -16,7 +16,7 @@ struct SessionListView: View {
         Button {
           store.send(.sessionTapped(session.id))
         } label: {
-          SessionRowView(session: session)
+          SessionRowView(session: session, now: store.now)
         }
         .buttonStyle(.plain)
       }

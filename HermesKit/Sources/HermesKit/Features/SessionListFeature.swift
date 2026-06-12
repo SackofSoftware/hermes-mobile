@@ -13,19 +13,24 @@ public struct SessionListFeature {
     public var searchQuery: String
     public var isLoading: Bool
     public var loadError: String?
+    /// Reference "now" for relative row timestamps; set from the date dependency on
+    /// load so the value is controllable (deterministic snapshots/tests).
+    public var now: Date
 
     public init(
       connection: ServerConnection,
       sessions: IdentifiedArrayOf<Session> = [],
       searchQuery: String = "",
       isLoading: Bool = false,
-      loadError: String? = nil
+      loadError: String? = nil,
+      now: Date = Date(timeIntervalSince1970: 0)
     ) {
       self.connection = connection
       self.sessions = sessions
       self.searchQuery = searchQuery
       self.isLoading = isLoading
       self.loadError = loadError
+      self.now = now
     }
   }
 
@@ -49,6 +54,7 @@ public struct SessionListFeature {
 
   @Dependency(\.hermesREST) var rest
   @Dependency(\.continuousClock) var clock
+  @Dependency(\.date.now) var now
 
   public init() {}
 
@@ -57,6 +63,7 @@ public struct SessionListFeature {
     Reduce { state, action in
       switch action {
       case .task, .pulledToRefresh:
+        state.now = now
         state.isLoading = true
         state.loadError = nil
         return .run { [rest, connection = state.connection, query = state.searchQuery] send in

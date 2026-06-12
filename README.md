@@ -69,10 +69,12 @@ Build/run the `HermesMobile` scheme from Xcode, or use the scripts below.
 Common tasks are wrapped in `scripts/` (and a `Makefile`):
 
 ```sh
-make setup        # tuist install + generate
-make test         # run the HermesKit suite (streamed output)
-make run          # build + install + launch on a simulator
-make run-device   # build + install + launch on a connected device
+make setup            # tuist install + generate
+make test             # run the HermesKit suite (streamed output)
+make run              # build + install + launch on a simulator
+make run-device       # build + install + launch on a connected device
+make snapshot         # run SwiftUI snapshot tests against baselines
+make snapshot-record  # re-record SwiftUI snapshot baselines
 ```
 
 - **Simulator** (`scripts/run-sim.sh`) needs no signing. Override the device with
@@ -82,6 +84,10 @@ make run-device   # build + install + launch on a connected device
   generate time.
 - **Tests** (`scripts/test.sh`) wrap `swift test` in a pseudo-TTY so output streams
   live (a bare pipe buffers until exit).
+- **Snapshots** (`scripts/snapshot.sh`) render the SwiftUI views via SnapshotTesting
+  (iOS XCTest target `HermesMobileTests`, separate from the SPM suite). Baselines live
+  in `HermesMobileTests/__Snapshots__/`. Row timestamps are pinned to a fixed reference
+  date so the images are deterministic.
 
 TestFlight/App Store distribution (via the `asc` CLI) is not wired yet — pending the
 personal App Store Connect API key for this account.

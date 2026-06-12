@@ -15,6 +15,10 @@ let project = Project(
   name: "HermesMobile",
   packages: [
     .local(path: "HermesKit"),
+    .remote(
+      url: "https://github.com/pointfreeco/swift-snapshot-testing",
+      requirement: .upToNextMajor(from: "1.17.0")
+    ),
   ],
   targets: [
     .target(
@@ -43,6 +47,18 @@ let project = Project(
           .release(name: "Release"),
         ]
       )
+    ),
+    .target(
+      name: "HermesMobileTests",
+      destinations: [.iPhone],
+      product: .unitTests,
+      bundleId: "me.honcharenko.HermesMobileTests",
+      deploymentTargets: .iOS("17.0"),
+      sources: ["HermesMobileTests/**"],
+      dependencies: [
+        .target(name: "HermesMobile"),
+        .package(product: "SnapshotTesting"),
+      ]
     ),
   ]
 )

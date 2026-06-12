@@ -8,16 +8,22 @@ import Testing
 struct SessionListFeatureTests {
   private let connection = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "tok")
 
+  private let now = Date(timeIntervalSince1970: 1_749_600_000)
+
   @Test func loadSuccess() async {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()
     } withDependencies: {
+      $0.date = .constant(now)
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", title: "Hello", preview: "hi")]
       }
     }
 
-    await store.send(.task) { $0.isLoading = true }
+    await store.send(.task) {
+      $0.now = now
+      $0.isLoading = true
+    }
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1", title: "Hello", preview: "hi")]
@@ -28,10 +34,14 @@ struct SessionListFeatureTests {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()
     } withDependencies: {
+      $0.date = .constant(now)
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
-    await store.send(.task) { $0.isLoading = true }
+    await store.send(.task) {
+      $0.now = now
+      $0.isLoading = true
+    }
     await store.receive(\.sessionsResponse.failure) {
       $0.isLoading = false
       $0.loadError = RESTError.unreachable.message

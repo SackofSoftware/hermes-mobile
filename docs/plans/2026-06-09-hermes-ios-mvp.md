@@ -412,12 +412,17 @@ sanity check, not a week of research.)
 - Create: `HermesMobile/Sources/Features/SessionList{View,RowView}.swift`
 - Create: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] load `GET /api/sessions?order=recent` (pull-to-refresh), search field →
-  `/api/sessions/search?q=`
-- [ ] rows: title, relative timestamp, preview; tap → navigate to ChatFeature (resume);
-  "+" → navigate to ChatFeature (new)
-- [ ] write reducer tests for load success, load failure, and search via mock REST
-- [ ] run tests — must pass before next task
+- [x] load `GET /api/sessions?order=recent` on appear + pull-to-refresh; `.searchable`
+  field → debounced (300ms via `clock.sleep` + `.cancellable(cancelInFlight:)`) →
+  `/api/sessions/search?q=` (empty query reloads the full list)
+- [x] `SessionRowView`: title (or id), relative timestamp, preview; row tap →
+  `.delegate(.openSession)`, "+" → `.delegate(.createSession)` — `ChatFeature`/`AppFeature`
+  wiring deferred to Task 8 (same delegate seam as `ConnectionFeature`)
+- [x] reducer tests: load success, load failure (typed error message), debounced search
+  via `TestClock`, open/create delegate emission
+- [x] run tests — **57 passed**; `xcodebuild` app target → **BUILD SUCCEEDED**
+- ➕ note: modern TCA has no `Effect.debounce(clock:)`; use `clock.sleep` +
+  `.cancellable(id:, cancelInFlight: true)` instead
 
 #### Task 8: `ChatFeature` streaming core
 

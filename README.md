@@ -62,20 +62,29 @@ To bake a default server URL into Debug builds (kept out of git), set it at gene
 HERMES_DEFAULT_SERVER_URL=http://<tailnet-host>:9119 tuist generate
 ```
 
-Build/run the `HermesMobile` scheme from Xcode, or:
+Build/run the `HermesMobile` scheme from Xcode, or use the scripts below.
+
+## Scripts
+
+Common tasks are wrapped in `scripts/` (and a `Makefile`):
 
 ```sh
-xcodebuild build -workspace HermesMobile.xcworkspace -scheme HermesMobile \
-  -destination 'generic/platform=iOS Simulator'
+make setup        # tuist install + generate
+make test         # run the HermesKit suite (streamed output)
+make run          # build + install + launch on a simulator
+make run-device   # build + install + launch on a connected device
 ```
 
-## Test
+- **Simulator** (`scripts/run-sim.sh`) needs no signing. Override the device with
+  `SIM_NAME="iPhone 16" make run` or `scripts/run-sim.sh "iPhone 16"`.
+- **Device** (`scripts/run-device.sh`) needs automatic signing —
+  `DEVELOPMENT_TEAM=<your 10-char team id> make run-device`. The team is baked in at
+  generate time.
+- **Tests** (`scripts/test.sh`) wrap `swift test` in a pseudo-TTY so output streams
+  live (a bare pipe buffers until exit).
 
-Engine tests run fast on the Mac, no simulator:
-
-```sh
-swift test --package-path HermesKit
-```
+TestFlight/App Store distribution (via the `asc` CLI) is not wired yet — pending the
+personal App Store Connect API key for this account.
 
 ## Verifying the protocol (M0 probe)
 

@@ -6,6 +6,11 @@ import ProjectDescription
 // without committing their tailnet address/token. Empty by default.
 let debugServerURL = ProcessInfo.processInfo.environment["HERMES_DEFAULT_SERVER_URL"] ?? ""
 
+// Apple team for device/TestFlight signing, baked in at generate time. Empty for
+// simulator-only work (simulator builds pass CODE_SIGNING_ALLOWED=NO). For a device
+// build: `DEVELOPMENT_TEAM=<your 10-char team id> tuist generate`.
+let developmentTeam = ProcessInfo.processInfo.environment["DEVELOPMENT_TEAM"] ?? ""
+
 let project = Project(
   name: "HermesMobile",
   packages: [
@@ -27,6 +32,12 @@ let project = Project(
         .package(product: "HermesKit"),
       ],
       settings: .settings(
+        base: [
+          "DEVELOPMENT_TEAM": .string(developmentTeam),
+          "CODE_SIGN_STYLE": "Automatic",
+          "MARKETING_VERSION": "0.1.0",
+          "CURRENT_PROJECT_VERSION": "1",
+        ],
         configurations: [
           .debug(name: "Debug"),
           .release(name: "Release"),

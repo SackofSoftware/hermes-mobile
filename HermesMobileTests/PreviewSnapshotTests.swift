@@ -13,6 +13,10 @@ final class PreviewSnapshotTests: XCTestCase {
   private let device = ViewImageConfig.iPhone13Pro
   /// Fixed reference "now" so relative timestamps are deterministic.
   private let now = Date(timeIntervalSince1970: 1_749_600_000)
+  private let connection = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t")
+  private func id(_ n: Int) -> UUID {
+    UUID(uuidString: "00000000-0000-0000-0000-\(String(format: "%012x", n))")!
+  }
 
   // MARK: ConnectionView (Task 6)
 
@@ -96,6 +100,38 @@ final class PreviewSnapshotTests: XCTestCase {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
+  // MARK: ChatView (Task 8)
+
+  func testChatView() {
+    let rows: [ChatRow] = [
+      ChatRow(id: id(0), kind: .message(role: .user, text: "Summarize the streaming protocol.", isComplete: true)),
+      ChatRow(id: id(1), kind: .tool(name: "read_file", state: .complete, result: "tui_gateway/server.py", durationS: 0.8)),
+      ChatRow(id: id(2), kind: .message(
+        role: .assistant,
+        text: "Here's the gist:\n\n- **WebSocket** JSON-RPC at `/api/ws`\n- Responses stream as `message.delta` events\n- Tools surface via `tool.start` / `tool.complete`",
+        isComplete: true
+      )),
+    ]
+    let view = NavigationStack {
+      ChatView(
+        store: Store(
+          initialState: ChatFeature.State(
+            connection: connection,
+            title: "Protocol chat",
+            transcript: IdentifiedArray(uniqueElements: rows)
+          )
+        ) {
+          ChatFeature()
+        } withDependencies: {
+          // Don't open a real socket during render.
+          $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+          $0.continuousClock = ImmediateClock()
         }
       )
     }

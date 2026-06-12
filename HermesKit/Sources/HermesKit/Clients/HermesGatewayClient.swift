@@ -24,6 +24,14 @@ public enum GatewayError: Error, Equatable, Sendable {
   case notConnected
   case disconnected
   case server(String)
+
+  public var message: String {
+    switch self {
+    case .notConnected: "Not connected."
+    case .disconnected: "Connection lost."
+    case let .server(message): message
+    }
+  }
 }
 
 // MARK: - Live / factory

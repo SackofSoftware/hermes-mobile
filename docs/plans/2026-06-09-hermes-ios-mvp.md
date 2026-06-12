@@ -431,24 +431,29 @@ sanity check, not a week of research.)
 - Create: `HermesMobile/Sources/Features/Chat/{ChatView,MessageBubbleView,ToolStatusView,ComposerView}.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] long-running cancellable connect effect funneling every event through
-  `.gatewayEvent`; reconnect/backoff driven in the reducer
-- [ ] resolve the two-session-id question: confirm whether `session.resume` takes
-  `session_id` or `stored_session_id`, and whether its inline `messages[]` is full
-  history (hydrate from WS) or partial (fall back to REST `messages(sessionID:)`)
-- [ ] resume path: hydrate from the resolved source → connect socket; new path:
-  connect socket → `session.create`
-- [ ] fold rules: single in-flight assistant row for `message.*` (no message id),
-  `tool.*`, `thinking.delta`/`reasoning.available`, open-string `status.update` kind →
-  `IdentifiedArrayOf<ChatRow>`
-- [ ] composer submit → optimistic user row + `prompt.submit` effect; interrupt →
-  `session.interrupt`
-- [ ] native `AttributedString` markdown rendering from `text`
-- [ ] write **event-reduction tests** driving the M0 fixture sequence; assert final
-  transcript
-- [ ] write reconnect/backoff test with `TestClock`
-- [ ] run tests — must pass before next task. **M1 demo: send a prompt from iPhone and
-  watch it stream.**
+- [x] long-running cancellable connect effect (`CancelID.socket`) funnels every event
+  through `.gatewayEvent`; stream end → `.gatewayClosed`; reconnect/backoff
+  (`2^(attempt-1)`, cap 30s, via `clock.sleep`) driven in the reducer; `.onDisappear`
+  cancels socket + reconnect
+- [x] **two-session-id model (unified):** first ready with no stored id → `session.create`;
+  any ready with a stored id (resume entry / reconnect) → `session.resume` by stored id
+  (which `create` also returns). History hydrates via REST `messages(storedID)`.
+  ⚠️ **still needs live verification** (server wasn't up to probe `session.resume`) — if
+  resume actually wants the live `session_id`, it's a one-line change in `bootstrapSession`
+- [x] resume path: REST history hydrate (`.task`) + connect socket; new path:
+  connect → `session.create` on `.ready`
+- [x] fold rules verified by tests: single in-flight assistant row for `message.*`
+  (no id), tool rows keyed by `tool_id`, `thinking.delta`/`reasoning.available` → one
+  collapsible row, `status.update` → transient `activity` footer, `error` → banner
+- [x] composer submit → optimistic user row + `prompt.submit`; interrupt →
+  `session.interrupt`; both capture deps in the effect
+- [x] native `AttributedString` markdown (inline-only, whitespace-preserving) for
+  assistant text in `MessageBubbleView`
+- [x] event-reduction tests (streaming/thinking/tool/status/error) with `.incrementing`
+  UUIDs; create-bootstrap integration test; reconnect/backoff test with `TestClock`
+- [x] run tests — **64 passed**; app `BUILD SUCCEEDED`; `ChatView` snapshot recorded
+- ➕ **M1 demo (send a prompt from iPhone, watch it stream) still pending**: needs
+  `AppFeature` wiring (Connection → SessionList → Chat) + a live run against the server
 
 ### Milestone M2 — Approvals & clarify (the mobile-native payoff)
 

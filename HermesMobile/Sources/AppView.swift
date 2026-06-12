@@ -2,23 +2,25 @@ import ComposableArchitecture
 import HermesKit
 import SwiftUI
 
-/// Placeholder root view. Will be replaced by connection-gated navigation
-/// (onboarding → session list → chat) as M1 features land.
+/// Root view: the onboarding screen until connected, then the session list with a
+/// navigation stack that pushes chat screens.
 struct AppView: View {
-  let store: StoreOf<AppFeature>
+  @Bindable var store: StoreOf<AppFeature>
 
   var body: some View {
-    VStack(spacing: 12) {
-      Image(systemName: "staroflife.fill")
-        .font(.largeTitle)
-        .foregroundStyle(.tint)
-      Text("Hermes Mobile")
-        .font(.title2.weight(.semibold))
-      Text("Scaffold ready")
-        .font(.footnote)
-        .foregroundStyle(.secondary)
+    if let homeStore = store.scope(state: \.home, action: \.home) {
+      NavigationStack(path: $store.scope(state: \.path, action: \.path)) {
+        SessionListView(store: homeStore)
+      } destination: { chatStore in
+        ChatView(store: chatStore)
+      }
+    } else {
+      NavigationStack {
+        ConnectionView(store: store.scope(state: \.onboarding, action: \.onboarding))
+          .navigationTitle("Connect to Hermes")
+          .navigationBarTitleDisplayMode(.inline)
+      }
     }
-    .task { store.send(.task) }
   }
 }
 

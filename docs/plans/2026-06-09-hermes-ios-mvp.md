@@ -452,8 +452,13 @@ sanity check, not a week of research.)
 - [x] event-reduction tests (streaming/thinking/tool/status/error) with `.incrementing`
   UUIDs; create-bootstrap integration test; reconnect/backoff test with `TestClock`
 - [x] run tests — **64 passed**; app `BUILD SUCCEEDED`; `ChatView` snapshot recorded
-- ➕ **M1 demo (send a prompt from iPhone, watch it stream) still pending**: needs
-  `AppFeature` wiring (Connection → SessionList → Chat) + a live run against the server
+- [x] **`AppFeature` integration**: onboarding (`ConnectionFeature`) until connected,
+  then `SessionListFeature` as the stack root pushing `ChatFeature` screens; wired via
+  child delegates (`connected` / `openSession` / `createSession`). 66 tests pass; runs
+  on simulator. (`AppView` renders the `NavigationStack` over `StackState`.)
+- ➕ **M1 demo (send a prompt from iPhone, watch it stream) — ready for on-device run**:
+  needs the iPhone connected + Hermes running (Model A) + `DEVELOPMENT_TEAM=7V99GYC5W7
+  make run-device`. This is also where the `session.resume` contract gets live-verified.
 
 ### Milestone M2 — Approvals & clarify (the mobile-native payoff)
 

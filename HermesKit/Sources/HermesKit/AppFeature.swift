@@ -1,27 +1,65 @@
 import ComposableArchitecture
 
-/// Root feature. For now a placeholder so the project generates and builds;
-/// it will grow to own connection state and root navigation (ConnectionFeature,
-/// SessionListFeature, ChatFeature, SettingsFeature) in later M1 tasks.
+/// Root feature: onboarding until connected, then a session list that pushes chat
+/// screens. Wires the child features together via their delegate actions.
 @Reducer
 public struct AppFeature {
   @ObservableState
   public struct State: Equatable {
-    public init() {}
+    public var onboarding: ConnectionFeature.State
+    public var home: SessionListFeature.State?
+    public var path: StackState<ChatFeature.State>
+
+    public init(
+      onboarding: ConnectionFeature.State = .init(),
+      home: SessionListFeature.State? = nil,
+      path: StackState<ChatFeature.State> = .init()
+    ) {
+      self.onboarding = onboarding
+      self.home = home
+      self.path = path
+    }
   }
 
   public enum Action {
-    case task
+    case onboarding(ConnectionFeature.Action)
+    case home(SessionListFeature.Action)
+    case path(StackActionOf<ChatFeature>)
   }
 
   public init() {}
 
-  public var body: some Reducer<State, Action> {
+  public var body: some ReducerOf<Self> {
+    Scope(state: \.onboarding, action: \.onboarding) {
+      ConnectionFeature()
+    }
     Reduce { state, action in
       switch action {
-      case .task:
+      case let .onboarding(.delegate(.connected(connection))):
+        state.home = SessionListFeature.State(connection: connection)
+        return .none
+
+      case let .home(.delegate(.openSession(session))):
+        guard let connection = state.home?.connection else { return .none }
+        state.path.append(
+          ChatFeature.State(connection: connection, resumeStoredID: session.id, title: session.title)
+        )
+        return .none
+
+      case .home(.delegate(.createSession)):
+        guard let connection = state.home?.connection else { return .none }
+        state.path.append(ChatFeature.State(connection: connection))
+        return .none
+
+      case .onboarding, .home, .path:
         return .none
       }
+    }
+    .ifLet(\.home, action: \.home) {
+      SessionListFeature()
+    }
+    .forEach(\.path, action: \.path) {
+      ChatFeature()
     }
   }
 }

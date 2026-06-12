@@ -374,15 +374,18 @@ sanity check, not a week of research.)
 - Create: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift`
 - Create: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`
 
-- [ ] `@DependencyClient HermesGatewayClient` with
-  `connect(url:token:) -> AsyncStream<GatewayEvent>` and
-  `send(method:params:) async throws -> JSONValue`
-- [ ] implement over `URLSessionWebSocketTask`: id counter, pending-request map
-  (`id → continuation`), route `{method:"event"}` frames into the stream
-- [ ] handle newline-delimited framing and socket close (finish the stream)
-- [ ] write a test against a fake transport: a `send` resolves on its matching
-  `{id,result}`; an event frame is yielded on the stream
-- [ ] run tests — must pass before next task
+- [x] `@DependencyClient HermesGatewayClient` with `connect`/`send`/`disconnect`;
+  transport abstracted behind `WebSocketTransport` so tests inject a fake socket
+- [x] `GatewayConnection` actor over `URLSessionWebSocketTask`: id counter,
+  pending-request map (`id → continuation`), routes `InboundFrame` to event stream
+  vs. waiting `send`; **`send` fails fast (`.disconnected`) on a finished connection
+  so a torn-down socket can never hang the caller**
+- [x] newline-delimited framing (one WS message → many frames) + socket close finishes
+  the stream and fails all outstanding requests
+- [x] fake-transport tests: send↔result correlation, concurrent-send id routing, events
+  on stream, multi-frame split, error response, not-connected, socket-close-fails-pending
+- [x] run tests — **46 passed** (`swift test`). ⚠️ note: pipe `swift test` through
+  `script -q /dev/null …` for live (unbuffered) output; bare pipes buffer until exit
 
 #### Task 6: `ConnectionFeature` (staged validation)
 

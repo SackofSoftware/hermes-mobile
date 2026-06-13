@@ -490,15 +490,31 @@ clarify/secret for Task 10).
 - Create: `HermesMobile/Sources/Features/Chat/ClarifyCardView.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ClarifyFeatureTests.swift`
 
-- [ ] `clarify.request`: choices[] non-empty → selectable options; empty → inline text
-  input → `clarify.respond`
-- [ ] `sudo.request`/`secret.request` → same card with `isSecureEntry: true` →
-  `sudo.respond`/`secret.respond`
-- [ ] composer disabled while `pendingInteraction` set; clears on response
-- [ ] ⚠️ investigate whether the server re-emits pending requests on resume/reconnect;
-  record findings and adjust reconnect handling if needed
-- [ ] write tests: choices path, free-text path, secure-entry path
-- [ ] run tests — must pass before next task
+**Decision:** like Task 9, folded into `ChatFeature` (not a separate child reducer) —
+responding needs the gateway connection + sessionID. `PendingInteraction` already had
+`.clarify`/`.secret` cases; this task wired the events, responses, and a shared
+`ClarifyCardView`.
+
+- [x] `clarify.request`: choices[] non-empty → selectable options; empty → inline text
+  input → `clarify.respond({request_id, answer})`. `ClarifyCardView` covers both shapes.
+- [x] `sudo.request`/`secret.request` → same card with secure entry → `sudo.respond`/
+  `secret.respond`. **Verified value keys differ** (`tui_gateway/server.py:5224-5236`):
+  `clarify`→`answer`, `sudo`→`password`, `secret`→`value`. `secret.request` carries a
+  `prompt`; `sudo.request` payload is `{}` (no prompt). Secret value is **never echoed**
+  into the transcript (settled row shows "Password/Secret submitted").
+- [x] composer disabled while `pendingInteraction` set (`canSend` already gates on it);
+  clears on response
+- [x] ⚠️ **investigated — server does NOT re-emit pending prompts on reconnect.**
+  `_block` registers the request in `_pending`/`_pending_prompt_payloads` and the thread
+  blocks up to a timeout (clarify 300s, sudo 120s), but only `_session_pending_kind`
+  reads the stored payload — just to report a "waiting" status on `session.info`, not to
+  re-`_emit` the `*.request`. So a socket drop mid-prompt loses the card client-side
+  while the server stays blocked until timeout. **MVP limitation, accepted** (matches the
+  deferred reconnect-resilience scope); a future fix could re-surface from `session.info`
+  `live_status == "waiting"`. Revisit in Task 11 (reconnect resilience).
+- [x] write tests: choices path, free-text path, secure-entry path (sudo + secret),
+  request-pins-card, no-secret-echo, guard when nothing pending — 7 new tests
+- [x] run tests — **77 passed**; app `BUILD SUCCEEDED`
 
 ### Milestone M3 — Polish
 

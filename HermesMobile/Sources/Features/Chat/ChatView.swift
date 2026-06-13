@@ -71,8 +71,16 @@ struct ChatView: View {
         onApprove: { all in store.send(.respondToApproval(approve: true, all: all)) },
         onDeny: { store.send(.respondToApproval(approve: false, all: false)) }
       )
-    case .clarify, .secret, .none:
-      EmptyView() // clarify/secret cards wired in Task 10
+    case let .clarify(request):
+      ClarifyCardView(mode: .clarify(request)) { answer in
+        store.send(.respondToClarify(answer: answer))
+      }
+    case let .secret(kind, prompt):
+      ClarifyCardView(mode: .secret(kind, prompt)) { value in
+        store.send(.respondToSecret(value: value))
+      }
+    case .none:
+      EmptyView()
     }
   }
 

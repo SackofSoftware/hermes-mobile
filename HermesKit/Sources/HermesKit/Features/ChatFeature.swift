@@ -95,6 +95,8 @@ public struct ChatFeature {
     case composerSubmitted
     case interruptTapped
     case respondToApproval(approve: Bool, all: Bool)
+    case respondToClarify(answer: String)
+    case respondToSecret(value: String)
   }
 
   private enum CancelID { case socket, reconnect }
@@ -197,6 +199,47 @@ public struct ChatFeature {
             "all": .bool(all),
           ]))
         }
+
+      case let .respondToClarify(answer):
+        guard case let .clarify(request) = state.pendingInteraction,
+              let sessionID = state.liveSessionID
+        else { return .none }
+        state.pendingInteraction = nil
+        // Echo the answer so the transcript records what was chosen/typed.
+        state.transcript.append(
+          ChatRow(id: uuid(), kind: .status(kind: "clarify", text: answer))
+        )
+        let requestID = request.requestID
+        return .run { [gateway] _ in
+          _ = try? await gateway.send("clarify.respond", .object([
+            "session_id": .string(sessionID),
+            "request_id": .string(requestID),
+            "answer": .string(answer),
+          ]))
+        }
+
+      case let .respondToSecret(value):
+        guard case let .secret(kind, prompt) = state.pendingInteraction,
+              let sessionID = state.liveSessionID
+        else { return .none }
+        state.pendingInteraction = nil
+        // Never echo the secret value into the transcript.
+        let label = kind == .sudo ? "Password submitted" : "Secret submitted"
+        state.transcript.append(
+          ChatRow(id: uuid(), kind: .status(kind: "secret", text: label))
+        )
+        // Method + value key differ per kind (verified against tui_gateway/server.py):
+        // sudo.respond → "password", secret.respond → "value".
+        let method = kind == .sudo ? "sudo.respond" : "secret.respond"
+        let valueKey = kind == .sudo ? "password" : "value"
+        let requestID = prompt.requestID
+        return .run { [gateway] _ in
+          _ = try? await gateway.send(method, .object([
+            "session_id": .string(sessionID),
+            "request_id": .string(requestID),
+            valueKey: .string(value),
+          ]))
+        }
       }
     }
   }
@@ -270,8 +313,23 @@ public struct ChatFeature {
       state.activity = nil
       return .none
 
-    case .sessionInfo, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
-      // sessionInfo: not needed yet. clarify/sudo/secret: handled in Task 10.
+    case let .clarifyRequest(request):
+      state.pendingInteraction = .clarify(request)
+      state.activity = nil
+      return .none
+
+    case let .sudoRequest(prompt):
+      state.pendingInteraction = .secret(.sudo, prompt)
+      state.activity = nil
+      return .none
+
+    case let .secretRequest(prompt):
+      state.pendingInteraction = .secret(.secret, prompt)
+      state.activity = nil
+      return .none
+
+    case .sessionInfo, .unknown:
+      // sessionInfo: not needed yet.
       return .none
     }
   }

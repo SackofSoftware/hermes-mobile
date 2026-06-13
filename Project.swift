@@ -37,8 +37,12 @@ let project = Project(
         ],
         // On device, reaching a private/tailnet host can trigger the local-network prompt.
         "NSLocalNetworkUsageDescription": "Hermes Mobile connects to your self-hosted Hermes server over your private network or Tailscale.",
+        // Only standard encryption (HTTPS/TLS) — exempt; lets TestFlight skip the
+        // export-compliance prompt so builds are testable immediately.
+        "ITSAppUsesNonExemptEncryption": false,
       ]),
       sources: ["HermesMobile/Sources/**"],
+      resources: ["HermesMobile/Resources/**"],
       dependencies: [
         .package(product: "HermesKit"),
       ],
@@ -46,8 +50,9 @@ let project = Project(
         base: [
           "DEVELOPMENT_TEAM": .string(developmentTeam),
           "CODE_SIGN_STYLE": "Automatic",
-          "MARKETING_VERSION": "0.1.0",
+          "MARKETING_VERSION": "1.0",
           "CURRENT_PROJECT_VERSION": "1",
+          "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
         ],
         configurations: [
           .debug(name: "Debug"),

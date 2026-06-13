@@ -11,6 +11,7 @@ struct ChatView: View {
     VStack(spacing: 0) {
       transcript
       footer
+      pendingCard
       Divider()
       ComposerView(
         text: $store.composerText,
@@ -58,6 +59,20 @@ struct ChatView: View {
       .font(.caption)
     case let .status(_, text):
       Text(text).font(.caption).foregroundStyle(.secondary)
+    }
+  }
+
+  @ViewBuilder
+  private var pendingCard: some View {
+    switch store.pendingInteraction {
+    case let .approval(request):
+      ApprovalCardView(
+        request: request,
+        onApprove: { all in store.send(.respondToApproval(approve: true, all: all)) },
+        onDeny: { store.send(.respondToApproval(approve: false, all: false)) }
+      )
+    case .clarify, .secret, .none:
+      EmptyView() // clarify/secret cards wired in Task 10
     }
   }
 

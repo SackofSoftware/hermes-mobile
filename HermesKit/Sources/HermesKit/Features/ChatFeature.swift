@@ -22,6 +22,9 @@ public struct ChatFeature {
     public var activity: String?     // latest status.update text (transient footer)
     public var errorBanner: String?
     public var isSending: Bool
+    /// A blocking request from the agent (approval/clarify/secret). While set, the
+    /// composer is disabled and a card is the focal point.
+    public var pendingInteraction: PendingInteraction?
 
     // Bookkeeping (internal).
     var liveSessionID: String?
@@ -36,6 +39,15 @@ public struct ChatFeature {
       case connecting
       case ready
       case reconnecting
+    }
+
+    /// A blocking interactive request the agent is waiting on.
+    public enum PendingInteraction: Equatable, Sendable {
+      case approval(ApprovalRequest)
+      case clarify(ClarifyRequest)        // wired in Task 10
+      case secret(SecretKind, SecretPrompt) // wired in Task 10
+
+      public enum SecretKind: Equatable, Sendable { case sudo, secret }
     }
 
     public init(
@@ -61,11 +73,13 @@ public struct ChatFeature {
       self.toolRowIDs = [:]
       self.reconnectAttempt = 0
       self.hasRequestedSession = false
+      self.pendingInteraction = nil
     }
 
     public var canSend: Bool {
       !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         && liveSessionID != nil
+        && pendingInteraction == nil
     }
   }
 
@@ -80,6 +94,7 @@ public struct ChatFeature {
     case historyResponse([SessionMessage])
     case composerSubmitted
     case interruptTapped
+    case respondToApproval(approve: Bool, all: Bool)
   }
 
   private enum CancelID { case socket, reconnect }
@@ -163,6 +178,25 @@ public struct ChatFeature {
         return .run { [gateway] _ in
           _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
         }
+
+      case let .respondToApproval(approve, all):
+        guard case let .approval(request) = state.pendingInteraction,
+              let sessionID = state.liveSessionID
+        else { return .none }
+        state.pendingInteraction = nil
+        state.transcript.append(
+          ChatRow(id: uuid(), kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
+        )
+        let requestID = request.requestID
+        let choice = approve ? "approve" : "deny"
+        return .run { [gateway] _ in
+          _ = try? await gateway.send("approval.respond", .object([
+            "session_id": .string(sessionID),
+            "request_id": .string(requestID),
+            "choice": .string(choice),
+            "all": .bool(all),
+          ]))
+        }
       }
     }
   }
@@ -231,8 +265,13 @@ public struct ChatFeature {
       state.isSending = false
       return .none
 
-    case .sessionInfo, .approvalRequest, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
-      // sessionInfo: not needed yet. Interactive requests: handled in M2 (Tasks 9–10).
+    case let .approvalRequest(request):
+      state.pendingInteraction = .approval(request)
+      state.activity = nil
+      return .none
+
+    case .sessionInfo, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
+      // sessionInfo: not needed yet. clarify/sudo/secret: handled in Task 10.
       return .none
     }
   }

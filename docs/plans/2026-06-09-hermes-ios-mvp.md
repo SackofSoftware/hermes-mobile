@@ -462,18 +462,26 @@ sanity check, not a week of research.)
 
 ### Milestone M2 — Approvals & clarify (the mobile-native payoff)
 
-#### Task 9: `ApprovalFeature`
+#### Task 9: Approvals (folded into `ChatFeature`)
+
+**Decision:** implemented inside `ChatFeature` (not a separate child reducer) — responding
+needs ChatFeature's gateway connection + sessionID, so a child would just reach back into
+all of it. State: `pendingInteraction: PendingInteraction?` (enum covering approval +
+clarify/secret for Task 10).
 
 **Files:**
-- Create: `HermesKit/Sources/HermesKit/Features/ApprovalFeature.swift`
+- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Create: `HermesMobile/Sources/Features/Chat/ApprovalCardView.swift`
-- Create: `HermesKit/Tests/HermesKitTests/ApprovalFeatureTests.swift`
+- Create: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`
 
-- [ ] `approval.request` → set `chat.pendingInteraction`, disable composer, pin card
-- [ ] Approve/Deny + "approve all" toggle → `approval.respond({…, choice, all})` →
-  collapse to settled state on `{resolved}`
-- [ ] write round-trip test: request event → respond effect → settled; "approve all" path
-- [ ] run tests — must pass before next task
+- [x] `approval.request` → `state.pendingInteraction = .approval(req)`; `canSend` now also
+  requires `pendingInteraction == nil`, so the composer is blocked; `ApprovalCardView` pinned
+- [x] Approve/Deny + "approve all" toggle → `respondToApproval(approve:all:)` →
+  `approval.respond({session_id, request_id, choice, all})`; clears pending + appends a
+  settled `.status` row ("Approved"/"Denied")
+- [x] tests: request pins card + blocks composer; approve/approve-all/deny round-trips
+  assert the exact RPC params (via recorded `gateway.send`)
+- [x] run tests — **70 passed**; app `BUILD SUCCEEDED`
 
 #### Task 10: `ClarifyFeature` (+ sudo/secret)
 

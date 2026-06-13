@@ -30,6 +30,13 @@ let project = Project(
       infoPlist: .extendingDefault(with: [
         "UILaunchScreen": ["UIColorName": ""],
         "HermesDefaultServerURL": .string(debugServerURL),
+        // The app connects to user-specified self-hosted servers over http (Tailscale/LAN),
+        // so domain-scoped ATS exceptions aren't possible — allow cleartext loads.
+        "NSAppTransportSecurity": [
+          "NSAllowsArbitraryLoads": true,
+        ],
+        // On device, reaching a private/tailnet host can trigger the local-network prompt.
+        "NSLocalNetworkUsageDescription": "Hermes Mobile connects to your self-hosted Hermes server over your private network or Tailscale.",
       ]),
       sources: ["HermesMobile/Sources/**"],
       dependencies: [

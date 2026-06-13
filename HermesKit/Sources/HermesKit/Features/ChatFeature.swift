@@ -97,6 +97,7 @@ public struct ChatFeature {
     case respondToApproval(approve: Bool, all: Bool)
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
+    case copyRow(id: ChatRow.ID)
   }
 
   private enum CancelID { case socket, reconnect }
@@ -105,6 +106,7 @@ public struct ChatFeature {
   @Dependency(\.hermesREST) var rest
   @Dependency(\.continuousClock) var clock
   @Dependency(\.uuid) var uuid
+  @Dependency(\.pasteboard) var pasteboard
 
   public init() {}
 
@@ -131,6 +133,9 @@ public struct ChatFeature {
       case .gatewayClosed:
         state.status = .reconnecting
         state.hasRequestedSession = false
+        // Finalize anything mid-stream so a dropped socket doesn't leave a row
+        // spinning forever; the transcript itself persists across the reconnect.
+        finalizeInFlight(into: &state)
         state.reconnectAttempt += 1
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .run { [clock] send in
@@ -240,6 +245,10 @@ public struct ChatFeature {
             valueKey: .string(value),
           ]))
         }
+
+      case let .copyRow(id):
+        guard let text = state.transcript[id: id]?.copyText, !text.isEmpty else { return .none }
+        return .run { [pasteboard] _ in pasteboard.copy(text) }
       }
     }
   }
@@ -339,6 +348,19 @@ public struct ChatFeature {
           case let .message(role, existing, _) = state.transcript[id: id]?.kind
     else { return }
     state.transcript[id: id]?.kind = .message(role: role, text: existing + text, isComplete: false)
+  }
+
+  /// Close out any row that was still streaming when the socket dropped: mark the
+  /// in-flight assistant message complete and clear the streaming/thinking pointers
+  /// so reconnect starts clean. Idempotent.
+  private func finalizeInFlight(into state: inout State) {
+    if let id = state.streamingRowID,
+       case let .message(role, text, _) = state.transcript[id: id]?.kind {
+      state.transcript[id: id]?.kind = .message(role: role, text: text, isComplete: true)
+    }
+    state.streamingRowID = nil
+    state.thinkingRowID = nil
+    state.isSending = false
   }
 
   private func appendToThinking(_ text: String, into state: inout State) {

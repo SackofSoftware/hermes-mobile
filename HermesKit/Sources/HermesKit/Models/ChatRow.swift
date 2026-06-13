@@ -23,6 +23,17 @@ public struct ChatRow: Equatable, Sendable, Identifiable {
     case status(kind: String, text: String)
   }
 
+  /// Text put on the pasteboard when the user copies this row (Task 11). Tool rows
+  /// prefer their result; a running tool with no result yet copies its name.
+  public var copyText: String {
+    switch kind {
+    case let .message(_, text, _): return text
+    case let .tool(name, _, result, _): return (result?.isEmpty == false ? result : name) ?? name
+    case let .thinking(text): return text
+    case let .status(_, text): return text
+    }
+  }
+
   public enum Role: Equatable, Sendable {
     case user
     case assistant

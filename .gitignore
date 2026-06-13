@@ -17,6 +17,9 @@ xcuserdata/
 # Swift Package Manager
 .swiftpm/
 
+# TestFlight build artifacts (archive / IPA / ExportOptions) — regenerable
+build/
+
 # M0 probe artifacts — regenerable, and the captured session.info frame contains
 # the local machine's skills/tools inventory + home paths. Keep out of git.
 Probe/fixtures/

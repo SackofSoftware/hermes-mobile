@@ -157,4 +157,50 @@ struct ChatReductionTests {
     await store.receive(\.reconnectTick)
     await store.send(.onDisappear)
   }
+
+  // MARK: Reconnect resilience — finalize a row that was mid-stream when the socket dropped
+
+  @Test func closeFinalizesInFlightStreamingRow() async {
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "Half", isComplete: false))]
+    initial.streamingRowID = uuid(0)
+    initial.thinkingRowID = uuid(1)
+    initial.isSending = true
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.continuousClock = clock
+      $0.uuid = .incrementing
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+    }
+
+    await store.send(.gatewayClosed) {
+      $0.status = .reconnecting
+      $0.transcript[id: self.uuid(0)]?.kind = .message(role: .assistant, text: "Half", isComplete: true)
+      $0.streamingRowID = nil
+      $0.thinkingRowID = nil
+      $0.isSending = false
+      $0.reconnectAttempt = 1
+    }
+    await store.send(.onDisappear)
+  }
+
+  // MARK: Copy a row to the pasteboard
+
+  @Test func copyRowPutsTextOnPasteboard() async {
+    let copied = LockIsolated<String?>(nil)
+    var initial = ChatFeature.State(connection: conn)
+    initial.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "copy me", isComplete: true))]
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+    }
+
+    await store.send(.copyRow(id: uuid(0)))
+    await store.finish()
+    #expect(copied.value == "copy me")
+  }
+
+  @Test func copyUnknownRowIsNoOp() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
+    await store.send(.copyRow(id: uuid(9))) // no such row → no effect, no state change
+  }
 }

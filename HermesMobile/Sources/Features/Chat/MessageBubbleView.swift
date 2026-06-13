@@ -11,11 +11,16 @@ struct MessageBubbleView: View {
     HStack(alignment: .top) {
       if role == .user { Spacer(minLength: 32) }
       VStack(alignment: role == .user ? .trailing : .leading, spacing: 4) {
-        Text(rendered)
-          .textSelection(.enabled)
-          .padding(.horizontal, 12)
-          .padding(.vertical, 8)
-          .background(bubbleColor, in: .rect(cornerRadius: 14))
+        Group {
+          if role == .assistant {
+            MarkdownText(text: text)
+          } else {
+            Text(text).textSelection(.enabled)
+          }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(bubbleColor, in: .rect(cornerRadius: 14))
         if !isComplete {
           ProgressView().controlSize(.mini)
         }
@@ -26,11 +31,5 @@ struct MessageBubbleView: View {
 
   private var bubbleColor: Color {
     role == .user ? Color.accentColor.opacity(0.18) : Color(uiColor: .secondarySystemBackground)
-  }
-
-  private var rendered: AttributedString {
-    guard role == .assistant else { return AttributedString(text) }
-    let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-    return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
   }
 }

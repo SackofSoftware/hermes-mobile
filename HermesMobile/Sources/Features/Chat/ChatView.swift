@@ -9,6 +9,7 @@ struct ChatView: View {
 
   var body: some View {
     VStack(spacing: 0) {
+      connectionBanner
       transcript
       footer
       pendingCard
@@ -32,7 +33,15 @@ struct ChatView: View {
       ScrollView {
         LazyVStack(alignment: .leading, spacing: 10) {
           ForEach(store.transcript) { row in
-            rowView(row).id(row.id)
+            rowView(row)
+              .id(row.id)
+              .contextMenu {
+                Button {
+                  store.send(.copyRow(id: row.id))
+                } label: {
+                  Label("Copy", systemImage: "doc.on.doc")
+                }
+              }
           }
         }
         .padding()
@@ -82,6 +91,31 @@ struct ChatView: View {
     case .none:
       EmptyView()
     }
+  }
+
+  @ViewBuilder
+  private var connectionBanner: some View {
+    switch store.status {
+    case .connecting:
+      banner("Connecting…", systemImage: "wifi", tint: .secondary)
+    case .reconnecting:
+      banner("Reconnecting…", systemImage: "wifi.exclamationmark", tint: .orange)
+    case .ready:
+      EmptyView()
+    }
+  }
+
+  private func banner(_ text: String, systemImage: String, tint: Color) -> some View {
+    HStack(spacing: 6) {
+      Image(systemName: systemImage)
+      Text(text)
+      Spacer()
+    }
+    .font(.caption.weight(.medium))
+    .foregroundStyle(tint)
+    .padding(.horizontal)
+    .padding(.vertical, 6)
+    .background(tint.opacity(0.12))
   }
 
   @ViewBuilder

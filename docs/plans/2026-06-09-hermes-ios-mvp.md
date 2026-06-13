@@ -521,14 +521,42 @@ responding needs the gateway connection + sessionID. `PendingInteraction` alread
 #### Task 11: Chat polish (markdown, copy, tool rows, resilience)
 
 **Files:**
-- Modify: `HermesMobile/Sources/Features/Chat/*.swift`, `HermesKit/.../ChatFeature.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
+- Create: `HermesKit/Sources/HermesKit/Models/MarkdownSegment.swift`,
+  `HermesKit/Sources/HermesKit/Clients/PasteboardClient.swift`,
+  `HermesMobile/Sources/Features/Chat/MarkdownText.swift`
+- Modify: `HermesMobile/Sources/Features/Chat/*.swift`, `HermesKit/.../ChatFeature.swift`,
+  `HermesKit/.../Models/ChatRow.swift`
+- Create: `HermesKit/Tests/HermesKitTests/MarkdownSegmentTests.swift`;
+  Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] refine markdown rendering (code blocks, lists), copy-message action
-- [ ] collapsible tool rows with result + duration; collapsible thinking row
-- [ ] reconnect resilience: replay/re-hydrate after drop; visible connection state
-- [ ] write tests for copy action and reconnect-rehydrate behavior
-- [ ] run tests — must pass before next task
+- [x] markdown rendering: `MarkdownSegment.parse` (pure, in HermesKit) splits ``` fences;
+  `MarkdownText` renders code blocks in a monospaced box. **Lesson (caught by snapshot):**
+  SwiftUI `Text` does *not* lay out block-level Markdown — `.full` collapsed lists onto
+  one line with no bullets/newlines. Fix: render prose **line-by-line**, drawing explicit
+  bullets/numbers and keeping inline-only Markdown (bold/code/links) per line. Tolerates
+  an unterminated fence mid-stream.
+- [x] copy-message action: `PasteboardClient` dependency + `ChatRow.copyText` +
+  `.copyRow(id:)` reducer action; `ChatView` exposes it via a per-row context menu
+- [x] collapsible tool rows (result + duration) and thinking row — already present from
+  Task 8 (`ToolStatusView` / `DisclosureGroup`); kept as-is
+- [x] reconnect resilience: **transcript persists across reconnect** (TCA state), and
+  `gatewayClosed` now calls `finalizeInFlight` to close out a half-streamed row so it
+  doesn't spin forever; **visible connection state** via a `connecting…/reconnecting…`
+  banner in `ChatView` driven by `state.status`.
+  - ⚠️ **Not done (deferred):** true re-hydration of messages the agent emitted *while
+    the socket was down* — would need a diff against `session.resume`'s inline
+    `messages[]` to avoid duplicating the persisted transcript. Out of MVP scope; pairs
+    with the Task 10 "pending prompts not re-emitted on reconnect" limitation. Revisit
+    if on-device testing shows dropped turns.
+- [x] tests: `MarkdownSegmentTests` (5 — plain, fenced, lang-hint, unterminated, blank
+  trimming); `ChatReductionTests` (+3 — finalize-in-flight-on-close, copy round-trip,
+  copy-unknown-row no-op)
+- [x] **snapshot tests** (`HermesMobileTests/PreviewSnapshotTests`, +5): approval card,
+  clarify-choices, clarify-free-text, secret card, chat with code-block + reconnecting
+  banner; updated the existing `testChatView` baseline (now real bullets + `.ready`
+  status). 11 snapshot tests pass via `make snapshot`. **These caught the list-collapse
+  bug above** — exactly the M3 stabilization payoff the plan anticipated.
+- [x] run tests — **85 HermesKit + 11 snapshot pass**; app `BUILD SUCCEEDED`
 
 #### Task 12: `SettingsFeature` + connection debug log
 

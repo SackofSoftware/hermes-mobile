@@ -124,7 +124,8 @@ final class PreviewSnapshotTests: XCTestCase {
           initialState: ChatFeature.State(
             connection: connection,
             title: "Protocol chat",
-            transcript: IdentifiedArray(uniqueElements: rows)
+            transcript: IdentifiedArray(uniqueElements: rows),
+            status: .ready
           )
         ) {
           ChatFeature()
@@ -136,5 +137,80 @@ final class PreviewSnapshotTests: XCTestCase {
       )
     }
     assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
+  /// Fenced code block + list rendering (Task 11 markdown polish).
+  func testChatView_codeBlockAndReconnecting() {
+    let rows: [ChatRow] = [
+      ChatRow(id: id(0), kind: .message(role: .user, text: "Show me the connect effect.", isComplete: true)),
+      ChatRow(id: id(1), kind: .message(
+        role: .assistant,
+        text: "Here's the gist:\n\n```swift\nfor await event in gateway.connect(url, token) {\n  await send(.gatewayEvent(event))\n}\n```\n\nThat funnels every event through one action.",
+        isComplete: true
+      )),
+    ]
+    let view = NavigationStack {
+      ChatView(
+        store: Store(
+          initialState: ChatFeature.State(
+            connection: connection,
+            title: "Protocol chat",
+            transcript: IdentifiedArray(uniqueElements: rows),
+            status: .reconnecting // exercises the connection banner too
+          )
+        ) {
+          ChatFeature()
+        } withDependencies: {
+          $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+          $0.continuousClock = ImmediateClock()
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
+  // MARK: Approval card (Task 9)
+
+  func testApprovalCard() {
+    let view = ApprovalCardView(
+      request: ApprovalRequest(requestID: "r1", command: "rm -rf build/ && git clean -fdx"),
+      onApprove: { _ in },
+      onDeny: {}
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  // MARK: Clarify / secret cards (Task 10)
+
+  func testClarifyCard_choices() {
+    let view = ClarifyCardView(
+      mode: .clarify(ClarifyRequest(
+        requestID: "c1",
+        question: "Which environment should I deploy to?",
+        choices: ["staging", "production"]
+      )),
+      onSubmit: { _ in }
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  func testClarifyCard_freeText() {
+    let view = ClarifyCardView(
+      mode: .clarify(ClarifyRequest(requestID: "c2", question: "What should I name the branch?", choices: [])),
+      onSubmit: { _ in }
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  func testSecretCard_secure() {
+    let view = ClarifyCardView(
+      mode: .secret(.secret, SecretPrompt(requestID: "s1", prompt: "Enter the API key for the weather service")),
+      onSubmit: { _ in }
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 }

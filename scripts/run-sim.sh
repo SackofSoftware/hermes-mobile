@@ -16,7 +16,8 @@ WORKSPACE="HermesMobile.xcworkspace"
 BUNDLE_ID="me.honcharenko.HermesMobile"
 SIM_NAME="${1:-${SIM_NAME:-iPhone 17 Pro}}"
 
-[ -d "$WORKSPACE" ] || tuist generate --no-open
+# Tuist only forwards TUIST_-prefixed env vars to the manifest, so translate.
+[ -d "$WORKSPACE" ] || TUIST_SERVER_URL="${HERMES_DEFAULT_SERVER_URL:-}" tuist generate --no-open
 
 # Resolve a simulator UDID by exact name (first available match).
 SIM_UDID="$(

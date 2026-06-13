@@ -56,11 +56,15 @@ Generate the Xcode workspace and open it:
 tuist generate
 ```
 
-To bake a default server URL into Debug builds (kept out of git), set it at generate time:
+To bake a default server URL into Debug builds (kept out of git), set it at generate
+time. Tuist only forwards `TUIST_`-prefixed env vars to the manifest:
 
 ```sh
-HERMES_DEFAULT_SERVER_URL=http://<tailnet-host>:9119 tuist generate
+TUIST_SERVER_URL=http://<tailnet-host>:9119 tuist generate     # or: HERMES_DEFAULT_SERVER_URL=… make run
 ```
+
+Likewise a device build needs the team: `DEVELOPMENT_TEAM=<team id> make run-device`
+(the script translates it to `TUIST_DEVELOPMENT_TEAM`).
 
 Build/run the `HermesMobile` scheme from Xcode, or use the scripts below.
 

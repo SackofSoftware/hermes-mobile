@@ -1,15 +1,17 @@
 import Foundation
 import ProjectDescription
 
-// Debug-only server preset. Baked in at generate time from the environment so a
-// developer can do `HERMES_DEFAULT_SERVER_URL=http://<tailnet-host>:9119 tuist generate`
-// without committing their tailnet address/token. Empty by default.
-let debugServerURL = ProcessInfo.processInfo.environment["HERMES_DEFAULT_SERVER_URL"] ?? ""
+// Read at generate time via Tuist's `Environment` — Tuist only forwards `TUIST_`-prefixed
+// env vars to manifest evaluation (plain `ProcessInfo` env vars are NOT visible here).
+// The run scripts translate friendly names (DEVELOPMENT_TEAM, HERMES_DEFAULT_SERVER_URL)
+// into TUIST_DEVELOPMENT_TEAM / TUIST_SERVER_URL.
 
-// Apple team for device/TestFlight signing, baked in at generate time. Empty for
-// simulator-only work (simulator builds pass CODE_SIGNING_ALLOWED=NO). For a device
-// build: `DEVELOPMENT_TEAM=<your 10-char team id> tuist generate`.
-let developmentTeam = ProcessInfo.processInfo.environment["DEVELOPMENT_TEAM"] ?? ""
+// Debug-only server preset (empty by default; baked into the Debug Info.plist).
+let debugServerURL = Environment.serverUrl.getString(default: "")
+
+// Apple team for device/TestFlight signing. Empty for simulator-only work (simulator
+// builds pass CODE_SIGNING_ALLOWED=NO).
+let developmentTeam = Environment.developmentTeam.getString(default: "")
 
 let project = Project(
   name: "HermesMobile",

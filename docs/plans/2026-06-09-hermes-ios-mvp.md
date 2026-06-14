@@ -597,12 +597,35 @@ rejected as awkward).
 
 ### Task 13: Verify acceptance criteria
 
-- [ ] verify all Overview requirements: connect, list, resume, create, stream,
-  tool/status visibility, approve/deny, clarify
-- [ ] verify edge cases: unknown events ignored, 401 token, socket drop/reconnect,
-  pending-interaction blocking
-- [ ] run full test suite (`tuist test` / `swift test`)
-- [ ] verify event-reduction coverage against the M0 fixture
+Mapped every Overview requirement + edge case to covering tests; closed the gaps found.
+
+- [x] verify all Overview requirements — covered:
+  - **connect** → `ConnectionFeatureTests` (reachable/unreachable/not-Hermes/invalid-token/
+    empty-URL/edit-resets) + `HermesRESTClientTests` (status decode, no-token probe)
+  - **list / search** → `SessionListFeatureTests` (load/fail/debounced-search) +
+    `HermesRESTClientTests` (sessions/search mapping)
+  - **resume** → ➕ **gap found & filled**: `resumeReadyBootstrapsViaSessionResume`
+    (ready *with* stored id → `session.resume`, not create) +
+    `historyResponseSeedsTranscriptSkippingNonChatRoles` (REST hydration);
+    `AppFeatureTests.openingSessionPushesChat`
+  - **create** → `createsSessionOnFirstReady`, `creatingSessionPushesNewChat`
+  - **stream** → `streamingMessageFold`, `composerSubmitAppendsUserRowAndSends`
+  - **tool/status visibility** → `toolStartThenComplete`, `statusUpdateAndError`
+  - **approve/deny** → `ChatInteractionTests` (pin+block, approve/approve-all/deny RPC)
+  - **clarify (+sudo/secret)** → `ClarifyFeatureTests` (choices/free-text/secure, no-echo)
+- [x] verify edge cases — covered:
+  - **unknown events ignored** → `GatewayEventDecodingTests` (decode→`.unknown`, never
+    throws) + ➕ **gap filled**: `unknownAndSessionInfoEventsAreInertInTheFold` (reducer)
+  - **401 token** → `unauthorizedMapsToTypedError`, `invalidTokenDoesNotStore`
+  - **socket drop/reconnect** → `reconnectsAfterBackoffOnClose`,
+    `closeFinalizesInFlightStreamingRow`, `socketCloseFailsPendingAndFinishesStream`
+  - **pending-interaction blocking** → approval + clarify "pins card & blocks composer"
+- [x] run full test suite — **101 HermesKit + 13 snapshot pass**
+- [x] verify event-reduction coverage against the M0 fixture — every event type in
+  `Probe/fixtures/session-events.jsonl` (gateway.ready, message.start/delta/complete,
+  thinking.delta, reasoning.available, status.update, session.info, + the two JSON-RPC
+  responses) maps to a handled `GatewayEvent`/`InboundFrame` case — **no surprise types**.
+  Suite inlines trimmed frames (fixture is gitignored) to stay hermetic.
 
 ### Task 14: [Final] Documentation
 

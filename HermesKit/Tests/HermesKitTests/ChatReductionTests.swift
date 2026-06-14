@@ -137,6 +137,59 @@ struct ChatReductionTests {
     await store.send(.onDisappear)
   }
 
+  @Test func resumeReadyBootstrapsViaSessionResume() async {
+    let sent = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object(["session_id": .string("live123"), "stored_session_id": .string("stored123")])
+      }
+    }
+
+    // A ready frame *with* a stored id must resume (not create).
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "live123"
+      $0.storedSessionID = "stored123"
+      $0.status = .ready
+    }
+    #expect(sent.value?["method"]?.stringValue == "session.resume")
+    #expect(sent.value?["params"]?["session_id"]?.stringValue == "stored123")
+  }
+
+  @Test func historyResponseSeedsTranscriptSkippingNonChatRoles() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: { $0.uuid = .incrementing }
+
+    let messages = [
+      SessionMessage(id: 1, role: "user", content: "Hi"),
+      SessionMessage(id: 2, role: "assistant", content: "Hello"),
+      SessionMessage(id: 3, role: "tool", content: "ignored"), // not user/assistant → skipped
+    ]
+    await store.send(.historyResponse(messages)) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "Hi", isComplete: true)),
+        ChatRow(id: self.uuid(1), kind: .message(role: .assistant, text: "Hello", isComplete: true)),
+      ]
+    }
+  }
+
+  @Test func unknownAndSessionInfoEventsAreInertInTheFold() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    }
+    // Forward-compat: events the UI doesn't model must not mutate state or crash.
+    await store.send(.gatewayEvent(.unknown(type: "tool.progress", raw: .object([:]))))
+    await store.send(.gatewayEvent(.sessionInfo(SessionInfo(model: "claude"))))
+  }
+
   // MARK: Reconnect / backoff
 
   @Test func reconnectsAfterBackoffOnClose() async {

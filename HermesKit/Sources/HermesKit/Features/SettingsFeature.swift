@@ -93,6 +93,7 @@ public struct SettingsFeature {
         try? keychain.deleteToken()
         preferences.clearServerURL()
         preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
+        preferences.saveSeenCounts([:]) // unread state is per-server; drop it too
         return .merge(
           .send(.delegate(.disconnect)),
           .run { [dismiss] _ in await dismiss() }

@@ -198,12 +198,13 @@ two ordering/expansion bugs found on-device:
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify: in-group rows ordered by last-active; groups collapse + expand; pin/unpin with
+- [x] verify: in-group rows ordered by last-active; groups collapse + expand; pin/unpin with
   a top Pinned section (hidden when empty); archive removes a session (server-persisted);
   active sessions glow and refresh on the poll
-- [ ] verify edge cases: stale pinned id; archive failure re-inserts; search disables
-  grouping/poll; logout clears pins + seen counts
-- [ ] run full suite (`make test`) + snapshots (`make snapshot`)
+- [x] verify edge cases: stale pinned id; archive failure re-inserts; search disables
+  grouping/poll; logout clears pins + seen counts (➕ fixed: logout now also clears seen
+  counts — was only clearing the URL + pins; extended SettingsFeatureTests to assert both)
+- [x] run full suite (`make test`) + snapshots (`make snapshot`)
 
 ### Task 7: [Final] Documentation
 

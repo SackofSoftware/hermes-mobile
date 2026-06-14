@@ -12,6 +12,8 @@ struct SettingsFeatureTests {
     let deleted = LockIsolated(false)
     let preferences = PreferencesClient.inMemory()
     preferences.saveServerURL("http://mac.tailnet:9119")
+    preferences.savePinnedIDs(["s1"])
+    preferences.saveSeenCounts(["s1": 4])
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
@@ -24,6 +26,8 @@ struct SettingsFeatureTests {
     await store.receive(\.delegate.disconnect)
     #expect(deleted.value)
     #expect(preferences.loadServerURL() == nil) // logout forgets the server URL too
+    #expect(preferences.loadPinnedIDs() == []) // pins are per-server — cleared on logout
+    #expect(preferences.loadSeenCounts() == [:]) // unread state cleared too
   }
 
   @Test func reconnectEmitsReconnectDelegate() async {

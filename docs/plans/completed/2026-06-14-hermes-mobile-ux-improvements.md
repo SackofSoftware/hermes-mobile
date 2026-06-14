@@ -304,23 +304,38 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
   + `Provider.isConfigured`/`warning`; updated `ModelOptionsTests` + picker snapshot.
 - [x] run tests — **123 unit + 20 snapshot pass**; app `BUILD SUCCEEDED`
 
-### Task 8: Verify acceptance criteria
+### Task 8: Verify acceptance criteria ✅
 
-- [ ] verify each item: auto-login skips onboarding; connection auto-validates without a
-  Check button; sessions grouped by workspace like desktop; tool/skill rows show
-  title + open a detail sheet; no empty bubbles; scroll-to-bottom button appears when
-  scrolled up; composer shows model/reasoning chip (interactive), disabled voice, and a
-  yellow-orange send button
-- [ ] verify edge cases: no stored creds → onboarding; invalid stored token → onboarding
-  prefilled; search disables grouping; model switch blocked mid-turn; sessions with no cwd
-  grouped under "No workspace"
-- [ ] run the full suite (`make test`) + snapshots (`make snapshot`)
+- [x] each item verified, mapped to tests:
+  - **auto-login** → `AppFeatureTests.autoLoginWithStoredCredsOpensSessionList`
+  - **auto-validate (no Check button)** → `ConnectionFeatureTests` debounce/commit tests
+    + re-recorded `ConnectionView` snapshots
+  - **workspace grouping** → `SessionGroupTests` + `testSessionList` snapshot
+  - **tool/skill rows + detail sheet** → `ChatReductionTests` tool fold + tap-presents;
+    `testToolRows`/`testToolDetailSheet` snapshots
+  - **no empty bubbles** → `toolOnlyTurnLeavesNoEmptyMessageBubble`,
+    `streamingMessageFold` (lazy row)
+  - **scroll-to-bottom** → `testScrollToBottomButton` snapshot
+  - **composer chip / disabled voice / brand send** → `sessionInfoUpdatesModelAndReasoningChip`;
+    `testComposer_*` snapshots; **picker** → `ChatInteractionTests` model/reasoning round-trips
+    + `testModelPickerSheet*` snapshots
+- [x] edge cases verified:
+  - no creds → onboarding (`launchWithoutStoredCredsStaysOnOnboarding`); invalid token →
+    prefilled onboarding (`autoLoginWithInvalidTokenFallsBackToPrefilledOnboarding`)
+  - search disables grouping (`State.isSearching` + flat render); no-cwd → "No workspace"
+    (`emptyOrNilCwdGoesToNoWorkspaceBucket`)
+  - model/reasoning switch blocked mid-turn (`selectionIsBlockedWhileSending`); reasoning
+    gated per-model (`supportsReasoningReflectsPerModelCapability`)
+- [x] full suite + snapshots green — **123 unit + 20 snapshot pass**
 
-### Task 9: [Final] Documentation
+### Task 9: [Final] Documentation ✅
 
-- [ ] update `README.md` (features: auto-login, workspace grouping, tool detail, model
-  picker) and `CLAUDE.md` if new patterns emerged (`@Shared(.appStorage)`, glass effect)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] updated `README.md` features (auto-login, auto-validating connect, workspace
+  grouping, tool detail rows, scroll-to-bottom, composer/model picker) + the feature tree
+  and dependency-clients list (`PreferencesClient`)
+- [x] updated `CLAUDE.md` with new patterns (lazy assistant row, Keychain-vs-Preferences
+  persistence, gate-UI-by-capability, iOS 17 floor + glass fallback, public-init-for-nested-State)
+- [x] moved this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

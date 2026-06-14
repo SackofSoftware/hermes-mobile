@@ -14,17 +14,23 @@ agent's actions from an iPhone while the real runtime stays on your Mac/server.
 
 ## Features
 
-- **Connect** — staged validation of server URL + token (`/api/status` reachability,
-  then an authenticated probe); token stored in the iOS Keychain.
-- **Sessions** — list, full-text search, resume an existing session, or start a new one.
-- **Live chat** — streaming assistant responses rendered as native Markdown (with code
-  blocks and lists), collapsible tool and thinking rows, and a transient status line.
+- **Connect** — type a server URL (validated automatically as you type / on paste / on
+  return) + token; token in the iOS Keychain, server URL persisted so the app
+  **auto-logs-in on launch** and skips onboarding when credentials are stored.
+- **Sessions** — list **grouped by workspace** (like the desktop app), full-text search
+  (flat results), resume an existing session, or start a new one.
+- **Live chat** — streaming assistant responses as native Markdown (code blocks + lists),
+  **tool/skill activity rows** (human title + a detail sheet with args/result/diff), a
+  collapsible thinking row, and a Liquid-Glass **scroll-to-bottom** button.
+- **Composer** — a **model · reasoning-effort chip** (tap to switch via an interactive
+  picker; reasoning is gated per-model; unconfigured providers shown disabled), a voice
+  button (placeholder), and a brand-coloured send button.
 - **Approvals & clarify** — the mobile-native payoff: respond to `approval.request`,
   `clarify.request`, and `sudo`/`secret` prompts via pinned cards; the composer blocks
   until you answer.
 - **Resilience** — automatic reconnect with backoff and a visible connection banner.
-- **Settings** — re-paste / clear the token, manual reconnect, and a live debug log of
-  decoded gateway events.
+- **Settings** — re-paste / clear the token (logout), manual reconnect, and a live debug
+  log of decoded gateway events.
 
 ## Architecture
 
@@ -42,19 +48,20 @@ turn: streaming, tool/status events, approval/clarify requests).
 ### Feature tree (TCA reducers, in `HermesKit`)
 
 ```
-AppFeature                 // root navigation; onboarding until connected
-├─ ConnectionFeature       // staged URL + token validation
-├─ SessionListFeature      // list / search / create; presents Settings
+AppFeature                 // root nav + launch auto-connect; onboarding until connected
+├─ ConnectionFeature       // auto-validating URL + token
+├─ SessionListFeature      // workspace-grouped list / search / create; presents Settings
 │  └─ SettingsFeature      // token mgmt, manual reconnect, debug log
-└─ ChatFeature             // owns the WS lifecycle + streaming reduction,
-                           //   approvals, clarify/sudo/secret, reconnect
+└─ ChatFeature             // owns the WS lifecycle + streaming reduction; also folds in
+                           //   approvals, clarify/sudo/secret, the tool-detail sheet,
+                           //   and the model/reasoning picker, reconnect
 ```
 
 Dependency clients (`@DependencyClient`): `HermesRESTClient` (status/sessions/search/
 messages), `HermesGatewayClient` (WebSocket JSON-RPC connect/send), `KeychainClient`
-(token), `PasteboardClient` (copy), `DebugLogClient` (event ring buffer). The socket is
-one long-running cancellable effect; reconnect/backoff lives in the reducer (testable
-with `TestClock`).
+(token), `PreferencesClient` (server URL, for auto-login), `PasteboardClient` (copy),
+`DebugLogClient` (event ring buffer). The socket is one long-running cancellable effect;
+reconnect/backoff lives in the reducer (testable with `TestClock`).
 
 ## Requirements
 

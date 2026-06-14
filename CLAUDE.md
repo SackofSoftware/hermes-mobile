@@ -26,8 +26,15 @@ client; no agent logic on the phone. See `README.md` for the feature overview an
   event through one `.gatewayEvent` action; outbound JSON-RPC calls are discrete
   one-shot effects. **Reconnect/backoff lives in the reducer**, not the client.
 - **Streaming has no message id** (verified by the M0 probe) — the fold tracks a single
-  in-flight assistant row. `session_id` is on the event *frame*, not the payload.
+  in-flight assistant row, created **lazily on the first delta** (a `message.start` with no
+  text would otherwise render as an empty bubble). `session_id` is on the event *frame*.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
+- **Persistence**: secrets (token) → `KeychainClient`; non-secret prefs (server URL) →
+  `PreferencesClient` (UserDefaults-backed `@DependencyClient`). Both have `.inMemory()`
+  test variants. (We deliberately use clients over `@Shared` for test isolation.)
+- **Gate UI by server capability, not assumptions** — e.g. reasoning effort is shown only
+  when `model.options` capabilities say the selected model supports it (`?? true` on
+  unknown). Mirror the desktop's behaviour where one exists; check the Hermes source.
 - **Commit messages**: capitalized verb, no conventional-commit prefixes, concise.
 
 ## Testing (required for every change)
@@ -49,4 +56,9 @@ client; no agent logic on the phone. See `README.md` for the feature overview an
   up (sources are globbed at generation time).
 - **`@Sendable` effect closures** must capture dependencies explicitly (`[dismiss]`,
   `[gateway]`) — the reducer `self` is not `Sendable`.
+- **Deployment target is iOS 17.** Gate newer APIs: `#available(iOS 26, *)` for Liquid
+  Glass (`.glassEffect`) with a material fallback; prefer `GeometryReader`/`PreferenceKey`
+  over iOS-18-only scroll APIs when behaviour must work on 17.
+- **A `public struct` nested in feature State** needs an explicit `public init` to be
+  constructed from the app/snapshot target (the memberwise init is internal).
 - TestFlight **export must use manual signing** (cloud/API-key signing fails on export).

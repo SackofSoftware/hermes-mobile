@@ -166,17 +166,17 @@ two ordering/expansion bugs found on-device:
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift` (trailing swipe)
 - Modify: `HermesKit/Tests/HermesKitTests/{HermesRESTClientTests,SessionListFeatureTests}.swift`
 
-- [ ] `HermesRESTClient.archive(_:_:archived:)` → `PATCH /api/sessions/{id}` `{"archived":…}`
+- [x] `HermesRESTClient.archive(_:_:archived:)` → `PATCH /api/sessions/{id}` `{"archived":…}`
   with the existing auth header + `RESTError` mapping
-- [ ] `SessionListFeature`: trailing swipe → `archiveButtonTapped(id:)` presents a
+- [x] `SessionListFeature`: trailing swipe → `archiveButtonTapped(id:)` presents a
   `ConfirmationDialogState` (`@Presents var confirmationDialog`); confirm →
   `archiveConfirmed(id:)` does optimistic removal + RPC; on failure re-insert + `loadError`;
   also clears its pin/seen entry
-- [ ] `SessionListView`: trailing swipe "Archive" **and** the row's long-press context-menu
+- [x] `SessionListView`: trailing swipe "Archive" **and** the row's long-press context-menu
   "Archive" both route through `archiveButtonTapped` + `.confirmationDialog` bound to state
-- [ ] tests: swipe presents the dialog; cancel = no-op; confirm sends PATCH (body + path) +
+- [x] tests: swipe presents the dialog; cancel = no-op; confirm sends PATCH (body + path) +
   optimistic removal; failure re-inserts; REST client PATCH (success/401)
-- [ ] run tests — must pass before next task
+- [x] run tests — must pass before next task
 
 ### Task 5: Working glow (is_active + auto-poll)
 

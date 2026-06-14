@@ -63,6 +63,8 @@ public struct HermesRESTClient: Sendable {
   public var sessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int, _ order: SessionOrder) async throws -> [Session]
   public var search: @Sendable (_ connection: ServerConnection, _ query: String) async throws -> [Session]
   public var messages: @Sendable (_ connection: ServerConnection, _ sessionID: String) async throws -> [SessionMessage]
+  /// Soft-hide (archive) or restore a session — `PATCH /api/sessions/{id}` `{"archived":…}`.
+  public var archive: @Sendable (_ connection: ServerConnection, _ id: String, _ archived: Bool) async throws -> Void
 }
 
 public extension HermesRESTClient {
@@ -91,6 +93,12 @@ public extension HermesRESTClient {
         let url = try makeURL(conn.baseURL, "/api/sessions/\(sessionID)/messages")
         let response: MessagesResponse = try await get(url, token: conn.token, session: session)
         return response.messages
+      },
+      archive: { conn, id, archived in
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let url = try makeURL(conn.baseURL, "/api/sessions/\(encoded)")
+        let body = try JSONSerialization.data(withJSONObject: ["archived": archived])
+        try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
       }
     )
   }
@@ -145,6 +153,34 @@ private func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) 
     return try JSONDecoder().decode(T.self, from: data)
   } catch {
     throw RESTError.decoding
+  }
+}
+
+/// Fire a write request (e.g. PATCH) and validate the status, discarding the body.
+private func send(
+  _ url: URL, method: String, body: Data?, token: String?, session: URLSession
+) async throws {
+  var request = URLRequest(url: url)
+  request.httpMethod = method
+  if let body {
+    request.httpBody = body
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+  }
+  if let token { request.setValue(token, forHTTPHeaderField: "X-Hermes-Session-Token") }
+
+  let response: URLResponse
+  do {
+    (_, response) = try await session.data(for: request)
+  } catch {
+    throw RESTError.unreachable
+  }
+
+  guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
+  switch http.statusCode {
+  case 200..<300: break
+  case 401: throw RESTError.unauthorized
+  case 404: throw RESTError.notFound
+  default: throw RESTError.server(status: http.statusCode)
   }
 }
 

@@ -53,6 +53,7 @@ struct SessionListView: View {
       }
     }
     .task { store.send(.task) }
+    .confirmationDialog($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .sheet(item: $store.scope(state: \.settings, action: \.settings)) { settingsStore in
       NavigationStack {
         SettingsView(store: settingsStore)
@@ -95,8 +96,16 @@ struct SessionListView: View {
       pinButton(session, isPinned: isPinned)
         .tint(.orange)
     }
+    .swipeActions(edge: .trailing) {
+      Button("Archive", systemImage: "archivebox", role: .destructive) {
+        store.send(.archiveButtonTapped(id: session.id))
+      }
+    }
     .contextMenu {
       pinButton(session, isPinned: isPinned)
+      Button("Archive", systemImage: "archivebox", role: .destructive) {
+        store.send(.archiveButtonTapped(id: session.id))
+      }
     }
   }
 

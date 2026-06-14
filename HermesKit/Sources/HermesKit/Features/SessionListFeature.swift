@@ -23,6 +23,7 @@ public struct SessionListFeature {
     /// Workspace group ids the user expanded past the collapsed limit.
     public var expandedGroups: Set<String>
     @Presents public var settings: SettingsFeature.State?
+    @Presents public var confirmationDialog: ConfirmationDialogState<Action.Dialog>?
 
     /// Collapsed groups show at most this many rows before a "Show more".
     public static let collapsedLimit = 5
@@ -101,9 +102,17 @@ public struct SessionListFeature {
     case pinSession(id: Session.ID)
     case unpinSession(id: Session.ID)
     case toggleGroupExpansion(groupID: String)
+    case archiveButtonTapped(id: Session.ID)
+    case archiveFailed(id: Session.ID, session: Session)
+    case confirmationDialog(PresentationAction<Dialog>)
     case settingsButtonTapped
     case settings(PresentationAction<SettingsFeature.Action>)
     case delegate(Delegate)
+
+    @CasePathable
+    public enum Dialog: Equatable {
+      case confirmArchive(id: Session.ID)
+    }
 
     @CasePathable
     public enum Delegate {
@@ -187,6 +196,48 @@ public struct SessionListFeature {
         }
         return .none
 
+      case let .archiveButtonTapped(id):
+        state.confirmationDialog = ConfirmationDialogState {
+          TextState("Archive session?")
+        } actions: {
+          ButtonState(role: .destructive, action: .confirmArchive(id: id)) {
+            TextState("Archive")
+          }
+          ButtonState(role: .cancel) {
+            TextState("Cancel")
+          }
+        } message: {
+          TextState("This hides the session from the list. You can restore it from the server.")
+        }
+        return .none
+
+      case let .confirmationDialog(.presented(.confirmArchive(id))):
+        guard let session = state.sessions[id: id] else { return .none }
+        // Optimistic removal: drop from the list + clear its pin/seen entries, persist,
+        // then run the RPC. On failure we re-insert and surface the error.
+        state.sessions.remove(id: id)
+        state.pinnedIDs.removeAll { $0 == id }
+        state.seenCounts[id] = nil
+        let pinnedIDs = state.pinnedIDs
+        let seenCounts = state.seenCounts
+        return .run { [rest, preferences, connection = state.connection] send in
+          preferences.savePinnedIDs(pinnedIDs)
+          preferences.saveSeenCounts(seenCounts)
+          do {
+            try await rest.archive(connection, id, true)
+          } catch {
+            await send(.archiveFailed(id: id, session: session))
+          }
+        }
+
+      case .confirmationDialog:
+        return .none
+
+      case let .archiveFailed(id, session):
+        state.sessions[id: id] = session
+        state.loadError = "Couldn’t archive the session."
+        return .none
+
       case .newSessionButtonTapped:
         return .send(.delegate(.createSession))
 
@@ -216,6 +267,7 @@ public struct SessionListFeature {
     .ifLet(\.$settings, action: \.settings) {
       SettingsFeature()
     }
+    .ifLet(\.$confirmationDialog, action: \.confirmationDialog)
   }
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {

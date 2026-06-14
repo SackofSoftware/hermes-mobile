@@ -128,6 +128,39 @@ struct HermesRESTClientTests {
     #expect(messages.last?.toolCallID == "call_1")
   }
 
+  @Test func archiveSendsPatchWithBodyAndAuthHeader() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().archive(connection, "20260610_120231_afcca6", true)
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "PATCH")
+    #expect(req.url?.path == "/api/sessions/20260610_120231_afcca6")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+    // URLProtocol strips httpBody into a stream, so read it back from the stream.
+    let body = req.httpBody ?? req.httpBodyStream.map { stream -> Data in
+      stream.open()
+      defer { stream.close() }
+      var data = Data()
+      let bufSize = 1024
+      let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+      defer { buffer.deallocate() }
+      while stream.hasBytesAvailable {
+        let read = stream.read(buffer, maxLength: bufSize)
+        if read <= 0 { break }
+        data.append(buffer, count: read)
+      }
+      return data
+    } ?? Data()
+    let json = try JSONSerialization.jsonObject(with: body) as? [String: Bool]
+    #expect(json == ["archived": true])
+  }
+
+  @Test func archiveUnauthorizedMapsToTypedError() async throws {
+    MockURLProtocol.set(status: 401)
+    await #expect(throws: RESTError.unauthorized) {
+      try await makeClient().archive(connection, "sid", true)
+    }
+  }
+
   @Test func unauthorizedMapsToTypedError() async throws {
     MockURLProtocol.set(status: 401, json: #"{"detail":"Unauthorized"}"#)
     await #expect(throws: RESTError.unauthorized) {

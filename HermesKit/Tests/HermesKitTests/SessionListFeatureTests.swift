@@ -207,6 +207,123 @@ struct SessionListFeatureTests {
     #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 5) // re-collapsed
   }
 
+  // MARK: Archiving
+
+  @Test func archiveButtonPresentsConfirmationDialog() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: [Session(id: "a")])
+    ) {
+      SessionListFeature()
+    }
+
+    await store.send(.archiveButtonTapped(id: "a")) {
+      $0.confirmationDialog = ConfirmationDialogState {
+        TextState("Archive session?")
+      } actions: {
+        ButtonState(role: .destructive, action: .confirmArchive(id: "a")) {
+          TextState("Archive")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState("This hides the session from the list. You can restore it from the server.")
+      }
+    }
+  }
+
+  @Test func cancellingDialogKeepsSession() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: [Session(id: "a")])
+    ) {
+      SessionListFeature()
+    }
+
+    await store.send(.archiveButtonTapped(id: "a")) {
+      $0.confirmationDialog = ConfirmationDialogState {
+        TextState("Archive session?")
+      } actions: {
+        ButtonState(role: .destructive, action: .confirmArchive(id: "a")) {
+          TextState("Archive")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState("This hides the session from the list. You can restore it from the server.")
+      }
+    }
+    // Dismissing (cancel) clears the dialog and leaves the session in place.
+    await store.send(.confirmationDialog(.dismiss)) {
+      $0.confirmationDialog = nil
+    }
+    #expect(store.state.sessions.map(\.id) == ["a"])
+  }
+
+  @Test func confirmArchiveRemovesSessionOptimisticallyAndCallsRPC() async {
+    let prefs = PreferencesClient.inMemory()
+    let archived = LockIsolated<[(String, Bool)]>([])
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [Session(id: "a"), Session(id: "b")],
+      seenCounts: ["a": 1, "b": 2],
+      pinnedIDs: ["a"]
+    )
+    initial.confirmationDialog = ConfirmationDialogState {
+      TextState("Archive session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmArchive(id: "a")) { TextState("Archive") }
+    }
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+      $0.hermesREST.archive = { @Sendable _, id, flag in
+        archived.withValue { $0.append((id, flag)) }
+      }
+    }
+
+    await store.send(.confirmationDialog(.presented(.confirmArchive(id: "a")))) {
+      $0.confirmationDialog = nil
+      $0.sessions = [Session(id: "b")]
+      $0.pinnedIDs = []
+      $0.seenCounts = ["b": 2]
+    }
+    await store.finish()
+    #expect(archived.value.count == 1)
+    #expect(archived.value.first?.0 == "a")
+    #expect(archived.value.first?.1 == true)
+    #expect(prefs.loadPinnedIDs() == [])
+  }
+
+  @Test func archiveFailureReinsertsSessionAndSetsError() async {
+    let session = Session(id: "a", title: "Keep me")
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [session, Session(id: "b")]
+    )
+    initial.confirmationDialog = ConfirmationDialogState {
+      TextState("Archive session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmArchive(id: "a")) { TextState("Archive") }
+    }
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.archive = { @Sendable _, _, _ in throw RESTError.unreachable }
+    }
+
+    await store.send(.confirmationDialog(.presented(.confirmArchive(id: "a")))) {
+      $0.confirmationDialog = nil
+      $0.sessions = [Session(id: "b")]
+    }
+    await store.receive(\.archiveFailed) {
+      $0.sessions = [Session(id: "b"), session] // re-inserted
+      $0.loadError = "Couldn’t archive the session."
+    }
+  }
+
   @Test func newSessionButtonEmitsCreateDelegate() async {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()

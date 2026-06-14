@@ -4,7 +4,7 @@
 
 # Hermes Mobile
 
-**Drive your self-hosted Hermes coding agent from your iPhone.**
+**Drive your self-hosted Hermes agent from your iPhone.**
 
 Chat with sessions, watch the agent work in real time, and approve or clarify its
 actions — all from your pocket, while the real runtime stays on your Mac or server.
@@ -73,3 +73,7 @@ The MVP is feature-complete and shipping to TestFlight — the full loop (connec
 browse/search/resume/create, stream, approve/clarify) is built and covered by unit and
 SwiftUI snapshot tests. It's a personal tool first, designed to run over a private
 network.
+
+## License
+
+[MIT](LICENSE) © Eugene Honcharenko

@@ -18,6 +18,8 @@ public struct SessionListFeature {
     public var now: Date
     /// Last-seen message count per session id (persisted) — drives the unread indicator.
     public var seenCounts: [String: Int]
+    /// Pinned session ids (persisted), order = display order in the top "Pinned" section.
+    public var pinnedIDs: [String]
     /// Workspace group ids the user expanded past the collapsed limit.
     public var expandedGroups: Set<String>
     @Presents public var settings: SettingsFeature.State?
@@ -33,6 +35,7 @@ public struct SessionListFeature {
       loadError: String? = nil,
       now: Date = Date(timeIntervalSince1970: 0),
       seenCounts: [String: Int] = [:],
+      pinnedIDs: [String] = [],
       expandedGroups: Set<String> = [],
       settings: SettingsFeature.State? = nil
     ) {
@@ -43,6 +46,7 @@ public struct SessionListFeature {
       self.loadError = loadError
       self.now = now
       self.seenCounts = seenCounts
+      self.pinnedIDs = pinnedIDs
       self.expandedGroups = expandedGroups
       self.settings = settings
     }
@@ -53,9 +57,21 @@ public struct SessionListFeature {
       !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// Pinned sessions resolved from `pinnedIDs`, in pin order; stale ids are dropped.
+    public var pinnedSessions: [Session] {
+      pinnedIDs.compactMap { sessions[id: $0] }
+    }
+
+    /// Sessions not pinned — these feed the workspace grouping.
+    public var unpinnedSessions: [Session] {
+      let pinned = Set(pinnedIDs)
+      return sessions.filter { !pinned.contains($0.id) }
+    }
+
     /// Sessions grouped by workspace for the (non-search) list, desktop-style.
+    /// Pinned sessions are excluded — they render in the top "Pinned" section.
     public var groups: [SessionGroup] {
-      SessionGroup.grouped(Array(sessions))
+      SessionGroup.grouped(unpinnedSessions)
     }
 
     /// Sessions with new activity since the user last opened them.
@@ -82,6 +98,8 @@ public struct SessionListFeature {
     case sessionsResponse(Result<[Session], RESTError>)
     case sessionTapped(Session.ID)
     case newSessionButtonTapped
+    case pinSession(id: Session.ID)
+    case unpinSession(id: Session.ID)
     case toggleGroupExpansion(groupID: String)
     case settingsButtonTapped
     case settings(PresentationAction<SettingsFeature.Action>)
@@ -113,6 +131,7 @@ public struct SessionListFeature {
         state.isLoading = true
         state.loadError = nil
         state.seenCounts = preferences.loadSeenCounts()
+        state.pinnedIDs = preferences.loadPinnedIDs()
         return .run { [rest, connection = state.connection, query = state.searchQuery] send in
           await send(fetchSessions(rest: rest, connection: connection, query: query))
         }
@@ -153,6 +172,15 @@ public struct SessionListFeature {
           .send(.delegate(.openSession(session)))
         )
 
+      case let .pinSession(id):
+        guard !state.pinnedIDs.contains(id) else { return .none }
+        state.pinnedIDs.append(id)
+        return persistPinnedIDs(state.pinnedIDs)
+
+      case let .unpinSession(id):
+        state.pinnedIDs.removeAll { $0 == id }
+        return persistPinnedIDs(state.pinnedIDs)
+
       case let .toggleGroupExpansion(groupID):
         if !state.expandedGroups.insert(groupID).inserted {
           state.expandedGroups.remove(groupID)
@@ -192,6 +220,10 @@ public struct SessionListFeature {
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {
     .run { [preferences] _ in preferences.saveSeenCounts(counts) }
+  }
+
+  private func persistPinnedIDs(_ ids: [String]) -> Effect<Action> {
+    .run { [preferences] _ in preferences.savePinnedIDs(ids) }
   }
 }
 

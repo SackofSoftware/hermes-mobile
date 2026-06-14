@@ -14,6 +14,9 @@ public struct PreferencesClient: Sendable {
   /// Last-seen message count per session id — used to flag unread activity.
   public var loadSeenCounts: @Sendable () -> [String: Int] = { [:] }
   public var saveSeenCounts: @Sendable (_ counts: [String: Int]) -> Void
+  /// Pinned session ids, ordered = display order in the top "Pinned" section.
+  public var loadPinnedIDs: @Sendable () -> [String] = { [] }
+  public var savePinnedIDs: @Sendable (_ ids: [String]) -> Void
 }
 
 public extension PreferencesClient {
@@ -21,6 +24,7 @@ public extension PreferencesClient {
   static func live(defaults: UserDefaults = .standard) -> PreferencesClient {
     let key = "hermes.server-url"
     let seenKey = "hermes.seen-message-counts"
+    let pinnedKey = "hermes.pinned-session-ids"
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
     return PreferencesClient(
@@ -28,7 +32,9 @@ public extension PreferencesClient {
       saveServerURL: { store.set($0, forKey: key) },
       clearServerURL: { store.removeObject(forKey: key) },
       loadSeenCounts: { (store.dictionary(forKey: seenKey) as? [String: Int]) ?? [:] },
-      saveSeenCounts: { store.set($0, forKey: seenKey) }
+      saveSeenCounts: { store.set($0, forKey: seenKey) },
+      loadPinnedIDs: { (store.array(forKey: pinnedKey) as? [String]) ?? [] },
+      savePinnedIDs: { store.set($0, forKey: pinnedKey) }
     )
   }
 
@@ -36,12 +42,15 @@ public extension PreferencesClient {
   static func inMemory() -> PreferencesClient {
     let box = LockIsolated<String?>(nil)
     let seen = LockIsolated<[String: Int]>([:])
+    let pinned = LockIsolated<[String]>([])
     return PreferencesClient(
       loadServerURL: { box.value },
       saveServerURL: { url in box.setValue(url) },
       clearServerURL: { box.setValue(nil) },
       loadSeenCounts: { seen.value },
-      saveSeenCounts: { seen.setValue($0) }
+      saveSeenCounts: { seen.setValue($0) },
+      loadPinnedIDs: { pinned.value },
+      savePinnedIDs: { pinned.setValue($0) }
     )
   }
 }

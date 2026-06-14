@@ -92,6 +92,7 @@ public struct SettingsFeature {
       case .clearTokenTapped:
         try? keychain.deleteToken()
         preferences.clearServerURL()
+        preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
         return .merge(
           .send(.delegate(.disconnect)),
           .run { [dismiss] _ in await dismiss() }

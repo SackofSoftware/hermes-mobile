@@ -18,6 +18,14 @@ struct SessionListView: View {
           row(session, showsPreview: true)
         }
       } else {
+        // Pinned sessions float to the top, above the workspace groups.
+        if !store.pinnedSessions.isEmpty {
+          Section("Pinned") {
+            ForEach(store.pinnedSessions) { session in
+              row(session, isPinned: true)
+            }
+          }
+        }
         // Group by workspace, desktop-style, with per-group "Show more".
         ForEach(store.groups) { group in
           groupSection(group)
@@ -70,7 +78,7 @@ struct SessionListView: View {
     }
   }
 
-  private func row(_ session: Session, showsPreview: Bool = false) -> some View {
+  private func row(_ session: Session, showsPreview: Bool = false, isPinned: Bool = false) -> some View {
     Button {
       store.send(.sessionTapped(session.id))
     } label: {
@@ -78,9 +86,30 @@ struct SessionListView: View {
         session: session,
         now: store.now,
         showsPreview: showsPreview,
-        isUnread: store.unreadSessionIDs.contains(session.id)
+        isUnread: store.unreadSessionIDs.contains(session.id),
+        isPinned: isPinned
       )
     }
     .buttonStyle(.plain)
+    .swipeActions(edge: .leading) {
+      pinButton(session, isPinned: isPinned)
+        .tint(.orange)
+    }
+    .contextMenu {
+      pinButton(session, isPinned: isPinned)
+    }
+  }
+
+  @ViewBuilder
+  private func pinButton(_ session: Session, isPinned: Bool) -> some View {
+    if isPinned {
+      Button("Unpin", systemImage: "pin.slash") {
+        store.send(.unpinSession(id: session.id))
+      }
+    } else {
+      Button("Pin", systemImage: "pin") {
+        store.send(.pinSession(id: session.id))
+      }
+    }
   }
 }

@@ -117,6 +117,42 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .device(config: device)))
   }
 
+  func testSessionList_pinnedSection() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = (0..<4).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP",
+                      "UX polish pass", "Workspace grouping"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            pinnedIDs: ["m1"] // "Plan the iOS MVP" floats to the top Pinned section
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
   // MARK: ChatView (Task 8)
 
   func testChatView() {

@@ -99,6 +99,93 @@ struct SessionListFeatureTests {
     #expect(state.unreadSessionIDs.isEmpty)
   }
 
+  // MARK: Pinning
+
+  @Test func pinMovesSessionIntoPinnedSetAndOutOfGroup() async {
+    let prefs = PreferencesClient.inMemory()
+    let sessions = [
+      Session(id: "a", cwd: "/w", startedAt: Date(timeIntervalSince1970: 1)),
+      Session(id: "b", cwd: "/w", startedAt: Date(timeIntervalSince1970: 2)),
+    ]
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: IdentifiedArray(uniqueElements: sessions))
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+    }
+
+    #expect(store.state.pinnedSessions.isEmpty)
+    #expect(store.state.groups[0].sessions.map(\.id) == ["a", "b"])
+
+    await store.send(.pinSession(id: "a")) {
+      $0.pinnedIDs = ["a"]
+    }
+    #expect(store.state.pinnedSessions.map(\.id) == ["a"])
+    #expect(store.state.groups[0].sessions.map(\.id) == ["b"]) // pinned dropped from group
+    #expect(prefs.loadPinnedIDs() == ["a"]) // persisted
+  }
+
+  @Test func unpinRestoresSessionToGroup() async {
+    let prefs = PreferencesClient.inMemory()
+    let sessions = [
+      Session(id: "a", cwd: "/w", startedAt: Date(timeIntervalSince1970: 1)),
+      Session(id: "b", cwd: "/w", startedAt: Date(timeIntervalSince1970: 2)),
+    ]
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: IdentifiedArray(uniqueElements: sessions),
+        pinnedIDs: ["a"]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+    }
+
+    #expect(store.state.pinnedSessions.map(\.id) == ["a"])
+
+    await store.send(.unpinSession(id: "a")) {
+      $0.pinnedIDs = []
+    }
+    #expect(store.state.pinnedSessions.isEmpty)
+    #expect(store.state.groups[0].sessions.map(\.id) == ["a", "b"]) // restored to group
+    #expect(prefs.loadPinnedIDs() == []) // persisted
+  }
+
+  @Test func stalePinnedIDIsIgnored() {
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: [Session(id: "a")],
+      pinnedIDs: ["a", "ghost"] // "ghost" no longer exists
+    )
+    #expect(state.pinnedSessions.map(\.id) == ["a"]) // stale id dropped
+  }
+
+  @Test func taskLoadsPinnedIDsFromPreferences() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.savePinnedIDs(["s1"])
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
+    }
+
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+      $0.pinnedIDs = ["s1"]
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1")]
+      $0.seenCounts = ["s1": 0]
+    }
+  }
+
   @Test func toggleGroupExpansionExpandsThenCollapses() async {
     let sessions = (0..<7).map { Session(id: "s\($0)", cwd: "/w", startedAt: Date(timeIntervalSince1970: Double($0))) }
     let store = TestStore(

@@ -145,18 +145,18 @@ two ordering/expansion bugs found on-device:
 - Modify: `HermesKit/Tests/HermesKitTests/{PreferencesClientTests,SessionListFeatureTests}.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] `PreferencesClient`: `loadPinnedIDs`/`savePinnedIDs` (UserDefaults ordered array);
+- [x] `PreferencesClient`: `loadPinnedIDs`/`savePinnedIDs` (UserDefaults ordered array);
   in-memory variant; cleared on logout
-- [ ] `SessionListFeature`: load pins on `.task`; `pinSession`/`unpinSession` actions persist
+- [x] `SessionListFeature`: load pins on `.task`; `pinSession`/`unpinSession` actions persist
   + update state; computed `pinnedSessions` (in pin order) and `unpinnedSessions` (feed
   grouping); pinned excluded from groups
-- [ ] `SessionListView`: a "Pinned" `Section` above groups, **shown only when non-empty**;
+- [x] `SessionListView`: a "Pinned" `Section` above groups, **shown only when non-empty**;
   pin/unpin via a **leading swipe action** and a **long-press context menu** (the menu also
   includes Archive); `SessionRowView` shows a pin glyph when pinned
-- [ ] tests: pin persists + moves the session to the pinned set + out of its group; unpin
+- [x] tests: pin persists + moves the session to the pinned set + out of its group; unpin
   restores; stale pinned id ignored; PreferencesClient round-trip
-- [ ] snapshot: list with a non-empty Pinned section
-- [ ] run tests — must pass before next task
+- [x] snapshot: list with a non-empty Pinned section
+- [x] run tests — must pass before next task
 
 ### Task 4: Archive sessions (server PATCH + swipe)
 

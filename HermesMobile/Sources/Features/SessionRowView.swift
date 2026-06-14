@@ -11,6 +11,8 @@ struct SessionRowView: View {
   var showsPreview: Bool = false
   /// New activity since the user last opened this session.
   var isUnread: Bool = false
+  /// Whether this session is pinned (shows a small pin glyph).
+  var isPinned: Bool = false
 
   private static let relativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
@@ -29,6 +31,12 @@ struct SessionRowView: View {
           .font(.headline)
           .fontWeight(isUnread ? .semibold : .regular)
           .lineLimit(1)
+        if isPinned {
+          Image(systemName: "pin.fill")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Pinned")
+        }
         Spacer()
         if let updatedAt = session.updatedAt {
           Text(Self.relativeFormatter.localizedString(for: updatedAt, relativeTo: now))

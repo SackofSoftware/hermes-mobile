@@ -251,6 +251,20 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .device(config: device)))
   }
 
+  func testScrollToBottomButton() {
+    // Over a gradient so the Liquid Glass refraction is visible (it's near-invisible on
+    // flat black).
+    let view = ScrollToBottomButton(action: {})
+      .padding(40)
+      .background(
+        LinearGradient(
+          colors: [.purple, .blue, .teal],
+          startPoint: .topLeading, endPoint: .bottomTrailing
+        )
+      )
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
   // MARK: Settings (Task 12)
 
   func testSettingsView() {

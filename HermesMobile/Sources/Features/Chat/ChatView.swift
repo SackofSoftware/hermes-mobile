@@ -6,6 +6,7 @@ import SwiftUI
 /// the composer. Streams over the gateway via `ChatFeature`.
 struct ChatView: View {
   @Bindable var store: StoreOf<ChatFeature>
+  @State private var isAtBottom = true
 
   var body: some View {
     VStack(spacing: 0) {
@@ -43,27 +44,61 @@ struct ChatView: View {
 
   private var transcript: some View {
     ScrollViewReader { proxy in
-      ScrollView {
-        LazyVStack(alignment: .leading, spacing: 10) {
-          ForEach(store.transcript) { row in
-            rowView(row)
-              .id(row.id)
-              .contextMenu {
-                Button {
-                  store.send(.copyRow(id: row.id))
-                } label: {
-                  Label("Copy", systemImage: "doc.on.doc")
+      GeometryReader { outer in
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 10) {
+            ForEach(store.transcript) { row in
+              rowView(row)
+                .id(row.id)
+                .contextMenu {
+                  Button {
+                    store.send(.copyRow(id: row.id))
+                  } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                  }
                 }
-              }
+            }
+            // Invisible anchor at the very bottom; its position relative to the viewport
+            // tells us whether the user is scrolled to the latest message.
+            Color.clear.frame(height: 1)
+              .id(Self.bottomAnchor)
+              .background(GeometryReader { inner in
+                Color.clear.preference(
+                  key: BottomDistanceKey.self,
+                  value: inner.frame(in: .global).minY - outer.frame(in: .global).maxY
+                )
+              })
+          }
+          .padding()
+        }
+        .onPreferenceChange(BottomDistanceKey.self) { distance in
+          isAtBottom = distance < 60 // within ~60pt of the bottom counts as "at bottom"
+        }
+        .onChange(of: store.transcript.last?.id) { _, last in
+          guard last != nil else { return }
+          withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
+        }
+        .overlay(alignment: .bottomTrailing) {
+          if !isAtBottom {
+            ScrollToBottomButton {
+              withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
+            }
+            .padding(.trailing, 16)
+            .padding(.bottom, 12)
+            .transition(.scale.combined(with: .opacity))
           }
         }
-        .padding()
-      }
-      .onChange(of: store.transcript.last?.id) { _, last in
-        guard let last else { return }
-        withAnimation { proxy.scrollTo(last, anchor: .bottom) }
+        .animation(.spring(duration: 0.25), value: isAtBottom)
       }
     }
+  }
+
+  private static let bottomAnchor = "transcript-bottom-anchor"
+
+  /// Bottom anchor's distance below the viewport bottom (≤0 ⇒ visible ⇒ at bottom).
+  private struct BottomDistanceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
   }
 
   @ViewBuilder

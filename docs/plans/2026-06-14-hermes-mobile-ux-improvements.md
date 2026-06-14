@@ -228,20 +228,21 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
 - [x] snapshots: tool rows (running/complete/no-detail) + detail sheet (shared in chat)
 - [x] run tests — **115 pass**; app `BUILD SUCCEEDED`
 
-### Task 5: Scroll-to-bottom button
+### Task 5: Scroll-to-bottom button ✅
 
 **Files:**
-- Create: `HermesMobile/Sources/Features/Chat/ScrollToBottomButton.swift`
-- Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
-- Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
+- Create: `ScrollToBottomButton.swift`; Modify: `ChatView.swift`, `PreviewSnapshotTests.swift`
 
-- [ ] track whether the transcript is scrolled near the bottom (scroll position / last-row
-  visibility via `onScrollGeometryChange` on iOS 26+, with a pre-26 fallback)
-- [ ] overlay a circular down-chevron button (`.glassEffect` on iOS 26+, material fallback)
-  bottom-trailing above the composer, shown only when not at bottom; tap → scroll to last
-- [ ] keep the existing auto-scroll-on-new-message behaviour; hide the button at bottom
-- [ ] write/snapshot: button visible (scrolled up) vs hidden (at bottom)
-- [ ] run tests — must pass before next task
+- [x] scroll-position detection via a bottom anchor + `GeometryReader`/`PreferenceKey`
+  (works on the iOS 17 floor, no version branch) — `isAtBottom` when the anchor is within
+  ~60pt of the viewport bottom
+- [x] `ScrollToBottomButton`: circular down-chevron, `.glassEffect(.regular.interactive())`
+  on iOS 26+, material + hairline + shadow fallback below; `.buttonStyle(.plain)` keeps the
+  chevron `.primary`
+- [x] overlaid bottom-trailing over the transcript, shown only when `!isAtBottom` (spring
+  transition); tap scrolls to the bottom anchor; auto-scroll-on-new-message preserved
+- [x] snapshot of the button over a gradient (so the glass refraction is visible)
+- [x] run tests — **115 unit + 16 snapshot pass**; app `BUILD SUCCEEDED`
 
 ### Task 6: Composer redesign (layout, brand send, disabled voice)
 

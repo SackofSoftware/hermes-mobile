@@ -215,20 +215,26 @@ struct ChatReductionTests {
     #expect(sent.value?["params"]?["session_id"]?.stringValue == "stored123")
   }
 
-  @Test func historyResponseSeedsTranscriptSkippingNonChatRoles() async {
+  @Test func historyReconstructsToolRowsAndDropsEmptyTurns() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
     } withDependencies: { $0.uuid = .incrementing }
 
     let messages = [
-      SessionMessage(id: 1, role: "user", content: "Hi"),
-      SessionMessage(id: 2, role: "assistant", content: "Hello"),
-      SessionMessage(id: 3, role: "tool", content: "ignored"), // not user/assistant → skipped
+      SessionMessage(id: 1, role: "user", content: "Read the file"),
+      // An assistant tool-call turn with no text — must NOT become an empty bubble.
+      SessionMessage(id: 2, role: "assistant", content: ""),
+      SessionMessage(id: 3, role: "tool", content: "file contents…", toolName: "read_file"),
+      SessionMessage(id: 4, role: "assistant", content: "Here's the gist."),
     ]
     await store.send(.historyResponse(messages)) {
       $0.transcript = [
-        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "Hi", isComplete: true)),
-        ChatRow(id: self.uuid(1), kind: .message(role: .assistant, text: "Hello", isComplete: true)),
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "Read the file", isComplete: true)),
+        ChatRow(id: self.uuid(1), kind: .tool(
+          name: "read_file", title: "read_file", state: .complete,
+          detail: ToolDetail(resultText: "file contents…"), durationS: nil
+        )),
+        ChatRow(id: self.uuid(2), kind: .message(role: .assistant, text: "Here's the gist.", isComplete: true)),
       ]
     }
   }

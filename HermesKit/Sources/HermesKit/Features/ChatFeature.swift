@@ -190,11 +190,11 @@ public struct ChatFeature {
         return .none
 
       case let .historyResponse(messages):
-        // Seed the transcript with prior user/assistant messages (REST hydration).
-        let rows = messages.compactMap { message -> ChatRow? in
-          guard let role = ChatRow.Role(restRole: message.role) else { return nil }
-          return ChatRow(id: uuid(), kind: .message(role: role, text: message.content ?? "", isComplete: true))
-        }
+        // Seed the transcript from REST history. user/assistant text → message rows;
+        // `tool` rows → reconstructed tool rows (so resumed sessions show tool/skill
+        // activity). Empty-content turns (an assistant tool-call turn with no text) are
+        // dropped so they don't render as blank bubbles.
+        let rows = messages.compactMap { historyRow(from: $0) }
         state.transcript.insert(contentsOf: rows, at: 0)
         return .none
 
@@ -550,18 +550,26 @@ public struct ChatFeature {
       ]))
     }
   }
+
+  /// Map a stored history message to a transcript row. `user`/`assistant` text → message
+  /// rows (empty turns dropped — an assistant tool-call turn has no text); `tool` rows →
+  /// reconstructed tool rows with their result. Other roles are skipped.
+  private func historyRow(from message: SessionMessage) -> ChatRow? {
+    switch message.role {
+    case "user", "assistant":
+      guard let text = message.content?.nonEmpty else { return nil }
+      let role: ChatRow.Role = message.role == "user" ? .user : .assistant
+      return ChatRow(id: uuid(), kind: .message(role: role, text: text, isComplete: true))
+    case "tool":
+      let name = message.toolName?.nonEmpty ?? "tool"
+      let detail = message.content?.nonEmpty.map { ToolDetail(resultText: $0) }
+      return ChatRow(id: uuid(), kind: .tool(name: name, title: name, state: .complete, detail: detail, durationS: nil))
+    default:
+      return nil
+    }
+  }
 }
 
 private func backoffDelay(attempt: Int) -> Duration {
   .seconds(min(30.0, pow(2.0, Double(max(0, attempt - 1)))))
-}
-
-private extension ChatRow.Role {
-  init?(restRole: String) {
-    switch restRole {
-    case "user": self = .user
-    case "assistant": self = .assistant
-    default: return nil // skip tool/system messages in history for MVP
-    }
-  }
 }

@@ -15,6 +15,7 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.date = .constant(now)
+      $0.continuousClock = TestClock()
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", title: "Hello", preview: "hi")]
       }
@@ -29,6 +30,7 @@ struct SessionListFeatureTests {
       $0.sessions = [Session(id: "s1", title: "Hello", preview: "hi")]
       $0.seenCounts = ["s1": 0] // seeded so the session isn't shown unread on first sight
     }
+    await store.send(.onDisappear) // cancels the auto-poll loop
   }
 
   @Test func loadFailureSetsError() async {
@@ -36,6 +38,7 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.date = .constant(now)
+      $0.continuousClock = TestClock()
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -47,6 +50,62 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.loadError = RESTError.unreachable.message
     }
+    await store.send(.onDisappear) // cancels the auto-poll loop
+  }
+
+  // MARK: Auto-poll (working glow freshness)
+
+  @Test func pollRefreshesAfterIntervalAndStopsOnDisappear() async {
+    let clock = TestClock()
+    let fetchCount = LockIsolated(0)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = clock
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        fetchCount.withValue { $0 += 1 }
+        return [Session(id: "s1", isActive: true)]
+      }
+    }
+
+    // .task does the initial load and starts the 10s poll loop.
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1", isActive: true)]
+      $0.seenCounts = ["s1": 0]
+    }
+    #expect(fetchCount.value == 1)
+
+    // Advancing the clock by the interval fires a poll tick → refresh → re-fetch.
+    await clock.advance(by: .seconds(10))
+    await store.receive(\.pollTick)
+    await store.receive(\.pulledToRefresh) {
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+    }
+    #expect(fetchCount.value == 2)
+
+    // Disappearing cancels the loop — advancing further triggers no more refreshes.
+    await store.send(.onDisappear)
+    await clock.advance(by: .seconds(30))
+    #expect(fetchCount.value == 2)
+  }
+
+  @Test func pollTickIsSkippedWhileSearching() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, searchQuery: "foo")
+    ) {
+      SessionListFeature()
+    }
+    // While a query is active the poll tick is a no-op (no refresh).
+    await store.send(.pollTick)
   }
 
   @Test func searchIsDebouncedAndHitsSearchEndpoint() async {
@@ -170,6 +229,7 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.date = .constant(now)
+      $0.continuousClock = TestClock()
       $0.preferences = prefs
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
     }
@@ -184,6 +244,7 @@ struct SessionListFeatureTests {
       $0.sessions = [Session(id: "s1")]
       $0.seenCounts = ["s1": 0]
     }
+    await store.send(.onDisappear) // cancels the auto-poll loop
   }
 
   @Test func toggleGroupExpansionExpandsThenCollapses() async {

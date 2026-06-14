@@ -53,6 +53,7 @@ struct SessionListView: View {
       }
     }
     .task { store.send(.task) }
+    .onDisappear { store.send(.onDisappear) }
     .confirmationDialog($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .sheet(item: $store.scope(state: \.settings, action: \.settings)) { settingsStore in
       NavigationStack {
@@ -88,7 +89,8 @@ struct SessionListView: View {
         now: store.now,
         showsPreview: showsPreview,
         isUnread: store.unreadSessionIDs.contains(session.id),
-        isPinned: isPinned
+        isPinned: isPinned,
+        isActive: session.isActive == true
       )
     }
     .buttonStyle(.plain)

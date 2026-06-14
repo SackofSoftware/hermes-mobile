@@ -70,6 +70,23 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 
+  func testSessionRow_active() {
+    // A session the agent is currently working — renders the brand-tinted glow.
+    let view = SessionRowView(
+      session: Session(
+        id: "20260610_120231_afcca6",
+        title: "Refactor the streaming parser",
+        updatedAt: Date(timeIntervalSince1970: 1_749_599_700),
+        isActive: true
+      ),
+      now: now,
+      isActive: true
+    )
+    .padding()
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
   // MARK: SessionListView (Task 7)
 
   func testSessionList() {

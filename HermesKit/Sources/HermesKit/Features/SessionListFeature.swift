@@ -95,7 +95,9 @@ public struct SessionListFeature {
   public enum Action: BindableAction {
     case binding(BindingAction<State>)
     case task
+    case onDisappear
     case pulledToRefresh
+    case pollTick
     case sessionsResponse(Result<[Session], RESTError>)
     case sessionTapped(Session.ID)
     case newSessionButtonTapped
@@ -122,7 +124,10 @@ public struct SessionListFeature {
     }
   }
 
-  private enum CancelID { case search }
+  private enum CancelID { case search, poll }
+
+  /// How often the list auto-refreshes while visible, to keep `isActive` (working glow) fresh.
+  private static let pollInterval: Duration = .seconds(10)
 
   @Dependency(\.hermesREST) var rest
   @Dependency(\.continuousClock) var clock
@@ -135,15 +140,34 @@ public struct SessionListFeature {
     BindingReducer()
     Reduce { state, action in
       switch action {
-      case .task, .pulledToRefresh:
-        state.now = now
-        state.isLoading = true
-        state.loadError = nil
-        state.seenCounts = preferences.loadSeenCounts()
-        state.pinnedIDs = preferences.loadPinnedIDs()
-        return .run { [rest, connection = state.connection, query = state.searchQuery] send in
-          await send(fetchSessions(rest: rest, connection: connection, query: query))
-        }
+      case .task:
+        // Load now AND start the auto-poll loop that keeps `isActive` fresh while visible.
+        return .merge(
+          load(&state),
+          .run { [clock, interval = Self.pollInterval] send in
+            while true {
+              try await clock.sleep(for: interval)
+              await send(.pollTick)
+            }
+          }
+          .cancellable(id: CancelID.poll, cancelInFlight: true)
+        )
+
+      case .onDisappear:
+        // Stop the poll (and any in-flight search debounce) when the list goes away.
+        return .merge(
+          .cancel(id: CancelID.poll),
+          .cancel(id: CancelID.search)
+        )
+
+      case .pollTick:
+        // Skip the auto-refresh while searching so it doesn't fight the user's query.
+        guard !state.isSearching else { return .none }
+        return .send(.pulledToRefresh)
+
+      case .pulledToRefresh:
+        // A plain reload — does NOT (re)start the poll loop.
+        return load(&state)
 
       case .binding:
         // searchQuery is the only bound field; debounce so each keystroke doesn't fire.
@@ -268,6 +292,18 @@ public struct SessionListFeature {
       SettingsFeature()
     }
     .ifLet(\.$confirmationDialog, action: \.confirmationDialog)
+  }
+
+  /// Refresh "now", clear errors, reload persisted prefs, and fetch the session list.
+  private func load(_ state: inout State) -> Effect<Action> {
+    state.now = now
+    state.isLoading = true
+    state.loadError = nil
+    state.seenCounts = preferences.loadSeenCounts()
+    state.pinnedIDs = preferences.loadPinnedIDs()
+    return .run { [rest, connection = state.connection, query = state.searchQuery] send in
+      await send(fetchSessions(rest: rest, connection: connection, query: query))
+    }
   }
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {

@@ -187,14 +187,14 @@ two ordering/expansion bugs found on-device:
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] auto-poll: cancellable timer effect on `.task` (`clock.sleep(10s)` → `.pulledToRefresh`
+- [x] auto-poll: cancellable timer effect on `.task` (`clock.sleep(10s)` → `.pulledToRefresh`
   loop), cancelled on a new `.onDisappear`; paused while searching
-- [ ] `SessionRowView`: subtle brand-tinted pulsing glow/border when `session.isActive`
+- [x] `SessionRowView`: subtle brand-tinted pulsing glow/border when `session.isActive`
   (respects reduce-motion)
-- [ ] tests: poll fires a refresh after the interval (TestClock) and stops on disappear;
+- [x] tests: poll fires a refresh after the interval (TestClock) and stops on disappear;
   active session flagged for glow
-- [ ] snapshot: a row in the active/glowing state
-- [ ] run tests — must pass before next task
+- [x] snapshot: a row in the active/glowing state
+- [x] run tests — must pass before next task
 
 ### Task 6: Verify acceptance criteria
 

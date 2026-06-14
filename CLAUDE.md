@@ -1,8 +1,9 @@
 # Hermes Mobile — project conventions
 
 Native SwiftUI + TCA iOS companion for a self-hosted Hermes Agent. A thin remote
-client; no agent logic on the phone. See `README.md` for the feature overview and
-`docs/plans/completed/2026-06-09-hermes-ios-mvp.md` for the full design history.
+client; no agent logic on the phone. See `README.md` for the feature overview,
+`docs/architecture.md` for the structure/protocol, `docs/development.md` for
+build/test/distribution, and `docs/plans/completed/` for the full design history.
 
 ## Layout
 

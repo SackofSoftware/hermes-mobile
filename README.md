@@ -17,8 +17,13 @@ agent's actions from an iPhone while the real runtime stays on your Mac/server.
 - **Connect** — type a server URL (validated automatically as you type / on paste / on
   return) + token; token in the iOS Keychain, server URL persisted so the app
   **auto-logs-in on launch** and skips onboarding when credentials are stored.
-- **Sessions** — list **grouped by workspace** (like the desktop app), full-text search
-  (flat results), resume an existing session, or start a new one.
+- **Sessions** — list **grouped by workspace** (like the desktop app), ordered by
+  last-active within each group, with **collapsible groups** ("Show N more" / "Show
+  less"); full-text search (flat results), resume an existing session, or start a new
+  one. **Pin** sessions into a top "Pinned" section (client-side, shown only when
+  non-empty; via swipe or a long-press menu), **archive** them server-side (PATCH, behind
+  a confirmation dialog), and watch a subtle **working glow** on active sessions —
+  driven by `is_active` and a ~10s auto-poll while the list is on screen.
 - **Live chat** — streaming assistant responses as native Markdown (code blocks + lists),
   **tool/skill activity rows** (human title + a detail sheet with args/result/diff), a
   collapsible thinking row, and a Liquid-Glass **scroll-to-bottom** button.
@@ -50,7 +55,9 @@ turn: streaming, tool/status events, approval/clarify requests).
 ```
 AppFeature                 // root nav + launch auto-connect; onboarding until connected
 ├─ ConnectionFeature       // auto-validating URL + token
-├─ SessionListFeature      // workspace-grouped list / search / create; presents Settings
+├─ SessionListFeature      // workspace-grouped list (last-active order, collapsible) /
+│  │                       //   search / create; pin (client-side) + archive (server) +
+│  │                       //   working-glow auto-poll; presents Settings
 │  └─ SettingsFeature      // token mgmt, manual reconnect, debug log
 └─ ChatFeature             // owns the WS lifecycle + streaming reduction; also folds in
                            //   approvals, clarify/sudo/secret, the tool-detail sheet,
@@ -59,7 +66,8 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 
 Dependency clients (`@DependencyClient`): `HermesRESTClient` (status/sessions/search/
 messages), `HermesGatewayClient` (WebSocket JSON-RPC connect/send), `KeychainClient`
-(token), `PreferencesClient` (server URL, for auto-login), `PasteboardClient` (copy),
+(token), `PreferencesClient` (server URL for auto-login, per-session seen counts, and
+client-side pinned session ids — all cleared on logout), `PasteboardClient` (copy),
 `DebugLogClient` (event ring buffer). The socket is one long-running cancellable effect;
 reconnect/backoff lives in the reducer (testable with `TestClock`).
 

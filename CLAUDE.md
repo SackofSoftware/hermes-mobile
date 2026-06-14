@@ -29,9 +29,24 @@ client; no agent logic on the phone. See `README.md` for the feature overview an
   in-flight assistant row, created **lazily on the first delta** (a `message.start` with no
   text would otherwise render as an empty bubble). `session_id` is on the event *frame*.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
-- **Persistence**: secrets (token) → `KeychainClient`; non-secret prefs (server URL) →
-  `PreferencesClient` (UserDefaults-backed `@DependencyClient`). Both have `.inMemory()`
-  test variants. (We deliberately use clients over `@Shared` for test isolation.)
+- **Persistence**: secrets (token) → `KeychainClient`; non-secret prefs (server URL,
+  per-session seen counts, client-side pinned session ids) → `PreferencesClient`
+  (UserDefaults-backed `@DependencyClient`). Both have `.inMemory()` test variants. (We
+  deliberately use clients over `@Shared` for test isolation.) **Logout must clear every
+  prefs entry** (URL, seen counts, pins), not just the URL.
+- **Client-side vs server state**: pins are device-local (no Hermes pin API) — an ordered
+  `[String]` of session ids in `PreferencesClient`. Archive is server-side
+  (`PATCH /api/sessions/{id}` `{"archived":…}`) done optimistically: remove from the list
+  immediately, re-insert on RPC failure.
+- **Auto-poll** (e.g. the session-list working glow): a cancellable `continuousClock`
+  `sleep`-loop effect started on `.task` and cancelled by an explicit `.onDisappear`
+  action — not a bare `.task` cancellation. Pause it while searching. Testable with
+  `TestClock`.
+- **Destructive actions** use TCA `ConfirmationDialogState` (`@Presents`) so the
+  confirm/cancel flow is driven by state and unit-testable.
+- **List-row affordances**: pin/unpin and archive are offered via both `.swipeActions`
+  and a long-press `.contextMenu` on the row (mirrors the desktop). Animations (the glow)
+  respect reduce-motion.
 - **Gate UI by server capability, not assumptions** — e.g. reasoning effort is shown only
   when `model.options` capabilities say the selected model supports it (`?? true` on
   unknown). Mirror the desktop's behaviour where one exists; check the Hermes source.

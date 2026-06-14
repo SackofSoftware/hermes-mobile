@@ -208,9 +208,9 @@ two ordering/expansion bugs found on-device:
 
 ### Task 7: [Final] Documentation
 
-- [ ] update `README.md` (pin/archive/working glow, list behaviours) and `CLAUDE.md` if new
+- [x] update `README.md` (pin/archive/working glow, list behaviours) and `CLAUDE.md` if new
   patterns emerge (auto-poll, swipe actions, client-side pin store)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

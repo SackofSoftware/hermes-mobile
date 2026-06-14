@@ -22,6 +22,13 @@ public struct SessionListFeature {
     public var pinnedIDs: [String]
     /// Workspace group ids the user expanded past the collapsed limit.
     public var expandedGroups: Set<String>
+    /// Ids whose archive PATCH is currently IN FLIGHT. Transient: an id is added when its
+    /// PATCH starts and removed on BOTH success and failure. While an id is here, a list/search
+    /// response that lands during the in-flight window filters it out (suppressing a stale row),
+    /// and the poll skips. On success the in-flight fetch is cancelled so no stale response can
+    /// land after the id is cleared; future authoritative fetches exclude archived sessions
+    /// server-side (`archived=exclude`), so no permanent filter is needed.
+    public var archivingIDs: Set<String>
     @Presents public var settings: SettingsFeature.State?
     @Presents public var confirmationDialog: ConfirmationDialogState<Action.Dialog>?
 
@@ -38,6 +45,7 @@ public struct SessionListFeature {
       seenCounts: [String: Int] = [:],
       pinnedIDs: [String] = [],
       expandedGroups: Set<String> = [],
+      archivingIDs: Set<String> = [],
       settings: SettingsFeature.State? = nil
     ) {
       self.connection = connection
@@ -49,6 +57,7 @@ public struct SessionListFeature {
       self.seenCounts = seenCounts
       self.pinnedIDs = pinnedIDs
       self.expandedGroups = expandedGroups
+      self.archivingIDs = archivingIDs
       self.settings = settings
     }
 
@@ -105,7 +114,14 @@ public struct SessionListFeature {
     case unpinSession(id: Session.ID)
     case toggleGroupExpansion(groupID: String)
     case archiveButtonTapped(id: Session.ID)
-    case archiveFailed(id: Session.ID, session: Session)
+    /// Archive RPC succeeded — clear the transient in-flight guard and cancel any fetch that
+    /// started during the PATCH window so a stale response can't land after the guard is gone.
+    case archiveSucceeded(id: Session.ID)
+    /// Archive RPC failed — the server still has the session. Clear the in-flight guard and
+    /// restore everything locally: re-insert the `session` at its saved `index`, restore the
+    /// pin at `pinIndex` (nil if it wasn't pinned) and the prior `seenCount`, persist, and
+    /// surface the error. Local restore guarantees the row is present regardless of network.
+    case archiveFailed(id: Session.ID, session: Session, index: Int, pinIndex: Int?, seenCount: Int?)
     case confirmationDialog(PresentationAction<Dialog>)
     case settingsButtonTapped
     case settings(PresentationAction<SettingsFeature.Action>)
@@ -124,7 +140,10 @@ public struct SessionListFeature {
     }
   }
 
-  private enum CancelID { case search, poll }
+  // One id for BOTH the list fetch and the search fetch: any new fetch (list refresh, poll,
+  // or search) cancels the previous in-flight one, so a late list response can't overwrite
+  // active search results (and vice versa). `poll` is the separate timer loop.
+  private enum CancelID { case fetch, poll }
 
   /// How often the list auto-refreshes while visible, to keep `isActive` (working glow) fresh.
   private static let pollInterval: Duration = .seconds(10)
@@ -154,15 +173,16 @@ public struct SessionListFeature {
         )
 
       case .onDisappear:
-        // Stop the poll (and any in-flight search debounce) when the list goes away.
+        // Stop the poll (and any in-flight fetch / search debounce) when the list goes away.
         return .merge(
           .cancel(id: CancelID.poll),
-          .cancel(id: CancelID.search)
+          .cancel(id: CancelID.fetch)
         )
 
       case .pollTick:
-        // Skip the auto-refresh while searching so it doesn't fight the user's query.
-        guard !state.isSearching else { return .none }
+        // Skip the auto-refresh while searching (don't fight the user's query) or while an
+        // archive is in flight (don't churn / risk resurrecting the archiving row).
+        guard !state.isSearching, state.archivingIDs.isEmpty else { return .none }
         return .send(.pulledToRefresh)
 
       case .pulledToRefresh:
@@ -175,16 +195,23 @@ public struct SessionListFeature {
           try await clock.sleep(for: .milliseconds(300))
           await send(fetchSessions(rest: rest, connection: connection, query: query))
         }
-        .cancellable(id: CancelID.search, cancelInFlight: true)
+        // Shared `fetch` id: cancels any in-flight list load so a late list response can't
+        // overwrite these search results.
+        .cancellable(id: CancelID.fetch, cancelInFlight: true)
 
       case let .sessionsResponse(.success(sessions)):
         state.isLoading = false
         state.loadError = nil
-        state.sessions = IdentifiedArray(uniqueElements: sessions)
+        // Belt-and-suspenders: drop any session whose archive PATCH is still in flight, so a
+        // fetch that completes during the PATCH window can't repopulate the removed row.
+        let visible = state.archivingIDs.isEmpty
+          ? sessions
+          : sessions.filter { !state.archivingIDs.contains($0.id) }
+        state.sessions = IdentifiedArray(uniqueElements: visible)
         // Seed last-seen counts for newly-discovered sessions so they don't all show as
         // unread on first sight; only later increases flag unread.
         var seeded = false
-        for session in sessions where state.seenCounts[session.id] == nil {
+        for session in visible where state.seenCounts[session.id] == nil {
           state.seenCounts[session.id] = session.messageCount ?? 0
           seeded = true
         }
@@ -236,30 +263,68 @@ public struct SessionListFeature {
         return .none
 
       case let .confirmationDialog(.presented(.confirmArchive(id))):
-        guard let session = state.sessions[id: id] else { return .none }
+        guard let index = state.sessions.index(id: id) else { return .none }
+        // Capture rollback info BEFORE mutating: the session + its list index, the pin position
+        // (if pinned) and prior seen baseline — so a failed RPC can restore everything locally.
+        let session = state.sessions[index]
+        let pinIndex = state.pinnedIDs.firstIndex(of: id)
+        let seenCount = state.seenCounts[id]
         // Optimistic removal: drop from the list + clear its pin/seen entries, persist,
         // then run the RPC. On failure we re-insert and surface the error.
         state.sessions.remove(id: id)
         state.pinnedIDs.removeAll { $0 == id }
         state.seenCounts[id] = nil
+        // Mark as in-flight so a fetch landing during the PATCH window filters it out and the
+        // poll skips — closing the window where a reload could resurrect the removed row.
+        state.archivingIDs.insert(id)
         let pinnedIDs = state.pinnedIDs
         let seenCounts = state.seenCounts
-        return .run { [rest, preferences, connection = state.connection] send in
-          preferences.savePinnedIDs(pinnedIDs)
-          preferences.saveSeenCounts(seenCounts)
-          do {
-            try await rest.archive(connection, id, true)
-          } catch {
-            await send(.archiveFailed(id: id, session: session))
+        // Cancel any in-flight fetch (list load OR search) too: one started before this
+        // archive could land afterward and resurrect the row we just optimistically removed.
+        return .merge(
+          .cancel(id: CancelID.fetch),
+          .run { [rest, preferences, connection = state.connection] send in
+            preferences.savePinnedIDs(pinnedIDs)
+            preferences.saveSeenCounts(seenCounts)
+            do {
+              try await rest.archive(connection, id, true)
+              await send(.archiveSucceeded(id: id))
+            } catch {
+              await send(.archiveFailed(
+                id: id, session: session, index: index, pinIndex: pinIndex, seenCount: seenCount
+              ))
+            }
           }
-        }
+        )
 
       case .confirmationDialog:
         return .none
 
-      case let .archiveFailed(id, session):
-        state.sessions[id: id] = session
+      case let .archiveSucceeded(id):
+        // PATCH landed — clear the transient guard so the poll resumes. Cancel any fetch that
+        // started during the PATCH window: with the guard now gone, its (stale) response could
+        // otherwise resurrect the archived row. Future authoritative fetches exclude archived
+        // sessions server-side (`archived=exclude`), so no permanent filter is needed.
+        state.archivingIDs.remove(id)
+        return .cancel(id: CancelID.fetch)
+
+      case let .archiveFailed(id, session, index, pinIndex, seenCount):
+        // The archive didn't take — the server still has the session. Lift the in-flight guard
+        // and restore everything LOCALLY (no reliance on a reload): re-insert the session at its
+        // saved index, restore the pin and seen baseline, persist, and surface the error. Local
+        // restore guarantees the row is present regardless of network; a later poll/refresh
+        // reconciles ordering/context (self-healing).
+        state.archivingIDs.remove(id)
+        let insertAt = min(index, state.sessions.count)
+        state.sessions.insert(session, at: insertAt)
+        if let pinIndex {
+          let pinAt = min(pinIndex, state.pinnedIDs.count)
+          state.pinnedIDs.insert(id, at: pinAt)
+        }
+        state.seenCounts[id] = seenCount
         state.loadError = "Couldn’t archive the session."
+        preferences.savePinnedIDs(state.pinnedIDs)
+        preferences.saveSeenCounts(state.seenCounts)
         return .none
 
       case .newSessionButtonTapped:
@@ -304,6 +369,9 @@ public struct SessionListFeature {
     return .run { [rest, connection = state.connection, query = state.searchQuery] send in
       await send(fetchSessions(rest: rest, connection: connection, query: query))
     }
+    // Shared `fetch` id: a newer load/search/poll cancels this one, so an older in-flight
+    // fetch finishing late can't overwrite `state.sessions` (stale list or search results).
+    .cancellable(id: CancelID.fetch, cancelInFlight: true)
   }
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {

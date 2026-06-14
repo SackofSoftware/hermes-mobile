@@ -59,10 +59,23 @@ struct SessionRowView: View {
     }
     .padding(.vertical, 2)
     .modifier(ActiveGlow(isActive: isActive, reduceMotion: reduceMotion, pulsing: pulsing))
-    .onAppear {
-      guard isActive, !reduceMotion else { return }
+    .onAppear { updatePulsing() }
+    // Drive the pulse off `isActive` too: when a poll flips it true on a row that's
+    // already on screen (no re-onAppear), this starts the animation; flips to false stop it.
+    .onChange(of: isActive) { updatePulsing() }
+    .onChange(of: reduceMotion) { updatePulsing() }
+  }
+
+  /// Start the repeating pulse while active (and motion is allowed); otherwise hold it flat.
+  private func updatePulsing() {
+    if isActive, !reduceMotion {
+      guard !pulsing else { return }
       withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
         pulsing = true
+      }
+    } else if pulsing {
+      withAnimation(.easeInOut(duration: 0.2)) {
+        pulsing = false
       }
     }
   }

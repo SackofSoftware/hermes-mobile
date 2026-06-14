@@ -17,12 +17,13 @@ struct SessionListView: View {
         ForEach(store.sessions) { session in
           row(session, showsPreview: true)
         }
+        // (isPinned is derived inside `row` so pinned sessions in search show Unpin.)
       } else {
         // Pinned sessions float to the top, above the workspace groups.
         if !store.pinnedSessions.isEmpty {
           Section("Pinned") {
             ForEach(store.pinnedSessions) { session in
-              row(session, isPinned: true)
+              row(session)
             }
           }
         }
@@ -80,8 +81,12 @@ struct SessionListView: View {
     }
   }
 
-  private func row(_ session: Session, showsPreview: Bool = false, isPinned: Bool = false) -> some View {
-    Button {
+  private func row(_ session: Session, showsPreview: Bool = false) -> some View {
+    // Derive pinned state from the store so every row (search, grouped, Pinned section)
+    // reflects the true state — search rows used to default to unpinned and offered a
+    // no-op "Pin" for already-pinned sessions.
+    let isPinned = store.pinnedIDs.contains(session.id)
+    return Button {
       store.send(.sessionTapped(session.id))
     } label: {
       SessionRowView(

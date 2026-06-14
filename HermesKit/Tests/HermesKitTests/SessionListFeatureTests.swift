@@ -99,13 +99,80 @@ struct SessionListFeatureTests {
   }
 
   @Test func pollTickIsSkippedWhileSearching() async {
+    let fetchCount = LockIsolated(0)
     let store = TestStore(
       initialState: SessionListFeature.State(connection: connection, searchQuery: "foo")
     ) {
       SessionListFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        fetchCount.withValue { $0 += 1 }
+        return []
+      }
+      $0.hermesREST.search = { @Sendable _, _ in
+        fetchCount.withValue { $0 += 1 }
+        return []
+      }
     }
-    // While a query is active the poll tick is a no-op (no refresh).
+    // While a query is active the poll tick is a no-op — no refresh, no fetch of any kind.
     await store.send(.pollTick)
+    await store.finish()
+    #expect(fetchCount.value == 0)
+  }
+
+  @Test func pollResumesAfterSuccessfulArchive() async {
+    // The archiving guard is transient: once archiveSucceeded clears it, a pollTick (not
+    // searching, archivingIDs empty) DOES refresh — the poll isn't permanently disabled.
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, archivingIDs: ["a"])
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = .inMemory()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+    }
+
+    // While the archive is in flight, the poll skips (guard non-empty).
+    await store.send(.pollTick)
+
+    // Success clears the transient guard (and cancels any in-flight fetch).
+    await store.send(.archiveSucceeded(id: "a")) {
+      $0.archivingIDs = []
+    }
+
+    // Now a poll tick refreshes again — the poll was only paused, not killed.
+    await store.send(.pollTick)
+    await store.receive(\.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+    }
+  }
+
+  @Test func searchIsCancelledOnDisappear() async {
+    let clock = TestClock()
+    let fetchCount = LockIsolated(0)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.hermesREST.search = { @Sendable _, _ in
+        fetchCount.withValue { $0 += 1 }
+        return []
+      }
+    }
+
+    // Typing schedules a 300ms-debounced search…
+    await store.send(\.binding.searchQuery, "foo") { $0.searchQuery = "foo" }
+    // …but disappearing before the debounce fires cancels it.
+    await store.send(.onDisappear)
+    await clock.advance(by: .milliseconds(300))
+    await store.finish()
+    #expect(fetchCount.value == 0) // no .sessionsResponse — the debounced search was cancelled
   }
 
   @Test func searchIsDebouncedAndHitsSearchEndpoint() async {
@@ -211,6 +278,24 @@ struct SessionListFeatureTests {
     #expect(store.state.pinnedSessions.isEmpty)
     #expect(store.state.groups[0].sessions.map(\.id) == ["a", "b"]) // restored to group
     #expect(prefs.loadPinnedIDs() == []) // persisted
+  }
+
+  @Test func pinnedSessionsFollowPinInsertionOrder() async {
+    let prefs = PreferencesClient.inMemory()
+    // `sessions` array order is a, b — but pinning b first then a should yield [b, a].
+    let sessions = [Session(id: "a"), Session(id: "b")]
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: IdentifiedArray(uniqueElements: sessions))
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+    }
+
+    await store.send(.pinSession(id: "b")) { $0.pinnedIDs = ["b"] }
+    await store.send(.pinSession(id: "a")) { $0.pinnedIDs = ["b", "a"] }
+    // Pin order, not session-array order.
+    #expect(store.state.pinnedSessions.map(\.id) == ["b", "a"])
   }
 
   @Test func stalePinnedIDIsIgnored() {
@@ -349,15 +434,81 @@ struct SessionListFeatureTests {
       $0.sessions = [Session(id: "b")]
       $0.pinnedIDs = []
       $0.seenCounts = ["b": 2]
+      $0.archivingIDs = ["a"] // in-flight guard while the PATCH runs
+    }
+    // Success clears the transient guard (so the poll resumes) and cancels any stale in-flight
+    // fetch — no permanent filter (server now excludes the archived session anyway).
+    await store.receive(\.archiveSucceeded) {
+      $0.archivingIDs = []
     }
     await store.finish()
+    #expect(store.state.archivingIDs.isEmpty)
     #expect(archived.value.count == 1)
     #expect(archived.value.first?.0 == "a")
     #expect(archived.value.first?.1 == true)
     #expect(prefs.loadPinnedIDs() == [])
+    #expect(prefs.loadSeenCounts() == ["b": 2]) // archived session's seen baseline persisted-cleared
   }
 
-  @Test func archiveFailureReinsertsSessionAndSetsError() async {
+  @Test func staleLoadAfterArchiveDoesNotResurrectSession() async {
+    // A list fetch already in flight (gated behind a continuation) when the user archives
+    // a session must NOT land afterward and re-add the just-removed row.
+    let prefs = PreferencesClient.inMemory()
+    let gate = AsyncStream.makeStream(of: Void.self)
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [Session(id: "a"), Session(id: "b")]
+    )
+    initial.confirmationDialog = ConfirmationDialogState {
+      TextState("Archive session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmArchive(id: "a")) { TextState("Archive") }
+    }
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.preferences = prefs
+      $0.hermesREST.archive = { @Sendable _, _, _ in }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        // Block until released, then return the OLD list (both sessions) — stale data.
+        var iterator = gate.stream.makeAsyncIterator()
+        await iterator.next()
+        return [Session(id: "a"), Session(id: "b")]
+      }
+    }
+
+    // Kick off a load that parks inside the fetch (the response can't land yet).
+    await store.send(.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+
+    // Archive "a" — this cancels the in-flight load and optimistically drops the row.
+    await store.send(.confirmationDialog(.presented(.confirmArchive(id: "a")))) {
+      $0.confirmationDialog = nil
+      $0.sessions = [Session(id: "b")]
+      $0.archivingIDs = ["a"]
+    }
+    // Success clears the guard but cancels the in-flight fetch, so its stale response still
+    // can't land afterward to resurrect "a".
+    await store.receive(\.archiveSucceeded) {
+      $0.archivingIDs = []
+    }
+
+    // Release the parked fetch; its (now-cancelled) response must never arrive, so "a"
+    // stays archived. No `.sessionsResponse` is received — TestStore would fail otherwise.
+    gate.continuation.yield()
+    gate.continuation.finish()
+    await store.finish()
+    #expect(store.state.sessions.map(\.id) == ["b"])
+  }
+
+  @Test func archiveFailureRestoresSessionLocallyAndSetsError() async {
+    // On failure the optimistic removal is reversed LOCALLY (no reliance on a reload): the
+    // session is re-inserted at its saved index, the guard is lifted, and the error is set.
+    // `rest.sessions` throws on reload — proving the row is back purely from the local restore.
     let session = Session(id: "a", title: "Keep me")
     var initial = SessionListFeature.State(
       connection: connection,
@@ -371,18 +522,113 @@ struct SessionListFeatureTests {
     let store = TestStore(initialState: initial) {
       SessionListFeature()
     } withDependencies: {
+      $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.archive = { @Sendable _, _, _ in throw RESTError.unreachable }
+      // No reload happens; if one did, it would throw — the row must come back regardless.
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
     await store.send(.confirmationDialog(.presented(.confirmArchive(id: "a")))) {
       $0.confirmationDialog = nil
       $0.sessions = [Session(id: "b")]
+      $0.archivingIDs = ["a"]
     }
+    // Failure restores the session at its original index (no reload), lifts the guard, sets error.
     await store.receive(\.archiveFailed) {
-      $0.sessions = [Session(id: "b"), session] // re-inserted
+      $0.sessions = [session, Session(id: "b")]
+      $0.archivingIDs = []
       $0.loadError = "Couldn’t archive the session."
     }
+    await store.finish()
+    #expect(store.state.sessions.map(\.id) == ["a", "b"])
+  }
+
+  @Test func archiveFailureRestoresPinAndSeenState() async {
+    let prefs = PreferencesClient.inMemory()
+    let session = Session(id: "a", title: "Keep me", messageCount: 5)
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [session, Session(id: "b")],
+      seenCounts: ["a": 3, "b": 2],
+      pinnedIDs: ["a"]
+    )
+    initial.confirmationDialog = ConfirmationDialogState {
+      TextState("Archive session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmArchive(id: "a")) { TextState("Archive") }
+    }
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesREST.archive = { @Sendable _, _, _ in throw RESTError.unreachable }
+      // No reload happens; if one did it would throw — restore must be purely local.
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+    }
+
+    // Optimistic removal clears pin + seen and persists the cleared prefs.
+    await store.send(.confirmationDialog(.presented(.confirmArchive(id: "a")))) {
+      $0.confirmationDialog = nil
+      $0.sessions = [Session(id: "b")]
+      $0.pinnedIDs = []
+      $0.seenCounts = ["b": 2]
+      $0.archivingIDs = ["a"]
+    }
+    // Failure restores the session + pin + seen baseline LOCALLY (no reload), persists them,
+    // lifts the guard, and sets the error.
+    await store.receive(\.archiveFailed) {
+      $0.sessions = [session, Session(id: "b")]
+      $0.pinnedIDs = ["a"]
+      $0.seenCounts = ["a": 3, "b": 2]
+      $0.archivingIDs = []
+      $0.loadError = "Couldn’t archive the session."
+    }
+    await store.finish()
+    // The restored prefs are persisted (not left as the cleared prefs).
+    #expect(prefs.loadPinnedIDs() == ["a"])
+    #expect(prefs.loadSeenCounts() == ["a": 3, "b": 2])
+  }
+
+  @Test func successResponseDuringArchiveIsFilteredButGuardIsTransient() async {
+    // A fetch that completes mid-PATCH (its response still carrying the archiving session)
+    // must be filtered WHILE the id is in flight. The guard is transient: archiveSucceeded
+    // clears it, so a LATER response would include the id again (no permanent filter).
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [Session(id: "b")],
+      isLoading: true,
+      seenCounts: ["b": 2]
+    )
+    initial.archivingIDs = ["a"]
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+    }
+
+    // A stale response landing DURING the in-flight window still includes "a" (and "b"); only
+    // "b" survives, and "a" is NOT re-seeded into seenCounts (filtered before the seeding loop).
+    await store.send(.sessionsResponse(.success([Session(id: "a"), Session(id: "b")]))) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "b")] // "a" filtered out while in flight
+    }
+    #expect(store.state.seenCounts["a"] == nil)
+
+    // Success clears the transient guard (cancelling any in-flight fetch).
+    await store.send(.archiveSucceeded(id: "a")) {
+      $0.archivingIDs = []
+    }
+    #expect(store.state.archivingIDs.isEmpty)
+
+    // With the guard cleared, a LATER authoritative response is no longer filtered — there is
+    // no permanent filter (the server is the source of truth for archived state now).
+    await store.send(.sessionsResponse(.success([Session(id: "a"), Session(id: "b")]))) {
+      $0.sessions = [Session(id: "a"), Session(id: "b")]
+      $0.seenCounts = ["a": 0, "b": 2]
+    }
+    #expect(store.state.sessions.map(\.id) == ["a", "b"])
   }
 
   @Test func newSessionButtonEmitsCreateDelegate() async {

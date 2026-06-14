@@ -95,8 +95,9 @@ public extension HermesRESTClient {
         return response.messages
       },
       archive: { conn, id, archived in
-        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        let url = try makeURL(conn.baseURL, "/api/sessions/\(encoded)")
+        // `makeURL` percent-encodes `comps.path`, so interpolate the RAW id (matching
+        // the `messages` endpoint) — pre-encoding here would double-encode reserved chars.
+        let url = try makeURL(conn.baseURL, "/api/sessions/\(id)")
         let body = try JSONSerialization.data(withJSONObject: ["archived": archived])
         try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
       }
@@ -141,18 +142,23 @@ private func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) 
     throw RESTError.unreachable
   }
 
+  try validate(response)
+
+  do {
+    return try JSONDecoder().decode(T.self, from: data)
+  } catch {
+    throw RESTError.decoding
+  }
+}
+
+/// Validate an HTTP response status, mapping non-success codes to `RESTError`.
+private func validate(_ response: URLResponse) throws {
   guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
   switch http.statusCode {
   case 200..<300: break
   case 401: throw RESTError.unauthorized
   case 404: throw RESTError.notFound
   default: throw RESTError.server(status: http.statusCode)
-  }
-
-  do {
-    return try JSONDecoder().decode(T.self, from: data)
-  } catch {
-    throw RESTError.decoding
   }
 }
 
@@ -175,13 +181,7 @@ private func send(
     throw RESTError.unreachable
   }
 
-  guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
-  switch http.statusCode {
-  case 200..<300: break
-  case 401: throw RESTError.unauthorized
-  case 404: throw RESTError.notFound
-  default: throw RESTError.server(status: http.statusCode)
-  }
+  try validate(response)
 }
 
 // MARK: - DTOs (verified against hermes_cli/web_server.py + hermes_state.py)

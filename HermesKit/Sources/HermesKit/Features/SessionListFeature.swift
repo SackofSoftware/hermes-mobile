@@ -16,6 +16,7 @@ public struct SessionListFeature {
     /// Reference "now" for relative row timestamps; set from the date dependency on
     /// load so the value is controllable (deterministic snapshots/tests).
     public var now: Date
+    @Presents public var settings: SettingsFeature.State?
 
     public init(
       connection: ServerConnection,
@@ -23,7 +24,8 @@ public struct SessionListFeature {
       searchQuery: String = "",
       isLoading: Bool = false,
       loadError: String? = nil,
-      now: Date = Date(timeIntervalSince1970: 0)
+      now: Date = Date(timeIntervalSince1970: 0),
+      settings: SettingsFeature.State? = nil
     ) {
       self.connection = connection
       self.sessions = sessions
@@ -31,6 +33,7 @@ public struct SessionListFeature {
       self.isLoading = isLoading
       self.loadError = loadError
       self.now = now
+      self.settings = settings
     }
   }
 
@@ -41,12 +44,15 @@ public struct SessionListFeature {
     case sessionsResponse(Result<[Session], RESTError>)
     case sessionTapped(Session.ID)
     case newSessionButtonTapped
+    case settingsButtonTapped
+    case settings(PresentationAction<SettingsFeature.Action>)
     case delegate(Delegate)
 
     @CasePathable
     public enum Delegate {
       case openSession(Session)
       case createSession
+      case disconnect
     }
   }
 
@@ -96,9 +102,31 @@ public struct SessionListFeature {
       case .newSessionButtonTapped:
         return .send(.delegate(.createSession))
 
+      case .settingsButtonTapped:
+        state.settings = SettingsFeature.State(connection: state.connection)
+        return .none
+
+      case let .settings(.presented(.delegate(.tokenSaved(token)))):
+        state.connection.token = token
+        return .none
+
+      case .settings(.presented(.delegate(.disconnect))):
+        state.settings = nil
+        return .send(.delegate(.disconnect))
+
+      case .settings(.presented(.delegate(.reconnect))):
+        // Manual reconnect = re-fetch the list over REST.
+        return .send(.pulledToRefresh)
+
+      case .settings:
+        return .none
+
       case .delegate:
         return .none
       }
+    }
+    .ifLet(\.$settings, action: \.settings) {
+      SettingsFeature()
     }
   }
 

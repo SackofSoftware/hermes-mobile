@@ -107,6 +107,7 @@ public struct ChatFeature {
   @Dependency(\.continuousClock) var clock
   @Dependency(\.uuid) var uuid
   @Dependency(\.pasteboard) var pasteboard
+  @Dependency(\.debugLog) var debugLog
 
   public init() {}
 
@@ -376,8 +377,9 @@ public struct ChatFeature {
   // MARK: - Effects
 
   private func connect(_ connection: ServerConnection) -> Effect<Action> {
-    .run { [gateway] send in
+    .run { [gateway, debugLog] send in
       for await event in gateway.connect(connection.baseURL, connection.token) {
+        debugLog.append(event) // mirror into the app-wide debug buffer (Task 12)
         await send(.gatewayEvent(event))
       }
       await send(.gatewayClosed)

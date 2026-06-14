@@ -213,4 +213,34 @@ final class PreviewSnapshotTests: XCTestCase {
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
+
+  // MARK: Settings (Task 12)
+
+  func testSettingsView() {
+    var initial = SettingsFeature.State(connection: connection)
+    initial.log = [
+      GatewayLogEntry(id: 0, type: "gateway.ready", summary: ""),
+      GatewayLogEntry(id: 1, type: "message.delta", summary: "Here's the gist"),
+    ]
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue // inert stream for a deterministic render
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
+  func testConnectionDebugView() {
+    let view = NavigationStack {
+      ConnectionDebugView(entries: [
+        GatewayLogEntry(id: 0, type: "gateway.ready", summary: ""),
+        GatewayLogEntry(id: 1, type: "tool.start", summary: "read_file"),
+        GatewayLogEntry(id: 2, type: "message.delta", summary: "WebSocket JSON-RPC at /api/ws"),
+        GatewayLogEntry(id: 3, type: "status.update", summary: "[lifecycle] thinking…"),
+      ])
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
 }

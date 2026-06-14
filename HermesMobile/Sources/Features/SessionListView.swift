@@ -30,6 +30,11 @@ struct SessionListView: View {
     .searchable(text: $store.searchQuery, prompt: "Search sessions")
     .refreshable { store.send(.pulledToRefresh) }
     .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Button("Settings", systemImage: "gearshape") {
+          store.send(.settingsButtonTapped)
+        }
+      }
       ToolbarItem(placement: .primaryAction) {
         Button("New", systemImage: "square.and.pencil") {
           store.send(.newSessionButtonTapped)
@@ -37,5 +42,10 @@ struct SessionListView: View {
       }
     }
     .task { store.send(.task) }
+    .sheet(item: $store.scope(state: \.settings, action: \.settings)) { settingsStore in
+      NavigationStack {
+        SettingsView(store: settingsStore)
+      }
+    }
   }
 }

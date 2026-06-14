@@ -560,15 +560,40 @@ responding needs the gateway connection + sessionID. `PendingInteraction` alread
 
 #### Task 12: `SettingsFeature` + connection debug log
 
-**Files:**
-- Create: `HermesKit/Sources/HermesKit/Features/SettingsFeature.swift`
-- Create: `HermesMobile/Sources/Features/Settings/{SettingsView,ConnectionDebugView}.swift`
-- Create: `HermesKit/Tests/HermesKitTests/SettingsFeatureTests.swift`
+**Decisions (resolved interactively):** Settings is a **sheet from the session list**
+(gear in the toolbar) since token + log are app-global. The debug log is fed by an
+app-wide **`DebugLogClient`** ring buffer (not feature state, so `ChatFeature`'s
+high-frequency event fold and its tests stay untouched). "Manual reconnect" = **reload
+the session list** over REST (the live socket is per-chat; a global socket reconnect was
+rejected as awkward).
 
-- [ ] re-paste/clear token (Keychain), manual reconnect trigger
-- [ ] raw event debug log view (live feed of decoded `GatewayEvent`s)
-- [ ] write tests for token clear + reconnect-trigger action
-- [ ] run tests — must pass before next task
+**Files:**
+- Create: `HermesKit/Sources/HermesKit/Features/SettingsFeature.swift`,
+  `HermesKit/Sources/HermesKit/Clients/DebugLogClient.swift`,
+  `HermesKit/Sources/HermesKit/Models/GatewayLogEntry.swift`
+- Create: `HermesMobile/Sources/Features/Settings/{SettingsView,ConnectionDebugView}.swift`
+- Modify: `SessionListFeature` (presents settings, handles its delegates), `AppFeature`
+  (`disconnect` → reset to onboarding), `ChatFeature` (connect loop mirrors events into
+  the buffer), `SessionListView` (gear + `.sheet`)
+- Create: `HermesKit/Tests/HermesKitTests/{SettingsFeatureTests,DebugLogClientTests}.swift`;
+  Modify: `SessionListFeatureTests`, `PreviewSnapshotTests`
+
+- [x] **token**: `SettingsView` shows server URL + a secure token field; "Save token"
+  persists to Keychain + `delegate(.tokenSaved)` (re-paste); "Clear token & disconnect"
+  deletes from Keychain + `delegate(.disconnect)` → `AppFeature` tears down to onboarding.
+- [x] **manual reconnect**: "Reconnect" → `delegate(.reconnect)` → `SessionListFeature`
+  re-fetches the list; the sheet auto-dismisses via `@Dependency(\.dismiss)`.
+- [x] **debug log**: `DebugLogClient` (capped 200, lock-guarded ring buffer + live
+  fan-out `AsyncStream`); `GatewayLogEntry` maps each event to type + truncated summary;
+  `ChatFeature.connect` appends; `SettingsFeature.task` subscribes; `ConnectionDebugView`
+  renders the live feed.
+- [x] tests: `SettingsFeatureTests` (5 — clear→delete+disconnect, reconnect delegate,
+  save→persist+tokenSaved, no-op-when-unchanged, log stream); `DebugLogClientTests`
+  (4 — sequential ids/summaries, capacity cap, stream prime+broadcast, newline collapse);
+  `SessionListFeatureTests` (+4 — present, disconnect-bubbles, reconnect-reloads,
+  token-saved-updates-connection)
+- [x] **snapshot tests** (+2): `SettingsView`, `ConnectionDebugView`
+- [x] run tests — **98 HermesKit + 13 snapshot pass**; app `BUILD SUCCEEDED`
 
 ### Task 13: Verify acceptance criteria
 

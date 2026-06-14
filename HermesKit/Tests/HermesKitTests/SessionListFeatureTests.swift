@@ -86,4 +86,58 @@ struct SessionListFeatureTests {
     await store.send(.newSessionButtonTapped)
     await store.receive(\.delegate.createSession)
   }
+
+  // MARK: Settings presentation (Task 12)
+
+  @Test func settingsButtonPresentsSettings() async {
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    }
+
+    await store.send(.settingsButtonTapped) {
+      $0.settings = SettingsFeature.State(connection: self.connection)
+    }
+  }
+
+  @Test func settingsDisconnectDismissesAndBubblesUp() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.settings = SettingsFeature.State(connection: connection)
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.settings(.presented(.delegate(.disconnect)))) {
+      $0.settings = nil
+    }
+    await store.receive(\.delegate.disconnect)
+  }
+
+  @Test func settingsReconnectTriggersReload() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.settings = SettingsFeature.State(connection: connection)
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
+    }
+
+    await store.send(.settings(.presented(.delegate(.reconnect))))
+    await store.receive(\.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1")]
+    }
+  }
+
+  @Test func settingsTokenSavedUpdatesConnection() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.settings = SettingsFeature.State(connection: connection)
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.settings(.presented(.delegate(.tokenSaved("newtok"))))) {
+      $0.connection.token = "newtok"
+    }
+  }
 }

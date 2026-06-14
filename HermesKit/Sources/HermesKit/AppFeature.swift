@@ -51,6 +51,13 @@ public struct AppFeature {
         state.path.append(ChatFeature.State(connection: connection))
         return .none
 
+      case .home(.delegate(.disconnect)):
+        // Token cleared in Settings → tear down and return to onboarding.
+        state.path = .init()
+        state.home = nil
+        state.onboarding = .init()
+        return .none
+
       case .onboarding, .home, .path:
         return .none
       }

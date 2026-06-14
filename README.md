@@ -5,9 +5,26 @@ iOS companion app for a self-hosted [Hermes Agent](https://github.com/) — a th
 remote client to chat with sessions, stream responses, and approve/clarify the
 agent's actions from an iPhone while the real runtime stays on your Mac/server.
 
-> **Status: early scaffold.** Project skeleton builds and the wire protocol is
-> verified against a live server (see M0 below). The chat/approvals UI is not built
-> yet. Full roadmap: [`docs/plans/2026-06-09-hermes-ios-mvp.md`](docs/plans/2026-06-09-hermes-ios-mvp.md).
+> **Status: MVP feature-complete.** The full loop is built and tested — connect, list/
+> search/resume/create sessions, stream responses, see tool/status activity, and
+> approve/clarify the agent's requests. Covered by 101 unit tests (`swift test`) + 13
+> SwiftUI snapshot tests, and shipping to TestFlight. Remaining: final on-device
+> verification against a live server. Full history:
+> [`docs/plans/completed/2026-06-09-hermes-ios-mvp.md`](docs/plans/completed/2026-06-09-hermes-ios-mvp.md).
+
+## Features
+
+- **Connect** — staged validation of server URL + token (`/api/status` reachability,
+  then an authenticated probe); token stored in the iOS Keychain.
+- **Sessions** — list, full-text search, resume an existing session, or start a new one.
+- **Live chat** — streaming assistant responses rendered as native Markdown (with code
+  blocks and lists), collapsible tool and thinking rows, and a transient status line.
+- **Approvals & clarify** — the mobile-native payoff: respond to `approval.request`,
+  `clarify.request`, and `sudo`/`secret` prompts via pinned cards; the composer blocks
+  until you answer.
+- **Resilience** — automatic reconnect with backoff and a visible connection banner.
+- **Settings** — re-paste / clear the token, manual reconnect, and a live debug log of
+  decoded gateway events.
 
 ## Architecture
 
@@ -21,6 +38,23 @@ agent's actions from an iPhone while the real runtime stays on your Mac/server.
 The app is a remote-control surface only — no agent logic runs on the phone. It
 talks to Hermes over REST (lists/history) and a WebSocket JSON-RPC gateway (the live
 turn: streaming, tool/status events, approval/clarify requests).
+
+### Feature tree (TCA reducers, in `HermesKit`)
+
+```
+AppFeature                 // root navigation; onboarding until connected
+├─ ConnectionFeature       // staged URL + token validation
+├─ SessionListFeature      // list / search / create; presents Settings
+│  └─ SettingsFeature      // token mgmt, manual reconnect, debug log
+└─ ChatFeature             // owns the WS lifecycle + streaming reduction,
+                           //   approvals, clarify/sudo/secret, reconnect
+```
+
+Dependency clients (`@DependencyClient`): `HermesRESTClient` (status/sessions/search/
+messages), `HermesGatewayClient` (WebSocket JSON-RPC connect/send), `KeychainClient`
+(token), `PasteboardClient` (copy), `DebugLogClient` (event ring buffer). The socket is
+one long-running cancellable effect; reconnect/backoff lives in the reducer (testable
+with `TestClock`).
 
 ## Requirements
 
@@ -93,8 +127,32 @@ make snapshot-record  # re-record SwiftUI snapshot baselines
   in `HermesMobileTests/__Snapshots__/`. Row timestamps are pinned to a fixed reference
   date so the images are deterministic.
 
-TestFlight/App Store distribution (via the `asc` CLI) is not wired yet — pending the
-personal App Store Connect API key for this account.
+## TestFlight distribution
+
+Distribution runs through the [`asc`](https://github.com/) CLI (the `hermes` profile).
+Bump `CURRENT_PROJECT_VERSION` in `Project.swift`, then archive → export with **manual**
+signing → upload:
+
+```sh
+# 1. archive (Release, generic iOS) with automatic signing
+xcodebuild archive -workspace HermesMobile.xcworkspace -scheme HermesMobile \
+  -configuration Release -destination 'generic/platform=iOS' \
+  -archivePath build/testflight/HermesMobile.xcarchive \
+  -allowProvisioningUpdates -authenticationKeyPath <AuthKey.p8> \
+  -authenticationKeyID <KEY_ID> -authenticationKeyIssuerID <ISSUER_ID> \
+  CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=<team id>
+
+# 2. export — MUST use manual signing (cloud/API-key signing fails on export)
+xcodebuild -exportArchive -archivePath build/testflight/HermesMobile.xcarchive \
+  -exportPath build/testflight/export \
+  -exportOptionsPlist build/testflight/ExportOptions.plist   # method app-store-connect, signingStyle manual
+
+# 3. upload
+asc --profile hermes builds upload --app <app id> --ipa build/testflight/export/HermesMobile.ipa
+```
+
+The provisioning profile must be installed locally first
+(`asc --profile hermes profiles download --id <profile id>`). `build/` is gitignored.
 
 ## Verifying the protocol (M0 probe)
 

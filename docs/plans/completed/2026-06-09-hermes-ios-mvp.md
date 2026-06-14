@@ -629,10 +629,13 @@ Mapped every Overview requirement + edge case to covering tests; closed the gaps
 
 ### Task 14: [Final] Documentation
 
-- [ ] write `README.md`: architecture, the Model A server setup (`--insecure` + stable
-  token), Tailscale connection, build instructions
-- [ ] update `CLAUDE.md` with project conventions (TCA/Tuist/HermesKit layout) if useful
-- [ ] move this plan to `docs/plans/completed/`
+- [x] updated `README.md`: MVP status + feature list, architecture incl. the feature
+  tree + dependency clients, Model A server setup (`--insecure` + stable token), build
+  instructions, and a TestFlight distribution section (archive → manual-sign export →
+  `asc` upload)
+- [x] created `CLAUDE.md` with project conventions (HermesKit/Tuist layout, client +
+  socket patterns, testing/snapshots, Tuist env-var + manual-signing gotchas)
+- [x] moved this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

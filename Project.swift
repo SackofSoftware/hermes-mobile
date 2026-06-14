@@ -53,7 +53,7 @@ let project = Project(
           "DEVELOPMENT_TEAM": .string(developmentTeam),
           "CODE_SIGN_STYLE": "Automatic",
           "MARKETING_VERSION": "1.0",
-          "CURRENT_PROJECT_VERSION": "4",
+          "CURRENT_PROJECT_VERSION": "5",
           "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
         ],
         configurations: [

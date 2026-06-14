@@ -113,6 +113,21 @@ struct HermesRESTClientTests {
     #expect(messages.first == SessionMessage(id: 1, role: "user", content: "hi", timestamp: 1749550000.0))
   }
 
+  @Test func messagesDecodeToolCallsAndCallID() async throws {
+    MockURLProtocol.set(json: #"""
+    {"session_id":"sid","messages":[
+      {"id":1,"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"terminal","arguments":"{\"command\":\"git status\"}"}}]},
+      {"id":2,"role":"tool","content":"clean","tool_name":"terminal","tool_call_id":"call_1"}
+    ]}
+    """#)
+    let messages = try await makeClient().messages(connection, "sid")
+    let call = try #require(messages.first?.toolCalls?.first)
+    #expect(call.id == "call_1")
+    #expect(call.name == "terminal")
+    #expect(call.arguments == #"{"command":"git status"}"#)
+    #expect(messages.last?.toolCallID == "call_1")
+  }
+
   @Test func unauthorizedMapsToTypedError() async throws {
     MockURLProtocol.set(status: 401, json: #"{"detail":"Unauthorized"}"#)
     await #expect(throws: RESTError.unauthorized) {

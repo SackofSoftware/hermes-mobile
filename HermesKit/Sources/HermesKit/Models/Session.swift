@@ -74,17 +74,68 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   public var content: String?
   public var timestamp: Double?
   public var toolName: String?
+  /// Links a `tool` result message to the assistant `tool_calls` entry that requested it.
+  public var toolCallID: String?
+  /// On an assistant message: the tool calls it made (name + arguments) — used to
+  /// recover the *command* shown in a tool's detail sheet on resume.
+  public var toolCalls: [ToolCallRef]?
 
   enum CodingKeys: String, CodingKey {
     case id, role, content, timestamp
     case toolName = "tool_name"
+    case toolCallID = "tool_call_id"
+    case toolCalls = "tool_calls"
   }
 
-  public init(id: Int, role: String, content: String? = nil, timestamp: Double? = nil, toolName: String? = nil) {
+  public init(
+    id: Int, role: String, content: String? = nil, timestamp: Double? = nil,
+    toolName: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCallRef]? = nil
+  ) {
     self.id = id
     self.role = role
     self.content = content
     self.timestamp = timestamp
     self.toolName = toolName
+    self.toolCallID = toolCallID
+    self.toolCalls = toolCalls
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = (try? c.decode(Int.self, forKey: .id)) ?? 0
+    role = (try? c.decode(String.self, forKey: .role)) ?? ""
+    content = try? c.decodeIfPresent(String.self, forKey: .content)
+    timestamp = try? c.decodeIfPresent(Double.self, forKey: .timestamp)
+    toolName = try? c.decodeIfPresent(String.self, forKey: .toolName)
+    toolCallID = try? c.decodeIfPresent(String.self, forKey: .toolCallID)
+    // tool_calls is OpenAI-shaped; tolerate absence / odd shapes.
+    toolCalls = try? c.decodeIfPresent([ToolCallRef].self, forKey: .toolCalls)
+  }
+}
+
+/// A tool call recorded on an assistant message (`tool_calls`): which tool was invoked
+/// and with what arguments. OpenAI-shaped (`{id, function:{name, arguments}}`).
+public struct ToolCallRef: Equatable, Sendable, Decodable, Identifiable {
+  public var id: String?
+  public var name: String?
+  /// Raw arguments — a JSON string for OpenAI-style providers.
+  public var arguments: String?
+
+  enum CodingKeys: String, CodingKey { case id, function }
+  enum FunctionKeys: String, CodingKey { case name, arguments }
+
+  public init(id: String? = nil, name: String? = nil, arguments: String? = nil) {
+    self.id = id
+    self.name = name
+    self.arguments = arguments
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try? c.decodeIfPresent(String.self, forKey: .id)
+    if let fn = try? c.nestedContainer(keyedBy: FunctionKeys.self, forKey: .function) {
+      name = try? fn.decodeIfPresent(String.self, forKey: .name)
+      arguments = try? fn.decodeIfPresent(String.self, forKey: .arguments)
+    }
   }
 }

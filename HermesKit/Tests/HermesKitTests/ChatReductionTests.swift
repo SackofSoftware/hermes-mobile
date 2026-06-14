@@ -222,9 +222,12 @@ struct ChatReductionTests {
 
     let messages = [
       SessionMessage(id: 1, role: "user", content: "Read the file"),
-      // An assistant tool-call turn with no text — must NOT become an empty bubble.
-      SessionMessage(id: 2, role: "assistant", content: ""),
-      SessionMessage(id: 3, role: "tool", content: "file contents…", toolName: "read_file"),
+      // An assistant tool-call turn with no text — must NOT become an empty bubble. Its
+      // tool_calls carry the command for the matching tool result row.
+      SessionMessage(id: 2, role: "assistant", content: "", toolCalls: [
+        ToolCallRef(id: "call_1", name: "read_file", arguments: #"{"path":"/x"}"#),
+      ]),
+      SessionMessage(id: 3, role: "tool", content: "file contents…", toolName: "read_file", toolCallID: "call_1"),
       SessionMessage(id: 4, role: "assistant", content: "Here's the gist."),
     ]
     await store.send(.historyResponse(messages)) {
@@ -232,7 +235,9 @@ struct ChatReductionTests {
         ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "Read the file", isComplete: true)),
         ChatRow(id: self.uuid(1), kind: .tool(
           name: "read_file", title: "read_file", state: .complete,
-          detail: ToolDetail(resultText: "file contents…"), durationS: nil
+          // Command (args) recovered from the assistant tool_calls + result joined.
+          detail: ToolDetail(args: .object(["path": .string("/x")]), resultText: "file contents…"),
+          durationS: nil
         )),
         ChatRow(id: self.uuid(2), kind: .message(role: .assistant, text: "Here's the gist.", isComplete: true)),
       ]

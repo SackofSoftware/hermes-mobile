@@ -194,7 +194,14 @@ public struct ChatFeature {
         // `tool` rows → reconstructed tool rows (so resumed sessions show tool/skill
         // activity). Empty-content turns (an assistant tool-call turn with no text) are
         // dropped so they don't render as blank bubbles.
-        let rows = messages.compactMap { historyRow(from: $0) }
+        // Index tool-call args by id so a `tool` result row can show the command it ran.
+        var argsByCallID: [String: String] = [:]
+        for message in messages {
+          for call in message.toolCalls ?? [] {
+            if let id = call.id, let args = call.arguments?.nonEmpty { argsByCallID[id] = args }
+          }
+        }
+        let rows = messages.compactMap { historyRow(from: $0, argsByCallID: argsByCallID) }
         state.transcript.insert(contentsOf: rows, at: 0)
         return .none
 
@@ -553,8 +560,9 @@ public struct ChatFeature {
 
   /// Map a stored history message to a transcript row. `user`/`assistant` text → message
   /// rows (empty turns dropped — an assistant tool-call turn has no text); `tool` rows →
-  /// reconstructed tool rows with their result. Other roles are skipped.
-  private func historyRow(from message: SessionMessage) -> ChatRow? {
+  /// reconstructed tool rows with the command (args, looked up by `tool_call_id`) and
+  /// result. Other roles are skipped.
+  private func historyRow(from message: SessionMessage, argsByCallID: [String: String]) -> ChatRow? {
     switch message.role {
     case "user", "assistant":
       guard let text = message.content?.nonEmpty else { return nil }
@@ -562,11 +570,30 @@ public struct ChatFeature {
       return ChatRow(id: uuid(), kind: .message(role: role, text: text, isComplete: true))
     case "tool":
       let name = message.toolName?.nonEmpty ?? "tool"
-      let detail = message.content?.nonEmpty.map { ToolDetail(resultText: $0) }
-      return ChatRow(id: uuid(), kind: .tool(name: name, title: name, state: .complete, detail: detail, durationS: nil))
+      let argsString = message.toolCallID.flatMap { argsByCallID[$0] }
+      let parsedArgs = argsString.flatMap(Self.parseArgs)
+      let detail = ToolDetail(
+        argsText: parsedArgs == nil ? argsString : nil,
+        args: parsedArgs,
+        resultText: message.content?.nonEmpty
+      )
+      return ChatRow(id: uuid(), kind: .tool(
+        name: name, title: name, state: .complete,
+        detail: detail.isEmpty ? nil : detail, durationS: nil
+      ))
     default:
       return nil
     }
+  }
+
+  /// Parse a tool-call `arguments` JSON string into a structured value for the detail
+  /// sheet — only when it's an object (a bare scalar stays raw text).
+  private static func parseArgs(_ string: String) -> JSONValue? {
+    guard let data = string.data(using: .utf8),
+          let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+          case .object = value
+    else { return nil }
+    return value
   }
 }
 

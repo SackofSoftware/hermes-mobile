@@ -128,12 +128,12 @@ two ordering/expansion bugs found on-device:
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] rename/repurpose `showMoreTapped` → `toggleGroupExpansion(groupID:)` (insert/remove
+- [x] rename/repurpose `showMoreTapped` → `toggleGroupExpansion(groupID:)` (insert/remove
   from `expandedGroups`)
-- [ ] `SessionListView`: footer shows "Show N more" (collapsed) / "Show less" (expanded)
-- [ ] tests: toggle expands then collapses; `visibleSessions(in:)` respects it
-- [ ] re-record the grouped session-list snapshot (expanded state)
-- [ ] run tests — must pass before next task
+- [x] `SessionListView`: footer shows "Show N more" (collapsed) / "Show less" (expanded)
+- [x] tests: toggle expands then collapses; `visibleSessions(in:)` respects it
+- [x] re-record the grouped session-list snapshot (expanded state)
+- [x] run tests — must pass before next task
 
 ### Task 3: Pin sessions (client-side, top "Pinned" section)
 

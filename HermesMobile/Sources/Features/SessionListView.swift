@@ -56,13 +56,14 @@ struct SessionListView: View {
   private func groupSection(_ group: SessionGroup) -> some View {
     let visible = store.state.visibleSessions(in: group)
     let hidden = group.sessions.count - visible.count
+    let isExpanded = store.expandedGroups.contains(group.id)
     Section(group.label) {
       ForEach(visible) { session in
         row(session)
       }
-      if hidden > 0 {
-        Button("Show \(hidden) more") {
-          store.send(.showMoreTapped(groupID: group.id))
+      if hidden > 0 || isExpanded, group.sessions.count > SessionListFeature.State.collapsedLimit {
+        Button(isExpanded ? "Show less" : "Show \(hidden) more") {
+          store.send(.toggleGroupExpansion(groupID: group.id))
         }
         .font(.subheadline)
       }

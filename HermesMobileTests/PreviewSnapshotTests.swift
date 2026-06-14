@@ -102,7 +102,8 @@ final class PreviewSnapshotTests: XCTestCase {
             connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen
+            seenCounts: seen,
+            expandedGroups: [mobile]
           )
         ) {
           SessionListFeature()

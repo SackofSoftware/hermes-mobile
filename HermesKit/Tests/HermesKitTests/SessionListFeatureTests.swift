@@ -99,7 +99,7 @@ struct SessionListFeatureTests {
     #expect(state.unreadSessionIDs.isEmpty)
   }
 
-  @Test func showMoreExpandsGroup() async {
+  @Test func toggleGroupExpansionExpandsThenCollapses() async {
     let sessions = (0..<7).map { Session(id: "s\($0)", cwd: "/w", startedAt: Date(timeIntervalSince1970: Double($0))) }
     let store = TestStore(
       initialState: SessionListFeature.State(connection: connection, sessions: IdentifiedArray(uniqueElements: sessions))
@@ -109,10 +109,15 @@ struct SessionListFeatureTests {
     let group = store.state.groups[0]
     #expect(store.state.visibleSessions(in: group).count == 5) // collapsed
 
-    await store.send(.showMoreTapped(groupID: group.id)) {
+    await store.send(.toggleGroupExpansion(groupID: group.id)) {
       $0.expandedGroups = [group.id]
     }
     #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 7) // expanded
+
+    await store.send(.toggleGroupExpansion(groupID: group.id)) {
+      $0.expandedGroups = []
+    }
+    #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 5) // re-collapsed
   }
 
   @Test func newSessionButtonEmitsCreateDelegate() async {

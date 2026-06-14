@@ -82,7 +82,7 @@ public struct SessionListFeature {
     case sessionsResponse(Result<[Session], RESTError>)
     case sessionTapped(Session.ID)
     case newSessionButtonTapped
-    case showMoreTapped(groupID: String)
+    case toggleGroupExpansion(groupID: String)
     case settingsButtonTapped
     case settings(PresentationAction<SettingsFeature.Action>)
     case delegate(Delegate)
@@ -153,8 +153,10 @@ public struct SessionListFeature {
           .send(.delegate(.openSession(session)))
         )
 
-      case let .showMoreTapped(groupID):
-        state.expandedGroups.insert(groupID)
+      case let .toggleGroupExpansion(groupID):
+        if !state.expandedGroups.insert(groupID).inserted {
+          state.expandedGroups.remove(groupID)
+        }
         return .none
 
       case .newSessionButtonTapped:

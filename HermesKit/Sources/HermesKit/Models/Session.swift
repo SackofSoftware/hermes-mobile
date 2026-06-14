@@ -15,6 +15,10 @@ public struct Session: Equatable, Sendable, Identifiable {
   public var cwd: String?
   /// Original start time; used to order rows within a workspace group (desktop parity).
   public var startedAt: Date?
+  /// Number of messages — compared against the last-seen count to flag unread activity.
+  public var messageCount: Int?
+  /// Whether the session is currently active (a turn ran recently).
+  public var isActive: Bool?
 
   public init(
     id: String,
@@ -22,7 +26,9 @@ public struct Session: Equatable, Sendable, Identifiable {
     updatedAt: Date? = nil,
     preview: String? = nil,
     cwd: String? = nil,
-    startedAt: Date? = nil
+    startedAt: Date? = nil,
+    messageCount: Int? = nil,
+    isActive: Bool? = nil
   ) {
     self.id = id
     self.title = title
@@ -30,6 +36,8 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.preview = preview
     self.cwd = cwd
     self.startedAt = startedAt
+    self.messageCount = messageCount
+    self.isActive = isActive
   }
 }
 

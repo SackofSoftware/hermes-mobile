@@ -16,7 +16,14 @@ public struct SessionListFeature {
     /// Reference "now" for relative row timestamps; set from the date dependency on
     /// load so the value is controllable (deterministic snapshots/tests).
     public var now: Date
+    /// Last-seen message count per session id (persisted) — drives the unread indicator.
+    public var seenCounts: [String: Int]
+    /// Workspace group ids the user expanded past the collapsed limit.
+    public var expandedGroups: Set<String>
     @Presents public var settings: SettingsFeature.State?
+
+    /// Collapsed groups show at most this many rows before a "Show more".
+    public static let collapsedLimit = 5
 
     public init(
       connection: ServerConnection,
@@ -25,6 +32,8 @@ public struct SessionListFeature {
       isLoading: Bool = false,
       loadError: String? = nil,
       now: Date = Date(timeIntervalSince1970: 0),
+      seenCounts: [String: Int] = [:],
+      expandedGroups: Set<String> = [],
       settings: SettingsFeature.State? = nil
     ) {
       self.connection = connection
@@ -33,6 +42,8 @@ public struct SessionListFeature {
       self.isLoading = isLoading
       self.loadError = loadError
       self.now = now
+      self.seenCounts = seenCounts
+      self.expandedGroups = expandedGroups
       self.settings = settings
     }
 
@@ -46,6 +57,22 @@ public struct SessionListFeature {
     public var groups: [SessionGroup] {
       SessionGroup.grouped(Array(sessions))
     }
+
+    /// Sessions with new activity since the user last opened them.
+    public var unreadSessionIDs: Set<Session.ID> {
+      Set(sessions.compactMap { session in
+        guard let count = session.messageCount, let seen = seenCounts[session.id], count > seen
+        else { return nil }
+        return session.id
+      })
+    }
+
+    /// Rows to show for a group given its collapsed/expanded state.
+    public func visibleSessions(in group: SessionGroup) -> [Session] {
+      guard !expandedGroups.contains(group.id), group.sessions.count > Self.collapsedLimit
+      else { return group.sessions }
+      return Array(group.sessions.prefix(Self.collapsedLimit))
+    }
   }
 
   public enum Action: BindableAction {
@@ -55,6 +82,7 @@ public struct SessionListFeature {
     case sessionsResponse(Result<[Session], RESTError>)
     case sessionTapped(Session.ID)
     case newSessionButtonTapped
+    case showMoreTapped(groupID: String)
     case settingsButtonTapped
     case settings(PresentationAction<SettingsFeature.Action>)
     case delegate(Delegate)
@@ -72,6 +100,7 @@ public struct SessionListFeature {
   @Dependency(\.hermesREST) var rest
   @Dependency(\.continuousClock) var clock
   @Dependency(\.date.now) var now
+  @Dependency(\.preferences) var preferences
 
   public init() {}
 
@@ -83,6 +112,7 @@ public struct SessionListFeature {
         state.now = now
         state.isLoading = true
         state.loadError = nil
+        state.seenCounts = preferences.loadSeenCounts()
         return .run { [rest, connection = state.connection, query = state.searchQuery] send in
           await send(fetchSessions(rest: rest, connection: connection, query: query))
         }
@@ -99,7 +129,15 @@ public struct SessionListFeature {
         state.isLoading = false
         state.loadError = nil
         state.sessions = IdentifiedArray(uniqueElements: sessions)
-        return .none
+        // Seed last-seen counts for newly-discovered sessions so they don't all show as
+        // unread on first sight; only later increases flag unread.
+        var seeded = false
+        for session in sessions where state.seenCounts[session.id] == nil {
+          state.seenCounts[session.id] = session.messageCount ?? 0
+          seeded = true
+        }
+        guard seeded else { return .none }
+        return persistSeenCounts(state.seenCounts)
 
       case let .sessionsResponse(.failure(error)):
         state.isLoading = false
@@ -108,7 +146,16 @@ public struct SessionListFeature {
 
       case let .sessionTapped(id):
         guard let session = state.sessions[id: id] else { return .none }
-        return .send(.delegate(.openSession(session)))
+        // Opening clears the unread flag (mark seen at the current count).
+        state.seenCounts[id] = session.messageCount ?? state.seenCounts[id] ?? 0
+        return .merge(
+          persistSeenCounts(state.seenCounts),
+          .send(.delegate(.openSession(session)))
+        )
+
+      case let .showMoreTapped(groupID):
+        state.expandedGroups.insert(groupID)
+        return .none
 
       case .newSessionButtonTapped:
         return .send(.delegate(.createSession))
@@ -141,6 +188,9 @@ public struct SessionListFeature {
     }
   }
 
+  private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {
+    .run { [preferences] _ in preferences.saveSeenCounts(counts) }
+  }
 }
 
 /// Fetch the list (or search results when a query is present) and map to a response.

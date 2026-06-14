@@ -27,6 +27,7 @@ struct SessionListFeatureTests {
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1", title: "Hello", preview: "hi")]
+      $0.seenCounts = ["s1": 0] // seeded so the session isn't shown unread on first sight
     }
   }
 
@@ -63,19 +64,55 @@ struct SessionListFeatureTests {
     await clock.advance(by: .milliseconds(300))
     await store.receive(\.sessionsResponse.success) {
       $0.sessions = [Session(id: "r1", title: nil, preview: "foo")]
+      $0.seenCounts = ["r1": 0]
     }
   }
 
-  @Test func tappingSessionEmitsOpenDelegate() async {
-    let session = Session(id: "s1", title: "Hello")
+  @Test func tappingSessionEmitsOpenDelegateAndMarksSeen() async {
+    let session = Session(id: "s1", title: "Hello", messageCount: 7)
     let store = TestStore(
-      initialState: SessionListFeature.State(connection: connection, sessions: [session])
+      initialState: SessionListFeature.State(connection: connection, sessions: [session], seenCounts: ["s1": 3])
     ) {
       SessionListFeature()
     }
 
-    await store.send(.sessionTapped("s1"))
+    await store.send(.sessionTapped("s1")) {
+      $0.seenCounts = ["s1": 7] // opening marks the session read at its current count
+    }
     await store.receive(\.delegate.openSession)
+  }
+
+  // MARK: Unread + pagination
+
+  @Test func unreadReflectsMessageCountAboveSeen() {
+    var state = SessionListFeature.State(
+      connection: connection,
+      sessions: [
+        Session(id: "a", messageCount: 5),  // seen 5 → read
+        Session(id: "b", messageCount: 8),  // seen 5 → unread
+        Session(id: "c", messageCount: 2),  // no seen entry → not unread (unseeded)
+      ],
+      seenCounts: ["a": 5, "b": 5]
+    )
+    #expect(state.unreadSessionIDs == ["b"])
+    state.seenCounts["b"] = 8
+    #expect(state.unreadSessionIDs.isEmpty)
+  }
+
+  @Test func showMoreExpandsGroup() async {
+    let sessions = (0..<7).map { Session(id: "s\($0)", cwd: "/w", startedAt: Date(timeIntervalSince1970: Double($0))) }
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: IdentifiedArray(uniqueElements: sessions))
+    ) {
+      SessionListFeature()
+    }
+    let group = store.state.groups[0]
+    #expect(store.state.visibleSessions(in: group).count == 5) // collapsed
+
+    await store.send(.showMoreTapped(groupID: group.id)) {
+      $0.expandedGroups = [group.id]
+    }
+    #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 7) // expanded
   }
 
   @Test func newSessionButtonEmitsCreateDelegate() async {
@@ -128,6 +165,7 @@ struct SessionListFeatureTests {
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1")]
+      $0.seenCounts = ["s1": 0]
     }
   }
 

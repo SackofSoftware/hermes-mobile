@@ -13,18 +13,14 @@ struct SessionListView: View {
           .foregroundStyle(.red)
       }
       if store.isSearching {
-        // Search results are flat (no workspace grouping).
+        // Search results are flat, with the matching snippet shown.
         ForEach(store.sessions) { session in
-          row(session)
+          row(session, showsPreview: true)
         }
       } else {
-        // Group by workspace, desktop-style.
+        // Group by workspace, desktop-style, with per-group "Show more".
         ForEach(store.groups) { group in
-          Section(group.label) {
-            ForEach(group.sessions) { session in
-              row(session)
-            }
-          }
+          groupSection(group)
         }
       }
     }
@@ -56,11 +52,33 @@ struct SessionListView: View {
     }
   }
 
-  private func row(_ session: Session) -> some View {
+  @ViewBuilder
+  private func groupSection(_ group: SessionGroup) -> some View {
+    let visible = store.state.visibleSessions(in: group)
+    let hidden = group.sessions.count - visible.count
+    Section(group.label) {
+      ForEach(visible) { session in
+        row(session)
+      }
+      if hidden > 0 {
+        Button("Show \(hidden) more") {
+          store.send(.showMoreTapped(groupID: group.id))
+        }
+        .font(.subheadline)
+      }
+    }
+  }
+
+  private func row(_ session: Session, showsPreview: Bool = false) -> some View {
     Button {
       store.send(.sessionTapped(session.id))
     } label: {
-      SessionRowView(session: session, now: store.now)
+      SessionRowView(
+        session: session,
+        now: store.now,
+        showsPreview: showsPreview,
+        isUnread: store.unreadSessionIDs.contains(session.id)
+      )
     }
     .buttonStyle(.plain)
   }

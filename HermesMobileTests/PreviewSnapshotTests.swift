@@ -74,35 +74,39 @@ final class PreviewSnapshotTests: XCTestCase {
 
   func testSessionList() {
     let now = self.now
-    let sessions: [Session] = [
-      Session(id: "s1", title: "Refactor the streaming parser",
-              updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
-              preview: "Can you help me refactor the WebSocket JSON-RPC parser?",
-              cwd: "/Users/me/dev/hermes-mobile",
-              startedAt: Date(timeIntervalSince1970: 1_749_556_800)),
-      Session(id: "s2", title: "Plan the iOS MVP",
-              updatedAt: Date(timeIntervalSince1970: 1_749_470_400),
-              preview: "Let's lock the connection model and milestones.",
-              cwd: "/Users/me/dev/hermes-mobile",
-              startedAt: Date(timeIntervalSince1970: 1_749_470_400)),
-      Session(id: "s3", title: nil,
-              updatedAt: Date(timeIntervalSince1970: 1_749_384_000),
-              preview: "quick question about cron jobs",
+    let mobile = "/Users/me/dev/hermes-mobile"
+    // 6 sessions in one workspace (triggers "Show more"), 1 in another.
+    var sessions: [Session] = (0..<6).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass",
+                      "Model picker", "Workspace grouping", "Unread badges"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    sessions.append(
+      Session(id: "a1", title: nil,
+              updatedAt: Date(timeIntervalSince1970: 1_749_300_000),
               cwd: "/Users/me/dev/hermes-agent",
-              startedAt: Date(timeIntervalSince1970: 1_749_384_000)),
-    ]
+              startedAt: Date(timeIntervalSince1970: 1_749_300_000), messageCount: 4)
+    )
+    // m0 has new activity since last seen (10 > 7) → unread; the rest are read.
+    var seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+    seen["m0"] = 7
+
     let view = NavigationStack {
       SessionListView(
         store: Store(
           initialState: SessionListFeature.State(
             connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
             sessions: IdentifiedArray(uniqueElements: sessions),
-            now: now
+            now: now,
+            seenCounts: seen
           )
         ) {
           SessionListFeature()
         } withDependencies: {
-          // Keep the on-appear .task from hitting the network during render.
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)

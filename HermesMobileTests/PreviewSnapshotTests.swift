@@ -283,6 +283,28 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 
+  func testModelPickerSheet() {
+    let picker = ChatFeature.State.ModelPicker(
+      isLoading: false,
+      options: ModelOptions(
+        providers: [
+          .init(name: "Anthropic", slug: "anthropic",
+                models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"], authenticated: true),
+          .init(name: "OpenAI", slug: "openai", models: ["gpt-5", "gpt-5-mini"], authenticated: true),
+        ],
+        currentModel: "claude-opus-4-8"
+      )
+    )
+    let view = ModelPickerSheet(
+      picker: picker,
+      currentModel: "claude-opus-4-8",
+      currentEffort: "high",
+      isBusy: false,
+      onSelectModel: { _ in }, onSelectEffort: { _ in }, onDone: {}
+    )
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
   func testScrollToBottomButton() {
     // Over a gradient so the Liquid Glass refraction is visible (it's near-invisible on
     // flat black).

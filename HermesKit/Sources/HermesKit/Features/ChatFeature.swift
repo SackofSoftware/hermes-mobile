@@ -30,6 +30,21 @@ public struct ChatFeature {
     /// Current model + reasoning effort (from `session.info`), shown in the composer chip.
     public var model: String?
     public var reasoningEffort: String?
+    /// The model/reasoning picker sheet, when open (Task 7).
+    public var modelPicker: ModelPicker?
+
+    /// State for the interactive model + reasoning-effort picker.
+    public struct ModelPicker: Equatable, Sendable {
+      public var isLoading: Bool
+      public var options: ModelOptions?
+      public var error: String?
+
+      public init(isLoading: Bool = true, options: ModelOptions? = nil, error: String? = nil) {
+        self.isLoading = isLoading
+        self.options = options
+        self.error = error
+      }
+    }
 
     // Bookkeeping (internal).
     var liveSessionID: String?
@@ -82,6 +97,7 @@ public struct ChatFeature {
       self.presentedTool = nil
       self.model = nil
       self.reasoningEffort = nil
+      self.modelPicker = nil
     }
 
     public var canSend: Bool {
@@ -109,6 +125,10 @@ public struct ChatFeature {
     case toolTapped(id: ChatRow.ID)
     case toolDetailDismissed
     case modelChipTapped
+    case modelOptionsResponse(Result<ModelOptions, GatewayError>)
+    case modelSelected(String)
+    case reasoningSelected(String)
+    case modelPickerDismissed
   }
 
   private enum CancelID { case socket, reconnect }
@@ -272,7 +292,46 @@ public struct ChatFeature {
         return .none
 
       case .modelChipTapped:
-        // Interactive model/reasoning picker is wired in Task 7.
+        guard let sessionID = state.liveSessionID else { return .none }
+        state.modelPicker = State.ModelPicker(isLoading: true)
+        return .run { [gateway] send in
+          do {
+            let result = try await gateway.send("model.options", .object(["session_id": .string(sessionID)]))
+            if let options = result.decoded(ModelOptions.self) {
+              await send(.modelOptionsResponse(.success(options)))
+            } else {
+              await send(.modelOptionsResponse(.failure(.server("Malformed model.options result"))))
+            }
+          } catch let error as GatewayError {
+            await send(.modelOptionsResponse(.failure(error)))
+          } catch {
+            await send(.modelOptionsResponse(.failure(.disconnected)))
+          }
+        }
+
+      case let .modelOptionsResponse(.success(options)):
+        state.modelPicker?.isLoading = false
+        state.modelPicker?.options = options
+        return .none
+
+      case let .modelOptionsResponse(.failure(error)):
+        state.modelPicker?.isLoading = false
+        state.modelPicker?.error = error.message
+        return .none
+
+      case let .modelSelected(model):
+        // Blocked mid-turn (server returns 4009); the picker disables selection too.
+        guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
+        state.model = model // optimistic; reconciled by the next session.info
+        return configSet(key: "model", value: model, sessionID: sessionID)
+
+      case let .reasoningSelected(effort):
+        guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
+        state.reasoningEffort = effort
+        return configSet(key: "reasoning", value: effort, sessionID: sessionID)
+
+      case .modelPickerDismissed:
+        state.modelPicker = nil
         return .none
       }
     }
@@ -477,6 +536,18 @@ public struct ChatFeature {
       if let messages = try? await rest.messages(connection, storedID) {
         await send(.historyResponse(messages))
       }
+    }
+  }
+
+  /// Change a session setting (model / reasoning) over the gateway. Fire-and-forget —
+  /// the authoritative value comes back on the next `session.info`.
+  private func configSet(key: String, value: String, sessionID: String) -> Effect<Action> {
+    .run { [gateway] _ in
+      _ = try? await gateway.send("config.set", .object([
+        "session_id": .string(sessionID),
+        "key": .string(key),
+        "value": .string(value),
+      ]))
     }
   }
 }

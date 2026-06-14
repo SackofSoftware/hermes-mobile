@@ -35,6 +35,26 @@ struct ChatView: View {
         ToolDetailSheet(name: name, title: title, detail: detail ?? ToolDetail(), durationS: durationS)
       }
     }
+    .sheet(isPresented: modelPickerBinding) {
+      if let picker = store.modelPicker {
+        ModelPickerSheet(
+          picker: picker,
+          currentModel: store.model,
+          currentEffort: store.reasoningEffort,
+          isBusy: store.isSending,
+          onSelectModel: { store.send(.modelSelected($0)) },
+          onSelectEffort: { store.send(.reasoningSelected($0)) },
+          onDone: { store.send(.modelPickerDismissed) }
+        )
+      }
+    }
+  }
+
+  private var modelPickerBinding: Binding<Bool> {
+    Binding(
+      get: { store.modelPicker != nil },
+      set: { if !$0 { store.send(.modelPickerDismissed) } }
+    )
   }
 
   /// Drives the tool-detail sheet; dismissing routes through the reducer.

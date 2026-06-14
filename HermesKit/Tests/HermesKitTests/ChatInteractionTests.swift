@@ -97,4 +97,85 @@ struct ChatInteractionTests {
 
     #expect(sent.value?["choice"]?.stringValue == "deny")
   }
+
+  // MARK: Model / reasoning picker (Task 7)
+
+  private func sampleOptions() -> ModelOptions {
+    ModelOptions(
+      providers: [.init(name: "Anthropic", slug: "anthropic", models: ["claude-opus-4-8", "claude-sonnet-4-6"], authenticated: true)],
+      currentModel: "claude-opus-4-8"
+    )
+  }
+
+  @Test func modelChipTappedLoadsOptions() async {
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object([
+          "providers": .array([.object([
+            "name": .string("Anthropic"), "slug": .string("anthropic"),
+            "models": .array([.string("claude-opus-4-8"), .string("claude-sonnet-4-6")]),
+            "authenticated": .bool(true),
+          ])]),
+          "model": .string("claude-opus-4-8"),
+        ])
+      }
+    }
+
+    await store.send(.modelChipTapped) {
+      $0.modelPicker = ChatFeature.State.ModelPicker(isLoading: true)
+    }
+    await store.receive(\.modelOptionsResponse.success) {
+      $0.modelPicker?.isLoading = false
+      $0.modelPicker?.options = self.sampleOptions()
+    }
+  }
+
+  @Test func selectingModelSendsConfigSet() async {
+    let sent = LockIsolated<JSONValue?>(nil)
+    var initial = readyState()
+    initial.modelPicker = ChatFeature.State.ModelPicker(isLoading: false, options: sampleOptions())
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object([:])
+      }
+    }
+
+    await store.send(.modelSelected("claude-sonnet-4-6")) {
+      $0.model = "claude-sonnet-4-6" // optimistic
+    }
+    await store.finish()
+
+    #expect(sent.value?["method"]?.stringValue == "config.set")
+    #expect(sent.value?["params"]?["key"]?.stringValue == "model")
+    #expect(sent.value?["params"]?["value"]?.stringValue == "claude-sonnet-4-6")
+    #expect(sent.value?["params"]?["session_id"]?.stringValue == "live")
+  }
+
+  @Test func selectingReasoningSendsConfigSet() async {
+    let sent = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, params in
+        sent.setValue(params)
+        return .object([:])
+      }
+    }
+
+    await store.send(.reasoningSelected("high")) {
+      $0.reasoningEffort = "high"
+    }
+    await store.finish()
+
+    #expect(sent.value?["key"]?.stringValue == "reasoning")
+    #expect(sent.value?["value"]?.stringValue == "high")
+  }
+
+  @Test func selectionIsBlockedWhileSending() async {
+    var initial = readyState()
+    initial.isSending = true
+    let store = TestStore(initialState: initial) { ChatFeature() }
+    // Mid-turn switches are rejected by the server (4009) — guarded client-side.
+    await store.send(.modelSelected("claude-sonnet-4-6"))
+    await store.send(.reasoningSelected("high"))
+  }
 }

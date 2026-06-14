@@ -264,29 +264,31 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
 - [x] snapshots: composer idle + typing/sending; updated `testChatView` for the new composer
 - [x] run tests — **116 unit + 18 snapshot pass**; app `BUILD SUCCEEDED`
 
-### Task 7: Interactive model + reasoning-effort picker
+### Task 7: Interactive model + reasoning-effort picker ✅
+
+**Protocol verified against `tui_gateway/server.py`:** `model.options {session_id}` →
+`{providers:[{name, slug, models:[String], authenticated}], model}`. Switch via
+`config.set {session_id, key, value}` — **`key:"model"`** for the model and
+**`key:"reasoning"`** (NOT `reasoning_effort`) for effort; valid efforts =
+`none/minimal/low/medium/high/xhigh`. Mid-turn switches are rejected (4009).
 
 **Files:**
-- Modify: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift` (if a typed helper helps)
-- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (picker state + RPCs)
-- Create: `HermesKit/Sources/HermesKit/Models/ModelOption.swift`
-- Create: `HermesMobile/Sources/Features/Chat/ModelPickerSheet.swift`
-- Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `PreviewSnapshotTests.swift`
+- Create: `ModelOptions.swift`, `ModelPickerSheet.swift`
+- Modify: `ChatFeature.swift` (picker state + RPCs + `configSet` helper), `ChatView.swift`,
+  `ChatInteractionTests.swift`, `PreviewSnapshotTests.swift`
 
-- [ ] `.modelChipTapped` → load `model.options(session_id)` into picker state; decode
-  `ModelOption` (id/label/provider/authenticated)
-- [ ] selecting a model → `config.set {session_id, key:"model", value}`; selecting a
-  reasoning effort → `config.set {session_id, key:"reasoning_effort", value}`; update
-  state optimistically and reconcile from the next `session.info`
-- [ ] guard while `isSending`/running (server returns 4009) — disable selection with an
-  explanatory note; ⚠️ live-verify the exact `reasoning_effort` key + allowed values
-- [ ] `ModelPickerSheet`: grouped model list + reasoning-effort segment; current selection
-  highlighted
-- [ ] write tests: chip tap loads options; model/effort selection sends exact `config.set`
-  params; busy-state guard blocks selection
-- [ ] record the picker-sheet snapshot
-- [ ] run tests — must pass before next task
+- [x] `.modelChipTapped` → `model.options(session_id)` into `State.ModelPicker`; lenient
+  `ModelOptions` decoding (`usableProviders` filters to authenticated + non-empty)
+- [x] `modelSelected` → `config.set key=model`; `reasoningSelected` → `config.set
+  key=reasoning`; optimistic state update, reconciled by the next `session.info`
+- [x] guarded while `isSending` (no-op + the sheet disables selection with an "finish the
+  turn" note)
+- [x] `ModelPickerSheet`: reasoning-effort section + per-provider model sections, current
+  selections checkmarked in `Color.hermesAccent`
+- [x] tests: chip-tap loads options; model + reasoning selection send exact `config.set`
+  params (key/value/session_id); busy-state guard blocks both — **120 pass**
+- [x] recorded the picker-sheet snapshot (shared in chat)
+- [x] run tests — **120 unit + 19 snapshot pass**; app `BUILD SUCCEEDED`
 
 ### Task 8: Verify acceptance criteria
 

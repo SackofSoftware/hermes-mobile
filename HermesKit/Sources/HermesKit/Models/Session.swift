@@ -10,12 +10,26 @@ public struct Session: Equatable, Sendable, Identifiable {
   public var title: String?
   public var updatedAt: Date?
   public var preview: String?
+  /// Working directory of the session — the workspace it belongs to. Used to group the
+  /// list like the desktop app (see `SessionGroup`). Nil/empty → "No workspace".
+  public var cwd: String?
+  /// Original start time; used to order rows within a workspace group (desktop parity).
+  public var startedAt: Date?
 
-  public init(id: String, title: String? = nil, updatedAt: Date? = nil, preview: String? = nil) {
+  public init(
+    id: String,
+    title: String? = nil,
+    updatedAt: Date? = nil,
+    preview: String? = nil,
+    cwd: String? = nil,
+    startedAt: Date? = nil
+  ) {
     self.id = id
     self.title = title
     self.updatedAt = updatedAt
     self.preview = preview
+    self.cwd = cwd
+    self.startedAt = startedAt
   }
 }
 

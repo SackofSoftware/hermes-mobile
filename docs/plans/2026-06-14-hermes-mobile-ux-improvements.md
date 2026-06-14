@@ -182,27 +182,25 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
 - [x] re-recorded the 3 `ConnectionView` snapshots (no Check button)
 - [x] run tests — **107 pass**; app `BUILD SUCCEEDED`
 
-### Task 3: Group sessions by workspace (desktop parity)
+### Task 3: Group sessions by workspace (desktop parity) ✅
 
 **Files:**
-- Modify: `HermesKit/Sources/HermesKit/Models/Session.swift` (add `cwd`, `startedAt`)
-- Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift` (map `cwd`/`started_at`)
-- Create: `HermesKit/Sources/HermesKit/Models/SessionGroup.swift` (pure grouping)
-- Modify: `HermesMobile/Sources/Features/SessionListView.swift` (sectioned list)
-- Create: `HermesKit/Tests/HermesKitTests/SessionGroupTests.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift`, `PreviewSnapshotTests.swift`
+- Modify: `Session.swift` (+`cwd`, `startedAt`), `HermesRESTClient.swift` (map `cwd`),
+  `SessionListFeature.swift` (computed `groups`/`isSearching`), `SessionListView.swift`
+- Create: `SessionGroup.swift`, `SessionGroupTests.swift`
+- Modify: `HermesRESTClientTests.swift`, `PreviewSnapshotTests.swift`
 
-- [ ] add `cwd: String?` and `startedAt: Date?` to `Session`; map `cwd` + `started_at`
-  from `SessionListDTO` (verify the `started_at` JSON key against `/api/sessions`)
-- [ ] add `SessionGroup.grouped(_:)` mirroring desktop `workspaceGroupsFor` (group by
-  trimmed `cwd`; label = basename or "No workspace"; group order = first-seen in recency
-  order; in-group order = `startedAt` desc)
-- [ ] `SessionListView`: render a `Section` per group with the workspace label header;
-  keep search results flat (no grouping while a query is active)
-- [ ] write tests: grouping by cwd, basename labels, no-workspace bucket, group + in-group
-  ordering; REST DTO maps `cwd`/`started_at`
-- [ ] record a grouped session-list snapshot
-- [ ] run tests — must pass before next task
+- [x] added `cwd`/`startedAt` to `Session`; mapped `cwd` (`started_at` was already decoded)
+  in `SessionListDTO` (`/api/sessions` returns `cwd` via `SELECT s.*` — verified)
+- [x] `SessionGroup.grouped(_:)` mirrors desktop `workspaceGroupsFor`: group by trimmed
+  `cwd`, label = basename (root `/` → path, empty → "No workspace"), groups in first-seen
+  recency order, rows within a group sorted by `startedAt` desc
+- [x] `SessionListView` renders a `Section` per workspace group; search results stay flat
+  (`State.isSearching`)
+- [x] tests: `SessionGroupTests` (5 — basename labels, recency group order, in-group
+  ordering, no-workspace bucket, trailing-slash/root labels); REST DTO maps `cwd`/`started_at`
+- [x] recorded the grouped session-list snapshot (shared in chat)
+- [x] run tests — **112 pass**; app `BUILD SUCCEEDED`
 
 ### Task 4: Tool/skill activity rows + detail sheet (fix empty bubbles)
 

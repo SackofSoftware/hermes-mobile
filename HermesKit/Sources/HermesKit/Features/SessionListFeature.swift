@@ -35,6 +35,17 @@ public struct SessionListFeature {
       self.now = now
       self.settings = settings
     }
+
+    /// True while a search query is active — the list shows flat results, not workspace
+    /// groups (search has no `cwd`).
+    public var isSearching: Bool {
+      !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Sessions grouped by workspace for the (non-search) list, desktop-style.
+    public var groups: [SessionGroup] {
+      SessionGroup.grouped(Array(sessions))
+    }
   }
 
   public enum Action: BindableAction {

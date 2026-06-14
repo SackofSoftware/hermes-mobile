@@ -68,7 +68,7 @@ struct HermesRESTClientTests {
 
   @Test func sessionsMapsListToDomain() async throws {
     MockURLProtocol.set(json: #"""
-    {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","preview":"hello there","last_active":1749556800.0,"started_at":1749550000.0,"message_count":4,"is_active":true,"archived":false}],"total":1,"limit":20,"offset":0}
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","preview":"hello there","last_active":1749556800.0,"started_at":1749550000.0,"message_count":4,"cwd":"/Users/me/dev/hermes-mobile","is_active":true,"archived":false}],"total":1,"limit":20,"offset":0}
     """#)
     let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
     #expect(sessions.count == 1)
@@ -77,6 +77,8 @@ struct HermesRESTClientTests {
     #expect(s.title == "My chat")
     #expect(s.preview == "hello there")
     #expect(s.updatedAt == Date(timeIntervalSince1970: 1749556800.0))
+    #expect(s.cwd == "/Users/me/dev/hermes-mobile")
+    #expect(s.startedAt == Date(timeIntervalSince1970: 1749550000.0))
   }
 
   @Test func sessionsAttachesSessionTokenHeaderAndQuery() async throws {

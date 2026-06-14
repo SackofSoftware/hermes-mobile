@@ -162,9 +162,10 @@ private struct SessionListDTO: Decodable {
   let lastActive: Double?
   let startedAt: Double?
   let messageCount: Int?
+  let cwd: String?
 
   enum CodingKeys: String, CodingKey {
-    case id, title, preview
+    case id, title, preview, cwd
     case lastActive = "last_active"
     case startedAt = "started_at"
     case messageCount = "message_count"
@@ -175,7 +176,9 @@ private struct SessionListDTO: Decodable {
       id: id,
       title: title?.nonEmpty,
       updatedAt: (lastActive ?? startedAt).map { Date(timeIntervalSince1970: $0) },
-      preview: preview?.nonEmpty
+      preview: preview?.nonEmpty,
+      cwd: cwd?.nonEmpty,
+      startedAt: startedAt.map { Date(timeIntervalSince1970: $0) }
     )
   }
 }

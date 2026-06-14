@@ -12,13 +12,20 @@ struct SessionListView: View {
         Label(error, systemImage: "exclamationmark.triangle")
           .foregroundStyle(.red)
       }
-      ForEach(store.sessions) { session in
-        Button {
-          store.send(.sessionTapped(session.id))
-        } label: {
-          SessionRowView(session: session, now: store.now)
+      if store.isSearching {
+        // Search results are flat (no workspace grouping).
+        ForEach(store.sessions) { session in
+          row(session)
         }
-        .buttonStyle(.plain)
+      } else {
+        // Group by workspace, desktop-style.
+        ForEach(store.groups) { group in
+          Section(group.label) {
+            ForEach(group.sessions) { session in
+              row(session)
+            }
+          }
+        }
       }
     }
     .overlay {
@@ -47,5 +54,14 @@ struct SessionListView: View {
         SettingsView(store: settingsStore)
       }
     }
+  }
+
+  private func row(_ session: Session) -> some View {
+    Button {
+      store.send(.sessionTapped(session.id))
+    } label: {
+      SessionRowView(session: session, now: store.now)
+    }
+    .buttonStyle(.plain)
   }
 }

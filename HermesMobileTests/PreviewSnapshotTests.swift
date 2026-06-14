@@ -77,13 +77,19 @@ final class PreviewSnapshotTests: XCTestCase {
     let sessions: [Session] = [
       Session(id: "s1", title: "Refactor the streaming parser",
               updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
-              preview: "Can you help me refactor the WebSocket JSON-RPC parser?"),
+              preview: "Can you help me refactor the WebSocket JSON-RPC parser?",
+              cwd: "/Users/me/dev/hermes-mobile",
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800)),
       Session(id: "s2", title: "Plan the iOS MVP",
               updatedAt: Date(timeIntervalSince1970: 1_749_470_400),
-              preview: "Let's lock the connection model and milestones."),
+              preview: "Let's lock the connection model and milestones.",
+              cwd: "/Users/me/dev/hermes-mobile",
+              startedAt: Date(timeIntervalSince1970: 1_749_470_400)),
       Session(id: "s3", title: nil,
               updatedAt: Date(timeIntervalSince1970: 1_749_384_000),
-              preview: "quick question about cron jobs"),
+              preview: "quick question about cron jobs",
+              cwd: "/Users/me/dev/hermes-agent",
+              startedAt: Date(timeIntervalSince1970: 1_749_384_000)),
     ]
     let view = NavigationStack {
       SessionListView(

@@ -55,8 +55,8 @@ public extension GatewayEvent {
     case let .thinkingDelta(text): return Self.truncate(text)
     case let .reasoningAvailable(text): return Self.truncate(text)
     case let .statusUpdate(kind, text): return "[\(kind)] \(text)"
-    case let .toolStart(_, name, _): return name
-    case let .toolComplete(_, name, _, durationS):
+    case let .toolStart(_, name, _, _): return name
+    case let .toolComplete(_, name, _, _, _, _, durationS):
       let d = durationS.map { String(format: " (%.1fs)", $0) } ?? ""
       return (name ?? "") + d
     case let .approvalRequest(req): return req.command ?? req.requestID

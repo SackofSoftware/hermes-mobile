@@ -25,6 +25,8 @@ public struct ChatFeature {
     /// A blocking request from the agent (approval/clarify/secret). While set, the
     /// composer is disabled and a card is the focal point.
     public var pendingInteraction: PendingInteraction?
+    /// The tool/skill row whose detail sheet is open, if any (Task 4).
+    public var presentedTool: ChatRow?
 
     // Bookkeeping (internal).
     var liveSessionID: String?
@@ -74,6 +76,7 @@ public struct ChatFeature {
       self.reconnectAttempt = 0
       self.hasRequestedSession = false
       self.pendingInteraction = nil
+      self.presentedTool = nil
     }
 
     public var canSend: Bool {
@@ -98,6 +101,8 @@ public struct ChatFeature {
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
+    case toolTapped(id: ChatRow.ID)
+    case toolDetailDismissed
   }
 
   private enum CancelID { case socket, reconnect }
@@ -250,6 +255,15 @@ public struct ChatFeature {
       case let .copyRow(id):
         guard let text = state.transcript[id: id]?.copyText, !text.isEmpty else { return .none }
         return .run { [pasteboard] _ in pasteboard.copy(text) }
+
+      case let .toolTapped(id):
+        guard let row = state.transcript[id: id], case .tool = row.kind else { return .none }
+        state.presentedTool = row
+        return .none
+
+      case .toolDetailDismissed:
+        state.presentedTool = nil
+        return .none
       }
     }
   }
@@ -266,9 +280,9 @@ public struct ChatFeature {
       return bootstrapSession(stored: state.storedSessionID)
 
     case .messageStart:
-      let id = uuid()
-      state.transcript.append(ChatRow(id: id, kind: .message(role: .assistant, text: "", isComplete: false)))
-      state.streamingRowID = id
+      // Defer creating the assistant row until the first delta — a tool-only turn emits
+      // message.start with no text, and an eager empty row renders as a blank bubble.
+      state.streamingRowID = nil
       state.thinkingRowID = nil
       state.activity = nil
       state.errorBanner = nil
@@ -282,7 +296,11 @@ public struct ChatFeature {
     case let .messageComplete(text, _):
       if let id = state.streamingRowID {
         state.transcript[id: id]?.kind = .message(role: .assistant, text: text, isComplete: true)
+      } else if !text.isEmpty {
+        // No deltas arrived (non-streamed reply) — materialise the row now.
+        state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .assistant, text: text, isComplete: true)))
       }
+      // else: empty tool-only turn → no row at all.
       state.streamingRowID = nil
       state.thinkingRowID = nil
       state.activity = nil
@@ -301,15 +319,41 @@ public struct ChatFeature {
       state.activity = text
       return .none
 
-    case let .toolStart(toolID, name, _):
+    case let .toolStart(toolID, name, title, argsText):
       let id = uuid()
-      state.transcript.append(ChatRow(id: id, kind: .tool(name: name, state: .running, result: nil, durationS: nil)))
+      let detail = argsText.map { ToolDetail(argsText: $0) }
+      state.transcript.append(ChatRow(id: id, kind: .tool(
+        name: name, title: title?.nonEmpty ?? name, state: .running, detail: detail, durationS: nil
+      )))
       if let toolID { state.toolRowIDs[toolID] = id }
       return .none
 
-    case let .toolComplete(toolID, name, result, durationS):
-      if let toolID, let id = state.toolRowIDs[toolID], case let .tool(existing, _, _, _) = state.transcript[id: id]?.kind {
-        state.transcript[id: id]?.kind = .tool(name: name ?? existing, state: .complete, result: result, durationS: durationS)
+    case let .toolComplete(toolID, name, title, args, resultText, inlineDiff, durationS):
+      let detail = ToolDetail(args: args, resultText: resultText?.nonEmpty, inlineDiff: inlineDiff?.nonEmpty)
+      if let toolID, let id = state.toolRowIDs[toolID],
+         case let .tool(existingName, existingTitle, _, existingDetail, _) = state.transcript[id: id]?.kind {
+        // Merge: keep the start-time args_text; fill in result/diff/structured args.
+        let merged = ToolDetail(
+          argsText: existingDetail?.argsText,
+          args: detail.args, resultText: detail.resultText, inlineDiff: detail.inlineDiff
+        )
+        state.transcript[id: id]?.kind = .tool(
+          name: name ?? existingName,
+          title: title?.nonEmpty ?? existingTitle,
+          state: .complete,
+          detail: merged.isEmpty ? nil : merged,
+          durationS: durationS
+        )
+      } else {
+        // tool.complete with no prior start — create the row directly.
+        let resolvedName = name ?? ""
+        state.transcript.append(ChatRow(id: uuid(), kind: .tool(
+          name: resolvedName,
+          title: title?.nonEmpty ?? resolvedName,
+          state: .complete,
+          detail: detail.isEmpty ? nil : detail,
+          durationS: durationS
+        )))
       }
       return .none
 
@@ -345,10 +389,15 @@ public struct ChatFeature {
   }
 
   private func appendToStreamingMessage(_ text: String, into state: inout State) {
-    guard let id = state.streamingRowID,
-          case let .message(role, existing, _) = state.transcript[id: id]?.kind
-    else { return }
-    state.transcript[id: id]?.kind = .message(role: role, text: existing + text, isComplete: false)
+    if let id = state.streamingRowID,
+       case let .message(role, existing, _) = state.transcript[id: id]?.kind {
+      state.transcript[id: id]?.kind = .message(role: role, text: existing + text, isComplete: false)
+    } else {
+      // First delta of the turn — create the assistant row lazily (see `.messageStart`).
+      let id = uuid()
+      state.transcript.append(ChatRow(id: id, kind: .message(role: .assistant, text: text, isComplete: false)))
+      state.streamingRowID = id
+    }
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the

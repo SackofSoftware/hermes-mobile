@@ -67,6 +67,22 @@ public extension JSONValue {
     guard let data = try? JSONEncoder().encode(self) else { return nil }
     return try? JSONDecoder().decode(T.self, from: data)
   }
+
+  /// A human-readable rendering for the tool-detail UI: scalars as their plain value,
+  /// objects/arrays as pretty-printed JSON. Nil for `.null`.
+  var displayString: String? {
+    switch self {
+    case .null: return nil
+    case let .string(s): return s
+    case let .bool(b): return String(b)
+    case let .number(d): return d == d.rounded() ? String(Int(d)) : String(d)
+    case .array, .object:
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+      guard let data = try? encoder.encode(self), let s = String(data: data, encoding: .utf8) else { return nil }
+      return s
+    }
+  }
 }
 
 // MARK: - Outbound request

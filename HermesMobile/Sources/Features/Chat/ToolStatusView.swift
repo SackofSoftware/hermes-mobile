@@ -1,34 +1,43 @@
 import HermesKit
 import SwiftUI
 
-/// A collapsed tool-call row: name, running/done state, and (on completion) result.
+/// A tool/skill activity row: icon + human title (with the raw tool name beneath when
+/// they differ), running spinner / duration, and a chevron that opens the detail sheet.
 struct ToolStatusView: View {
   let name: String
+  let title: String
   let state: ChatRow.ToolState
-  let result: String?
   let durationS: Double?
+  let hasDetail: Bool
+  let onTap: () -> Void
 
   var body: some View {
-    DisclosureGroup {
-      if let result, !result.isEmpty {
-        Text(result)
-          .font(.caption.monospaced())
-          .foregroundStyle(.secondary)
-          .textSelection(.enabled)
-          .frame(maxWidth: .infinity, alignment: .leading)
-      }
-    } label: {
-      HStack(spacing: 8) {
+    Button(action: onTap) {
+      HStack(spacing: 10) {
         Image(systemName: state == .running ? "wrench.and.screwdriver" : "checkmark.seal")
           .foregroundStyle(state == .running ? Color.secondary : Color.green)
-        Text(name).font(.callout.weight(.medium))
+        VStack(alignment: .leading, spacing: 1) {
+          Text(title.isEmpty ? name : title)
+            .font(.callout.weight(.medium))
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+          if !title.isEmpty, title != name {
+            Text(name).font(.caption2.monospaced()).foregroundStyle(.secondary)
+          }
+        }
         if state == .running { ProgressView().controlSize(.mini) }
-        Spacer()
         if let durationS {
-          Text(String(format: "%.1fs", durationS))
-            .font(.caption).foregroundStyle(.secondary)
+          Text(String(format: "%.1fs", durationS)).font(.caption).foregroundStyle(.secondary)
+        }
+        if hasDetail {
+          Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
         }
       }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
+      .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 12))
     }
+    .buttonStyle(.plain)
+    .disabled(!hasDetail)
   }
 }

@@ -212,7 +212,3 @@ private struct SearchResultDTO: Decodable {
 private struct MessagesResponse: Decodable {
   let messages: [SessionMessage]
 }
-
-private extension String {
-  var nonEmpty: String? { isEmpty ? nil : self }
-}

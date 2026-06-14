@@ -12,8 +12,11 @@ public enum GatewayEvent: Equatable, Sendable {
   case thinkingDelta(text: String)
   case reasoningAvailable(text: String)
   case statusUpdate(kind: String, text: String)
-  case toolStart(toolID: String?, name: String, args: JSONValue)
-  case toolComplete(toolID: String?, name: String?, result: String?, durationS: Double?)
+  case toolStart(toolID: String?, name: String, title: String?, argsText: String?)
+  case toolComplete(
+    toolID: String?, name: String?, title: String?,
+    args: JSONValue?, resultText: String?, inlineDiff: String?, durationS: Double?
+  )
   case approvalRequest(ApprovalRequest)
   case clarifyRequest(ClarifyRequest)
   case sudoRequest(SecretPrompt)
@@ -47,12 +50,20 @@ public enum GatewayEvent: Equatable, Sendable {
     case "status.update":
       self = .statusUpdate(kind: p["kind"]?.stringValue ?? "", text: p["text"]?.stringValue ?? "")
     case "tool.start":
-      self = .toolStart(toolID: p["tool_id"]?.stringValue, name: p["name"]?.stringValue ?? "", args: p["args"] ?? .null)
+      self = .toolStart(
+        toolID: p["tool_id"]?.stringValue,
+        name: p["name"]?.stringValue ?? "",
+        title: p["context"]?.stringValue,       // human description shown as the row title
+        argsText: p["args_text"]?.stringValue   // present only in verbose runs
+      )
     case "tool.complete":
       self = .toolComplete(
         toolID: p["tool_id"]?.stringValue,
         name: p["name"]?.stringValue,
-        result: p["result"]?.stringValue,
+        title: p["summary"]?.stringValue,        // human one-line summary
+        args: p["args"],
+        resultText: p["result_text"]?.stringValue ?? p["result"]?.displayString,
+        inlineDiff: p["inline_diff"]?.stringValue,
         durationS: p["duration_s"]?.doubleValue
       )
     case "approval.request":

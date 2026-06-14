@@ -26,6 +26,19 @@ struct ChatView: View {
     .navigationBarTitleDisplayMode(.inline)
     .task { store.send(.task) }
     .onDisappear { store.send(.onDisappear) }
+    .sheet(item: toolDetailBinding) { row in
+      if case let .tool(name, title, _, detail, durationS) = row.kind {
+        ToolDetailSheet(name: name, title: title, detail: detail ?? ToolDetail(), durationS: durationS)
+      }
+    }
+  }
+
+  /// Drives the tool-detail sheet; dismissing routes through the reducer.
+  private var toolDetailBinding: Binding<ChatRow?> {
+    Binding(
+      get: { store.presentedTool },
+      set: { if $0 == nil { store.send(.toolDetailDismissed) } }
+    )
   }
 
   private var transcript: some View {
@@ -58,8 +71,12 @@ struct ChatView: View {
     switch row.kind {
     case let .message(role, text, isComplete):
       MessageBubbleView(role: role, text: text, isComplete: isComplete)
-    case let .tool(name, state, result, durationS):
-      ToolStatusView(name: name, state: state, result: result, durationS: durationS)
+    case let .tool(name, title, state, detail, durationS):
+      ToolStatusView(
+        name: name, title: title, state: state, durationS: durationS,
+        hasDetail: detail?.isEmpty == false,
+        onTap: { store.send(.toolTapped(id: row.id)) }
+      )
     case let .thinking(text):
       DisclosureGroup("Thinking") {
         Text(text).font(.caption).foregroundStyle(.secondary)

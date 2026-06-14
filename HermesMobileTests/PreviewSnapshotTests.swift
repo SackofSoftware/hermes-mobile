@@ -117,7 +117,8 @@ final class PreviewSnapshotTests: XCTestCase {
   func testChatView() {
     let rows: [ChatRow] = [
       ChatRow(id: id(0), kind: .message(role: .user, text: "Summarize the streaming protocol.", isComplete: true)),
-      ChatRow(id: id(1), kind: .tool(name: "read_file", state: .complete, result: "tui_gateway/server.py", durationS: 0.8)),
+      ChatRow(id: id(1), kind: .tool(name: "read_file", title: "Read tui_gateway/server.py", state: .complete,
+                                     detail: ToolDetail(resultText: "tui_gateway/server.py"), durationS: 0.8)),
       ChatRow(id: id(2), kind: .message(
         role: .assistant,
         text: "Here's the gist:\n\n- **WebSocket** JSON-RPC at `/api/ws`\n- Responses stream as `message.delta` events\n- Tools surface via `tool.start` / `tool.complete`",
@@ -218,6 +219,36 @@ final class PreviewSnapshotTests: XCTestCase {
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  // MARK: Tool/skill rows + detail sheet (UX Task 4)
+
+  func testToolRows() {
+    let view = VStack(spacing: 10) {
+      ToolStatusView(name: "read_file", title: "Reading server.py", state: .running,
+                     durationS: nil, hasDetail: true, onTap: {})
+      ToolStatusView(name: "edit_file", title: "Edited 3 lines in ChatView.swift", state: .complete,
+                     durationS: 1.4, hasDetail: true, onTap: {})
+      ToolStatusView(name: "todo", title: "todo", state: .complete,
+                     durationS: 0.1, hasDetail: false, onTap: {})
+    }
+    .padding()
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  func testToolDetailSheet() {
+    let view = ToolDetailSheet(
+      name: "edit_file",
+      title: "Edited 3 lines in ChatView.swift",
+      detail: ToolDetail(
+        args: .object(["path": .string("ChatView.swift"), "start": .number(42)]),
+        resultText: "Applied edit successfully.",
+        inlineDiff: "- old line\n+ new line"
+      ),
+      durationS: 1.4
+    )
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
   }
 
   // MARK: Settings (Task 12)

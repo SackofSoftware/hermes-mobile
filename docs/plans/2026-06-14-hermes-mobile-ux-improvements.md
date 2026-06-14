@@ -202,30 +202,31 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
 - [x] recorded the grouped session-list snapshot (shared in chat)
 - [x] run tests — **112 pass**; app `BUILD SUCCEEDED`
 
-### Task 4: Tool/skill activity rows + detail sheet (fix empty bubbles)
+### Task 4: Tool/skill activity rows + detail sheet (fix empty bubbles) ✅
 
 **Files:**
-- Modify: `HermesKit/Sources/HermesKit/Models/{ChatRow,GatewayEvent}.swift` (tool title + detail)
-- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (fold; drop empty msg rows)
-- Modify: `HermesMobile/Sources/Features/Chat/ToolStatusView.swift` → titled row
-- Create: `HermesMobile/Sources/Features/Chat/ToolDetailSheet.swift`
-- Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift` (present sheet)
-- Modify: `HermesKit/Tests/HermesKitTests/{ChatReductionTests,GatewayEventDecodingTests}.swift`
-- Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
+- Modify: `ChatRow.swift` (+`ToolDetail`, enriched `.tool`), `GatewayEvent.swift`,
+  `GatewayLogEntry.swift`, `JSONRPC.swift` (+`displayString`), `ChatFeature.swift`
+- Create: `StringExtensions.swift` (consolidated internal `nonEmpty`), `ToolDetailSheet.swift`
+- Modify: `ToolStatusView.swift` (titled row), `ChatView.swift` (sheet)
+- Modify: `ChatReductionTests.swift`, `GatewayEventDecodingTests.swift`, `PreviewSnapshotTests.swift`
 
-- [ ] enrich `GatewayEvent.toolStart/toolComplete` to decode `summary`/`context`, `args`,
-  `result`/`result_text`, `inline_diff`; add a `ToolDetail` payload type
-- [ ] enrich `ChatRow.tool` with a display `title` (summary/context → fallback `name`) and
-  optional `ToolDetail`; fold them in `ChatFeature`
-- [ ] reproduce + fix the **empty bubble**: don't render an assistant message row that is
-  still empty when only tool/status activity is in flight (only materialise it on first
-  `message.delta`)
-- [ ] `ToolStatusView`: icon + title + state + duration + a chevron; tap → `.toolTapped(id)`
-- [ ] `ToolDetailSheet`: read-only args/result/inline-diff (monospaced/diff styling)
-- [ ] write tests: enriched tool fold (title fallback chain, detail captured), empty-msg
-  suppression, decoding of the richer tool payloads; tool-tap presents detail
-- [ ] record snapshots: titled tool row (running + complete) and the detail sheet
-- [ ] run tests — must pass before next task
+- [x] enriched `GatewayEvent.toolStart` (`context`→title, `args_text`) / `toolComplete`
+  (`summary`→title, `args`, `result_text`/stringified `result`, `inline_diff`); added
+  `ToolDetail` + `JSONValue.displayString` (pretty JSON for objects)
+- [x] `ChatRow.tool` now carries `title` (summary/context → fallback `name`) + optional
+  `ToolDetail`; fold merges start args_text with complete result/diff
+- [x] **empty-bubble fix**: `message.start` no longer creates a row; the assistant row is
+  materialised lazily on the first `message.delta` (or finalised directly from
+  `message.complete` when non-streamed). A tool-only turn leaves **no** empty bubble.
+- [x] `ToolStatusView`: icon + human title + raw name + spinner/duration + chevron (only
+  when there's detail); tap → `.toolTapped(id)`
+- [x] `ToolDetailSheet`: read-only Arguments / Result / Diff sections (monospaced)
+- [x] tests: enriched tool fold + title fallback + tap-presents-detail; tool-only-turn
+  leaves no bubble; lazy/streamed message rows; richer tool payload decoding + object-result
+  stringification — **115 pass**
+- [x] snapshots: tool rows (running/complete/no-detail) + detail sheet (shared in chat)
+- [x] run tests — **115 pass**; app `BUILD SUCCEEDED`
 
 ### Task 5: Scroll-to-bottom button
 

@@ -72,11 +72,25 @@ import Testing
   }
 
   @Test func toolStartAndComplete() throws {
-    let start = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.start","session_id":"s","payload":{"tool_id":"t1","name":"read_file","args":{"path":"/x"}}}}"#)
-    #expect(start == .event(sessionID: "s", .toolStart(toolID: "t1", name: "read_file", args: .object(["path": .string("/x")]))))
+    let start = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.start","session_id":"s","payload":{"tool_id":"t1","name":"read_file","context":"Reading /x","args_text":"path=/x"}}}"#)
+    #expect(start == .event(sessionID: "s", .toolStart(
+      toolID: "t1", name: "read_file", title: "Reading /x", argsText: "path=/x"
+    )))
 
-    let done = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s","payload":{"tool_id":"t1","name":"read_file","result":"ok","duration_s":1.5}}}"#)
-    #expect(done == .event(sessionID: "s", .toolComplete(toolID: "t1", name: "read_file", result: "ok", durationS: 1.5)))
+    let done = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s","payload":{"tool_id":"t1","name":"read_file","summary":"Read 12 lines","args":{"path":"/x"},"result_text":"ok","duration_s":1.5}}}"#)
+    #expect(done == .event(sessionID: "s", .toolComplete(
+      toolID: "t1", name: "read_file", title: "Read 12 lines",
+      args: .object(["path": .string("/x")]), resultText: "ok", inlineDiff: nil, durationS: 1.5
+    )))
+  }
+
+  @Test func toolCompleteStringifiesObjectResultWhenNoResultText() throws {
+    // No result_text (non-verbose) → result object is rendered for the detail sheet.
+    let done = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s","payload":{"tool_id":"t1","name":"grep","result":{"matches":2}}}}"#)
+    guard case let .event(_, .toolComplete(_, _, _, _, resultText, _, _)) = done else {
+      Issue.record("expected tool.complete event"); return
+    }
+    #expect(resultText?.contains("\"matches\" : 2") == true)
   }
 
   // MARK: Interactive requests (synthetic — shapes verified later in M2)

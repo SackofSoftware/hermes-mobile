@@ -18,13 +18,14 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: { $0.uuid = .incrementing }
 
+    // message.start no longer creates a row (would render as an empty bubble); the row
+    // is materialised lazily on the first delta.
     await store.send(.gatewayEvent(.messageStart)) {
-      $0.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "", isComplete: false))]
-      $0.streamingRowID = uuid(0)
       $0.isSending = true
     }
     await store.send(.gatewayEvent(.messageDelta(text: "Hel"))) {
-      $0.transcript[id: uuid(0)]?.kind = .message(role: .assistant, text: "Hel", isComplete: false)
+      $0.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "Hel", isComplete: false))]
+      $0.streamingRowID = uuid(0)
     }
     await store.send(.gatewayEvent(.messageDelta(text: "lo"))) {
       $0.transcript[id: uuid(0)]?.kind = .message(role: .assistant, text: "Hello", isComplete: false)
@@ -34,6 +35,19 @@ struct ChatReductionTests {
       $0.streamingRowID = nil
       $0.isSending = false
     }
+  }
+
+  @Test func toolOnlyTurnLeavesNoEmptyMessageBubble() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: { $0.uuid = .incrementing }
+
+    // start → (tool activity) → complete with no text: no assistant message row at all.
+    await store.send(.gatewayEvent(.messageStart)) { $0.isSending = true }
+    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil))) {
+      $0.isSending = false
+    }
+    #expect(store.state.transcript.isEmpty)
   }
 
   @Test func thinkingFoldsIntoOneRowThenMessageStarts() async {
@@ -49,13 +63,12 @@ struct ChatReductionTests {
       $0.transcript[id: uuid(0)]?.kind = .thinking(text: "Thinking…")
     }
     await store.send(.gatewayEvent(.messageStart)) {
-      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "", isComplete: false)))
-      $0.streamingRowID = uuid(1)
       $0.thinkingRowID = nil
       $0.isSending = true
     }
+    // No deltas → message.complete materialises the finalised row directly (uuid 1).
     await store.send(.gatewayEvent(.messageComplete(text: "pong", usage: nil))) {
-      $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "pong", isComplete: true)
+      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "pong", isComplete: true)))
       $0.streamingRowID = nil
       $0.isSending = false
     }
@@ -66,12 +79,51 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: { $0.uuid = .incrementing }
 
-    await store.send(.gatewayEvent(.toolStart(toolID: "t1", name: "read_file", args: .object(["path": .string("/x")])))) {
-      $0.transcript = [ChatRow(id: uuid(0), kind: .tool(name: "read_file", state: .running, result: nil, durationS: nil))]
+    await store.send(.gatewayEvent(.toolStart(toolID: "t1", name: "read_file", title: "Reading /x", argsText: "path=/x"))) {
+      $0.transcript = [ChatRow(id: uuid(0), kind: .tool(
+        name: "read_file", title: "Reading /x", state: .running,
+        detail: ToolDetail(argsText: "path=/x"), durationS: nil
+      ))]
       $0.toolRowIDs = ["t1": uuid(0)]
     }
-    await store.send(.gatewayEvent(.toolComplete(toolID: "t1", name: "read_file", result: "ok", durationS: 1.5))) {
-      $0.transcript[id: uuid(0)]?.kind = .tool(name: "read_file", state: .complete, result: "ok", durationS: 1.5)
+    await store.send(.gatewayEvent(.toolComplete(
+      toolID: "t1", name: "read_file", title: "Read 12 lines",
+      args: .object(["path": .string("/x")]), resultText: "ok", inlineDiff: nil, durationS: 1.5
+    ))) {
+      // Merge keeps the start-time args_text; fills in result + structured args.
+      $0.transcript[id: uuid(0)]?.kind = .tool(
+        name: "read_file", title: "Read 12 lines", state: .complete,
+        detail: ToolDetail(argsText: "path=/x", args: .object(["path": .string("/x")]), resultText: "ok", inlineDiff: nil),
+        durationS: 1.5
+      )
+    }
+  }
+
+  @Test func toolTitleFallsBackToNameAndTapPresentsDetail() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: { $0.uuid = .incrementing }
+
+    // No context/summary → title falls back to the raw tool name.
+    await store.send(.gatewayEvent(.toolStart(toolID: "t1", name: "grep", title: nil, argsText: nil))) {
+      $0.transcript = [ChatRow(id: uuid(0), kind: .tool(
+        name: "grep", title: "grep", state: .running, detail: nil, durationS: nil
+      ))]
+      $0.toolRowIDs = ["t1": uuid(0)]
+    }
+    await store.send(.gatewayEvent(.toolComplete(
+      toolID: "t1", name: "grep", title: nil, args: nil, resultText: "2 matches", inlineDiff: nil, durationS: 0.2
+    ))) {
+      $0.transcript[id: self.uuid(0)]?.kind = .tool(
+        name: "grep", title: "grep", state: .complete,
+        detail: ToolDetail(resultText: "2 matches"), durationS: 0.2
+      )
+    }
+    await store.send(.toolTapped(id: uuid(0))) {
+      $0.presentedTool = $0.transcript[id: self.uuid(0)]
+    }
+    await store.send(.toolDetailDismissed) {
+      $0.presentedTool = nil
     }
   }
 

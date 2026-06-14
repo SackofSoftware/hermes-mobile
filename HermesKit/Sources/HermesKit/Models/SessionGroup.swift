@@ -54,7 +54,3 @@ public struct SessionGroup: Equatable, Sendable, Identifiable {
     return base?.nonEmpty ?? path.nonEmpty ?? noWorkspaceLabel
   }
 }
-
-private extension String {
-  var nonEmpty: String? { isEmpty ? nil : self }
-}

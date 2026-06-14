@@ -244,26 +244,25 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
 - [x] snapshot of the button over a gradient (so the glass refraction is visible)
 - [x] run tests — **115 unit + 16 snapshot pass**; app `BUILD SUCCEEDED`
 
-### Task 6: Composer redesign (layout, brand send, disabled voice)
+### Task 6: Composer redesign (layout, brand send, disabled voice) ✅
 
 **Files:**
-- Create: `HermesMobile/Sources/Resources/Assets.xcassets/HermesAccent.colorset` + `Color+Hermes.swift`
-- Modify: `HermesMobile/Sources/Features/Chat/ComposerView.swift`
-- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (fold `session.info`)
-- Modify: `HermesKit/Sources/HermesKit/Models/GatewayEvent.swift` (`SessionInfo.reasoningEffort`)
-- Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`, `PreviewSnapshotTests.swift`
+- Create: `Assets.xcassets/HermesAccent.colorset`, `Color+Hermes.swift`
+- Modify: `ComposerView.swift`, `ChatView.swift`, `ChatFeature.swift` (fold `session.info`
+  + `modelChipTapped` stub), `GatewayEvent.swift` (`SessionInfo.reasoningEffort`)
+- Modify: `ChatReductionTests.swift`, `PreviewSnapshotTests.swift`
 
-- [ ] add `Color.hermesAccent` (asset-catalog colour, yellow-orange sampled from the icon)
-- [ ] fold `session.info` into `ChatFeature.State` (`model`, `reasoningEffort`); add
-  `reasoningEffort` to `SessionInfo` decoding
-- [ ] rebuild `ComposerView` to the Claude layout: multiline field; bottom bar with a left
-  **model/reasoning chip** (display `model · effort`, tappable → `.modelChipTapped`), a
-  **disabled mic** button, and a **send** button tinted `Color.hermesAccent` (interrupt
-  state unchanged)
-- [ ] write tests: sessionInfo fold sets model/effort; chip reflects state; (picker wiring
-  in Task 7)
-- [ ] record the redesigned composer snapshot (idle / sending)
-- [ ] run tests — must pass before next task
+- [x] `Color.hermesAccent` (asset-catalog colour `#F5A524`, yellow-orange from the icon)
+- [x] folded `session.info` into `ChatFeature.State` (`model`, `reasoningEffort`); later
+  partial `session.info` events don't clobber present values; added `reasoning_effort`
+  decoding to `SessionInfo`
+- [x] rebuilt `ComposerView`: multiline field over a toolbar row — left **model · effort
+  chip** (tappable → `.modelChipTapped`), **disabled mic** placeholder, **send** button in
+  `Color.hermesAccent` (red stop while streaming)
+- [x] tests: `sessionInfoUpdatesModelAndReasoningChip` (incl. partial-update preservation);
+  split the unknown-event test
+- [x] snapshots: composer idle + typing/sending; updated `testChatView` for the new composer
+- [x] run tests — **116 unit + 18 snapshot pass**; app `BUILD SUCCEEDED`
 
 ### Task 7: Interactive model + reasoning-effort picker
 

@@ -27,6 +27,9 @@ public struct ChatFeature {
     public var pendingInteraction: PendingInteraction?
     /// The tool/skill row whose detail sheet is open, if any (Task 4).
     public var presentedTool: ChatRow?
+    /// Current model + reasoning effort (from `session.info`), shown in the composer chip.
+    public var model: String?
+    public var reasoningEffort: String?
 
     // Bookkeeping (internal).
     var liveSessionID: String?
@@ -77,6 +80,8 @@ public struct ChatFeature {
       self.hasRequestedSession = false
       self.pendingInteraction = nil
       self.presentedTool = nil
+      self.model = nil
+      self.reasoningEffort = nil
     }
 
     public var canSend: Bool {
@@ -103,6 +108,7 @@ public struct ChatFeature {
     case copyRow(id: ChatRow.ID)
     case toolTapped(id: ChatRow.ID)
     case toolDetailDismissed
+    case modelChipTapped
   }
 
   private enum CancelID { case socket, reconnect }
@@ -264,6 +270,10 @@ public struct ChatFeature {
       case .toolDetailDismissed:
         state.presentedTool = nil
         return .none
+
+      case .modelChipTapped:
+        // Interactive model/reasoning picker is wired in Task 7.
+        return .none
       }
     }
   }
@@ -382,8 +392,14 @@ public struct ChatFeature {
       state.activity = nil
       return .none
 
-    case .sessionInfo, .unknown:
-      // sessionInfo: not needed yet.
+    case let .sessionInfo(info):
+      // Update the model/reasoning chip; later session.info events can be partial, so
+      // only overwrite fields that are present.
+      if let model = info.model?.nonEmpty { state.model = model }
+      if let effort = info.reasoningEffort?.nonEmpty { state.reasoningEffort = effort }
+      return .none
+
+    case .unknown:
       return .none
     }
   }

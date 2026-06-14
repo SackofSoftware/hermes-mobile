@@ -233,13 +233,26 @@ struct ChatReductionTests {
     }
   }
 
-  @Test func unknownAndSessionInfoEventsAreInertInTheFold() async {
+  @Test func unknownEventIsInertInTheFold() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
     }
     // Forward-compat: events the UI doesn't model must not mutate state or crash.
     await store.send(.gatewayEvent(.unknown(type: "tool.progress", raw: .object([:]))))
-    await store.send(.gatewayEvent(.sessionInfo(SessionInfo(model: "claude"))))
+  }
+
+  @Test func sessionInfoUpdatesModelAndReasoningChip() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    }
+    await store.send(.gatewayEvent(.sessionInfo(SessionInfo(model: "claude-opus-4-8", reasoningEffort: "high")))) {
+      $0.model = "claude-opus-4-8"
+      $0.reasoningEffort = "high"
+    }
+    // A later partial session.info (model only) must not clear the reasoning effort.
+    await store.send(.gatewayEvent(.sessionInfo(SessionInfo(model: "claude-sonnet-4-6")))) {
+      $0.model = "claude-sonnet-4-6"
+    }
   }
 
   // MARK: Reconnect / backoff

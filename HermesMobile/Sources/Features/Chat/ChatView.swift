@@ -19,6 +19,9 @@ struct ChatView: View {
         text: $store.composerText,
         isSending: store.isSending,
         canSend: store.canSend,
+        model: store.model,
+        reasoningEffort: store.reasoningEffort,
+        onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) }
       )

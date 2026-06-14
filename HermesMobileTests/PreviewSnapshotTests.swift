@@ -251,6 +251,38 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .device(config: device)))
   }
 
+  func testComposer_idle() {
+    let view = ComposerView(
+      text: .constant(""),
+      isSending: false,
+      canSend: false,
+      model: "claude-opus-4-8",
+      reasoningEffort: "high",
+      onModelTap: {}, onSend: {}, onInterrupt: {}
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  func testComposer_typingAndSending() {
+    let view = VStack(spacing: 20) {
+      ComposerView(
+        text: .constant("Summarize the streaming protocol"),
+        isSending: false, canSend: true,
+        model: "claude-sonnet-4-6", reasoningEffort: "medium",
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+      ComposerView(
+        text: .constant(""),
+        isSending: true, canSend: false,
+        model: "claude-opus-4-8", reasoningEffort: nil,
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+    }
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
   func testScrollToBottomButton() {
     // Over a gradient so the Liquid Glass refraction is visible (it's near-invisible on
     // flat black).

@@ -113,6 +113,7 @@ public struct Usage: Equatable, Sendable, Decodable {
 /// the few fields the UI needs and ignore the rest (Codable skips unknown keys).
 public struct SessionInfo: Equatable, Sendable, Decodable {
   public var model: String?
+  public var reasoningEffort: String?
   public var running: Bool?
   public var version: String?
   public var cwd: String?
@@ -121,14 +122,16 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
 
   enum CodingKeys: String, CodingKey {
     case model, running, version, cwd, usage
+    case reasoningEffort = "reasoning_effort"
     case profileName = "profile_name"
   }
 
   public init(
-    model: String? = nil, running: Bool? = nil, version: String? = nil,
-    cwd: String? = nil, profileName: String? = nil, usage: Usage? = nil
+    model: String? = nil, reasoningEffort: String? = nil, running: Bool? = nil,
+    version: String? = nil, cwd: String? = nil, profileName: String? = nil, usage: Usage? = nil
   ) {
     self.model = model
+    self.reasoningEffort = reasoningEffort
     self.running = running
     self.version = version
     self.cwd = cwd

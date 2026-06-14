@@ -295,6 +295,14 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
   `caps?.reasoning ?? true`. Added `ModelOptionsTests` (decode + capability gating) + a
   non-reasoning-model snapshot.
 - [x] run tests — **122 unit + 20 snapshot pass**; app `BUILD SUCCEEDED`
+- [x] ➕ **picker layout refinements** (review follow-up): (a) reasoning-effort options now
+  drop down **inline under the selected model** (not a separate top section); (b) providers
+  ordered **configured-first (selectable), then unconfigured (disabled)** — unconfigured
+  providers come back from `model.options` with empty model lists + a `warning`
+  (e.g. "paste ANTHROPIC_API_KEY to activate"), so they render grayed with the hint rather
+  than fake model rows (mobile can't configure providers). `ModelOptions.orderedProviders`
+  + `Provider.isConfigured`/`warning`; updated `ModelOptionsTests` + picker snapshot.
+- [x] run tests — **123 unit + 20 snapshot pass**; app `BUILD SUCCEEDED`
 
 ### Task 8: Verify acceptance criteria
 

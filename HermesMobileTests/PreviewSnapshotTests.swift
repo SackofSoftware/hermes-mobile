@@ -288,22 +288,18 @@ final class PreviewSnapshotTests: XCTestCase {
       isLoading: false,
       options: ModelOptions(
         providers: [
-          .init(name: "Anthropic", slug: "anthropic",
-                models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"], authenticated: true,
-                capabilities: [
-                  "claude-opus-4-8": .init(reasoning: true),
-                  "claude-sonnet-4-6": .init(reasoning: true),
-                  "claude-haiku-4-5": .init(reasoning: false),
-                ]),
           .init(name: "OpenAI", slug: "openai", models: ["gpt-5", "gpt-5-mini"], authenticated: true,
                 capabilities: ["gpt-5": .init(reasoning: true), "gpt-5-mini": .init(reasoning: true)]),
+          // Unconfigured — appears disabled below, with a configure hint.
+          .init(name: "Anthropic", slug: "anthropic", models: [], authenticated: false,
+                warning: "paste ANTHROPIC_API_KEY to activate"),
         ],
-        currentModel: "claude-opus-4-8"
+        currentModel: "gpt-5"
       )
     )
     let view = ModelPickerSheet(
       picker: picker,
-      currentModel: "claude-opus-4-8", // reasoning-capable → effort section shown, "high" selected
+      currentModel: "gpt-5", // reasoning-capable → effort options drop down under it, "high" selected
       currentEffort: "high",
       isBusy: false,
       onSelectModel: { _ in }, onSelectEffort: { _ in }, onDone: {}

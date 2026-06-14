@@ -18,7 +18,7 @@ struct ModelOptionsTests {
             "claude-haiku-4-5": {"fast": true, "reasoning": false}
           }
         },
-        { "name": "Skeleton", "slug": "x", "models": [], "authenticated": false }
+        { "name": "OpenAI", "slug": "openai", "models": [], "authenticated": false, "warning": "paste OPENAI_API_KEY to activate" }
       ]
     }
     """#
@@ -26,8 +26,19 @@ struct ModelOptionsTests {
 
     #expect(options.currentModel == "claude-opus-4-8")
     #expect(options.providers.count == 2)
-    // usableProviders drops the empty/unauthenticated skeleton.
-    #expect(options.usableProviders.map(\.name) == ["Anthropic"])
+    // Configured providers first, then unconfigured (with a hint); both kept.
+    #expect(options.orderedProviders.map(\.name) == ["Anthropic", "OpenAI"])
+    #expect(options.orderedProviders.map(\.isConfigured) == [true, false])
+    #expect(options.providers.first(where: { $0.name == "OpenAI" })?.warning == "paste OPENAI_API_KEY to activate")
+  }
+
+  @Test func orderedProvidersPutsConfiguredFirstAndDropsEmptyNoHint() {
+    let options = ModelOptions(providers: [
+      .init(name: "Unconfigured", slug: "u", models: [], authenticated: false, warning: "configure me"),
+      .init(name: "Configured", slug: "c", models: ["m"], authenticated: true),
+      .init(name: "Empty", slug: "e", models: [], authenticated: false), // no models, no hint → dropped
+    ])
+    #expect(options.orderedProviders.map(\.name) == ["Configured", "Unconfigured"])
   }
 
   @Test func supportsReasoningReflectsPerModelCapability() {

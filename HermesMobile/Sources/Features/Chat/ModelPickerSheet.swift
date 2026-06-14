@@ -1,9 +1,10 @@
 import HermesKit
 import SwiftUI
 
-/// Interactive model + reasoning-effort picker. Selecting an item applies it to the live
-/// session via `config.set`. Selection is disabled while a turn is in flight (the server
-/// rejects mid-turn switches).
+/// Interactive model + reasoning-effort picker. Configured providers are listed first and
+/// are selectable; unconfigured providers appear disabled with a "how to configure" hint
+/// (they can't be set up from mobile). The reasoning-effort options drop down inline under
+/// the selected model when that model supports reasoning. Applies via `config.set`.
 struct ModelPickerSheet: View {
   let picker: ChatFeature.State.ModelPicker
   let currentModel: String?
@@ -25,13 +26,19 @@ struct ModelPickerSheet: View {
           List {
             if isBusy {
               Section {
-                Label("Finish or stop the current turn to switch models.",
-                      systemImage: "hourglass")
+                Label("Finish or stop the current turn to switch models.", systemImage: "hourglass")
                   .font(.footnote).foregroundStyle(.secondary)
               }
             }
-            reasoningSection
-            modelSections
+            ForEach(picker.options?.orderedProviders ?? []) { provider in
+              Section(provider.name) {
+                if provider.isConfigured {
+                  configuredModels(provider)
+                } else {
+                  unconfiguredRow(provider)
+                }
+              }
+            }
           }
         }
       }
@@ -46,26 +53,22 @@ struct ModelPickerSheet: View {
   }
 
   @ViewBuilder
-  private var reasoningSection: some View {
-    // Only reasoning-capable models expose the effort control (desktop parity).
-    if picker.options?.supportsReasoning(currentModel) ?? true {
-      Section("Reasoning effort") {
+  private func configuredModels(_ provider: ModelOptions.Provider) -> some View {
+    ForEach(provider.models, id: \.self) { model in
+      selectableRow(model, selected: model == currentModel) { onSelectModel(model) }
+      // Reasoning effort drops down under the selected, reasoning-capable model.
+      if model == currentModel, picker.options?.supportsReasoning(model) ?? true {
         ForEach(ModelOptions.reasoningEfforts, id: \.self) { effort in
-          selectableRow(effort, selected: effort == currentEffort) { onSelectEffort(effort) }
+          effortRow(effort, selected: effort == currentEffort) { onSelectEffort(effort) }
         }
       }
     }
   }
 
-  @ViewBuilder
-  private var modelSections: some View {
-    ForEach(picker.options?.usableProviders ?? []) { provider in
-      Section(provider.name) {
-        ForEach(provider.models, id: \.self) { model in
-          selectableRow(model, selected: model == currentModel) { onSelectModel(model) }
-        }
-      }
-    }
+  private func unconfiguredRow(_ provider: ModelOptions.Provider) -> some View {
+    Label(provider.warning ?? "Not configured", systemImage: "lock")
+      .font(.footnote)
+      .foregroundStyle(.secondary)
   }
 
   private func selectableRow(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -79,7 +82,25 @@ struct ModelPickerSheet: View {
       }
       .contentShape(.rect)
     }
-    .buttonStyle(.plain) // primary label text, not the accent tint
+    .buttonStyle(.plain)
+    .disabled(isBusy)
+  }
+
+  /// An indented reasoning-effort option shown beneath the selected model.
+  private func effortRow(_ effort: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      HStack(spacing: 8) {
+        Image(systemName: "arrow.turn.down.right").font(.caption2).foregroundStyle(.tertiary)
+        Text(effort).font(.subheadline).foregroundStyle(isBusy ? .tertiary : .secondary)
+        Spacer()
+        if selected {
+          Image(systemName: "checkmark").font(.subheadline).foregroundStyle(Color.hermesAccent).fontWeight(.semibold)
+        }
+      }
+      .padding(.leading, 12)
+      .contentShape(.rect)
+    }
+    .buttonStyle(.plain)
     .disabled(isBusy)
   }
 }

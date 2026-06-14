@@ -28,22 +28,31 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
     public var slug: String?
     public var models: [String]
     public var authenticated: Bool?
+    /// Hint for unconfigured providers, e.g. "paste ANTHROPIC_API_KEY to activate".
+    public var warning: String?
     /// Per-model capabilities (`{model: {fast, reasoning}}`). Used to gate the reasoning
     /// control — a model that doesn't support reasoning hides the effort picker.
     public var capabilities: [String: Capability]
 
     public var id: String { slug ?? name }
 
-    enum CodingKeys: String, CodingKey { case name, slug, models, authenticated, capabilities }
+    /// Configured + usable: authenticated with at least one model. Unconfigured providers
+    /// come back authenticated=false with an empty model list and a `warning`.
+    public var isConfigured: Bool { (authenticated ?? false) && !models.isEmpty }
+
+    enum CodingKeys: String, CodingKey {
+      case name, slug, models, authenticated, warning, capabilities
+    }
 
     public init(
       name: String, slug: String? = nil, models: [String] = [],
-      authenticated: Bool? = nil, capabilities: [String: Capability] = [:]
+      authenticated: Bool? = nil, warning: String? = nil, capabilities: [String: Capability] = [:]
     ) {
       self.name = name
       self.slug = slug
       self.models = models
       self.authenticated = authenticated
+      self.warning = warning
       self.capabilities = capabilities
     }
 
@@ -53,6 +62,7 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
       slug = try c.decodeIfPresent(String.self, forKey: .slug)
       models = (try? c.decode([String].self, forKey: .models)) ?? []
       authenticated = try c.decodeIfPresent(Bool.self, forKey: .authenticated)
+      warning = try c.decodeIfPresent(String.self, forKey: .warning)
       capabilities = (try? c.decode([String: Capability].self, forKey: .capabilities)) ?? [:]
     }
   }
@@ -67,9 +77,13 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
     }
   }
 
-  /// Providers that have at least one model and are usable (authenticated, or unknown).
-  public var usableProviders: [Provider] {
-    providers.filter { !$0.models.isEmpty && ($0.authenticated ?? true) }
+  /// Providers ordered for the picker: configured (selectable) first in server order,
+  /// then unconfigured ones (shown disabled, with a configure hint). Providers that are
+  /// neither configured nor offer a hint are dropped.
+  public var orderedProviders: [Provider] {
+    let configured = providers.filter(\.isConfigured)
+    let unconfigured = providers.filter { !$0.isConfigured && ($0.warning?.isEmpty == false) }
+    return configured + unconfigured
   }
 
   /// Whether `model` supports reasoning, per the provider capabilities map. Defaults to

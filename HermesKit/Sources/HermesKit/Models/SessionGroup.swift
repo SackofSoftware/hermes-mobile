@@ -3,8 +3,8 @@ import Foundation
 /// A workspace group in the session list — sessions sharing a `cwd`. Mirrors the Hermes
 /// desktop sidebar (`workspaceGroupsFor`): group by trimmed `cwd` (empty → "No
 /// workspace"), label by the path's basename, keep groups in first-seen (recency) order,
-/// and sort rows within a group by `startedAt` descending so they don't reshuffle as
-/// messages land.
+/// and sort rows within a group by `updatedAt` (last-active) descending so the display
+/// order matches the shown timestamp.
 public struct SessionGroup: Equatable, Sendable, Identifiable {
   public let id: String      // the cwd, or "__no_workspace__"
   public let label: String   // basename of cwd, or "No workspace"
@@ -21,7 +21,7 @@ public struct SessionGroup: Equatable, Sendable, Identifiable {
 
   /// Group `sessions` by workspace. Input order is preserved as group order (the list is
   /// already recency-sorted, so an active project floats up); rows within each group are
-  /// re-sorted by `startedAt` desc (nil last).
+  /// re-sorted by `updatedAt` (last-active) desc (nil last).
   public static func grouped(_ sessions: [Session]) -> [SessionGroup] {
     var order: [String] = []
     var byID: [String: SessionGroup] = [:]
@@ -39,7 +39,7 @@ public struct SessionGroup: Equatable, Sendable, Identifiable {
     return order.map { id in
       var group = byID[id]!
       group.sessions.sort { lhs, rhs in
-        (lhs.startedAt ?? .distantPast) > (rhs.startedAt ?? .distantPast)
+        (lhs.updatedAt ?? .distantPast) > (rhs.updatedAt ?? .distantPast)
       }
       return group
     }

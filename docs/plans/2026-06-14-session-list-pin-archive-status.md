@@ -115,10 +115,10 @@ two ordering/expansion bugs found on-device:
 - Modify: `HermesKit/Sources/HermesKit/Models/SessionGroup.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionGroupTests.swift`
 
-- [ ] sort each group's `sessions` by `updatedAt` desc (nil last) instead of `startedAt`
-- [ ] update the grouping doc comment to reflect last-active ordering
-- [ ] update/extend tests: in-group order follows `updatedAt` desc; mixed nil handling
-- [ ] run tests — must pass before next task
+- [x] sort each group's `sessions` by `updatedAt` desc (nil last) instead of `startedAt`
+- [x] update the grouping doc comment to reflect last-active ordering
+- [x] update/extend tests: in-group order follows `updatedAt` desc; mixed nil handling
+- [x] run tests — must pass before next task
 
 ### Task 2: Collapse/expand toggle for groups
 

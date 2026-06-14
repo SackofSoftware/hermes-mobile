@@ -288,7 +288,13 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
 - [x] tests: chip-tap loads options; model + reasoning selection send exact `config.set`
   params (key/value/session_id); busy-state guard blocks both — **120 pass**
 - [x] recorded the picker-sheet snapshot (shared in chat)
-- [x] run tests — **120 unit + 19 snapshot pass**; app `BUILD SUCCEEDED`
+- [x] ➕ **reasoning is per-model** (review follow-up): `model.options` carries a
+  `capabilities` map (`capabilities[model].reasoning: Bool`). Decoded it +
+  `ModelOptions.supportsReasoning(_:)` (default true when unknown), and `ModelPickerSheet`
+  now hides the effort section for non-reasoning models — matches desktop
+  `caps?.reasoning ?? true`. Added `ModelOptionsTests` (decode + capability gating) + a
+  non-reasoning-model snapshot.
+- [x] run tests — **122 unit + 20 snapshot pass**; app `BUILD SUCCEEDED`
 
 ### Task 8: Verify acceptance criteria
 

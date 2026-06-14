@@ -305,6 +305,31 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .device(config: device)))
   }
 
+  func testModelPickerSheet_nonReasoningModelHidesEffort() {
+    let picker = ChatFeature.State.ModelPicker(
+      isLoading: false,
+      options: ModelOptions(
+        providers: [
+          .init(name: "Anthropic", slug: "anthropic",
+                models: ["claude-opus-4-8", "claude-haiku-4-5"], authenticated: true,
+                capabilities: [
+                  "claude-opus-4-8": .init(reasoning: true),
+                  "claude-haiku-4-5": .init(reasoning: false),
+                ]),
+        ],
+        currentModel: "claude-haiku-4-5"
+      )
+    )
+    let view = ModelPickerSheet(
+      picker: picker,
+      currentModel: "claude-haiku-4-5", // no reasoning → effort section hidden
+      currentEffort: nil,
+      isBusy: false,
+      onSelectModel: { _ in }, onSelectEffort: { _ in }, onDone: {}
+    )
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
   func testScrollToBottomButton() {
     // Over a gradient so the Liquid Glass refraction is visible (it's near-invisible on
     // flat black).

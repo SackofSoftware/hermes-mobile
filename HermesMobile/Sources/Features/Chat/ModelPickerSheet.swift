@@ -45,10 +45,14 @@ struct ModelPickerSheet: View {
     }
   }
 
+  @ViewBuilder
   private var reasoningSection: some View {
-    Section("Reasoning effort") {
-      ForEach(ModelOptions.reasoningEfforts, id: \.self) { effort in
-        selectableRow(effort, selected: effort == currentEffort) { onSelectEffort(effort) }
+    // Only reasoning-capable models expose the effort control (desktop parity).
+    if picker.options?.supportsReasoning(currentModel) ?? true {
+      Section("Reasoning effort") {
+        ForEach(ModelOptions.reasoningEfforts, id: \.self) { effort in
+          selectableRow(effort, selected: effort == currentEffort) { onSelectEffort(effort) }
+        }
       }
     }
   }

@@ -53,11 +53,19 @@ let project = Project(
           "DEVELOPMENT_TEAM": .string(developmentTeam),
           "CODE_SIGN_STYLE": "Automatic",
           "MARKETING_VERSION": "1.0",
-          "CURRENT_PROJECT_VERSION": "7",
+          "CURRENT_PROJECT_VERSION": "8",
+          // Production default (App Store / external TestFlight) — the orange "AppIcon".
+          // Debug builds override to the blue "AppIconDev" below. INTERNAL TestFlight
+          // archives the Release config but overrides the icon on the xcodebuild command
+          // line (`ASSETCATALOG_COMPILER_APPICON_NAME=AppIconDev`) — a custom configuration
+          // breaks Tuist's SwiftPM integration, so we switch the icon via a build setting.
           "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
         ],
         configurations: [
-          .debug(name: "Debug"),
+          // Local dev → blue icon, so it's visually distinct from the production app.
+          .debug(name: "Debug", settings: ["ASSETCATALOG_COMPILER_APPICON_NAME": "AppIconDev"]),
+          // App Store / external TestFlight → orange (base). Internal TF reuses this config
+          // with the icon overridden on the command line (see Makefile / README).
           .release(name: "Release"),
         ]
       )

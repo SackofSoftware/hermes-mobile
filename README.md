@@ -169,6 +169,22 @@ asc --profile hermes builds upload --app <app id> --ipa build/testflight/export/
 The provisioning profile must be installed locally first
 (`asc --profile hermes profiles download --id <profile id>`). `build/` is gitignored.
 
+### App icon per build (internal vs production)
+
+Two icons distinguish builds on-device: the orange **`AppIcon`** for production (App Store /
+external TestFlight) and the blue blueprint **`AppIconDev`** for dev/internal builds. Debug
+builds use `AppIconDev` automatically (set per-configuration in `Project.swift`). For an
+**internal TestFlight** build, archive the Release config but override the icon on the command
+line — append to the archive command above:
+
+```sh
+  ASSETCATALOG_COMPILER_APPICON_NAME=AppIconDev   # blue icon for internal builds
+```
+
+(A custom Xcode configuration would break Tuist's SwiftPM integration, so the icon is
+switched via this build setting rather than a separate config.) Omit the override for
+App Store / external builds to keep the orange icon.
+
 ## Verifying the protocol (M0 probe)
 
 To sanity-check connectivity and event shapes against your server:

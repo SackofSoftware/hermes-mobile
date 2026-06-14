@@ -13,7 +13,7 @@ struct ConnectionFeatureTests {
   @Test func reachableThenValidTokenConnectsAndStoresToken() async {
     let keychain = KeychainClient.inMemory()
     let preferences = PreferencesClient.inMemory()
-    let store = TestStore(initialState: ConnectionFeature.State()) {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "mac.tailnet:9119")) {
       ConnectionFeature()
     } withDependencies: {
       $0.hermesREST.status = { @Sendable _ in okStatus() }
@@ -22,10 +22,9 @@ struct ConnectionFeatureTests {
       $0.preferences = preferences
     }
 
-    await store.send(\.binding.serverURL, "mac.tailnet:9119") {
-      $0.serverURL = "mac.tailnet:9119"
-    }
-    await store.send(.checkServerTapped) { $0.status = .checking }
+    // Submit/focus-loss checks immediately, pre-empting the typing debounce.
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .checking }
     await store.receive(\.serverStatusResponse.success) {
       $0.status = .reachable(version: "0.16.0")
     }
@@ -46,7 +45,8 @@ struct ConnectionFeatureTests {
       $0.hermesREST.status = { @Sendable _ in throw RESTError.unreachable }
     }
 
-    await store.send(.checkServerTapped) { $0.status = .checking }
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .checking }
     await store.receive(\.serverStatusResponse.failure) { $0.status = .unreachable }
   }
 
@@ -57,7 +57,8 @@ struct ConnectionFeatureTests {
       $0.hermesREST.status = { @Sendable _ in throw RESTError.decoding }
     }
 
-    await store.send(.checkServerTapped) { $0.status = .checking }
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .checking }
     await store.receive(\.serverStatusResponse.failure) { $0.status = .notHermes }
   }
 
@@ -83,20 +84,51 @@ struct ConnectionFeatureTests {
   }
 
   @Test func emptyURLIsInvalid() async {
-    let store = TestStore(initialState: ConnectionFeature.State()) {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "   ")) {
       ConnectionFeature()
     }
-    await store.send(.checkServerTapped) { $0.status = .invalidURL }
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .invalidURL }
   }
 
-  @Test func editingURLResetsStatusToIdle() async {
+  // MARK: Auto-validation (Task 2 — no Check button)
+
+  @Test func editingURLResetsToIdleThenDebouncesAutoCheck() async {
+    let clock = TestClock()
     let store = TestStore(
-      initialState: ConnectionFeature.State(serverURL: "http://a.local", status: .reachable(version: "0.16.0"))
+      initialState: ConnectionFeature.State(status: .reachable(version: "0.16.0"))
     ) {
       ConnectionFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.hermesREST.status = { @Sendable _ in okStatus() }
     }
-    await store.send(\.binding.serverURL, "http://b.local") {
-      $0.serverURL = "http://b.local"
+
+    // Typing resets to idle immediately…
+    await store.send(\.binding.serverURL, "mac.tailnet:9119") {
+      $0.serverURL = "mac.tailnet:9119"
+      $0.status = .idle
+    }
+    // …then auto-checks once typing pauses (debounced).
+    await clock.advance(by: .milliseconds(600))
+    await store.receive(\.checkServer) { $0.status = .checking }
+    await store.receive(\.serverStatusResponse.success) {
+      $0.status = .reachable(version: "0.16.0")
+    }
+  }
+
+  @Test func clearingURLCancelsCheckAndStaysIdle() async {
+    let clock = TestClock()
+    let store = TestStore(
+      initialState: ConnectionFeature.State(serverURL: "x", status: .reachable(version: "0.16.0"))
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+    }
+    // Emptying the field cancels any pending debounced check; no request fires.
+    await store.send(\.binding.serverURL, "") {
+      $0.serverURL = ""
       $0.status = .idle
     }
   }

@@ -163,24 +163,24 @@ equality/isolation subtleties. Token stays in `KeychainClient`.
   round-trip (in-memory + live)
 - [x] run tests — **106 pass**; app `BUILD SUCCEEDED`
 
-### Task 2: Auto-validating connection screen (remove Check button)
+### Task 2: Auto-validating connection screen (remove Check button) ✅
 
 **Files:**
-- Modify: `HermesKit/Sources/HermesKit/Features/ConnectionFeature.swift`
-- Modify: `HermesMobile/Sources/Features/ConnectionView.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/ConnectionFeatureTests.swift`
-- Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
+- Modify: `ConnectionFeature.swift`, `ConnectionView.swift`, `ConnectionFeatureTests.swift`
+- Re-recorded: 3 `testConnectionView_*` snapshots
 
-- [ ] debounce URL edits (≈600ms via `clock.sleep` + `.cancellable(id:cancelInFlight:)`)
-  to auto-run the `/api/status` reachability check; also trigger on submit/focus-loss
-- [ ] remove `checkServerTapped` from the UI (keep the staged `Status`); auto-advance to
-  token validation when reachable + token present, or keep a single "Connect" button
-- [ ] `ConnectionView`: drop the Check button; show inline reachability status as the user
-  types; keep secure token field
-- [ ] update reducer tests: typing URL → debounced check; paste/submit triggers; invalid
-  URL/unreachable/not-Hermes still surface; remove check-button-specific assertions
-- [ ] re-record the `ConnectionView` snapshots for the new single-action layout
-- [ ] run tests — must pass before next task
+- [x] debounce URL edits (600ms via `clock.sleep` + `.cancellable(cancelInFlight:)`) → auto
+  `/api/status` check; `.serverFieldCommitted` (submit/focus-loss) checks immediately,
+  pre-empting the debounce; emptying the field cancels the pending check
+- [x] removed `checkServerTapped`; new internal `checkServer` + `serverFieldCommitted`
+  actions; the status request is `.cancellable(cancelInFlight:)`; kept the single
+  "Connect" button (gated on reachable + token)
+- [x] `ConnectionView`: dropped the Check button; `.onSubmit` + `@FocusState` focus-loss
+  drive validation; inline status footer unchanged; removed unused `canCheck`
+- [x] tests: happy path via `serverFieldCommitted`; unreachable/not-Hermes/empty-URL;
+  debounced auto-check + reset-to-idle (TestClock); clearing-URL cancels the check
+- [x] re-recorded the 3 `ConnectionView` snapshots (no Check button)
+- [x] run tests — **107 pass**; app `BUILD SUCCEEDED`
 
 ### Task 3: Group sessions by workspace (desktop parity)
 

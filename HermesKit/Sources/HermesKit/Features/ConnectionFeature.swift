@@ -32,10 +32,6 @@ public struct ConnectionFeature {
       case failed(String)
     }
 
-    public var canCheck: Bool {
-      !serverURL.trimmingCharacters(in: .whitespaces).isEmpty && status != .checking && status != .validating
-    }
-
     public var canConnect: Bool {
       guard !token.isEmpty, status != .validating else { return false }
       switch status {
@@ -47,7 +43,10 @@ public struct ConnectionFeature {
 
   public enum Action: BindableAction {
     case binding(BindingAction<State>)
-    case checkServerTapped
+    /// Reachability check (debounced after typing, or fired on submit/focus-loss).
+    case checkServer
+    /// The URL field was submitted or lost focus — check immediately.
+    case serverFieldCommitted
     case connectTapped
     case serverStatusResponse(Result<ServerStatus, RESTError>)
     case tokenValidationResponse(Result<ServerConnection, RESTError>)
@@ -59,9 +58,12 @@ public struct ConnectionFeature {
     }
   }
 
+  private enum CancelID { case urlDebounce, statusCheck }
+
   @Dependency(\.hermesREST) var rest
   @Dependency(\.keychain) var keychain
   @Dependency(\.preferences) var preferences
+  @Dependency(\.continuousClock) var clock
 
   public init() {}
 
@@ -71,12 +73,24 @@ public struct ConnectionFeature {
       switch action {
       case .binding(\.serverURL):
         state.status = .idle // a new URL invalidates any prior reachability result
-        return .none
+        guard !state.serverURL.trimmingCharacters(in: .whitespaces).isEmpty else {
+          return .cancel(id: CancelID.urlDebounce)
+        }
+        // Auto-check after the user stops typing (covers paste too).
+        return .run { [clock] send in
+          try await clock.sleep(for: .milliseconds(600))
+          await send(.checkServer)
+        }
+        .cancellable(id: CancelID.urlDebounce, cancelInFlight: true)
 
       case .binding:
         return .none
 
-      case .checkServerTapped:
+      case .serverFieldCommitted:
+        // Submit / focus-loss → check now, pre-empting the debounce.
+        return .merge(.cancel(id: CancelID.urlDebounce), .send(.checkServer))
+
+      case .checkServer:
         guard let url = parseServerURL(state.serverURL) else {
           state.status = .invalidURL
           return .none
@@ -92,6 +106,7 @@ public struct ConnectionFeature {
             await send(.serverStatusResponse(.failure(.unreachable)))
           }
         }
+        .cancellable(id: CancelID.statusCheck, cancelInFlight: true)
 
       case let .serverStatusResponse(.success(status)):
         state.status = .reachable(version: status.version)

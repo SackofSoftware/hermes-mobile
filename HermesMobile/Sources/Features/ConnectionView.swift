@@ -2,9 +2,10 @@ import ComposableArchitecture
 import HermesKit
 import SwiftUI
 
-/// Onboarding screen: enter a server URL, check reachability, paste a token, connect.
+/// Onboarding screen: type a server URL (validated automatically), paste a token, connect.
 struct ConnectionView: View {
   @Bindable var store: StoreOf<ConnectionFeature>
+  @FocusState private var urlFocused: Bool
 
   var body: some View {
     Form {
@@ -13,8 +14,12 @@ struct ConnectionView: View {
           .keyboardType(.URL)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-        Button("Check connection") { store.send(.checkServerTapped) }
-          .disabled(!store.canCheck)
+          .focused($urlFocused)
+          .submitLabel(.go)
+          .onSubmit { store.send(.serverFieldCommitted) }
+          .onChange(of: urlFocused) { _, focused in
+            if !focused { store.send(.serverFieldCommitted) } // check on focus-loss
+          }
       } header: {
         Text("Server")
       } footer: {

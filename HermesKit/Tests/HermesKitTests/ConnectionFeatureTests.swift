@@ -12,12 +12,14 @@ private func okStatus() -> ServerStatus {
 struct ConnectionFeatureTests {
   @Test func reachableThenValidTokenConnectsAndStoresToken() async {
     let keychain = KeychainClient.inMemory()
+    let preferences = PreferencesClient.inMemory()
     let store = TestStore(initialState: ConnectionFeature.State()) {
       ConnectionFeature()
     } withDependencies: {
       $0.hermesREST.status = { @Sendable _ in okStatus() }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.keychain = keychain
+      $0.preferences = preferences
     }
 
     await store.send(\.binding.serverURL, "mac.tailnet:9119") {
@@ -34,6 +36,7 @@ struct ConnectionFeatureTests {
     await store.receive(\.delegate.connected)
 
     #expect(keychain.loadToken() == "secret")
+    #expect(preferences.loadServerURL() == "http://mac.tailnet:9119")
   }
 
   @Test func unreachableServer() async {

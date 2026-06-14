@@ -8,6 +8,51 @@ import Testing
 struct AppFeatureTests {
   private let connection = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "tok")
 
+  // MARK: Launch auto-connect (Task 1)
+
+  @Test func autoLoginWithStoredCredsOpensSessionList() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadToken = { "tok" }
+      $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+    }
+
+    await store.send(.task) { $0.autoConnecting = true }
+    await store.receive(\.autoConnectSucceeded) {
+      $0.autoConnecting = false
+      $0.home = SessionListFeature.State(connection: self.connection)
+    }
+  }
+
+  @Test func autoLoginWithInvalidTokenFallsBackToPrefilledOnboarding() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadToken = { "bad" }
+      $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+    }
+
+    await store.send(.task) { $0.autoConnecting = true }
+    await store.receive(\.autoConnectFailed) {
+      $0.autoConnecting = false
+      $0.onboarding = ConnectionFeature.State(serverURL: "http://mac.tailnet:9119", token: "bad")
+    }
+  }
+
+  @Test func launchWithoutStoredCredsStaysOnOnboarding() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadToken = { nil }
+      $0.preferences.loadServerURL = { nil }
+    }
+    // No creds → no state change, no auto-connect effect.
+    await store.send(.task)
+  }
+
   @Test func connectingShowsSessionList() async {
     let store = TestStore(initialState: AppFeature.State()) { AppFeature() }
 

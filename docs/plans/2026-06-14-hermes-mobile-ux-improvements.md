@@ -136,26 +136,32 @@ shipped the full loop but with several rough UX edges. This plan fixes them:
 
 ## Implementation Steps
 
-### Task 1: Persist server URL + auto-login on launch
+### Task 1: Persist server URL + auto-login on launch ✅
+
+**Deviation:** used a `PreferencesClient` (UserDefaults-backed `@DependencyClient`) for the
+server URL instead of `@Shared(.appStorage)` — consistent with the codebase's all-clients
+architecture and trivial to stub in tests (`.inMemory()`), avoiding `@Shared`-in-two-States
+equality/isolation subtleties. Token stays in `KeychainClient`.
 
 **Files:**
-- Modify: `HermesKit/Sources/HermesKit/Features/ConnectionFeature.swift` (persist URL on connect)
-- Modify: `HermesKit/Sources/HermesKit/AppFeature.swift` (launch auto-connect + reset clears URL)
-- Modify: `HermesKit/Sources/HermesKit/Features/SettingsFeature.swift` (clear stored URL on disconnect)
-- Modify: `HermesMobile/Sources/AppView.swift` (drive launch `.task`)
-- Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
+- Create: `HermesKit/Sources/HermesKit/Clients/PreferencesClient.swift`
+- Modify: `ConnectionFeature.swift` (persist URL on connect), `AppFeature.swift` (launch
+  auto-connect), `SettingsFeature.swift` (clear URL on disconnect), `AppView.swift`
+- Create: `HermesKit/Tests/HermesKitTests/PreferencesClientTests.swift`; Modify:
+  `AppFeatureTests.swift`, `ConnectionFeatureTests.swift`, `SettingsFeatureTests.swift`
 
-- [ ] add a persisted server URL via `@Shared(.appStorage("server-url"))`; write it when
-  `ConnectionFeature` validates a token (next to the Keychain save)
-- [ ] add `AppFeature.Action.task` (launch): read Keychain token + stored URL; if both
-  present, silently validate (`rest.sessions(limit:1)`) → on success set `home`, else
-  show onboarding prefilled
-- [ ] add an `autoConnecting` state so `AppView` can show a brief launch placeholder
-  instead of flashing the onboarding screen
-- [ ] on `.home(.delegate(.disconnect))` and Settings clear, also clear the stored URL
-- [ ] write tests: stored token+URL → auto-opens session list; missing/invalid token →
-  onboarding (prefilled); disconnect clears URL + token
-- [ ] run tests — must pass before next task
+- [x] `PreferencesClient` persists the server URL; `ConnectionFeature` writes it next to
+  the Keychain token save on successful validation
+- [x] `AppFeature.task` (launch): reads token + URL; silently validates via
+  `rest.sessions(1,…)` → success sets `home`, failure → `autoConnectFailed` (onboarding
+  prefilled with URL+token)
+- [x] `autoConnecting` state; `AppView` shows a `ProgressView("Connecting…")` placeholder
+  instead of flashing onboarding
+- [x] Settings "Clear token & disconnect" clears the stored URL too
+- [x] tests: stored creds → opens list; invalid token → prefilled onboarding; no creds →
+  stays on onboarding; URL persisted on connect; URL cleared on logout; PreferencesClient
+  round-trip (in-memory + live)
+- [x] run tests — **106 pass**; app `BUILD SUCCEEDED`
 
 ### Task 2: Auto-validating connection screen (remove Check button)
 

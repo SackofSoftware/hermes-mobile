@@ -52,6 +52,7 @@ public struct SettingsFeature {
   private enum CancelID { case logStream }
 
   @Dependency(\.keychain) var keychain
+  @Dependency(\.preferences) var preferences
   @Dependency(\.debugLog) var debugLog
   @Dependency(\.dismiss) var dismiss
 
@@ -90,6 +91,7 @@ public struct SettingsFeature {
 
       case .clearTokenTapped:
         try? keychain.deleteToken()
+        preferences.clearServerURL()
         return .merge(
           .send(.delegate(.disconnect)),
           .run { [dismiss] _ in await dismiss() }

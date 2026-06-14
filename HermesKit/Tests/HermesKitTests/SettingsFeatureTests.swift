@@ -10,16 +10,20 @@ struct SettingsFeatureTests {
 
   @Test func clearTokenDeletesAndEmitsDisconnect() async {
     let deleted = LockIsolated(false)
+    let preferences = PreferencesClient.inMemory()
+    preferences.saveServerURL("http://mac.tailnet:9119")
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
       $0.keychain.deleteToken = { @Sendable in deleted.setValue(true) }
+      $0.preferences = preferences
       $0.dismiss = DismissEffect {}
     }
 
     await store.send(.clearTokenTapped)
     await store.receive(\.delegate.disconnect)
     #expect(deleted.value)
+    #expect(preferences.loadServerURL() == nil) // logout forgets the server URL too
   }
 
   @Test func reconnectEmitsReconnectDelegate() async {

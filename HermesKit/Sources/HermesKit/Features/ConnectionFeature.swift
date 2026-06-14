@@ -61,6 +61,7 @@ public struct ConnectionFeature {
 
   @Dependency(\.hermesREST) var rest
   @Dependency(\.keychain) var keychain
+  @Dependency(\.preferences) var preferences
 
   public init() {}
 
@@ -111,7 +112,7 @@ public struct ConnectionFeature {
         }
         let connection = ServerConnection(baseURL: url, token: state.token)
         state.status = .validating
-        return .run { [rest, keychain] send in
+        return .run { [rest, keychain, preferences] send in
           do {
             _ = try await rest.sessions(connection, 1, 0, .recent)
           } catch let error as RESTError {
@@ -121,8 +122,10 @@ public struct ConnectionFeature {
             await send(.tokenValidationResponse(.failure(.unreachable)))
             return
           }
-          // Validated: persist the token, then signal the parent.
+          // Validated: persist the token + server URL (for launch auto-connect),
+          // then signal the parent.
           try? keychain.saveToken(connection.token ?? "")
+          preferences.saveServerURL(connection.baseURL.absoluteString)
           await send(.tokenValidationResponse(.success(connection)))
         }
 

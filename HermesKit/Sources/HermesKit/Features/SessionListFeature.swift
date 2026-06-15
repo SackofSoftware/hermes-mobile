@@ -29,6 +29,10 @@ public struct SessionListFeature {
     /// land after the id is cleared; future authoritative fetches exclude archived sessions
     /// server-side (`archived=exclude`), so no permanent filter is needed.
     public var archivingIDs: Set<String>
+    /// Session currently being renamed (drives the rename alert's presentation); nil = no alert.
+    public var renamingID: Session.ID?
+    /// The editable title text bound to the rename alert's `TextField`.
+    public var renameDraft: String
     @Presents public var settings: SettingsFeature.State?
     @Presents public var confirmationDialog: ConfirmationDialogState<Action.Dialog>?
 
@@ -46,6 +50,8 @@ public struct SessionListFeature {
       pinnedIDs: [String] = [],
       expandedGroups: Set<String> = [],
       archivingIDs: Set<String> = [],
+      renamingID: Session.ID? = nil,
+      renameDraft: String = "",
       settings: SettingsFeature.State? = nil
     ) {
       self.connection = connection
@@ -58,6 +64,8 @@ public struct SessionListFeature {
       self.pinnedIDs = pinnedIDs
       self.expandedGroups = expandedGroups
       self.archivingIDs = archivingIDs
+      self.renamingID = renamingID
+      self.renameDraft = renameDraft
       self.settings = settings
     }
 
@@ -122,6 +130,16 @@ public struct SessionListFeature {
     /// pin at `pinIndex` (nil if it wasn't pinned) and the prior `seenCount`, persist, and
     /// surface the error. Local restore guarantees the row is present regardless of network.
     case archiveFailed(id: Session.ID, session: Session, index: Int, pinIndex: Int?, seenCount: Int?)
+    /// Open the rename alert for a row: seeds `renameDraft` with the row's current title.
+    case renameButtonTapped(id: Session.ID)
+    /// Commit the rename: optimistically update the row's title and fire the REST PATCH.
+    case confirmRename
+    /// Rename PATCH succeeded — the optimistic value stands.
+    case renameSucceeded(id: Session.ID)
+    /// Rename PATCH failed — restore `previousTitle` and surface the error.
+    case renameFailed(id: Session.ID, previousTitle: String?)
+    /// Dismiss the rename alert without applying changes.
+    case cancelRename
     case confirmationDialog(PresentationAction<Dialog>)
     case settingsButtonTapped
     case settings(PresentationAction<SettingsFeature.Action>)
@@ -189,8 +207,9 @@ public struct SessionListFeature {
         // A plain reload — does NOT (re)start the poll loop.
         return load(&state)
 
-      case .binding:
-        // searchQuery is the only bound field; debounce so each keystroke doesn't fire.
+      case .binding(\.searchQuery):
+        // Only the searchQuery binding drives the debounced fetch; other bound fields
+        // (renameDraft) must NOT trigger a search.
         return .run { [rest, connection = state.connection, query = state.searchQuery, clock] send in
           try await clock.sleep(for: .milliseconds(300))
           await send(fetchSessions(rest: rest, connection: connection, query: query))
@@ -198,6 +217,10 @@ public struct SessionListFeature {
         // Shared `fetch` id: cancels any in-flight list load so a late list response can't
         // overwrite these search results.
         .cancellable(id: CancelID.fetch, cancelInFlight: true)
+
+      case .binding:
+        // Other bindings (e.g. renameDraft) are pure state edits — no side effects.
+        return .none
 
       case let .sessionsResponse(.success(sessions)):
         state.isLoading = false
@@ -325,6 +348,50 @@ public struct SessionListFeature {
         state.loadError = "Couldn’t archive the session."
         preferences.savePinnedIDs(state.pinnedIDs)
         preferences.saveSeenCounts(state.seenCounts)
+        return .none
+
+      case let .renameButtonTapped(id):
+        guard let session = state.sessions[id: id] else { return .none }
+        state.renamingID = id
+        state.renameDraft = session.title ?? ""
+        return .none
+
+      case .confirmRename:
+        guard let id = state.renamingID, let session = state.sessions[id: id] else {
+          state.renamingID = nil
+          state.renameDraft = ""
+          return .none
+        }
+        // Capture the previous title for rollback, then optimistically apply the trimmed draft
+        // (an empty draft clears the title, mirroring the server's null/empty behaviour).
+        let previousTitle = session.title
+        let trimmed = state.renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        state.sessions[id: id]?.title = trimmed.isEmpty ? nil : trimmed
+        state.renamingID = nil
+        state.renameDraft = ""
+        return .run { [rest, connection = state.connection] send in
+          do {
+            try await rest.rename(connection, id, trimmed)
+            await send(.renameSucceeded(id: id))
+          } catch {
+            await send(.renameFailed(id: id, previousTitle: previousTitle))
+          }
+        }
+
+      case .renameSucceeded:
+        // The optimistic title stands; nothing to do.
+        return .none
+
+      case let .renameFailed(id, previousTitle):
+        // The rename didn't take (e.g. a 400 for an over-long/duplicate title) — restore the
+        // previous title locally and surface the error.
+        state.sessions[id: id]?.title = previousTitle
+        state.loadError = "Couldn’t rename the session."
+        return .none
+
+      case .cancelRename:
+        state.renamingID = nil
+        state.renameDraft = ""
         return .none
 
       case .newSessionButtonTapped:

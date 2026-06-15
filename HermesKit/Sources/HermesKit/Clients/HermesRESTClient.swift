@@ -65,6 +65,9 @@ public struct HermesRESTClient: Sendable {
   public var messages: @Sendable (_ connection: ServerConnection, _ sessionID: String) async throws -> [SessionMessage]
   /// Soft-hide (archive) or restore a session — `PATCH /api/sessions/{id}` `{"archived":…}`.
   public var archive: @Sendable (_ connection: ServerConnection, _ id: String, _ archived: Bool) async throws -> Void
+  /// Rename a session — `PATCH /api/sessions/{id}` `{"title":…}`. An empty title clears it.
+  /// The server may reject with 400 (too long / invalid chars / duplicate).
+  public var rename: @Sendable (_ connection: ServerConnection, _ id: String, _ title: String) async throws -> Void
 }
 
 public extension HermesRESTClient {
@@ -99,6 +102,13 @@ public extension HermesRESTClient {
         // the `messages` endpoint) — pre-encoding here would double-encode reserved chars.
         let url = try makeURL(conn.baseURL, "/api/sessions/\(id)")
         let body = try JSONSerialization.data(withJSONObject: ["archived": archived])
+        try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
+      },
+      rename: { conn, id, title in
+        // Same endpoint/shape as `archive`: interpolate the RAW id (`makeURL` percent-encodes
+        // the path), send `{"title": …}` — an empty string clears the title server-side.
+        let url = try makeURL(conn.baseURL, "/api/sessions/\(id)")
+        let body = try JSONSerialization.data(withJSONObject: ["title": title])
         try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
       }
     )

@@ -631,6 +631,91 @@ struct SessionListFeatureTests {
     #expect(store.state.sessions.map(\.id) == ["a", "b"])
   }
 
+  // MARK: Rename (optimistic + rollback, mirroring archive)
+
+  @Test func renameOptimisticallyUpdatesTitleAndCallsRPC() async {
+    let renamed = LockIsolated<[(String, String)]>([])
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "a", title: "Old"), Session(id: "b")]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.hermesREST.rename = { @Sendable _, id, title in
+        renamed.withValue { $0.append((id, title)) }
+      }
+    }
+
+    // Tapping rename seeds the draft with the row's current title and opens the alert.
+    await store.send(.renameButtonTapped(id: "a")) {
+      $0.renamingID = "a"
+      $0.renameDraft = "Old"
+    }
+
+    // Edit the draft (pure binding, no side effect).
+    await store.send(\.binding.renameDraft, "New name") {
+      $0.renameDraft = "New name"
+    }
+
+    // Confirm optimistically updates the title, clears the alert, and fires the RPC.
+    await store.send(.confirmRename) {
+      $0.sessions[id: "a"]?.title = "New name"
+      $0.renamingID = nil
+      $0.renameDraft = ""
+    }
+    await store.receive(\.renameSucceeded)
+    #expect(renamed.value.count == 1)
+    #expect(renamed.value.first?.0 == "a")
+    #expect(renamed.value.first?.1 == "New name")
+  }
+
+  @Test func renameFailureRestoresPreviousTitleAndSetsError() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "a", title: "Keep me")],
+        renamingID: "a",
+        renameDraft: "Too long"
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.hermesREST.rename = { @Sendable _, _, _ in throw RESTError.server(status: 400) }
+    }
+
+    // Optimistic update, then the RPC throws → renameFailed restores the previous title.
+    await store.send(.confirmRename) {
+      $0.sessions[id: "a"]?.title = "Too long"
+      $0.renamingID = nil
+      $0.renameDraft = ""
+    }
+    await store.receive(\.renameFailed) {
+      $0.sessions[id: "a"]?.title = "Keep me"
+      $0.loadError = "Couldn’t rename the session."
+    }
+  }
+
+  @Test func cancelRenameDismissesAlertWithoutChange() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "a", title: "Old")],
+        renamingID: "a",
+        renameDraft: "Edited"
+      )
+    ) {
+      SessionListFeature()
+    }
+
+    await store.send(.cancelRename) {
+      $0.renamingID = nil
+      $0.renameDraft = ""
+    }
+    #expect(store.state.sessions[id: "a"]?.title == "Old")
+  }
+
   @Test func newSessionButtonEmitsCreateDelegate() async {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()

@@ -135,23 +135,23 @@ proven by archive.
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift` (swipe/context menu + alert)
 
-- [ ] Add `rename: @Sendable (_ connection:, _ id:, _ title: String) async throws -> Void`
+- [x] Add `rename: @Sendable (_ connection:, _ id:, _ title: String) async throws -> Void`
   to `HermesRESTClient`; `live` does `PATCH /api/sessions/{id}` with `{"title": title}`
   (reuse the raw-id interpolation + `send` helper used by `archive`).
-- [ ] Add rename state to `SessionListFeature.State` (e.g. `renamingID: Session.ID?` +
+- [x] Add rename state to `SessionListFeature.State` (e.g. `renamingID: Session.ID?` +
   bound `renameDraft: String`) and actions: `renameButtonTapped(id)`,
   `renameDraftChanged`/binding, `confirmRename`, `renameSucceeded(id)`,
   `renameFailed(id, previousTitle:)`.
-- [ ] `confirmRename`: optimistically set the row's `title` to the trimmed draft, clear
+- [x] `confirmRename`: optimistically set the row's `title` to the trimmed draft, clear
   the alert, fire `rest.rename`; on failure restore `previousTitle` and set `loadError`
   (server may 400 on invalid/duplicate). Empty draft clears the title (allowed).
-- [ ] Wire the view: a "Rename" entry in both `.swipeActions` and the row `.contextMenu`,
+- [x] Wire the view: a "Rename" entry in both `.swipeActions` and the row `.contextMenu`,
   presenting an `.alert` with a `TextField` bound to `renameDraft` + Save/Cancel.
-- [ ] Write `HermesRESTClient` test: `rename` issues a `PATCH` with the correct path +
+- [x] Write `HermesRESTClient` test: `rename` issues a `PATCH` with the correct path +
   JSON body (URLProtocol mock); maps 400 → `RESTError.server`.
-- [ ] Write `SessionListFeature` tests: rename success (optimistic title update + RPC)
+- [x] Write `SessionListFeature` tests: rename success (optimistic title update + RPC)
   and failure (rollback to previous title + error surfaced).
-- [ ] Run `make test` — must pass before next task.
+- [x] Run `make test` — must pass before next task.
 
 ### Task 4: Rename from the chat screen via gateway `session.title` (#2)
 

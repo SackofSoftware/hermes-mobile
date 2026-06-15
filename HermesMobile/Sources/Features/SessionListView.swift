@@ -55,6 +55,17 @@ struct SessionListView: View {
     }
     .task { store.send(.task) }
     .onDisappear { store.send(.onDisappear) }
+    .alert(
+      "Rename session",
+      isPresented: Binding(
+        get: { store.renamingID != nil },
+        set: { presented in if !presented { store.send(.cancelRename) } }
+      )
+    ) {
+      TextField("Title", text: $store.renameDraft)
+      Button("Save") { store.send(.confirmRename) }
+      Button("Cancel", role: .cancel) { store.send(.cancelRename) }
+    }
     .confirmationDialog($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .sheet(item: $store.scope(state: \.settings, action: \.settings)) { settingsStore in
       NavigationStack {
@@ -107,9 +118,16 @@ struct SessionListView: View {
       Button("Archive", systemImage: "archivebox", role: .destructive) {
         store.send(.archiveButtonTapped(id: session.id))
       }
+      Button("Rename", systemImage: "pencil") {
+        store.send(.renameButtonTapped(id: session.id))
+      }
+      .tint(.blue)
     }
     .contextMenu {
       pinButton(session, isPinned: isPinned)
+      Button("Rename", systemImage: "pencil") {
+        store.send(.renameButtonTapped(id: session.id))
+      }
       Button("Archive", systemImage: "archivebox", role: .destructive) {
         store.send(.archiveButtonTapped(id: session.id))
       }

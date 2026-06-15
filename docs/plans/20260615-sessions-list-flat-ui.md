@@ -104,12 +104,12 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 - Create: `HermesKit/Tests/HermesKitTests/ArchivedSessionsFeatureTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] Create `@Reducer ArchivedSessionsFeature`: `State { connection, sessions: IdentifiedArrayOf<Session>, isLoading, loadError, now, restoringIDs: Set<String> }`; actions `task`, `archivedResponse(Result<[Session], RESTError>)`, `restoreButtonTapped(id)`, `restoreSucceeded(id)`, `restoreFailed(id, session, index)`, `sessionTapped(id)`, `delegate(Delegate { openSession(Session) })`.
-- [ ] `task` → `rest.archivedSessions`; `restoreButtonTapped` → optimistically remove the row + `restoringIDs` guard, call `rest.archive(conn, id, false)`, on failure re-insert at saved index + surface error; `sessionTapped` → `.delegate(.openSession(session))`.
-- [ ] In `SessionListFeature`: add `@Presents var archived: ArchivedSessionsFeature.State?`, action `archivedButtonTapped` → present (seed connection + `now`); handle `archived(.presented(.delegate(.openSession(s))))` → dismiss the sheet and forward `.delegate(.openSession(s))` (so the main stack opens chat); add `.ifLet(\.$archived, action: \.archived) { ArchivedSessionsFeature() }`.
-- [ ] Write `ArchivedSessionsFeature` tests: load success/failure; restore optimistic-remove + rollback-on-failure; `sessionTapped` emits the delegate.
-- [ ] Write `SessionListFeature` tests: `archivedButtonTapped` presents; the archived `openSession` delegate dismisses + re-emits `openSession`.
-- [ ] Run `make test` — must pass before next task.
+- [x] Create `@Reducer ArchivedSessionsFeature`: `State { connection, sessions: IdentifiedArrayOf<Session>, isLoading, loadError, now, restoringIDs: Set<String> }`; actions `task`, `archivedResponse(Result<[Session], RESTError>)`, `restoreButtonTapped(id)`, `restoreSucceeded(id)`, `restoreFailed(id, session, index)`, `sessionTapped(id)`, `delegate(Delegate { openSession(Session) })`.
+- [x] `task` → `rest.archivedSessions`; `restoreButtonTapped` → optimistically remove the row + `restoringIDs` guard, call `rest.archive(conn, id, false)`, on failure re-insert at saved index + surface error; `sessionTapped` → `.delegate(.openSession(session))`.
+- [x] In `SessionListFeature`: add `@Presents var archived: ArchivedSessionsFeature.State?`, action `archivedButtonTapped` → present (seed connection + `now`); handle `archived(.presented(.delegate(.openSession(s))))` → dismiss the sheet and forward `.delegate(.openSession(s))` (so the main stack opens chat); add `.ifLet(\.$archived, action: \.archived) { ArchivedSessionsFeature() }`.
+- [x] Write `ArchivedSessionsFeature` tests: load success/failure; restore optimistic-remove + rollback-on-failure; `sessionTapped` emits the delegate.
+- [x] Write `SessionListFeature` tests: `archivedButtonTapped` presents; the archived `openSession` delegate dismisses + re-emits `openSession`.
+- [x] Run `make test` — must pass before next task. (178 tests green.)
 
 ### Task 5: Flatten `SessionListView` + render both grouping modes
 

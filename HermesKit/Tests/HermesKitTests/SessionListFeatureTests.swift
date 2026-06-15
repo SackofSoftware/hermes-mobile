@@ -888,4 +888,31 @@ struct SessionListFeatureTests {
 
     #expect(state.chronologicalSessions.map(\.id) == ["c", "a"]) // recency desc, pinned dropped
   }
+
+  // MARK: - Archived sheet
+
+  @Test func archivedButtonPresentsTheSheet() async {
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    }
+
+    await store.send(.archivedButtonTapped) {
+      $0.archived = ArchivedSessionsFeature.State(
+        connection: self.connection,
+        now: Date(timeIntervalSince1970: 0) // the list's default `now`
+      )
+    }
+  }
+
+  @Test func openingFromArchivedDismissesSheetAndForwardsOpen() async {
+    let session = Session(id: "a", title: "Old")
+    var initial = SessionListFeature.State(connection: connection)
+    initial.archived = ArchivedSessionsFeature.State(connection: connection, sessions: [session])
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.archived(.presented(.delegate(.openSession(session))))) {
+      $0.archived = nil // sheet dismissed
+    }
+    await store.receive(\.delegate.openSession) // forwarded to the main stack
+  }
 }

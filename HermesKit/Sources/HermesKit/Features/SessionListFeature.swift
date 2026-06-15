@@ -40,6 +40,7 @@ public struct SessionListFeature {
     /// How the list groups its rows (workspace vs chronological); persisted, loaded on `task`.
     public var groupingMode: SessionGroupingMode
     @Presents public var settings: SettingsFeature.State?
+    @Presents public var archived: ArchivedSessionsFeature.State?
     @Presents public var confirmationDialog: ConfirmationDialogState<Action.Dialog>?
 
     /// Collapsed groups show at most this many rows before a "Show more".
@@ -161,6 +162,9 @@ public struct SessionListFeature {
     case confirmationDialog(PresentationAction<Dialog>)
     case settingsButtonTapped
     case settings(PresentationAction<SettingsFeature.Action>)
+    /// Open the Archived sessions sheet (from the top-trailing menu).
+    case archivedButtonTapped
+    case archived(PresentationAction<ArchivedSessionsFeature.Action>)
     case delegate(Delegate)
 
     @CasePathable
@@ -438,6 +442,18 @@ public struct SessionListFeature {
         state.settings = SettingsFeature.State(connection: state.connection)
         return .none
 
+      case .archivedButtonTapped:
+        state.archived = ArchivedSessionsFeature.State(connection: state.connection, now: state.now)
+        return .none
+
+      case let .archived(.presented(.delegate(.openSession(session)))):
+        // Open from the archived sheet → dismiss it and resume in the main stack.
+        state.archived = nil
+        return .send(.delegate(.openSession(session)))
+
+      case .archived:
+        return .none
+
       case let .settings(.presented(.delegate(.tokenSaved(token)))):
         state.connection.token = token
         return .none
@@ -459,6 +475,9 @@ public struct SessionListFeature {
     }
     .ifLet(\.$settings, action: \.settings) {
       SettingsFeature()
+    }
+    .ifLet(\.$archived, action: \.archived) {
+      ArchivedSessionsFeature()
     }
     .ifLet(\.$confirmationDialog, action: \.confirmationDialog)
   }

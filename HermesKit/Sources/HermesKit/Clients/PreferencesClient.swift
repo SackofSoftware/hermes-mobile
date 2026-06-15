@@ -17,6 +17,9 @@ public struct PreferencesClient: Sendable {
   /// Pinned session ids, ordered = display order in the top "Pinned" section.
   public var loadPinnedIDs: @Sendable () -> [String] = { [] }
   public var savePinnedIDs: @Sendable (_ ids: [String]) -> Void
+  /// How the session list groups its rows (workspace vs chronological). Device-local UI pref.
+  public var loadGroupingMode: @Sendable () -> SessionGroupingMode = { .default }
+  public var saveGroupingMode: @Sendable (_ mode: SessionGroupingMode) -> Void
 }
 
 public extension PreferencesClient {
@@ -25,6 +28,7 @@ public extension PreferencesClient {
     let key = "hermes.server-url"
     let seenKey = "hermes.seen-message-counts"
     let pinnedKey = "hermes.pinned-session-ids"
+    let groupingKey = "hermes.session-grouping-mode"
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
     return PreferencesClient(
@@ -34,7 +38,11 @@ public extension PreferencesClient {
       loadSeenCounts: { (store.dictionary(forKey: seenKey) as? [String: Int]) ?? [:] },
       saveSeenCounts: { store.set($0, forKey: seenKey) },
       loadPinnedIDs: { (store.array(forKey: pinnedKey) as? [String]) ?? [] },
-      savePinnedIDs: { store.set($0, forKey: pinnedKey) }
+      savePinnedIDs: { store.set($0, forKey: pinnedKey) },
+      loadGroupingMode: {
+        store.string(forKey: groupingKey).flatMap(SessionGroupingMode.init(rawValue:)) ?? .default
+      },
+      saveGroupingMode: { store.set($0.rawValue, forKey: groupingKey) }
     )
   }
 
@@ -43,6 +51,7 @@ public extension PreferencesClient {
     let box = LockIsolated<String?>(nil)
     let seen = LockIsolated<[String: Int]>([:])
     let pinned = LockIsolated<[String]>([])
+    let grouping = LockIsolated<SessionGroupingMode>(.default)
     return PreferencesClient(
       loadServerURL: { box.value },
       saveServerURL: { url in box.setValue(url) },
@@ -50,7 +59,9 @@ public extension PreferencesClient {
       loadSeenCounts: { seen.value },
       saveSeenCounts: { seen.setValue($0) },
       loadPinnedIDs: { pinned.value },
-      savePinnedIDs: { pinned.setValue($0) }
+      savePinnedIDs: { pinned.setValue($0) },
+      loadGroupingMode: { grouping.value },
+      saveGroupingMode: { grouping.setValue($0) }
     )
   }
 }

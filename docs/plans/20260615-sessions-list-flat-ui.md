@@ -68,11 +68,11 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 - Modify: `HermesKit/Sources/HermesKit/Clients/PreferencesClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/PreferencesClientTests.swift`
 
-- [ ] Create `public enum SessionGroupingMode: String, Sendable, CaseIterable, Equatable { case workspace, chronological }` (raw values for persistence; default `.workspace`).
-- [ ] Add `loadGroupingMode() -> SessionGroupingMode` and `saveGroupingMode(_:)` to `PreferencesClient` (live = UserDefaults under a new key, unknown/missing → `.workspace`); add to `.inMemory()` and `liveValue`.
-- [ ] Include the grouping-mode key in whatever logout/clear path clears prefs (so logout resets it, per CLAUDE.md).
-- [ ] Write `PreferencesClient` tests: save→load round-trip, default when unset, cleared on the clear-all path.
-- [ ] Run `make test` — must pass before next task.
+- [x] Create `public enum SessionGroupingMode: String, Sendable, CaseIterable, Equatable { case workspace, chronological }` (raw values for persistence; default `.workspace`).
+- [x] Add `loadGroupingMode() -> SessionGroupingMode` and `saveGroupingMode(_:)` to `PreferencesClient` (live = UserDefaults under a new key, unknown/missing → `.workspace`); add to `.inMemory()` and `liveValue`.
+- [x] Include the grouping-mode key in whatever logout/clear path clears prefs (so logout resets it, per CLAUDE.md). (Reset in `SettingsFeature.clearTokenTapped`.)
+- [x] Write `PreferencesClient` tests: save→load round-trip, default when unset, cleared on the clear-all path (+ `SettingsFeature` logout assertion).
+- [x] Run `make test` — must pass before next task. (166 tests green.)
 
 ### Task 2: Grouping-mode state + actions in `SessionListFeature`
 

@@ -94,6 +94,7 @@ public struct SettingsFeature {
         preferences.clearServerURL()
         preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
         preferences.saveSeenCounts([:]) // unread state is per-server; drop it too
+        preferences.saveGroupingMode(.default) // reset the list grouping pref on logout
         return .merge(
           .send(.delegate(.disconnect)),
           .run { [dismiss] _ in await dismiss() }

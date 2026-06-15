@@ -49,4 +49,34 @@ struct PreferencesClientTests {
     #expect(suite.array(forKey: "hermes.pinned-session-ids") as? [String] == ["a", "b"])
     #expect(prefs.loadPinnedIDs() == ["a", "b"])
   }
+
+  @Test func inMemoryGroupingModeRoundTripAndDefault() {
+    let prefs = PreferencesClient.inMemory()
+    #expect(prefs.loadGroupingMode() == .workspace) // default when unset
+
+    prefs.saveGroupingMode(.chronological)
+    #expect(prefs.loadGroupingMode() == .chronological)
+
+    prefs.saveGroupingMode(.workspace)
+    #expect(prefs.loadGroupingMode() == .workspace)
+  }
+
+  @Test func liveGroupingModeBacksOntoProvidedDefaults() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    #expect(prefs.loadGroupingMode() == .workspace) // default when unset
+    prefs.saveGroupingMode(.chronological)
+    #expect(suite.string(forKey: "hermes.session-grouping-mode") == "chronological")
+    #expect(prefs.loadGroupingMode() == .chronological)
+  }
+
+  @Test func liveGroupingModeDefaultsWhenValueIsGarbage() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping.garbage")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping.garbage")
+    suite.set("not-a-mode", forKey: "hermes.session-grouping-mode")
+    let prefs = PreferencesClient.live(defaults: suite)
+    #expect(prefs.loadGroupingMode() == .workspace) // unknown raw value → default
+  }
 }

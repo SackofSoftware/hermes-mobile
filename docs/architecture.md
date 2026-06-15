@@ -43,7 +43,8 @@ a `testValue`/`.inMemory()` variant):
 - **`HermesRESTClient`** — status, sessions, search, messages.
 - **`HermesGatewayClient`** — WebSocket JSON-RPC connect/send. The socket is one
   long-running cancellable effect; reconnect/backoff lives in the reducer (testable
-  with `TestClock`).
+  with `TestClock`). Each `send` enforces a per-request timeout (default 30s) so a
+  stuck/never-acking RPC throws `GatewayError.timedOut` instead of hanging forever.
 - **`KeychainClient`** — the auth token (the only secret).
 - **`PreferencesClient`** — non-secret prefs: server URL (for auto-login), per-session
   seen counts, and client-side pinned session ids. All cleared on logout.
@@ -66,3 +67,6 @@ not assumed):
 - **Pins are device-local** (Hermes has no pin API) — an ordered `[String]` of session
   ids in `PreferencesClient`. **Archive is server-side**
   (`PATCH /api/sessions/{id}` `{"archived": …}`), done optimistically.
+- **Rename is server-side**, optimistic with rollback (mirrors archive): the session
+  list uses `PATCH /api/sessions/{id}` `{"title": …}` over REST; the chat screen uses
+  the `session.title` gateway method.

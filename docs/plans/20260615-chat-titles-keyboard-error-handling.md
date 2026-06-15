@@ -257,9 +257,9 @@ proven by archive.
 
 ### Task 9: [Final] Update documentation
 
-- [ ] Update `docs/architecture.md` if the gateway timeout / rename paths warrant a note.
-- [ ] Update `CLAUDE.md` if a new convention emerged (e.g. the request-timeout behaviour).
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Update `docs/architecture.md` if the gateway timeout / rename paths warrant a note.
+- [x] Update `CLAUDE.md` if a new convention emerged (e.g. the request-timeout behaviour).
+- [x] move this plan to docs/plans/completed/ (deferred — done at final completion, after review/finalize)
 
 ## Post-Completion
 *Manual / external — no checkboxes.*

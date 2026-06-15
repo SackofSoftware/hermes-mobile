@@ -25,7 +25,10 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   `UIKit`/`Security`/`URLSession` directly from a reducer — go through a client.
 - **The gateway socket** is a single long-running cancellable effect funneling every
   event through one `.gatewayEvent` action; outbound JSON-RPC calls are discrete
-  one-shot effects. **Reconnect/backoff lives in the reducer**, not the client.
+  one-shot effects. **Reconnect/backoff lives in the reducer**, not the client. Each
+  `send` has a per-request timeout (default 30s) — a hung RPC throws
+  `GatewayError.timedOut` rather than hanging. **Surface `prompt.submit` failures**
+  (set `errorBanner`, clear `isSending`/`activity`) — never swallow them with `try?`.
 - **Streaming has no message id** (verified by the M0 probe) — the fold tracks a single
   in-flight assistant row, created **lazily on the first delta** (a `message.start` with no
   text would otherwise render as an empty bubble). `session_id` is on the event *frame*.
@@ -38,7 +41,9 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - **Client-side vs server state**: pins are device-local (no Hermes pin API) — an ordered
   `[String]` of session ids in `PreferencesClient`. Archive is server-side
   (`PATCH /api/sessions/{id}` `{"archived":…}`) done optimistically: remove from the list
-  immediately, re-insert on RPC failure.
+  immediately, re-insert on RPC failure. **Rename is server-side too** (no device-local
+  state), optimistic with rollback (mirrors archive): list → REST `PATCH /api/sessions/{id}`
+  `{"title":…}`; chat → `session.title` gateway method.
 - **Auto-poll** (e.g. the session-list working glow): a cancellable `continuousClock`
   `sleep`-loop effect started on `.task` and cancelled by an explicit `.onDisappear`
   action — not a bare `.task` cancellation. Pause it while searching. Testable with

@@ -521,8 +521,10 @@ public struct ChatFeature {
   private func bootstrapSession(stored: String?) -> Effect<Action> {
     .run { [gateway] send in
       let method = stored == nil ? "session.create" : "session.resume"
+      // New sessions send no title so the server auto-names from the first message
+      // (passing any title disables Hermes' auto-title generation).
       let params: JSONValue = stored.map { .object(["session_id": .string($0)]) }
-        ?? .object(["title": .string("Mobile chat")])
+        ?? .object([:])
       do {
         let result = try await gateway.send(method, params)
         if let handle = result.decoded(SessionHandle.self) {

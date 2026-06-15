@@ -161,14 +161,16 @@ struct ChatReductionTests {
   // MARK: Bootstrap (create on first ready)
 
   @Test func createsSessionOnFirstReady() async {
+    let sent = LockIsolated<JSONValue?>(nil)
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = ImmediateClock()
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
-      $0.hermesGateway.send = { @Sendable _, _ in
-        .object([
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object([
           "session_id": .string("live123"),
           "stored_session_id": .string("stored123"),
           "message_count": .number(0),
@@ -186,6 +188,10 @@ struct ChatReductionTests {
       $0.storedSessionID = "stored123"
       $0.status = .ready
     }
+    // New sessions create with no title so the server auto-names from the first message.
+    #expect(sent.value?["method"]?.stringValue == "session.create")
+    #expect(sent.value?["params"] == .object([:]))
+    #expect(sent.value?["params"]?["title"] == nil)
     await store.send(.onDisappear)
   }
 

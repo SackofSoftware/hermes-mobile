@@ -103,14 +103,14 @@ proven by archive.
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift` (and any
   gateway/JSONRPC test fixture referencing `"Mobile chat"`)
 
-- [ ] In `bootstrapSession`, change the new-session branch from
+- [x] In `bootstrapSession`, change the new-session branch from
   `?? .object(["title": .string("Mobile chat")])` to `?? .object([:])` so
   `session.create` sends no title and the server auto-names from the first message.
-- [ ] Verify the resume branch (`session.resume` with `session_id`) is unchanged.
-- [ ] Update/replace the bootstrap test to assert `session.create` is sent with **no
+- [x] Verify the resume branch (`session.resume` with `session_id`) is unchanged.
+- [x] Update/replace the bootstrap test to assert `session.create` is sent with **no
   `title`** param (and no regression to resume).
-- [ ] Grep for and update any test fixture still asserting `"Mobile chat"`.
-- [ ] Run `make test` — must pass before next task.
+- [x] Grep for and update any test fixture still asserting `"Mobile chat"` (none existed outside the source line).
+- [x] Run `make test` — must pass before next task.
 
 ### Task 2: Show snippet (not raw id) for search results (#3b)
 

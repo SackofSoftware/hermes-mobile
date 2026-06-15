@@ -92,9 +92,9 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift`
 
-- [ ] Add `archivedSessions: @Sendable (_ connection:, _ limit: Int, _ offset: Int) async throws -> [Session]` to the client; `live` does `GET /api/sessions?archived=only&order=recent&limit=&offset=` and maps via the existing `SessionListDTO` → `Session` path. `testValue` stays unimplemented.
-- [ ] Write a `HermesRESTClient` test (URLProtocol mock): asserts the request carries `archived=only` (+ order/limit/offset) and decodes results to `[Session]`; a non-2xx maps to the right `RESTError`.
-- [ ] Run `make test` — must pass before next task.
+- [x] Add `archivedSessions: @Sendable (_ connection:, _ limit: Int, _ offset: Int) async throws -> [Session]` to the client; `live` does `GET /api/sessions?archived=only&order=recent&limit=&offset=` and maps via the existing `SessionListDTO` → `Session` path. `testValue` stays unimplemented.
+- [x] Write a `HermesRESTClient` test (URLProtocol mock): asserts the request carries `archived=only` (+ order/limit/offset) and decodes results to `[Session]`; a non-2xx maps to the right `RESTError`.
+- [x] Run `make test` — must pass before next task. (171 tests green.)
 
 ### Task 4: `ArchivedSessionsFeature` reducer + presentation wiring
 

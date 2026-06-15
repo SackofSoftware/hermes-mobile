@@ -61,6 +61,8 @@ public struct HermesRESTClient: Sendable {
   /// Unauthenticated reachability/health probe.
   public var status: @Sendable (_ baseURL: URL) async throws -> ServerStatus
   public var sessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int, _ order: SessionOrder) async throws -> [Session]
+  /// Just the archived (soft-hidden) sessions — `GET /api/sessions?archived=only`.
+  public var archivedSessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int) async throws -> [Session]
   public var search: @Sendable (_ connection: ServerConnection, _ query: String) async throws -> [Session]
   public var messages: @Sendable (_ connection: ServerConnection, _ sessionID: String) async throws -> [SessionMessage]
   /// Soft-hide (archive) or restore a session — `PATCH /api/sessions/{id}` `{"archived":…}`.
@@ -83,6 +85,16 @@ public extension HermesRESTClient {
           .init(name: "limit", value: String(limit)),
           .init(name: "offset", value: String(offset)),
           .init(name: "order", value: order.rawValue),
+        ])
+        let response: SessionsResponse = try await get(url, token: conn.token, session: session)
+        return response.sessions.map(\.asSession)
+      },
+      archivedSessions: { conn, limit, offset in
+        let url = try makeURL(conn.baseURL, "/api/sessions", query: [
+          .init(name: "limit", value: String(limit)),
+          .init(name: "offset", value: String(offset)),
+          .init(name: "order", value: SessionOrder.recent.rawValue),
+          .init(name: "archived", value: "only"),
         ])
         let response: SessionsResponse = try await get(url, token: conn.token, session: session)
         return response.sessions.map(\.asSession)

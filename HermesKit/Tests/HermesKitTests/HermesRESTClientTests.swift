@@ -92,6 +92,30 @@ struct HermesRESTClientTests {
     #expect(query.contains(URLQueryItem(name: "limit", value: "20")))
   }
 
+  @Test func archivedSessionsSendsArchivedOnlyQueryAndMaps() async throws {
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"Old chat","preview":"bye","last_active":1749556800.0,"cwd":"/Users/me/dev/x","archived":true}],"total":1}
+    """#)
+    let sessions = try await makeClient().archivedSessions(connection, 50, 0)
+    #expect(sessions.map(\.id) == ["20260610_120231_afcca6"])
+    #expect(sessions.first?.title == "Old chat")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+    #expect(req.url?.path == "/api/sessions")
+    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query.contains(URLQueryItem(name: "archived", value: "only")))
+    #expect(query.contains(URLQueryItem(name: "order", value: "recent")))
+    #expect(query.contains(URLQueryItem(name: "limit", value: "50")))
+  }
+
+  @Test func archivedSessionsUnauthorizedMapsToTypedError() async throws {
+    MockURLProtocol.set(status: 401)
+    await #expect(throws: RESTError.unauthorized) {
+      _ = try await makeClient().archivedSessions(connection, 50, 0)
+    }
+  }
+
   @Test func searchMapsSnippetToPreviewWithNoTitle() async throws {
     MockURLProtocol.set(json: #"""
     {"results":[{"session_id":"20260610_120231_afcca6","snippet":"matched text","role":"user","model":"gpt-5.5","session_started":1749550000.0}]}

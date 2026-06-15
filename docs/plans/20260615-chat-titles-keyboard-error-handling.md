@@ -236,15 +236,24 @@ proven by archive.
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] #3a: a new session sends `session.create` with no title; after a first message the
-  list shows the auto-generated name (manual, against a live server).
-- [ ] #3b: search results show the snippet, never the raw stored id.
-- [ ] #2: rename works from both the list (REST) and the chat screen (gateway), with
-  optimistic update and rollback-on-error.
-- [ ] #5: keyboard dismisses on tap and on scroll, before any message is sent.
-- [ ] #6: a hung/failed prompt surfaces "Prompt failed", clears the spinner, and the
-  activity/compacting message wraps to multiple lines.
-- [ ] Run the full suite: `make test` and `make snapshot`.
+- [x] #3a: a new session sends `session.create` with no title — verified:
+  `bootstrapSession` (ChatFeature.swift:581) sends `.object([:])` for the create branch.
+  The "list shows the auto-generated name after first message" part is **manual —
+  requires a live server**.
+- [x] #3b: search results show the snippet, never the raw stored id — verified in
+  `SessionRowView.swift` (`promotesSnippet` promotes the snippet to the headline when
+  `showsPreview && title == nil`); covered by snapshot `searchMapsSnippetToPreview…`.
+- [x] #2: rename works from both the list (REST `rename` → PATCH, optimistic update +
+  rollback in `SessionListFeature`) and the chat screen (gateway `session.title`,
+  optimistic `state.title` + rollback in `ChatFeature`). Covered by reducer + REST tests.
+- [x] #5: `ChatView` has `@FocusState composerFocused` passed into `ComposerView`,
+  `.scrollDismissesKeyboard(.interactively)`, and a tap `.simultaneousGesture` that clears
+  focus. Actual keyboard behaviour is **manual — on-device**.
+- [x] #6: gateway request timeout (`GatewayError.timedOut`) + `promptSubmitFailed` surfaces
+  "Prompt failed: …", clears `isSending` and `activity`; the `ChatView` footer activity
+  Label has no `lineLimit` (wraps). A genuinely stuck server end-to-end is **manual**.
+- [x] Run the full suite: `make test` (157 tests / 17 suites passed) and `make snapshot`
+  (23 tests / 0 failures).
 
 ### Task 9: [Final] Update documentation
 

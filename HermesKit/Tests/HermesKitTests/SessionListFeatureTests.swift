@@ -659,13 +659,16 @@ struct SessionListFeatureTests {
       $0.renameDraft = "New name"
     }
 
-    // Confirm optimistically updates the title, clears the alert, and fires the RPC.
+    // Confirm optimistically updates the title, clears the alert, marks in-flight, and fires the RPC.
     await store.send(.confirmRename) {
       $0.sessions[id: "a"]?.title = "New name"
       $0.renamingID = nil
       $0.renameDraft = ""
+      $0.renamingInFlightIDs = ["a"]
     }
-    await store.receive(\.renameSucceeded)
+    await store.receive(\.renameSucceeded) {
+      $0.renamingInFlightIDs = [] // guard lifted, poll resumes
+    }
     #expect(renamed.value.count == 1)
     #expect(renamed.value.first?.0 == "a")
     #expect(renamed.value.first?.1 == "New name")
@@ -690,11 +693,29 @@ struct SessionListFeatureTests {
       $0.sessions[id: "a"]?.title = "Too long"
       $0.renamingID = nil
       $0.renameDraft = ""
+      $0.renamingInFlightIDs = ["a"]
     }
     await store.receive(\.renameFailed) {
+      $0.renamingInFlightIDs = [] // guard lifted on failure too
       $0.sessions[id: "a"]?.title = "Keep me"
       $0.loadError = "Couldn’t rename the session."
     }
+  }
+
+  @Test func pollTickIsSkippedWhileRenameInFlight() async {
+    // While a rename PATCH is in flight a pollTick must not fetch — a fetch landing mid-PATCH
+    // would clobber the optimistic title with the server's old one.
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "a", title: "New name")],
+        renamingInFlightIDs: ["a"]
+      )
+    ) {
+      SessionListFeature()
+    }
+    // No .pulledToRefresh / fetch follows — the guard short-circuits the tick.
+    await store.send(.pollTick)
   }
 
   @Test func cancelRenameDismissesAlertWithoutChange() async {

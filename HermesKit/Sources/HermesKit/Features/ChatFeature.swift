@@ -109,6 +109,10 @@ public struct ChatFeature {
         && liveSessionID != nil
         && pendingInteraction == nil
     }
+
+    /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
+    /// silently no-ops) — drives whether the toolbar Rename control is enabled.
+    public var canRename: Bool { liveSessionID != nil }
   }
 
   public enum Action: BindableAction {
@@ -376,9 +380,15 @@ public struct ChatFeature {
           return .none
         }
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The gateway `session.title` method rejects an empty title (server error 4021),
+        // so an empty/whitespace draft is a no-op: just close the alert, don't round-trip.
+        guard !trimmed.isEmpty else {
+          state.renameDraft = nil
+          return .none
+        }
         let previousTitle = state.title
         // Optimistic: update the header immediately; roll back on RPC failure.
-        state.title = trimmed.isEmpty ? nil : trimmed
+        state.title = trimmed
         state.renameDraft = nil
         state.errorBanner = nil
         return .run { [gateway] send in

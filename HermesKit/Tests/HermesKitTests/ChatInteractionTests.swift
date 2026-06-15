@@ -185,6 +185,7 @@ struct ChatInteractionTests {
     let sent = LockIsolated<JSONValue?>(nil)
     var initial = readyState()
     initial.title = "Old title"
+    initial.errorBanner = "Stale error" // a prior error must be cleared on a fresh rename
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.hermesGateway.send = { @Sendable method, params in
         sent.setValue(.object(["method": .string(method), "params": params]))
@@ -202,6 +203,7 @@ struct ChatInteractionTests {
     await store.send(.confirmRename) {
       $0.title = "New title" // optimistic
       $0.renameDraft = nil
+      $0.errorBanner = nil // cleared on a fresh rename attempt
     }
     await store.finish()
 
@@ -209,6 +211,58 @@ struct ChatInteractionTests {
     #expect(sent.value?["params"]?["session_id"]?.stringValue == "live")
     #expect(sent.value?["params"]?["title"]?.stringValue == "New title")
     #expect(store.state.title == "New title") // no rollback
+  }
+
+  @Test func renameEmptyDraftIsNoOpAndDoesNotSend() async {
+    // The gateway rejects an empty title (server 4021), so an empty/whitespace draft must
+    // just close the alert with no RPC — never round-trip to an error + rollback.
+    let sent = LockIsolated(false)
+    var initial = readyState()
+    initial.title = "Old title"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        sent.setValue(true)
+        return .object([:])
+      }
+    }
+
+    await store.send(.renameButtonTapped) {
+      $0.renameDraft = "Old title"
+    }
+    await store.send(.binding(.set(\.renameDraft, "   "))) {
+      $0.renameDraft = "   "
+    }
+    await store.send(.confirmRename) {
+      $0.renameDraft = nil // alert closes
+      // title unchanged, no errorBanner
+    }
+    await store.finish()
+
+    #expect(sent.value == false) // no RPC was sent
+    #expect(store.state.title == "Old title") // untouched
+    #expect(store.state.errorBanner == nil)
+  }
+
+  @Test func confirmRenameWithoutLiveSessionIsNoOp() async {
+    // No live session id → confirmRename can't send; it just closes the alert.
+    let sent = LockIsolated(false)
+    var initial = ChatFeature.State(connection: conn) // liveSessionID == nil
+    initial.title = "Old title"
+    initial.renameDraft = "New title"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        sent.setValue(true)
+        return .object([:])
+      }
+    }
+
+    await store.send(.confirmRename) {
+      $0.renameDraft = nil
+    }
+    await store.finish()
+
+    #expect(sent.value == false)
+    #expect(store.state.title == "Old title")
   }
 
   @Test func renameFailureRollsBackAndSetsErrorBanner() async {
@@ -260,6 +314,31 @@ struct ChatInteractionTests {
       $0.errorBanner = "Prompt failed: request timed out: prompt.submit"
       $0.isSending = false
       $0.activity = nil // the stuck "compacting…" footer is cleared
+    }
+  }
+
+  struct PlainError: Error {}
+
+  @Test func promptSubmitNonGatewayErrorFallsBackToDisconnectedMessage() async {
+    // A non-GatewayError throw (e.g. an encoding/transport failure) takes the fallback arm,
+    // surfacing GatewayError.disconnected.message ("Connection lost.").
+    var initial = readyState()
+    initial.composerText = "hello"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable _, _ in throw PlainError() }
+    }
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "hello", isComplete: true))]
+      $0.composerText = ""
+      $0.errorBanner = nil
+      $0.isSending = true
+    }
+    await store.receive(\.promptSubmitFailed) {
+      $0.errorBanner = "Prompt failed: Connection lost."
+      $0.isSending = false
+      $0.activity = nil
     }
   }
 }

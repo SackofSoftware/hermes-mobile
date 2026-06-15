@@ -180,6 +180,31 @@ struct HermesRESTClientTests {
     #expect(json == ["title": "New title"])
   }
 
+  @Test func renameWithEmptyTitleSendsEmptyStringBody() async throws {
+    // The clear contract: an empty title round-trips as {"title": ""} (server clears it).
+    MockURLProtocol.set(status: 200)
+    try await makeClient().rename(connection, "20260610_120231_afcca6", "")
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "PATCH")
+    #expect(req.url?.path == "/api/sessions/20260610_120231_afcca6")
+    let body = req.httpBody ?? req.httpBodyStream.map { stream -> Data in
+      stream.open()
+      defer { stream.close() }
+      var data = Data()
+      let bufSize = 1024
+      let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+      defer { buffer.deallocate() }
+      while stream.hasBytesAvailable {
+        let read = stream.read(buffer, maxLength: bufSize)
+        if read <= 0 { break }
+        data.append(buffer, count: read)
+      }
+      return data
+    } ?? Data()
+    let json = try JSONSerialization.jsonObject(with: body) as? [String: String]
+    #expect(json == ["title": ""])
+  }
+
   @Test func renameRejectionMapsToServerError() async throws {
     MockURLProtocol.set(status: 400)
     await #expect(throws: RESTError.server(status: 400)) {

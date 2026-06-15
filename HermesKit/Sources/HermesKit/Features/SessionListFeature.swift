@@ -29,6 +29,10 @@ public struct SessionListFeature {
     /// land after the id is cleared; future authoritative fetches exclude archived sessions
     /// server-side (`archived=exclude`), so no permanent filter is needed.
     public var archivingIDs: Set<String>
+    /// Ids whose rename PATCH is currently IN FLIGHT. Transient: added when the PATCH starts,
+    /// removed on success/failure. While non-empty the poll skips (like `archivingIDs`) so a
+    /// fetch landing mid-PATCH can't clobber the optimistic title with the server's old one.
+    public var renamingInFlightIDs: Set<String>
     /// Session currently being renamed (drives the rename alert's presentation); nil = no alert.
     public var renamingID: Session.ID?
     /// The editable title text bound to the rename alert's `TextField`.
@@ -50,6 +54,7 @@ public struct SessionListFeature {
       pinnedIDs: [String] = [],
       expandedGroups: Set<String> = [],
       archivingIDs: Set<String> = [],
+      renamingInFlightIDs: Set<String> = [],
       renamingID: Session.ID? = nil,
       renameDraft: String = "",
       settings: SettingsFeature.State? = nil
@@ -64,6 +69,7 @@ public struct SessionListFeature {
       self.pinnedIDs = pinnedIDs
       self.expandedGroups = expandedGroups
       self.archivingIDs = archivingIDs
+      self.renamingInFlightIDs = renamingInFlightIDs
       self.renamingID = renamingID
       self.renameDraft = renameDraft
       self.settings = settings
@@ -198,9 +204,11 @@ public struct SessionListFeature {
         )
 
       case .pollTick:
-        // Skip the auto-refresh while searching (don't fight the user's query) or while an
-        // archive is in flight (don't churn / risk resurrecting the archiving row).
-        guard !state.isSearching, state.archivingIDs.isEmpty else { return .none }
+        // Skip the auto-refresh while searching (don't fight the user's query), while an
+        // archive is in flight (don't churn / risk resurrecting the archiving row), or while a
+        // rename PATCH is in flight (a fetch could clobber the optimistic title with the old one).
+        guard !state.isSearching, state.archivingIDs.isEmpty, state.renamingInFlightIDs.isEmpty
+        else { return .none }
         return .send(.pulledToRefresh)
 
       case .pulledToRefresh:
@@ -369,22 +377,31 @@ public struct SessionListFeature {
         state.sessions[id: id]?.title = trimmed.isEmpty ? nil : trimmed
         state.renamingID = nil
         state.renameDraft = ""
-        return .run { [rest, connection = state.connection] send in
-          do {
-            try await rest.rename(connection, id, trimmed)
-            await send(.renameSucceeded(id: id))
-          } catch {
-            await send(.renameFailed(id: id, previousTitle: previousTitle))
+        // Mark as in-flight (poll skips while set) and cancel any in-flight fetch — one started
+        // before this PATCH could land mid-window and clobber the optimistic title with the
+        // server's old one. Mirrors archive's protection.
+        state.renamingInFlightIDs.insert(id)
+        return .merge(
+          .cancel(id: CancelID.fetch),
+          .run { [rest, connection = state.connection] send in
+            do {
+              try await rest.rename(connection, id, trimmed)
+              await send(.renameSucceeded(id: id))
+            } catch {
+              await send(.renameFailed(id: id, previousTitle: previousTitle))
+            }
           }
-        }
+        )
 
-      case .renameSucceeded:
-        // The optimistic title stands; nothing to do.
+      case let .renameSucceeded(id):
+        // PATCH landed — the optimistic title stands; lift the in-flight guard so the poll resumes.
+        state.renamingInFlightIDs.remove(id)
         return .none
 
       case let .renameFailed(id, previousTitle):
-        // The rename didn't take (e.g. a 400 for an over-long/duplicate title) — restore the
-        // previous title locally and surface the error.
+        // The rename didn't take (e.g. a 400 for an over-long/duplicate title) — lift the guard,
+        // restore the previous title locally, and surface the error.
+        state.renamingInFlightIDs.remove(id)
         state.sessions[id: id]?.title = previousTitle
         state.loadError = "Couldn’t rename the session."
         return .none

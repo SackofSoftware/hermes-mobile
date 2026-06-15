@@ -1,3 +1,5 @@
+import Clocks
+import ComposableArchitecture
 import Foundation
 import Testing
 
@@ -133,36 +135,51 @@ private func requestID(_ frame: String) -> Int? {
   }
 
   @Test func sendTimesOutWhenServerNeverResponds() async throws {
-    // The transport accepts the send but never yields a matching response; the
-    // per-id timeout must reject `send` with `.timedOut(method:)`.
+    // The transport accepts the send but never yields a matching response; advancing the
+    // injected TestClock past the timeout must reject `send` with `.timedOut(method:)`.
+    // Deterministic: no wall-clock racing — the timeout fires only when WE advance.
+    let clock = TestClock()
     let transport = FakeTransport() // no onSend → no inbound frame ever
-    let client = HermesGatewayClient.make(requestTimeout: .milliseconds(50)) { _, _ in transport }
+    let client = HermesGatewayClient.make(requestTimeout: .seconds(30), clock: clock) { _, _ in transport }
     let stream = client.connect(url, nil)
     defer { withExtendedLifetime(stream) {} }
 
-    await #expect(throws: GatewayError.timedOut(method: "prompt.submit")) {
-      _ = try await client.send("prompt.submit", .object(["text": .string("hi")]))
+    // Run `send` in a detached task so we can advance the clock while it's suspended on
+    // its pending continuation; capture whatever it throws.
+    let thrown = LockIsolated<(any Error)?>(nil)
+    let task = Task {
+      do { _ = try await client.send("prompt.submit", .object(["text": .string("hi")])) }
+      catch { thrown.setValue(error) }
     }
+    // Yield enough for `send` to register its pending continuation and the timeout task to
+    // reach `clock.sleep`, then fire the timeout deterministically by advancing the clock.
+    for _ in 0..<20 { await Task.yield() }
+    await clock.advance(by: .seconds(30))
+    await task.value
+
+    #expect(thrown.value as? GatewayError == .timedOut(method: "prompt.submit"))
   }
 
   @Test func normalResponseResolvesAndTimeoutDoesNotFire() async throws {
-    // A fast response resolves `send`; with a short timeout, waiting past it must
-    // produce no spurious late throw (the timer was cancelled on resolution).
+    // A fast response resolves `send` and cancels its timer. Advancing the TestClock well
+    // past the timeout afterwards must produce no spurious late throw — the result stands.
+    let clock = TestClock()
     let transport = FakeTransport { frame, inbound in
       if let id = requestID(frame) {
         inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"streaming"}}"#)
       }
     }
-    let client = HermesGatewayClient.make(requestTimeout: .milliseconds(50)) { _, _ in transport }
+    let client = HermesGatewayClient.make(requestTimeout: .seconds(30), clock: clock) { _, _ in transport }
     let stream = client.connect(url, nil)
     defer { withExtendedLifetime(stream) {} }
 
     let result = try await client.send("prompt.submit", .object(["text": .string("hi")]))
     #expect(result == .object(["status": .string("streaming")]))
 
-    // Outlive the timeout window; nothing late should fire or crash.
-    try await Task.sleep(for: .milliseconds(120))
-    #expect(true)
+    // Advance past the (now-cancelled) timeout window; the resolved value must be unaffected
+    // and no late `.timedOut` can fire.
+    await clock.advance(by: .seconds(60))
+    #expect(result == .object(["status": .string("streaming")]))
   }
 
   @Test func socketCloseFailsPendingAndFinishesStream() async throws {

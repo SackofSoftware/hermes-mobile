@@ -30,8 +30,9 @@ struct SessionRowView: View {
     // Search results have no title and `session.id` is a meaningless stored id, so
     // promote the snippet to the headline instead of showing the raw id.
     let snippet = session.preview.flatMap { $0.isEmpty ? nil : $0 }
-    let promotesSnippet = showsPreview && session.title == nil && snippet != nil
-    let headline = session.title ?? (promotesSnippet ? snippet! : session.id)
+    let promotedSnippet: String? = (showsPreview && session.title == nil) ? snippet : nil
+    let promotesSnippet = promotedSnippet != nil
+    let headline = session.title ?? promotedSnippet ?? session.id
 
     return VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 8) {

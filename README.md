@@ -23,8 +23,8 @@ from your desk and still keep your agent moving.
 - **Connect once.** Enter your server URL and token; the token lives in the iOS
   Keychain and the app auto-logs-in on launch.
 - **Find any session.** Browse sessions grouped by workspace, search across all of
-  them, pin the ones you care about, archive the ones you don't, and resume or start
-  a new one.
+  them, pin the ones you care about, rename or archive them, and resume or start a
+  new one.
 - **Watch it work.** Streaming responses render as native Markdown, with tool/skill
   activity rows (tap for args, results, and diffs), a collapsible thinking row, and a
   subtle glow on sessions that are actively running.

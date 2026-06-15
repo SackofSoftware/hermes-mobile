@@ -34,6 +34,7 @@ struct ChatView: View {
       ToolbarItem(placement: .topBarTrailing) {
         Menu {
           Button("Rename") { store.send(.renameButtonTapped) }
+            .disabled(!store.canRename)
         } label: {
           Image(systemName: "ellipsis.circle")
         }

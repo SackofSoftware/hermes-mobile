@@ -51,8 +51,12 @@ public extension HermesGatewayClient {
   /// Core factory parameterized by a transport-maker so tests can inject a fake
   /// socket. The connection state (id counter, pending map) lives in a per-connect
   /// `GatewayConnection` actor; `store` holds the current one for `send`/`disconnect`.
+  ///
+  /// `clock` drives the per-request timeout — injectable so tests can use a `TestClock`
+  /// and fire/hold the timeout deterministically instead of racing real wall-clock time.
   static func make(
     requestTimeout: Duration = .seconds(30),
+    clock: any Clock<Duration> = ContinuousClock(),
     makeTransport: @escaping @Sendable (_ baseURL: URL, _ token: String?) -> any WebSocketTransport
   ) -> HermesGatewayClient {
     let store = ConnectionStore()
@@ -62,7 +66,8 @@ public extension HermesGatewayClient {
         let connection = GatewayConnection(
           transport: makeTransport(baseURL, token),
           events: continuation,
-          requestTimeout: requestTimeout
+          requestTimeout: requestTimeout,
+          clock: clock
         )
         store.set(connection)
         continuation.onTermination = { _ in Task { await connection.shutdown() } }
@@ -102,6 +107,7 @@ actor GatewayConnection {
   private let transport: any WebSocketTransport
   private let events: AsyncStream<GatewayEvent>.Continuation
   private let requestTimeout: Duration
+  private let clock: any Clock<Duration>
   private var idCounter = 0
   private var pending: [Int: CheckedContinuation<JSONValue, any Error>] = [:]
   private var timeoutTasks: [Int: Task<Void, Never>] = [:]
@@ -111,11 +117,13 @@ actor GatewayConnection {
   init(
     transport: any WebSocketTransport,
     events: AsyncStream<GatewayEvent>.Continuation,
-    requestTimeout: Duration = .seconds(30)
+    requestTimeout: Duration = .seconds(30),
+    clock: any Clock<Duration> = ContinuousClock()
   ) {
     self.transport = transport
     self.events = events
     self.requestTimeout = requestTimeout
+    self.clock = clock
   }
 
   func start() {
@@ -136,8 +144,8 @@ actor GatewayConnection {
       pending[id] = continuation
       // Per-id timeout: if the server never acks (`prompt.submit` acks fast, so this
       // only catches a stuck server), reject with `.timedOut` rather than hang forever.
-      timeoutTasks[id] = Task { [requestTimeout] in
-        do { try await ContinuousClock().sleep(for: requestTimeout) } catch { return }
+      timeoutTasks[id] = Task { [requestTimeout, clock] in
+        do { try await clock.sleep(for: requestTimeout) } catch { return }
         await fireTimeout(id: id, method: method)
       }
       Task { await transmit(id: id, text: text) }

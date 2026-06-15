@@ -27,16 +27,22 @@ struct SessionRowView: View {
   }()
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
+    // Search results have no title and `session.id` is a meaningless stored id, so
+    // promote the snippet to the headline instead of showing the raw id.
+    let snippet = session.preview.flatMap { $0.isEmpty ? nil : $0 }
+    let promotesSnippet = showsPreview && session.title == nil && snippet != nil
+    let headline = session.title ?? (promotesSnippet ? snippet! : session.id)
+
+    return VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 8) {
         if isUnread {
           Circle().fill(Color.hermesAccent).frame(width: 8, height: 8)
             .accessibilityLabel("Unread")
         }
-        Text(session.title ?? session.id)
+        Text(headline)
           .font(.headline)
           .fontWeight(isUnread ? .semibold : .regular)
-          .lineLimit(1)
+          .lineLimit(promotesSnippet ? 2 : 1)
         if isPinned {
           Image(systemName: "pin.fill")
             .font(.caption2)
@@ -50,7 +56,8 @@ struct SessionRowView: View {
             .foregroundStyle(.secondary)
         }
       }
-      if showsPreview, let preview = session.preview, !preview.isEmpty {
+      // Show the snippet as a secondary line only when it isn't already the headline.
+      if showsPreview, !promotesSnippet, let preview = snippet {
         Text(preview)
           .font(.subheadline)
           .foregroundStyle(.secondary)

@@ -87,6 +87,24 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 
+  func testSessionRow_searchResult() {
+    // A search result: no title, `id` is a meaningless stored id, so the snippet is
+    // promoted to the headline instead of showing the raw id.
+    let view = SessionRowView(
+      session: Session(
+        id: "20260610_120231_afcca6",
+        title: nil,
+        updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
+        preview: "Can you help me refactor the WebSocket JSON-RPC parser?"
+      ),
+      now: now,
+      showsPreview: true
+    )
+    .padding()
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
   // MARK: SessionListView (Task 7)
 
   func testSessionList() {

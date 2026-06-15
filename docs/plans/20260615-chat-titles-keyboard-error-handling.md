@@ -118,13 +118,13 @@ proven by archive.
 - Modify: `HermesMobile/Sources/Features/SessionRowView.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] When the row has no `title` and `showsPreview` is true (search result), render the
+- [x] When the row has no `title` and `showsPreview` is true (search result), render the
   `preview`/snippet as the primary (headline) label instead of `session.id`; keep the
   relative date. Avoid ever showing the raw stored id as a title.
-- [ ] Keep the grouped-list behaviour unchanged (titled rows still show the title; an
+- [x] Keep the grouped-list behaviour unchanged (titled rows still show the title; an
   untitled non-search row still falls back to id, which only happens transiently).
-- [ ] Add a snapshot case for a search-result row with `title == nil` + a snippet.
-- [ ] Run `make snapshot` (record the new baseline intentionally) — must pass before next.
+- [x] Add a snapshot case for a search-result row with `title == nil` + a snippet.
+- [x] Run `make snapshot` (record the new baseline intentionally) — must pass before next.
 
 ### Task 3: Rename from the session list via REST PATCH (#2)
 

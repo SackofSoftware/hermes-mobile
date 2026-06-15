@@ -259,7 +259,7 @@ proven by archive.
 
 - [x] Update `docs/architecture.md` if the gateway timeout / rename paths warrant a note.
 - [x] Update `CLAUDE.md` if a new convention emerged (e.g. the request-timeout behaviour).
-- [x] move this plan to docs/plans/completed/ (deferred — done at final completion, after review/finalize)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Manual / external — no checkboxes.*

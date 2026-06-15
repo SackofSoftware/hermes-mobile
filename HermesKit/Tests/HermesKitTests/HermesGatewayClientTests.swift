@@ -132,6 +132,39 @@ private func requestID(_ frame: String) -> Int? {
     }
   }
 
+  @Test func sendTimesOutWhenServerNeverResponds() async throws {
+    // The transport accepts the send but never yields a matching response; the
+    // per-id timeout must reject `send` with `.timedOut(method:)`.
+    let transport = FakeTransport() // no onSend → no inbound frame ever
+    let client = HermesGatewayClient.make(requestTimeout: .milliseconds(50)) { _, _ in transport }
+    let stream = client.connect(url, nil)
+    defer { withExtendedLifetime(stream) {} }
+
+    await #expect(throws: GatewayError.timedOut(method: "prompt.submit")) {
+      _ = try await client.send("prompt.submit", .object(["text": .string("hi")]))
+    }
+  }
+
+  @Test func normalResponseResolvesAndTimeoutDoesNotFire() async throws {
+    // A fast response resolves `send`; with a short timeout, waiting past it must
+    // produce no spurious late throw (the timer was cancelled on resolution).
+    let transport = FakeTransport { frame, inbound in
+      if let id = requestID(frame) {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"streaming"}}"#)
+      }
+    }
+    let client = HermesGatewayClient.make(requestTimeout: .milliseconds(50)) { _, _ in transport }
+    let stream = client.connect(url, nil)
+    defer { withExtendedLifetime(stream) {} }
+
+    let result = try await client.send("prompt.submit", .object(["text": .string("hi")]))
+    #expect(result == .object(["status": .string("streaming")]))
+
+    // Outlive the timeout window; nothing late should fire or crash.
+    try await Task.sleep(for: .milliseconds(120))
+    #expect(true)
+  }
+
   @Test func socketCloseFailsPendingAndFinishesStream() async throws {
     // Close the socket the moment the first request is transmitted (pending is
     // already registered by then, so this is deterministic).

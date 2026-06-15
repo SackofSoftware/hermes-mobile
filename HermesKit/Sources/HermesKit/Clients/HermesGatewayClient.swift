@@ -24,12 +24,14 @@ public enum GatewayError: Error, Equatable, Sendable {
   case notConnected
   case disconnected
   case server(String)
+  case timedOut(method: String)
 
   public var message: String {
     switch self {
     case .notConnected: "Not connected."
     case .disconnected: "Connection lost."
     case let .server(message): message
+    case let .timedOut(method): "request timed out: \(method)"
     }
   }
 }
@@ -37,8 +39,11 @@ public enum GatewayError: Error, Equatable, Sendable {
 // MARK: - Live / factory
 
 public extension HermesGatewayClient {
-  static func live(session: URLSession = URLSession(configuration: .default)) -> HermesGatewayClient {
-    .make { baseURL, token in
+  static func live(
+    session: URLSession = URLSession(configuration: .default),
+    requestTimeout: Duration = .seconds(30)
+  ) -> HermesGatewayClient {
+    .make(requestTimeout: requestTimeout) { baseURL, token in
       URLSessionWebSocketTransport(url: webSocketURL(base: baseURL, token: token), session: session)
     }
   }
@@ -47,13 +52,18 @@ public extension HermesGatewayClient {
   /// socket. The connection state (id counter, pending map) lives in a per-connect
   /// `GatewayConnection` actor; `store` holds the current one for `send`/`disconnect`.
   static func make(
+    requestTimeout: Duration = .seconds(30),
     makeTransport: @escaping @Sendable (_ baseURL: URL, _ token: String?) -> any WebSocketTransport
   ) -> HermesGatewayClient {
     let store = ConnectionStore()
     return HermesGatewayClient(
       connect: { baseURL, token in
         let (stream, continuation) = AsyncStream<GatewayEvent>.makeStream()
-        let connection = GatewayConnection(transport: makeTransport(baseURL, token), events: continuation)
+        let connection = GatewayConnection(
+          transport: makeTransport(baseURL, token),
+          events: continuation,
+          requestTimeout: requestTimeout
+        )
         store.set(connection)
         continuation.onTermination = { _ in Task { await connection.shutdown() } }
         Task { await connection.start() }
@@ -91,14 +101,21 @@ public extension DependencyValues {
 actor GatewayConnection {
   private let transport: any WebSocketTransport
   private let events: AsyncStream<GatewayEvent>.Continuation
+  private let requestTimeout: Duration
   private var idCounter = 0
   private var pending: [Int: CheckedContinuation<JSONValue, any Error>] = [:]
+  private var timeoutTasks: [Int: Task<Void, Never>] = [:]
   private var receiveTask: Task<Void, Never>?
   private var isFinished = false
 
-  init(transport: any WebSocketTransport, events: AsyncStream<GatewayEvent>.Continuation) {
+  init(
+    transport: any WebSocketTransport,
+    events: AsyncStream<GatewayEvent>.Continuation,
+    requestTimeout: Duration = .seconds(30)
+  ) {
     self.transport = transport
     self.events = events
+    self.requestTimeout = requestTimeout
   }
 
   func start() {
@@ -117,8 +134,22 @@ actor GatewayConnection {
     return try await withCheckedThrowingContinuation { continuation in
       // Register before transmitting so a fast response can't race ahead of us.
       pending[id] = continuation
+      // Per-id timeout: if the server never acks (`prompt.submit` acks fast, so this
+      // only catches a stuck server), reject with `.timedOut` rather than hang forever.
+      timeoutTasks[id] = Task { [requestTimeout] in
+        do { try await ContinuousClock().sleep(for: requestTimeout) } catch { return }
+        await fireTimeout(id: id, method: method)
+      }
       Task { await transmit(id: id, text: text) }
     }
+  }
+
+  /// Called from the per-id timeout task after the sleep elapses. Resumes the waiter
+  /// with `.timedOut` only if it removes the pending entry itself; if another path
+  /// (response/failure/finish) already won, the entry is gone and this is a no-op.
+  private func fireTimeout(id: Int, method: String) {
+    timeoutTasks.removeValue(forKey: id)
+    pending.removeValue(forKey: id)?.resume(throwing: GatewayError.timedOut(method: method))
   }
 
   func shutdown() {
@@ -132,8 +163,15 @@ actor GatewayConnection {
     do {
       try await transport.send(text)
     } catch {
+      cancelTimeout(id)
       pending.removeValue(forKey: id)?.resume(throwing: error)
     }
+  }
+
+  /// Cancel and drop the timeout task for `id` so it can't fire a spurious `.timedOut`
+  /// after the request has already resolved (and doesn't leak).
+  private func cancelTimeout(_ id: Int) {
+    timeoutTasks.removeValue(forKey: id)?.cancel()
   }
 
   private func receiveLoop() async {
@@ -158,9 +196,13 @@ actor GatewayConnection {
     case let .event(_, event):
       events.yield(event)
     case let .response(id, result):
+      cancelTimeout(id)
       pending.removeValue(forKey: id)?.resume(returning: result)
     case let .failure(id, message):
-      if let id { pending.removeValue(forKey: id)?.resume(throwing: GatewayError.server(message)) }
+      if let id {
+        cancelTimeout(id)
+        pending.removeValue(forKey: id)?.resume(throwing: GatewayError.server(message))
+      }
     case .ignored:
       break
     }
@@ -170,6 +212,8 @@ actor GatewayConnection {
     guard !isFinished else { return }
     isFinished = true
     events.finish()
+    for (_, task) in timeoutTasks { task.cancel() }
+    timeoutTasks.removeAll()
     let outstanding = pending
     pending.removeAll()
     for (_, continuation) in outstanding { continuation.resume(throwing: error) }

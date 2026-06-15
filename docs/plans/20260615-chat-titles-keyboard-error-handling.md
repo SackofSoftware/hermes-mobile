@@ -200,17 +200,17 @@ proven by archive.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`
 
-- [ ] Add `GatewayError.timedOut` with a message mirroring desktop
+- [x] Add `GatewayError.timedOut` with a message mirroring desktop
   (`"request timed out: <method>"`).
-- [ ] Give `GatewayConnection` a `requestTimeout: Duration` (default e.g. `.seconds(30)`),
+- [x] Give `GatewayConnection` a `requestTimeout: Duration` (default e.g. `.seconds(30)`),
   threaded through `make(requestTimeout:)` and `live`. `send` schedules a per-id timeout
   task; on fire it removes the pending continuation and resumes it throwing `.timedOut`.
-- [ ] Cancel/clear the timeout task when the response, failure, or `finish` resolves the
+- [x] Cancel/clear the timeout task when the response, failure, or `finish` resolves the
   id (no leaks, no double-resume — track tasks per id alongside `pending`).
-- [ ] Write a gateway-client test: a fake `WebSocketTransport` that **never responds** to
+- [x] Write a gateway-client test: a fake `WebSocketTransport` that **never responds** to
   a request, with a short injected `requestTimeout`, makes `send` throw `.timedOut`;
   confirm a normal response still resolves and cancels its timer (no spurious throw).
-- [ ] Run `make test` — must pass before next task.
+- [x] Run `make test` — must pass before next task.
 
 ### Task 7: Surface prompt errors + multi-line activity footer (#6)
 

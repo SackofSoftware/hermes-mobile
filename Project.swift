@@ -30,6 +30,11 @@ let project = Project(
       bundleId: "me.honcharenko.HermesMobile",
       deploymentTargets: .iOS("17.0"),
       infoPlist: .extendingDefault(with: [
+        // Wire the bundle version/short-version to the build settings below so a
+        // `CURRENT_PROJECT_VERSION` bump actually reaches the Info.plist (Tuist's
+        // default otherwise hardcodes CFBundleVersion = 1, ignoring the setting).
+        "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+        "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
         "UILaunchScreen": ["UIColorName": ""],
         "HermesDefaultServerURL": .string(debugServerURL),
         // The app connects to user-specified self-hosted servers over http (Tailscale/LAN),

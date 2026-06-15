@@ -14,6 +14,7 @@ struct SessionListView: View {
       if let error = store.loadError {
         Label(error, systemImage: "exclamationmark.triangle")
           .foregroundStyle(.red)
+          .listRowSeparator(.hidden)
       }
       if store.isSearching {
         // Search results are flat, with the matching snippet shown.
@@ -43,6 +44,7 @@ struct SessionListView: View {
       }
     }
     .listStyle(.plain)
+    .listSectionSeparator(.hidden) // flat list — no section hairlines (row hairlines hidden per-row)
     .overlay {
       if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
@@ -93,20 +95,23 @@ struct SessionListView: View {
     }
   }
 
-  /// The bottom "New Chat" bar (a trailing prominent capsule, mirroring Codex). Rendered
-  /// via `safeAreaInset` so the list content scrolls clear of it.
+  /// The bottom "new session" button — a trailing circular FAB in the Hermes accent
+  /// (icon-only: it starts a new session, not a chat). Rendered via `safeAreaInset` so the
+  /// list content scrolls clear of it.
   private var newChatBar: some View {
     HStack {
       Spacer()
       Button {
         store.send(.newSessionButtonTapped)
       } label: {
-        Label("New Chat", systemImage: "square.and.pencil")
-          .fontWeight(.semibold)
+        Image(systemName: "square.and.pencil")
+          .font(.title2.weight(.semibold))
+          .foregroundStyle(.white)
+          .frame(width: 56, height: 56)
+          .background(Color.hermesAccent, in: Circle())
+          .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
       }
-      .buttonStyle(.borderedProminent)
-      .buttonBorderShape(.capsule)
-      .controlSize(.large)
+      .accessibilityLabel("New session")
     }
     .padding(.horizontal)
     .padding(.vertical, 8)
@@ -154,6 +159,7 @@ struct SessionListView: View {
           store.send(.toggleGroupExpansion(groupID: group.id))
         }
         .font(.subheadline)
+        .listRowSeparator(.hidden)
       }
     }
   }
@@ -176,6 +182,7 @@ struct SessionListView: View {
       )
     }
     .buttonStyle(.plain)
+    .listRowSeparator(.hidden)
     .swipeActions(edge: .leading) {
       pinButton(session, isPinned: isPinned)
         .tint(.orange)

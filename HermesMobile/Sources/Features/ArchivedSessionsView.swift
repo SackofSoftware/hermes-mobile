@@ -13,6 +13,7 @@ struct ArchivedSessionsView: View {
       if let error = store.loadError {
         Label(error, systemImage: "exclamationmark.triangle")
           .foregroundStyle(.red)
+          .listRowSeparator(.hidden)
       }
       ForEach(store.sessions) { session in
         Button {
@@ -21,6 +22,7 @@ struct ArchivedSessionsView: View {
           SessionRowView(session: session, now: store.now)
         }
         .buttonStyle(.plain)
+        .listRowSeparator(.hidden)
         .swipeActions(edge: .trailing) {
           restoreButton(session)
             .tint(.green)
@@ -31,6 +33,7 @@ struct ArchivedSessionsView: View {
       }
     }
     .listStyle(.plain)
+    .listSectionSeparator(.hidden)
     .overlay {
       if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
         ContentUnavailableView("No archived sessions", systemImage: "archivebox")

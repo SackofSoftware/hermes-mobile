@@ -117,21 +117,21 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] Switch the `List` to `.listStyle(.plain)` and restyle headers flat (Codex-style: plain section headers, no inset cards). Keep the `Pinned` group on top in both modes.
-- [ ] When `store.groupingMode == .workspace`: render the existing workspace `groupSection`s (keep the "Show N more" collapse, restyled flat). When `.chronological`: render a single flat `ForEach(store.chronologicalSessions)` with no workspace headers. Search results stay flat (unchanged).
-- [ ] Keep row affordances (tap, pin/unpin, rename, archive) intact.
-- [ ] Add snapshot cases: workspace-mode flat list and chronological-mode flat list (reuse pinned reference date).
-- [ ] Run `make snapshot` (record new baselines intentionally) — must pass before next task.
+- [x] Switch the `List` to `.listStyle(.plain)` and restyle headers flat (Codex-style: plain section headers, no inset cards). Keep the `Pinned` group on top in both modes.
+- [x] When `store.groupingMode == .workspace`: render the existing workspace `groupSection`s (keep the "Show N more" collapse, restyled flat). When `.chronological`: render a single flat `ForEach(store.chronologicalSessions)` with no workspace headers. Search results stay flat (unchanged).
+- [x] Keep row affordances (tap, pin/unpin, rename, archive) intact.
+- [x] Add snapshot cases: workspace-mode flat list and chronological-mode flat list (reuse pinned reference date).
+- [x] Run `make snapshot` (record new baselines intentionally) — must pass before next task.
 
 ### Task 6: Top-trailing Organize/Archived menu
 
 **Files:**
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 
-- [ ] Add a top-trailing `ToolbarItem` `Menu` (label e.g. `line.3.horizontal.decrease.circle` / `ellipsis.circle`): a grouping section with **By workspace** and **Chronological** (checkmark on the selected one via `store.groupingMode`), each sending `.setGroupingMode(…)`; then a `Divider()`; then an **Archived sessions** button (`archivebox`) sending `.archivedButtonTapped`.
-- [ ] Leave the Settings gear button in the top-leading slot unchanged.
-- [ ] No reducer logic added here (covered by Task 2/4 tests). Menus aren't snapshot-testable (popover) — verify the build via `make snapshot` and cover behaviour by the reducer tests; note menu interaction as manual.
-- [ ] Run `make snapshot` (build + existing baselines) — must pass before next task.
+- [x] Add a top-trailing `ToolbarItem` `Menu` (label e.g. `line.3.horizontal.decrease.circle` / `ellipsis.circle`): a grouping section with **By workspace** and **Chronological** (checkmark on the selected one via `store.groupingMode`), each sending `.setGroupingMode(…)`; then a `Divider()`; then an **Archived sessions** button (`archivebox`) sending `.archivedButtonTapped`.
+- [x] Leave the Settings gear button in the top-leading slot unchanged.
+- [x] No reducer logic added here (covered by Task 2/4 tests). Menus aren't snapshot-testable (popover) — verify the build via `make snapshot` and cover behaviour by the reducer tests; note menu interaction as manual.
+- [x] Run `make snapshot` (build + existing baselines) — must pass before next task.
 
 ### Task 7: Bottom new-session button + iOS 26 search coexistence
 
@@ -139,10 +139,13 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] Move the **New** button from `.primaryAction` to `ToolbarItem(placement: .bottomBar)` (keeps `.searchable`). On iOS 17–18 search stays in the nav bar and New sits in the bottom bar; on iOS 26 the system places the search field in the bottom — verify the New button coexists (if needed, gate an iOS 26-only `.searchToolbarBehavior(.minimize)` / bottom-accessory tweak with `#available(iOS 26.0, *)`, mirroring the existing Liquid-Glass gating).
-- [ ] Ensure the new-session action and label are unchanged (`.newSessionButtonTapped`).
-- [ ] Update/record a snapshot showing the bottom-bar New button (iOS 17/18 host). The iOS 26 bottom-search layout is **manual** (Post-Completion) — the snapshot host can't render it.
-- [ ] Run `make snapshot` — must pass before next task.
+- [x] Move the **New** button from `.primaryAction` to `ToolbarItem(placement: .bottomBar)` (keeps `.searchable`). On iOS 17–18 search stays in the nav bar and New sits in the bottom bar; on iOS 26 the system places the search field in the bottom — verify the New button coexists (if needed, gate an iOS 26-only `.searchToolbarBehavior(.minimize)` / bottom-accessory tweak with `#available(iOS 26.0, *)`, mirroring the existing Liquid-Glass gating).
+- [x] Ensure the new-session action and label are unchanged (`.newSessionButtonTapped`).
+- [x] Update/record a snapshot showing the bottom-bar New button (iOS 17/18 host). The iOS 26 bottom-search layout is **manual** (Post-Completion) — the snapshot host can't render it.
+- [x] Run `make snapshot` — must pass before next task.
+
+
+  > ⚠️ Implemented via `.safeAreaInset(edge: .bottom)` instead of `ToolbarItem(.bottomBar)`: a `.bottomBar` toolbar renders blank in the iOS 17/18 snapshot host (zero coverage). `safeAreaInset` lays out in the normal hierarchy (snapshots correctly) and still sits above the iOS 26 bottom search. iOS 26 search+button coexistence remains a manual-verify item.
 
 ### Task 8: `ArchivedSessionsView` (sheet)
 
@@ -151,10 +154,10 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] Create `ArchivedSessionsView`: a `.plain` `List` of archived rows (reuse `SessionRowView`), `.swipeActions`/`.contextMenu` **Restore** (`.restoreButtonTapped`), tap → `.sessionTapped`; loading + `ContentUnavailableView("No archived sessions")` empty state; nav title "Archived"; a Done button to dismiss.
-- [ ] Present it from `SessionListView` via `.sheet(item: $store.scope(state: \.archived, action: \.archived))` wrapped in a `NavigationStack` (mirrors the Settings sheet).
-- [ ] Add snapshot cases: archived list populated and empty.
-- [ ] Run `make snapshot` (record new baselines) — must pass before next task.
+- [x] Create `ArchivedSessionsView`: a `.plain` `List` of archived rows (reuse `SessionRowView`), `.swipeActions`/`.contextMenu` **Restore** (`.restoreButtonTapped`), tap → `.sessionTapped`; loading + `ContentUnavailableView("No archived sessions")` empty state; nav title "Archived"; a Done button to dismiss.
+- [x] Present it from `SessionListView` via `.sheet(item: $store.scope(state: \.archived, action: \.archived))` wrapped in a `NavigationStack` (mirrors the Settings sheet).
+- [x] Add snapshot cases: archived list populated and empty.
+- [x] Run `make snapshot` (record new baselines) — must pass before next task.
 
 ### Task 9: Verify acceptance criteria
 

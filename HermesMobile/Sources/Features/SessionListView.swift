@@ -2,7 +2,10 @@ import ComposableArchitecture
 import HermesKit
 import SwiftUI
 
-/// The session list: searchable, pull-to-refresh, "+" to start a new chat.
+/// The session list: a flat (Codex-style) list, searchable, pull-to-refresh. Grouping
+/// (by workspace / chronological) is chosen from the top-trailing menu, which also opens
+/// the Archived sessions sheet. "New chat" lives in the bottom bar (alongside the iOS 26
+/// bottom search field).
 struct SessionListView: View {
   @Bindable var store: StoreOf<SessionListFeature>
 
@@ -17,9 +20,8 @@ struct SessionListView: View {
         ForEach(store.sessions) { session in
           row(session, showsPreview: true)
         }
-        // (isPinned is derived inside `row` so pinned sessions in search show Unpin.)
       } else {
-        // Pinned sessions float to the top, above the workspace groups.
+        // Pinned sessions float to the top in both grouping modes.
         if !store.pinnedSessions.isEmpty {
           Section("Pinned") {
             ForEach(store.pinnedSessions) { session in
@@ -27,12 +29,20 @@ struct SessionListView: View {
             }
           }
         }
-        // Group by workspace, desktop-style, with per-group "Show more".
-        ForEach(store.groups) { group in
-          groupSection(group)
+        switch store.groupingMode {
+        case .workspace:
+          ForEach(store.groups) { group in
+            groupSection(group)
+          }
+        case .chronological:
+          // One flat, last-active-ordered list — no workspace headers.
+          ForEach(store.chronologicalSessions) { session in
+            row(session)
+          }
         }
       }
     }
+    .listStyle(.plain)
     .overlay {
       if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
@@ -47,11 +57,15 @@ struct SessionListView: View {
           store.send(.settingsButtonTapped)
         }
       }
-      ToolbarItem(placement: .primaryAction) {
-        Button("New", systemImage: "square.and.pencil") {
-          store.send(.newSessionButtonTapped)
-        }
+      ToolbarItem(placement: .topBarTrailing) {
+        organizeMenu
       }
+    }
+    // New chat lives at the bottom (Codex-style). A `safeAreaInset` keeps it in the
+    // normal view hierarchy so it sits above the home indicator — and, on iOS 26 where
+    // `.searchable` moves to the bottom, above the search field too.
+    .safeAreaInset(edge: .bottom) {
+      newChatBar
     }
     .task { store.send(.task) }
     .onDisappear { store.send(.onDisappear) }
@@ -71,6 +85,58 @@ struct SessionListView: View {
       NavigationStack {
         SettingsView(store: settingsStore)
       }
+    }
+    .sheet(item: $store.scope(state: \.archived, action: \.archived)) { archivedStore in
+      NavigationStack {
+        ArchivedSessionsView(store: archivedStore)
+      }
+    }
+  }
+
+  /// The bottom "New Chat" bar (a trailing prominent capsule, mirroring Codex). Rendered
+  /// via `safeAreaInset` so the list content scrolls clear of it.
+  private var newChatBar: some View {
+    HStack {
+      Spacer()
+      Button {
+        store.send(.newSessionButtonTapped)
+      } label: {
+        Label("New Chat", systemImage: "square.and.pencil")
+          .fontWeight(.semibold)
+      }
+      .buttonStyle(.borderedProminent)
+      .buttonBorderShape(.capsule)
+      .controlSize(.large)
+    }
+    .padding(.horizontal)
+    .padding(.vertical, 8)
+  }
+
+  /// Top-trailing menu: choose the grouping mode (checkmark on the active one), then a
+  /// divider and the Archived sessions entry. Mirrors the Codex "Organize / Manage" menu.
+  private var organizeMenu: some View {
+    Menu {
+      Picker(
+        "Grouping",
+        selection: Binding(
+          get: { store.groupingMode },
+          set: { store.send(.setGroupingMode($0)) }
+        )
+      ) {
+        Label("By workspace", systemImage: "folder").tag(SessionGroupingMode.workspace)
+        Label("Chronological", systemImage: "clock").tag(SessionGroupingMode.chronological)
+      }
+      .pickerStyle(.inline)
+
+      Divider()
+
+      Button {
+        store.send(.archivedButtonTapped)
+      } label: {
+        Label("Archived sessions", systemImage: "archivebox")
+      }
+    } label: {
+      Label("Organize", systemImage: "line.3.horizontal.decrease.circle")
     }
   }
 

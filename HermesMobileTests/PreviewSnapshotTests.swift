@@ -188,6 +188,93 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .device(config: device)))
   }
 
+  func testSessionList_chronological() {
+    let now = self.now
+    // Two workspaces, but chronological mode shows one flat recency-ordered list.
+    let sessions: [Session] = (0..<5).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass",
+                      "Model picker", "Workspace grouping"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: i.isMultiple(of: 2) ? "/Users/me/dev/hermes-mobile" : "/Users/me/dev/hermes-agent",
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            groupingMode: .chronological
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
+  // MARK: ArchivedSessionsView
+
+  func testArchivedSessions() {
+    let now = self.now
+    let sessions: [Session] = [
+      Session(id: "x0", title: "Old experiment",
+              updatedAt: Date(timeIntervalSince1970: 1_749_300_000),
+              cwd: "/Users/me/dev/hermes-mobile", messageCount: 6),
+      Session(id: "x1", title: "Scratch session",
+              updatedAt: Date(timeIntervalSince1970: 1_749_200_000),
+              cwd: "/Users/me/dev/hermes-agent", messageCount: 3),
+    ]
+    let view = NavigationStack {
+      ArchivedSessionsView(
+        store: Store(
+          initialState: ArchivedSessionsFeature.State(
+            connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now
+          )
+        ) {
+          ArchivedSessionsFeature()
+        } withDependencies: {
+          $0.hermesREST.archivedSessions = { _, _, _ in sessions }
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
+  func testArchivedSessions_empty() {
+    let now = self.now
+    let view = NavigationStack {
+      ArchivedSessionsView(
+        store: Store(
+          initialState: ArchivedSessionsFeature.State(
+            connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
+            now: now
+          )
+        ) {
+          ArchivedSessionsFeature()
+        } withDependencies: {
+          $0.hermesREST.archivedSessions = { _, _, _ in [] }
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+  }
+
   // MARK: ChatView (Task 8)
 
   func testChatView() {

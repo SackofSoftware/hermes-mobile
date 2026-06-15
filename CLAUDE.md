@@ -44,6 +44,14 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   immediately, re-insert on RPC failure. **Rename is server-side too** (no device-local
   state), optimistic with rollback (mirrors archive): list → REST `PATCH /api/sessions/{id}`
   `{"title":…}`; chat → `session.title` gateway method.
+- **Session-list grouping** is a persisted UI pref (`SessionGroupingMode`: `.workspace` /
+  `.chronological`) in `PreferencesClient` — display-only over the one fetched `sessions`
+  array (no fetch/order change), reset on logout. The list is a flat `.listStyle(.plain)`;
+  grouping options + the **Archived sessions** entry live in a top-trailing `Menu`; "New
+  chat" is a bottom bar via **`.safeAreaInset(edge: .bottom)`** (a `.bottomBar` toolbar
+  renders blank in the snapshot host). **Archived** is a server query (`?archived=only`)
+  shown in a sheet (`ArchivedSessionsFeature`); restore = `archive(id, false)`; tap-to-open
+  bubbles up the existing `openSession` delegate.
 - **Auto-poll** (e.g. the session-list working glow): a cancellable `continuousClock`
   `sleep`-loop effect started on `.task` and cancelled by an explicit `.onDisappear`
   action — not a bare `.task` cancellation. Pause it while searching. Testable with

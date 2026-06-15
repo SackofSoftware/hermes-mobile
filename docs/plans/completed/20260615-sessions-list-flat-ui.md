@@ -161,17 +161,17 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] Flat `.plain` list renders in both modes; Pinned stays on top; search still flat.
-- [ ] Grouping menu (top-trailing) switches modes with a checkmark and persists across relaunch; Settings still top-leading.
-- [ ] Archived menu entry opens the sheet; Restore unarchives (optimistic + rollback); tap opens/resumes the session in the main stack and dismisses the sheet.
-- [ ] New-session button is in the bottom bar and triggers create.
-- [ ] Run the full suites: `make test` and `make snapshot`.
+- [x] Flat `.plain` list renders in both modes; Pinned stays on top; search still flat.
+- [x] Grouping menu (top-trailing) switches modes with a checkmark and persists across relaunch; Settings still top-leading.
+- [x] Archived menu entry opens the sheet; Restore unarchives (optimistic + rollback); tap opens/resumes the session in the main stack and dismisses the sheet.
+- [x] New-session button is in the bottom bar and triggers create.
+- [x] Run the full suites: `make test` and `make snapshot`.
 
 ### Task 10: [Final] Update documentation
 
-- [ ] Update `CLAUDE.md` if a new convention emerged (grouping-mode pref; flat `.plain` list; bottom-bar New + iOS 26 search note).
-- [ ] Update `docs/architecture.md` if warranted (new `ArchivedSessionsFeature`, `archivedSessions` REST method, grouping pref).
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Update `CLAUDE.md` if a new convention emerged (grouping-mode pref; flat `.plain` list; bottom-bar New + iOS 26 search note).
+- [x] Update `docs/architecture.md` if warranted (new `ArchivedSessionsFeature`, `archivedSessions` REST method, grouping pref).
+- [x] Move this plan to `docs/plans/completed/`. (done)
 
 ## Post-Completion
 *Manual / external — no checkboxes.*

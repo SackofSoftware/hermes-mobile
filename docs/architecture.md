@@ -26,10 +26,11 @@ approval/clarify requests).
 ```
 AppFeature                 // root nav + launch auto-connect; onboarding until connected
 ├─ ConnectionFeature       // auto-validating URL + token
-├─ SessionListFeature      // workspace-grouped list (last-active order, collapsible) /
-│  │                       //   search / create; pin (client-side) + archive (server) +
-│  │                       //   working-glow auto-poll; presents Settings
-│  └─ SettingsFeature      // token mgmt, manual reconnect, debug log
+├─ SessionListFeature      // flat list, grouped by workspace OR chronological (persisted) /
+│  │                       //   search / create; pin (client-side) + archive/rename (server) +
+│  │                       //   working-glow auto-poll; presents Settings + Archived sheets
+│  ├─ SettingsFeature      // token mgmt, manual reconnect, debug log
+│  └─ ArchivedSessionsFeature // archived list (?archived=only); restore + open delegate
 └─ ChatFeature             // owns the WS lifecycle + streaming reduction; also folds in
                            //   approvals, clarify/sudo/secret, the tool-detail sheet,
                            //   and the model/reasoning picker, reconnect
@@ -40,14 +41,16 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 All side effects go through `@DependencyClient` structs (each with a `liveValue` and
 a `testValue`/`.inMemory()` variant):
 
-- **`HermesRESTClient`** — status, sessions, search, messages.
+- **`HermesRESTClient`** — status, sessions, archived sessions (`?archived=only`), search,
+  messages, archive/rename (`PATCH /api/sessions/{id}`).
 - **`HermesGatewayClient`** — WebSocket JSON-RPC connect/send. The socket is one
   long-running cancellable effect; reconnect/backoff lives in the reducer (testable
   with `TestClock`). Each `send` enforces a per-request timeout (default 30s) so a
   stuck/never-acking RPC throws `GatewayError.timedOut` instead of hanging forever.
 - **`KeychainClient`** — the auth token (the only secret).
 - **`PreferencesClient`** — non-secret prefs: server URL (for auto-login), per-session
-  seen counts, and client-side pinned session ids. All cleared on logout.
+  seen counts, client-side pinned session ids, and the session-list grouping mode
+  (`SessionGroupingMode`). All cleared/reset on logout.
 - **`PasteboardClient`** — copy.
 - **`DebugLogClient`** — an event ring buffer for the in-app debug log.
 

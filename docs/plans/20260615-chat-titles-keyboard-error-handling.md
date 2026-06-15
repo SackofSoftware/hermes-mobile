@@ -160,17 +160,17 @@ proven by archive.
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift` (toolbar + alert)
 
-- [ ] Add rename state to `ChatFeature.State` (e.g. `renameDraft: String?`) and actions:
+- [x] Add rename state to `ChatFeature.State` (e.g. `renameDraft: String?`) and actions:
   `renameButtonTapped`, `confirmRename`, `renameFailed(previousTitle:)`.
-- [ ] `confirmRename`: optimistically set `state.title` to the trimmed draft, then send
+- [x] `confirmRename`: optimistically set `state.title` to the trimmed draft, then send
   `session.title` with `{"session_id": liveSessionID, "title": draft}` over the gateway;
   on failure restore the previous title and set `errorBanner`. Guard on `liveSessionID`.
-- [ ] Wire the view: a nav-bar toolbar control (e.g. an ellipsis `Menu` with "Rename")
+- [x] Wire the view: a nav-bar toolbar control (e.g. an ellipsis `Menu` with "Rename")
   that presents an `.alert` with a `TextField` bound to the draft + Save/Cancel,
   pre-filled with the current title.
-- [ ] Write `ChatFeature` tests: rename success (optimistic `state.title` + the
+- [x] Write `ChatFeature` tests: rename success (optimistic `state.title` + the
   `session.title` RPC is sent) and failure (rollback + `errorBanner`).
-- [ ] Run `make test` — must pass before next task.
+- [x] Run `make test` — must pass before next task.
 
 ### Task 5: Dismiss the keyboard on tap / scroll (#5)
 

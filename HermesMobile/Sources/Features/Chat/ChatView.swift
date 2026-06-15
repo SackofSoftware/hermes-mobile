@@ -28,6 +28,20 @@ struct ChatView: View {
     }
     .navigationTitle(store.title ?? "Chat")
     .navigationBarTitleDisplayMode(.inline)
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Menu {
+          Button("Rename") { store.send(.renameButtonTapped) }
+        } label: {
+          Image(systemName: "ellipsis.circle")
+        }
+      }
+    }
+    .alert("Rename session", isPresented: renameBinding) {
+      TextField("Title", text: renameDraftBinding)
+      Button("Save") { store.send(.confirmRename) }
+      Button("Cancel", role: .cancel) { store.send(.cancelRename) }
+    }
     .task { store.send(.task) }
     .onDisappear { store.send(.onDisappear) }
     .sheet(item: toolDetailBinding) { row in
@@ -48,6 +62,23 @@ struct ChatView: View {
         )
       }
     }
+  }
+
+  /// Drives the rename alert's presentation; dismissing routes through `.cancelRename`.
+  private var renameBinding: Binding<Bool> {
+    Binding(
+      get: { store.renameDraft != nil },
+      set: { if !$0 { store.send(.cancelRename) } }
+    )
+  }
+
+  /// A non-optional proxy over the optional draft so the `TextField` stays authoritative
+  /// in the reducer (writes go through the binding action).
+  private var renameDraftBinding: Binding<String> {
+    Binding(
+      get: { store.renameDraft ?? "" },
+      set: { store.renameDraft = $0 }
+    )
   }
 
   private var modelPickerBinding: Binding<Bool> {

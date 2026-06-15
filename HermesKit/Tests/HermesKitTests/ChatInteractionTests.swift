@@ -178,4 +178,61 @@ struct ChatInteractionTests {
     await store.send(.modelSelected("claude-sonnet-4-6"))
     await store.send(.reasoningSelected("high"))
   }
+
+  // MARK: Rename via gateway session.title (Task 4)
+
+  @Test func renameSuccessOptimisticAndSendsTitleRPC() async {
+    let sent = LockIsolated<JSONValue?>(nil)
+    var initial = readyState()
+    initial.title = "Old title"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object(["pending": .bool(true), "title": .string("New title")])
+      }
+    }
+
+    await store.send(.renameButtonTapped) {
+      $0.renameDraft = "Old title" // pre-filled with current title
+    }
+    // The bound TextField edit reaches state.renameDraft.
+    await store.send(.binding(.set(\.renameDraft, "New title"))) {
+      $0.renameDraft = "New title"
+    }
+    await store.send(.confirmRename) {
+      $0.title = "New title" // optimistic
+      $0.renameDraft = nil
+    }
+    await store.finish()
+
+    #expect(sent.value?["method"]?.stringValue == "session.title")
+    #expect(sent.value?["params"]?["session_id"]?.stringValue == "live")
+    #expect(sent.value?["params"]?["title"]?.stringValue == "New title")
+    #expect(store.state.title == "New title") // no rollback
+  }
+
+  @Test func renameFailureRollsBackAndSetsErrorBanner() async {
+    var initial = readyState()
+    initial.title = "Old title"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        throw GatewayError.server("Title too long")
+      }
+    }
+
+    await store.send(.renameButtonTapped) {
+      $0.renameDraft = "Old title"
+    }
+    await store.send(.binding(.set(\.renameDraft, "Bad title"))) {
+      $0.renameDraft = "Bad title"
+    }
+    await store.send(.confirmRename) {
+      $0.title = "Bad title" // optimistic
+      $0.renameDraft = nil
+    }
+    await store.receive(\.renameFailed) {
+      $0.title = "Old title" // rolled back
+      $0.errorBanner = "Couldn’t rename the session."
+    }
+  }
 }

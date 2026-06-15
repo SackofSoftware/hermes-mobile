@@ -32,6 +32,9 @@ public struct ChatFeature {
     public var reasoningEffort: String?
     /// The model/reasoning picker sheet, when open (Task 7).
     public var modelPicker: ModelPicker?
+    /// Draft text for the rename alert. `nil` = alert closed; non-nil = alert open
+    /// with the in-progress title (Task 4).
+    public var renameDraft: String?
 
     /// State for the interactive model + reasoning-effort picker.
     public struct ModelPicker: Equatable, Sendable {
@@ -98,6 +101,7 @@ public struct ChatFeature {
       self.model = nil
       self.reasoningEffort = nil
       self.modelPicker = nil
+      self.renameDraft = nil
     }
 
     public var canSend: Bool {
@@ -129,6 +133,10 @@ public struct ChatFeature {
     case modelSelected(String)
     case reasoningSelected(String)
     case modelPickerDismissed
+    case renameButtonTapped
+    case confirmRename
+    case renameFailed(previousTitle: String?)
+    case cancelRename
   }
 
   private enum CancelID { case socket, reconnect }
@@ -339,6 +347,42 @@ public struct ChatFeature {
 
       case .modelPickerDismissed:
         state.modelPicker = nil
+        return .none
+
+      case .renameButtonTapped:
+        // Pre-fill the alert with the current title.
+        state.renameDraft = state.title ?? ""
+        return .none
+
+      case .confirmRename:
+        guard let sessionID = state.liveSessionID, let draft = state.renameDraft else {
+          state.renameDraft = nil
+          return .none
+        }
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousTitle = state.title
+        // Optimistic: update the header immediately; roll back on RPC failure.
+        state.title = trimmed.isEmpty ? nil : trimmed
+        state.renameDraft = nil
+        state.errorBanner = nil
+        return .run { [gateway] send in
+          do {
+            _ = try await gateway.send("session.title", .object([
+              "session_id": .string(sessionID),
+              "title": .string(trimmed),
+            ]))
+          } catch {
+            await send(.renameFailed(previousTitle: previousTitle))
+          }
+        }
+
+      case let .renameFailed(previousTitle):
+        state.title = previousTitle
+        state.errorBanner = "Couldn’t rename the session."
+        return .none
+
+      case .cancelRename:
+        state.renameDraft = nil
         return .none
       }
     }

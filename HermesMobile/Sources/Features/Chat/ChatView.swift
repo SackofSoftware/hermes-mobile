@@ -238,9 +238,10 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal)
     } else if let activity = store.activity {
+      // No lineLimit: the compacting/activity message is often long and must wrap
+      // so it stays fully visible (Issue #6).
       Label(activity, systemImage: "ellipsis.circle")
         .font(.caption).foregroundStyle(.secondary)
-        .lineLimit(1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal)
     }

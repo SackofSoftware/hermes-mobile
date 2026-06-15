@@ -121,6 +121,7 @@ public struct ChatFeature {
     case sessionResult(Result<SessionHandle, GatewayError>)
     case historyResponse([SessionMessage])
     case composerSubmitted
+    case promptSubmitFailed(message: String)
     case interruptTapped
     case respondToApproval(approve: Bool, all: Bool)
     case respondToClarify(answer: String)
@@ -220,11 +221,26 @@ public struct ChatFeature {
         state.composerText = ""
         state.errorBanner = nil
         state.isSending = true
-        return .run { [gateway] _ in
-          _ = try? await gateway.send("prompt.submit", .object([
-            "session_id": .string(sessionID), "text": .string(text),
-          ]))
+        // prompt.submit acks fast (`{status:"streaming"}`); the turn streams via events,
+        // so success does nothing here — only a thrown error (timeout / server / drop)
+        // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung).
+        return .run { [gateway] send in
+          do {
+            _ = try await gateway.send("prompt.submit", .object([
+              "session_id": .string(sessionID), "text": .string(text),
+            ]))
+          } catch let error as GatewayError {
+            await send(.promptSubmitFailed(message: error.message))
+          } catch {
+            await send(.promptSubmitFailed(message: GatewayError.disconnected.message))
+          }
         }
+
+      case let .promptSubmitFailed(message):
+        state.errorBanner = "Prompt failed: \(message)"
+        state.isSending = false
+        state.activity = nil
+        return .none
 
       case .interruptTapped:
         guard let sessionID = state.liveSessionID else { return .none }

@@ -219,17 +219,20 @@ proven by archive.
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`
 
-- [ ] In `composerSubmitted`, stop swallowing the error: await `gateway.send("prompt.submit",…)`
+- [x] In `composerSubmitted`, stop swallowing the error: await `gateway.send("prompt.submit",…)`
   and on throw send a new `promptSubmitFailed(message)` action.
-- [ ] Handle `promptSubmitFailed`: set `errorBanner` (e.g. `"Prompt failed: \(message)"`,
+- [x] Handle `promptSubmitFailed`: set `errorBanner` (e.g. `"Prompt failed: \(message)"`,
   mirroring desktop), set `isSending = false`, clear `activity` so the stuck
   "compacting…" footer goes away.
-- [ ] In `ChatView.footer`, remove `.lineLimit(1)` from the activity label (allow
+- [x] In `ChatView.footer`, remove `.lineLimit(1)` from the activity label (allow
   wrapping) so the compacting/activity message is fully visible.
-- [ ] Write `ChatFeature` tests: a failing `prompt.submit` (gateway throws, incl.
+- [x] Write `ChatFeature` tests: a failing `prompt.submit` (gateway throws, incl.
   `.timedOut`) sets `errorBanner`, clears `isSending`, and clears `activity`.
-- [ ] Optionally add/refresh a snapshot showing a wrapped multi-line activity footer.
-- [ ] Run `make test` (and `make snapshot` if a baseline changed) — must pass.
+- [x] (skipped — optional) No new snapshot added; the footer change is a pure
+  `.lineLimit(1)` removal. Ran `make snapshot` to confirm existing 23 baselines still
+  pass (`** TEST SUCCEEDED **`, no diffs).
+- [x] Run `make test` (and `make snapshot` if a baseline changed) — must pass. (157
+  HermesKit tests pass; snapshot suite passes.)
 
 ### Task 8: Verify acceptance criteria
 

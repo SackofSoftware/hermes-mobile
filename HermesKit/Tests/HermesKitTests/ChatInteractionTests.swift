@@ -235,4 +235,31 @@ struct ChatInteractionTests {
       $0.errorBanner = "Couldn’t rename the session."
     }
   }
+
+  // MARK: Prompt submit failure (Task 7, Issue #6)
+
+  @Test func promptSubmitFailureSurfacesBannerAndClearsSpinner() async {
+    var initial = readyState()
+    initial.composerText = "hello"
+    initial.activity = "compacting context…"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      // A stuck server: prompt.submit times out (Task 6's per-request timeout).
+      $0.hermesGateway.send = { @Sendable _, _ in
+        throw GatewayError.timedOut(method: "prompt.submit")
+      }
+    }
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "hello", isComplete: true))]
+      $0.composerText = ""
+      $0.errorBanner = nil
+      $0.isSending = true // optimistic; cleared when the failure arrives
+    }
+    await store.receive(\.promptSubmitFailed) {
+      $0.errorBanner = "Prompt failed: request timed out: prompt.submit"
+      $0.isSending = false
+      $0.activity = nil // the stuck "compacting…" footer is cleared
+    }
+  }
 }

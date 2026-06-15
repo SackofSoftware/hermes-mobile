@@ -9,6 +9,8 @@ struct ComposerView: View {
   let canSend: Bool
   let model: String?
   let reasoningEffort: String?
+  /// Owned by the parent's `@FocusState` so the transcript can dismiss the keyboard.
+  var focused: FocusState<Bool>.Binding
   let onModelTap: () -> Void
   let onSend: () -> Void
   let onInterrupt: () -> Void
@@ -17,6 +19,7 @@ struct ComposerView: View {
     VStack(spacing: 10) {
       TextField("Message", text: $text, axis: .vertical)
         .lineLimit(1 ... 6)
+        .focused(focused)
         .onSubmit(onSend)
 
       HStack(spacing: 12) {

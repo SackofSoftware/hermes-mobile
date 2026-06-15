@@ -178,16 +178,21 @@ proven by archive.
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 - Modify: `HermesMobile/Sources/Features/Chat/ComposerView.swift`
 
-- [ ] Hoist a `@FocusState private var composerFocused: Bool` in `ChatView`; pass a
+- [x] Hoist a `@FocusState private var composerFocused: Bool` in `ChatView`; pass a
   `FocusState<Bool>.Binding` into `ComposerView` and apply `.focused($composerFocused)`
   to its `TextField`.
-- [ ] Add `.scrollDismissesKeyboard(.interactively)` to the transcript `ScrollView`
+- [x] Add `.scrollDismissesKeyboard(.interactively)` to the transcript `ScrollView`
   (iOS 17-safe) so dragging the transcript dismisses the keyboard.
-- [ ] Add a tap affordance on the transcript area that sets `composerFocused = false`
-  (without stealing taps from rows/links — use a background/`simultaneousGesture`).
-- [ ] No reducer logic changes → no unit test; verify existing snapshots still pass
-  (`make snapshot`). Keyboard behaviour is covered by manual verification (Post-Completion).
-- [ ] Confirm the app target still builds (`tuist generate` not needed — no new files).
+- [x] Add a tap affordance on the transcript area that sets `composerFocused = false`
+  (`.simultaneousGesture(TapGesture())` on the ScrollView — preserves row buttons,
+  context menus, and markdown links).
+- [x] No reducer logic changes → no unit test; verified existing snapshots still pass
+  via `make snapshot` (23 tests, 0 failures — no baseline diffs). Updated the three
+  `ComposerView` snapshot call sites with a `ComposerHost` `@FocusState` wrapper.
+  Keyboard behaviour is covered by manual verification (Post-Completion).
+- [x] Confirmed the app/test target still builds — `make snapshot` ran a full
+  xcodebuild + test pass (`** TEST SUCCEEDED **`); no new files, so `tuist generate`
+  was not needed.
 
 ### Task 6: Add a per-request timeout to the gateway client (#6, mechanism)
 

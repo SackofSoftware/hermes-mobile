@@ -328,32 +328,41 @@ final class PreviewSnapshotTests: XCTestCase {
   }
 
   func testComposer_idle() {
-    let view = ComposerView(
-      text: .constant(""),
-      isSending: false,
-      canSend: false,
-      model: "claude-opus-4-8",
-      reasoningEffort: "high",
-      onModelTap: {}, onSend: {}, onInterrupt: {}
-    )
+    let view = ComposerHost {
+      ComposerView(
+        text: .constant(""),
+        isSending: false,
+        canSend: false,
+        model: "claude-opus-4-8",
+        reasoningEffort: "high",
+        focused: $0,
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+    }
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 
   func testComposer_typingAndSending() {
     let view = VStack(spacing: 20) {
-      ComposerView(
-        text: .constant("Summarize the streaming protocol"),
-        isSending: false, canSend: true,
-        model: "claude-sonnet-4-6", reasoningEffort: "medium",
-        onModelTap: {}, onSend: {}, onInterrupt: {}
-      )
-      ComposerView(
-        text: .constant(""),
-        isSending: true, canSend: false,
-        model: "claude-opus-4-8", reasoningEffort: nil,
-        onModelTap: {}, onSend: {}, onInterrupt: {}
-      )
+      ComposerHost {
+        ComposerView(
+          text: .constant("Summarize the streaming protocol"),
+          isSending: false, canSend: true,
+          model: "claude-sonnet-4-6", reasoningEffort: "medium",
+          focused: $0,
+          onModelTap: {}, onSend: {}, onInterrupt: {}
+        )
+      }
+      ComposerHost {
+        ComposerView(
+          text: .constant(""),
+          isSending: true, canSend: false,
+          model: "claude-opus-4-8", reasoningEffort: nil,
+          focused: $0,
+          onModelTap: {}, onSend: {}, onInterrupt: {}
+        )
+      }
     }
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
@@ -451,4 +460,18 @@ final class PreviewSnapshotTests: XCTestCase {
     }
     assertSnapshot(of: view, as: .image(layout: .device(config: device)))
   }
+}
+
+/// Hosts a `@FocusState` so `ComposerView` (which now takes a `FocusState.Binding`)
+/// can be snapshotted standalone. Focus defaults to `false`, matching the unfocused
+/// baseline render.
+private struct ComposerHost<Content: View>: View {
+  @FocusState private var focused: Bool
+  let content: (FocusState<Bool>.Binding) -> Content
+
+  init(@ViewBuilder content: @escaping (FocusState<Bool>.Binding) -> Content) {
+    self.content = content
+  }
+
+  var body: some View { content($focused) }
 }

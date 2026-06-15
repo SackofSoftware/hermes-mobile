@@ -7,6 +7,7 @@ import SwiftUI
 struct ChatView: View {
   @Bindable var store: StoreOf<ChatFeature>
   @State private var isAtBottom = true
+  @FocusState private var composerFocused: Bool
 
   var body: some View {
     VStack(spacing: 0) {
@@ -21,6 +22,7 @@ struct ChatView: View {
         canSend: store.canSend,
         model: store.model,
         reasoningEffort: store.reasoningEffort,
+        focused: $composerFocused,
         onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) }
@@ -125,6 +127,10 @@ struct ChatView: View {
           }
           .padding()
         }
+        .scrollDismissesKeyboard(.interactively)
+        // Tap on empty transcript space dismisses the keyboard without stealing taps
+        // from row buttons, context menus, or markdown links.
+        .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
         .onPreferenceChange(BottomDistanceKey.self) { distance in
           isAtBottom = distance < 60 // within ~60pt of the bottom counts as "at bottom"
         }

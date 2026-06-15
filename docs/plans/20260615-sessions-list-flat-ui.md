@@ -80,11 +80,11 @@ Grouping mode is a persisted enum that only changes how the existing `sessions` 
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] Add `public var groupingMode: SessionGroupingMode = .workspace` to `State` (init param + memberwise init update). Load it from `preferences.loadGroupingMode()` in `load()` (alongside pins/seen counts).
-- [ ] Add a computed `var chronologicalSessions: [Session]` = `unpinnedSessions` sorted by `updatedAt` desc (nil last) for the chronological mode. Keep `groups`/`pinnedSessions` as-is.
-- [ ] Add action `setGroupingMode(SessionGroupingMode)` → set `state.groupingMode` and persist via `preferences.saveGroupingMode`.
-- [ ] Write tests: `setGroupingMode` updates state + persists; `load` seeds `groupingMode` from preferences; `chronologicalSessions` ordering (pinned excluded, recency desc).
-- [ ] Run `make test` — must pass before next task.
+- [x] Add `public var groupingMode: SessionGroupingMode = .workspace` to `State` (init param + memberwise init update). Load it from `preferences.loadGroupingMode()` in `load()` (alongside pins/seen counts).
+- [x] Add a computed `var chronologicalSessions: [Session]` = `unpinnedSessions` sorted by `updatedAt` desc (nil last) for the chronological mode. Keep `groups`/`pinnedSessions` as-is.
+- [x] Add action `setGroupingMode(SessionGroupingMode)` → set `state.groupingMode` and persist via `preferences.saveGroupingMode` (no-op when unchanged).
+- [x] Write tests: `setGroupingMode` updates state + persists; `load` seeds `groupingMode` from preferences; `chronologicalSessions` ordering (pinned excluded, recency desc).
+- [x] Run `make test` — must pass before next task. (169 tests green.)
 
 ### Task 3: REST `archivedSessions` method
 

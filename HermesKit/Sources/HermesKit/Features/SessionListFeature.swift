@@ -37,6 +37,8 @@ public struct SessionListFeature {
     public var renamingID: Session.ID?
     /// The editable title text bound to the rename alert's `TextField`.
     public var renameDraft: String
+    /// How the list groups its rows (workspace vs chronological); persisted, loaded on `task`.
+    public var groupingMode: SessionGroupingMode
     @Presents public var settings: SettingsFeature.State?
     @Presents public var confirmationDialog: ConfirmationDialogState<Action.Dialog>?
 
@@ -57,6 +59,7 @@ public struct SessionListFeature {
       renamingInFlightIDs: Set<String> = [],
       renamingID: Session.ID? = nil,
       renameDraft: String = "",
+      groupingMode: SessionGroupingMode = .default,
       settings: SettingsFeature.State? = nil
     ) {
       self.connection = connection
@@ -72,6 +75,7 @@ public struct SessionListFeature {
       self.renamingInFlightIDs = renamingInFlightIDs
       self.renamingID = renamingID
       self.renameDraft = renameDraft
+      self.groupingMode = groupingMode
       self.settings = settings
     }
 
@@ -96,6 +100,12 @@ public struct SessionListFeature {
     /// Pinned sessions are excluded — they render in the top "Pinned" section.
     public var groups: [SessionGroup] {
       SessionGroup.grouped(unpinnedSessions)
+    }
+
+    /// Flat, last-active-ordered list of the unpinned sessions — the chronological mode's
+    /// rows (pinned sessions still render in the top "Pinned" section). `nil` dates sort last.
+    public var chronologicalSessions: [Session] {
+      unpinnedSessions.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
     }
 
     /// Sessions with new activity since the user last opened them.
@@ -127,6 +137,8 @@ public struct SessionListFeature {
     case pinSession(id: Session.ID)
     case unpinSession(id: Session.ID)
     case toggleGroupExpansion(groupID: String)
+    /// Switch the list grouping (workspace/chronological) and persist the choice.
+    case setGroupingMode(SessionGroupingMode)
     case archiveButtonTapped(id: Session.ID)
     /// Archive RPC succeeded — clear the transient in-flight guard and cancel any fetch that
     /// started during the PATCH window so a stale response can't land after the guard is gone.
@@ -271,6 +283,11 @@ public struct SessionListFeature {
       case let .unpinSession(id):
         state.pinnedIDs.removeAll { $0 == id }
         return persistPinnedIDs(state.pinnedIDs)
+
+      case let .setGroupingMode(mode):
+        guard state.groupingMode != mode else { return .none }
+        state.groupingMode = mode
+        return .run { [preferences] _ in preferences.saveGroupingMode(mode) }
 
       case let .toggleGroupExpansion(groupID):
         if !state.expandedGroups.insert(groupID).inserted {
@@ -453,6 +470,7 @@ public struct SessionListFeature {
     state.loadError = nil
     state.seenCounts = preferences.loadSeenCounts()
     state.pinnedIDs = preferences.loadPinnedIDs()
+    state.groupingMode = preferences.loadGroupingMode()
     return .run { [rest, connection = state.connection, query = state.searchQuery] send in
       await send(fetchSessions(rest: rest, connection: connection, query: query))
     }

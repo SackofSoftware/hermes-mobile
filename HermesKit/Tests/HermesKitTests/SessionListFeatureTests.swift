@@ -835,4 +835,57 @@ struct SessionListFeatureTests {
       $0.connection.token = "newtok"
     }
   }
+
+  // MARK: - Grouping mode
+
+  @Test func setGroupingModeUpdatesStateAndPersists() async {
+    let prefs = PreferencesClient.inMemory()
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+    }
+
+    #expect(store.state.groupingMode == .workspace) // default
+    await store.send(.setGroupingMode(.chronological)) {
+      $0.groupingMode = .chronological
+    }
+    #expect(prefs.loadGroupingMode() == .chronological) // persisted
+
+    // Re-sending the same mode is a no-op (no state change).
+    await store.send(.setGroupingMode(.chronological))
+  }
+
+  @Test func loadSeedsGroupingModeFromPreferences() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveGroupingMode(.chronological)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.preferences = prefs
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+    }
+
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+      $0.groupingMode = .chronological // seeded from prefs on load
+    }
+    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.send(.onDisappear)
+  }
+
+  @Test func chronologicalSessionsAreRecencyOrderedAndExcludePinned() {
+    var state = SessionListFeature.State(connection: connection)
+    state.sessions = [
+      Session(id: "a", updatedAt: Date(timeIntervalSince1970: 100)),
+      Session(id: "b", updatedAt: Date(timeIntervalSince1970: 300)),
+      Session(id: "c", updatedAt: Date(timeIntervalSince1970: 200)),
+    ]
+    state.pinnedIDs = ["b"] // pinned → excluded from the chronological body
+
+    #expect(state.chronologicalSessions.map(\.id) == ["c", "a"]) // recency desc, pinned dropped
+  }
 }

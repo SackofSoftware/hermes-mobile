@@ -674,6 +674,41 @@ struct SessionListFeatureTests {
     #expect(renamed.value.first?.1 == "New name")
   }
 
+  @Test func pollResumesAfterSuccessfulRename() async {
+    // The rename guard is transient: once renameSucceeded clears it, a pollTick (not searching,
+    // renamingInFlightIDs empty) DOES refresh — and renameSucceeded cancels any fetch started
+    // during the PATCH window so a stale response can't clobber the optimistic title.
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection, renamingInFlightIDs: ["a"]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = .inMemory()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+    }
+
+    // While the rename is in flight, the poll skips (guard non-empty).
+    await store.send(.pollTick)
+
+    // Success clears the transient guard (and cancels any in-flight fetch).
+    await store.send(.renameSucceeded(id: "a")) {
+      $0.renamingInFlightIDs = []
+    }
+
+    // Now a poll tick refreshes again — the poll was only paused, not killed.
+    await store.send(.pollTick)
+    await store.receive(\.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+    }
+  }
+
   @Test func renameFailureRestoresPreviousTitleAndSetsError() async {
     let store = TestStore(
       initialState: SessionListFeature.State(

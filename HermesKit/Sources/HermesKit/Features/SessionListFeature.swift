@@ -395,8 +395,11 @@ public struct SessionListFeature {
 
       case let .renameSucceeded(id):
         // PATCH landed — the optimistic title stands; lift the in-flight guard so the poll resumes.
+        // Cancel any fetch that started during the PATCH window: with the guard now gone, its
+        // (stale) response could otherwise clobber the optimistic title with the server's pre-rename
+        // value. Mirrors archiveSucceeded's protection.
         state.renamingInFlightIDs.remove(id)
-        return .none
+        return .cancel(id: CancelID.fetch)
 
       case let .renameFailed(id, previousTitle):
         // The rename didn't take (e.g. a 400 for an over-long/duplicate title) — lift the guard,

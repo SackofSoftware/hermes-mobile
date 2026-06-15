@@ -115,13 +115,13 @@ struct SessionListView: View {
         .tint(.orange)
     }
     .swipeActions(edge: .trailing) {
-      Button("Archive", systemImage: "archivebox", role: .destructive) {
-        store.send(.archiveButtonTapped(id: session.id))
-      }
       Button("Rename", systemImage: "pencil") {
         store.send(.renameButtonTapped(id: session.id))
       }
       .tint(.blue)
+      Button("Archive", systemImage: "archivebox", role: .destructive) {
+        store.send(.archiveButtonTapped(id: session.id))
+      }
     }
     .contextMenu {
       pinButton(session, isPinned: isPinned)

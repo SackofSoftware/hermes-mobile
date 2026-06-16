@@ -225,13 +225,13 @@ iOS-side (this repo):
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/` (REST client test, mock `URLSession`/transport)
 
-- [ ] Add `transcribe(connection:dataURL:mimeType:) async throws -> String` that POSTs to
-      `/api/audio/transcribe` with `{ data_url, mime_type }` and decodes `{ ok, transcript, provider? }`;
-      throw a typed error when `ok == false` or transport fails.
-- [ ] Build the `data:<mime>;base64,<…>` URL from `RecordedAudio` (helper; unit-tested).
-- [ ] Write tests: success returns transcript; `ok:false`/HTTP error throws; payload shape asserted
-      via injected transport.
-- [ ] Run tests — must pass before next task.
+- [x] Added `transcribe(connection:dataURL:mimeType:) -> String` POSTing to `/api/audio/transcribe`
+      with `{ data_url, mime_type? }`, decoding `{ ok, transcript, provider? }` via a new `postJSON`
+      helper; throws `RESTError.transcriptionFailed(reason)` on `ok:false`, maps HTTP errors as usual.
+- [x] Added `RecordedAudio.dataURL` (`data:<mime>;base64,<…>`) builder.
+- [x] Tests: success returns transcript + asserts POST/path/token/Content-Type; `ok:false` throws
+      server reason; 401 → `.unauthorized`; `dataURL` base64 round-trip. (`MockURLProtocol`.)
+- [x] Run tests — full HermesKit suite 193/193 pass.
 
 ### Task 6: Wire voice recording into the composer reducer + view (#7)
 

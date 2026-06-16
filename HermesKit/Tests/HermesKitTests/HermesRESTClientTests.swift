@@ -263,6 +263,32 @@ struct HermesRESTClientTests {
       _ = try await makeClient().status(baseURL)
     }
   }
+
+  // MARK: Transcription (#7)
+
+  @Test func transcribeReturnsTranscriptAndPostsToEndpoint() async throws {
+    MockURLProtocol.set(json: #"{"ok":true,"transcript":"hello there","provider":"local"}"#)
+    let text = try await makeClient().transcribe(connection, "data:audio/m4a;base64,AAA=", "audio/m4a")
+    #expect(text == "hello there")
+    #expect(MockURLProtocol.lastRequest?.url?.path == "/api/audio/transcribe")
+    #expect(MockURLProtocol.lastRequest?.httpMethod == "POST")
+    #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+    #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "Content-Type") == "application/json")
+  }
+
+  @Test func transcribeOkFalseThrowsServerReason() async throws {
+    MockURLProtocol.set(json: #"{"ok":false,"error":"no speech detected"}"#)
+    await #expect(throws: RESTError.transcriptionFailed("no speech detected")) {
+      _ = try await makeClient().transcribe(connection, "data:audio/m4a;base64,AAA=", "audio/m4a")
+    }
+  }
+
+  @Test func transcribeHTTPErrorMapsToTypedError() async throws {
+    MockURLProtocol.set(status: 401)
+    await #expect(throws: RESTError.unauthorized) {
+      _ = try await makeClient().transcribe(connection, "data:audio/m4a;base64,AAA=", nil)
+    }
+  }
 }
 
 @Suite struct KeychainClientTests {

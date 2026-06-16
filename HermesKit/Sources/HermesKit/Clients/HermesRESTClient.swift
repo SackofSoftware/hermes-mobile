@@ -42,6 +42,7 @@ public enum RESTError: Error, Equatable, Sendable {
   case server(status: Int)   // other non-2xx
   case unreachable           // transport failure / non-HTTP response
   case decoding              // 2xx body didn't match the expected shape
+  case transcriptionFailed(String) // 2xx but `{ok:false}` — carries the server's reason
 
   public var message: String {
     switch self {
@@ -50,6 +51,7 @@ public enum RESTError: Error, Equatable, Sendable {
     case let .server(status): "Server error (\(status))."
     case .unreachable: "Couldn’t reach the server."
     case .decoding: "Unexpected response — is this a Hermes server?"
+    case let .transcriptionFailed(reason): reason.isEmpty ? "Couldn’t transcribe the audio." : reason
     }
   }
 }
@@ -70,6 +72,9 @@ public struct HermesRESTClient: Sendable {
   /// Rename a session — `PATCH /api/sessions/{id}` `{"title":…}`. An empty title clears it.
   /// The server may reject with 400 (too long / invalid chars / duplicate).
   public var rename: @Sendable (_ connection: ServerConnection, _ id: String, _ title: String) async throws -> Void
+  /// Transcribe recorded audio — `POST /api/audio/transcribe` `{data_url, mime_type?}` →
+  /// `{ok, transcript}`. Returns the transcript text; throws `.transcriptionFailed` on `ok:false`.
+  public var transcribe: @Sendable (_ connection: ServerConnection, _ dataURL: String, _ mimeType: String?) async throws -> String
 }
 
 public extension HermesRESTClient {
@@ -122,6 +127,19 @@ public extension HermesRESTClient {
         let url = try makeURL(conn.baseURL, "/api/sessions/\(id)")
         let body = try JSONSerialization.data(withJSONObject: ["title": title])
         try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
+      },
+      transcribe: { conn, dataURL, mimeType in
+        let url = try makeURL(conn.baseURL, "/api/audio/transcribe")
+        var payload: [String: Any] = ["data_url": dataURL]
+        if let mimeType { payload["mime_type"] = mimeType }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let response: TranscriptionResponse = try await postJSON(
+          url, body: body, token: conn.token, session: session
+        )
+        guard response.ok, let transcript = response.transcript else {
+          throw RESTError.transcriptionFailed(response.error ?? "")
+        }
+        return transcript
       }
     )
   }
@@ -181,6 +199,33 @@ private func validate(_ response: URLResponse) throws {
   case 401: throw RESTError.unauthorized
   case 404: throw RESTError.notFound
   default: throw RESTError.server(status: http.statusCode)
+  }
+}
+
+/// POST a JSON body and decode the response (used by `transcribe`).
+private func postJSON<T: Decodable>(
+  _ url: URL, body: Data, token: String?, session: URLSession
+) async throws -> T {
+  var request = URLRequest(url: url)
+  request.httpMethod = "POST"
+  request.httpBody = body
+  request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+  if let token { request.setValue(token, forHTTPHeaderField: "X-Hermes-Session-Token") }
+
+  let data: Data
+  let response: URLResponse
+  do {
+    (data, response) = try await session.data(for: request)
+  } catch {
+    throw RESTError.unreachable
+  }
+
+  try validate(response)
+
+  do {
+    return try JSONDecoder().decode(T.self, from: data)
+  } catch {
+    throw RESTError.decoding
   }
 }
 
@@ -273,4 +318,12 @@ private struct SearchResultDTO: Decodable {
 
 private struct MessagesResponse: Decodable {
   let messages: [SessionMessage]
+}
+
+/// `/api/audio/transcribe` response — `{ok, transcript, provider?}`; `error` on failure.
+private struct TranscriptionResponse: Decodable {
+  let ok: Bool
+  let transcript: String?
+  let provider: String?
+  let error: String?
 }

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import HermesKit
@@ -38,5 +39,12 @@ struct AudioRecorderClientTests {
     for await level in client.levels() { collected.append(level) }
     // Finite stream so the for-await terminates (a hung stream would deadlock the test).
     #expect(collected == [0.2, 0.6, 0.4])
+  }
+
+  // MARK: data: URL builder (transcription upload)
+
+  @Test func recordedAudioBuildsBase64DataURL() {
+    let audio = RecordedAudio(data: Data([0xDE, 0xAD]), mimeType: "audio/m4a")
+    #expect(audio.dataURL == "data:audio/m4a;base64,3q0=")
   }
 }

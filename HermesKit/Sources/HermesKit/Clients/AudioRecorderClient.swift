@@ -12,6 +12,11 @@ public struct RecordedAudio: Equatable, Sendable {
     self.data = data
     self.mimeType = mimeType
   }
+
+  /// `data:<mime>;base64,<…>` URL for upload to `/api/audio/transcribe` (#7).
+  public var dataURL: String {
+    "data:\(mimeType);base64,\(data.base64EncodedString())"
+  }
 }
 
 public enum AudioRecorderError: Error, Equatable, Sendable {

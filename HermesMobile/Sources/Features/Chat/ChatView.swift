@@ -181,7 +181,8 @@ struct ChatView: View {
         role: role, text: text, isComplete: isComplete,
         copiedToken: store.recentlyCopiedToken,
         tokenPrefix: "\(row.id)",
-        onCopyCode: { text, token in store.send(.copyCode(text: text, token: token)) }
+        onCopyCode: { text, token in store.send(.copyCode(text: text, token: token)) },
+        attachmentImages: row.attachmentImages
       )
     case let .tool(name, title, state, detail, durationS):
       ToolStatusView(

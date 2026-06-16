@@ -6,10 +6,15 @@ import Foundation
 public struct ChatRow: Equatable, Sendable, Identifiable {
   public let id: UUID
   public var kind: Kind
+  /// Raw bytes of any images the user attached to this message (#8), rendered as
+  /// thumbnails in the bubble. Only set on the user's just-sent row — reloaded history
+  /// has no local bytes.
+  public var attachmentImages: [Data]
 
-  public init(id: UUID, kind: Kind) {
+  public init(id: UUID, kind: Kind, attachmentImages: [Data] = []) {
     self.id = id
     self.kind = kind
+    self.attachmentImages = attachmentImages
   }
 
   public enum Kind: Equatable, Sendable {

@@ -10,31 +10,50 @@ struct MessageBubbleView: View {
   var copiedToken: String?
   var tokenPrefix: String = ""
   var onCopyCode: ((_ text: String, _ token: String) -> Void)?
+  /// Raw bytes of images the user attached to this message (#8), shown as thumbnails.
+  var attachmentImages: [Data] = []
 
   var body: some View {
     HStack(alignment: .top) {
       if role == .user { Spacer(minLength: 32) }
       VStack(alignment: role == .user ? .trailing : .leading, spacing: 4) {
-        Group {
-          if role == .assistant {
-            MarkdownText(
-              text: text,
-              copiedToken: copiedToken,
-              tokenPrefix: tokenPrefix,
-              onCopyCode: onCopyCode
-            )
-          } else {
-            Text(text).textSelection(.enabled)
+        if !attachmentImages.isEmpty { imageThumbnails }
+        if !text.isEmpty {
+          Group {
+            if role == .assistant {
+              MarkdownText(
+                text: text,
+                copiedToken: copiedToken,
+                tokenPrefix: tokenPrefix,
+                onCopyCode: onCopyCode
+              )
+            } else {
+              Text(text).textSelection(.enabled)
+            }
           }
+          .padding(.horizontal, 12)
+          .padding(.vertical, 8)
+          .background(bubbleColor, in: .rect(cornerRadius: 14))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(bubbleColor, in: .rect(cornerRadius: 14))
         if !isComplete {
           ProgressView().controlSize(.mini)
         }
       }
       if role == .assistant { Spacer(minLength: 32) }
+    }
+  }
+
+  private var imageThumbnails: some View {
+    VStack(alignment: role == .user ? .trailing : .leading, spacing: 4) {
+      ForEach(Array(attachmentImages.enumerated()), id: \.offset) { _, data in
+        if let image = UIImage(data: data) {
+          Image(uiImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(maxWidth: 220, maxHeight: 220)
+            .clipShape(.rect(cornerRadius: 12))
+        }
+      }
     }
   }
 

@@ -579,7 +579,11 @@ struct ChatReductionTests {
       $0.attachments[0].uploadState = .uploading
     }
     await store.receive(\.attachmentsSubmitted) {
-      $0.transcript = [ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "look", isComplete: true))]
+      $0.transcript = [ChatRow(
+        id: self.uuid(0),
+        kind: .message(role: .user, text: "look", isComplete: true),
+        attachmentImages: [Data([0x89, 0x50, 5])] // image echoed as a thumbnail
+      )]
       $0.composerText = ""
       $0.attachments = []
     }
@@ -636,10 +640,11 @@ struct ChatReductionTests {
       $0.attachments[2].uploadState = .uploading
     }
     await store.receive(\.attachmentsSubmitted) {
-      // No text → the bubble shows the filenames.
+      // No text → the image shows as a thumbnail; non-image files fall back to their names.
       $0.transcript = [ChatRow(
         id: self.uuid(0),
-        kind: .message(role: .user, text: "photo5.png, doc6.pdf, file7.txt", isComplete: true)
+        kind: .message(role: .user, text: "doc6.pdf, file7.txt", isComplete: true),
+        attachmentImages: [Data([0x89, 0x50, 5])]
       )]
       $0.attachments = []
     }

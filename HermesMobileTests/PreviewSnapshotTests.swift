@@ -373,6 +373,35 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 
+  func testChatView_sentImageAttachment() {
+    let rows: [ChatRow] = [
+      ChatRow(
+        id: id(0),
+        kind: .message(role: .user, text: "What's in this picture?", isComplete: true),
+        attachmentImages: [solidPNG(.systemTeal, 200)]
+      ),
+      ChatRow(id: id(1), kind: .message(role: .assistant, text: "A solid teal square.", isComplete: true)),
+    ]
+    let view = NavigationStack {
+      ChatView(
+        store: Store(
+          initialState: ChatFeature.State(
+            connection: connection,
+            title: "Vision chat",
+            transcript: IdentifiedArray(uniqueElements: rows),
+            status: .ready
+          )
+        ) {
+          ChatFeature()
+        } withDependencies: {
+          $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+          $0.continuousClock = ImmediateClock()
+        }
+      )
+    }
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
+  }
+
   // MARK: Approval card (Task 9)
 
   func testApprovalCard() {

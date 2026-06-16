@@ -194,7 +194,7 @@ public struct ChatFeature {
     case attachFilesTapped
     case attachmentAdded(ComposerAttachment)
     case removeAttachment(id: ComposerAttachment.ID)
-    case attachmentsSubmitted(displayText: String, rowID: UUID)
+    case attachmentsSubmitted(displayText: String, images: [Data], rowID: UUID)
     case attachmentUploadFailed(message: String)
     case attachmentsUnsupportedDetected
   }
@@ -312,10 +312,12 @@ public struct ChatFeature {
               _ = try await gateway.send("prompt.submit", .object([
                 "session_id": .string(sessionID), "text": .string(body),
               ]))
-              let display = text.isEmpty
-                ? attachments.map(\.filename).joined(separator: ", ")
-                : text
-              await send(.attachmentsSubmitted(displayText: display, rowID: uuid()))
+              // Echo images as thumbnails in the bubble; non-image files (no thumbnail)
+              // fall back to their names when there's no typed text.
+              let images = attachments.filter { $0.kind == .image }.map(\.data)
+              let nonImageNames = attachments.filter { $0.kind != .image }.map(\.filename)
+              let display = text.isEmpty ? nonImageNames.joined(separator: ", ") : text
+              await send(.attachmentsSubmitted(displayText: display, images: images, rowID: uuid()))
             } catch let error as GatewayError {
               // An old agent without the byte-upload methods → gate the feature off.
               if error.isUnknownMethod {
@@ -587,10 +589,14 @@ public struct ChatFeature {
         state.attachments.removeAll { $0.id == id }
         return .none
 
-      case let .attachmentsSubmitted(displayText, rowID):
-        // Upload + submit landed: echo the user row, clear composer + attachments. isSending
-        // stays true — the turn now streams (it clears on message completion like text-only).
-        state.transcript.append(ChatRow(id: rowID, kind: .message(role: .user, text: displayText, isComplete: true)))
+      case let .attachmentsSubmitted(displayText, images, rowID):
+        // Upload + submit landed: echo the user row (with image thumbnails), clear composer +
+        // attachments. isSending stays true — the turn streams (clears on completion).
+        state.transcript.append(ChatRow(
+          id: rowID,
+          kind: .message(role: .user, text: displayText, isComplete: true),
+          attachmentImages: images
+        ))
         state.composerText = ""
         state.attachments = []
         return .none

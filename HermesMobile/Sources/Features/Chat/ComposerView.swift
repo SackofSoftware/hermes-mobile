@@ -53,9 +53,9 @@ struct ComposerView: View {
         .onSubmit(onSend)
 
       HStack(spacing: 12) {
-        if attachmentsSupported { attachButton }
         modelChip
         Spacer()
+        if attachmentsSupported { attachButton }
         voiceButton
         sendButton
       }
@@ -79,10 +79,12 @@ struct ComposerView: View {
       Button { onAttachCamera() } label: { Label("Camera", systemImage: "camera") }
       Button { onAttachFiles() } label: { Label("Files", systemImage: "folder") }
     } label: {
-      Image(systemName: "plus")
+      Image(systemName: "paperclip")
         .font(.title3)
         .foregroundStyle(.secondary)
     }
+    // Menu tints its label with the accent by default; pin it to match the mic button.
+    .tint(.secondary)
     .accessibilityLabel("Add attachment")
   }
 

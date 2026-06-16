@@ -303,21 +303,20 @@ iOS-side (this repo):
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] Add base64/data-URL encoding helpers (pure, unit-tested) for `content_base64` (images)
-      and `data_url` (files/PDF).
-- [ ] On `.composerSubmitted` with attachments: upload **before** `prompt.submit`, choosing the
-      method by kind — image → `image.attach_bytes` `{session_id, content_base64, filename}`;
-      pdf → `pdf.attach` `{session_id, content_base64, name}`; other → `file.attach`
-      `{session_id, data_url, name}`. Collect any `ref_text` (`@file:…`) and prepend to the
-      prompt text as desktop does; then send `prompt.submit`.
-- [ ] On any upload failure: set `errorBanner`, mark that attachment `.failed`, keep the composer
-      populated, clear `isSending`/`activity` (don't submit a partial message — surface and let
-      the user retry, mirroring `prompt.submit` failure handling).
-- [ ] Clear `attachments` on successful submit.
-- [ ] Tests (capture outbound RPCs via `LockIsolated`): image-only → `['image.attach_bytes','prompt.submit']`;
-      pdf → `['pdf.attach','prompt.submit']`; file → `['file.attach','prompt.submit']` with `@file:` ref
-      woven into text; mixed batch; upload failure aborts submit + sets banner.
-- [ ] Run tests — must pass before next task.
+- [x] `base64`/`dataURL` helpers live on `ComposerAttachment` (Task 7); a private free
+      `uploadAttachment(_:sessionID:gateway:)` dispatches by kind.
+- [x] `.composerSubmitted` with attachments uploads **before** `prompt.submit` (image →
+      `image.attach_bytes` `{content_base64, filename}`; pdf → `pdf.attach` `{content_base64, name}`;
+      file → `file.attach` `{data_url, name}`), collects `ref_text` (`@file:…`), prepends them on
+      their own lines, then submits. Empty text → the bubble shows filenames.
+- [x] Upload failure (`.attachmentUploadFailed`) sets `errorBanner`, marks attachments `.failed`,
+      clears `isSending`, and keeps the composer text + attachments for retry — never submits partial.
+- [x] `.attachmentsSubmitted` echoes the user row, clears composer + attachments on success.
+- [x] Tests (RPC order via `LockIsolated`): image → `['image.attach_bytes','prompt.submit']`;
+      pdf → `['pdf.attach','prompt.submit']`; file → `['file.attach','prompt.submit']` with the
+      `@file:` ref woven into the prompt text; mixed batch; failure aborts + preserves input. 209/209.
+- [x] Note: `-32601` is detected via the gateway error message prefix (`"unknown method"`) — the
+      JSON-RPC code isn't preserved by `InboundFrame`. Wired in Task 10.
 
 ### Task 10: Capability gating for old agents (`-32601`) (#8)
 

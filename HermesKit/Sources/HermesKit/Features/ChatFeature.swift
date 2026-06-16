@@ -194,6 +194,8 @@ public struct ChatFeature {
     case attachFilesTapped
     case attachmentAdded(ComposerAttachment)
     case removeAttachment(id: ComposerAttachment.ID)
+    case attachmentsSubmitted(displayText: String, rowID: UUID)
+    case attachmentUploadFailed(message: String)
   }
 
   private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer }
@@ -286,6 +288,41 @@ public struct ChatFeature {
       case .composerSubmitted:
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }
         let text = state.composerText
+
+        // With attachments we must upload bytes first (iOS shares no FS with the agent),
+        // then submit — so we keep the composer/attachments until success and only echo the
+        // user row once the upload+submit lands (a failed upload mustn't lose the input).
+        if !state.attachments.isEmpty {
+          let attachments = state.attachments
+          state.errorBanner = nil
+          state.isSending = true
+          for index in state.attachments.indices { state.attachments[index].uploadState = .uploading }
+          return .run { [gateway, uuid] send in
+            do {
+              var refs: [String] = []
+              for attachment in attachments {
+                if let ref = try await uploadAttachment(attachment, sessionID: sessionID, gateway: gateway) {
+                  refs.append(ref)
+                }
+              }
+              // `@file:` refs (from file.attach) go on their own lines above the text;
+              // image/pdf are picked up from session state by prompt.submit.
+              let body = (refs + (text.isEmpty ? [] : [text])).joined(separator: "\n")
+              _ = try await gateway.send("prompt.submit", .object([
+                "session_id": .string(sessionID), "text": .string(body),
+              ]))
+              let display = text.isEmpty
+                ? attachments.map(\.filename).joined(separator: ", ")
+                : text
+              await send(.attachmentsSubmitted(displayText: display, rowID: uuid()))
+            } catch let error as GatewayError {
+              await send(.attachmentUploadFailed(message: error.message))
+            } catch {
+              await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
+            }
+          }
+        }
+
         state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
         state.composerText = ""
         state.errorBanner = nil
@@ -542,6 +579,21 @@ public struct ChatFeature {
 
       case let .removeAttachment(id):
         state.attachments.removeAll { $0.id == id }
+        return .none
+
+      case let .attachmentsSubmitted(displayText, rowID):
+        // Upload + submit landed: echo the user row, clear composer + attachments. isSending
+        // stays true — the turn now streams (it clears on message completion like text-only).
+        state.transcript.append(ChatRow(id: rowID, kind: .message(role: .user, text: displayText, isComplete: true)))
+        state.composerText = ""
+        state.attachments = []
+        return .none
+
+      case let .attachmentUploadFailed(message):
+        // Keep the composer text + attachments so the user can retry; just flag the failure.
+        state.errorBanner = "Attachment failed: \(message)"
+        state.isSending = false
+        for index in state.attachments.indices { state.attachments[index].uploadState = .failed(message) }
         return .none
 
       case let .toolTapped(id):
@@ -898,4 +950,36 @@ public struct ChatFeature {
 
 private func backoffDelay(attempt: Int) -> Duration {
   .seconds(min(30.0, pow(2.0, Double(max(0, attempt - 1)))))
+}
+
+/// Upload one staged attachment to the session via the method its kind dictates (#8).
+/// Returns the `@file:` ref for `.file` uploads (nil for image/pdf, which the agent picks
+/// up from `attached_images` on the next `prompt.submit`). Mirrors the desktop's remote
+/// branch (`image.attach_bytes` / `pdf.attach` / `file.attach`).
+private func uploadAttachment(
+  _ attachment: ComposerAttachment, sessionID: String, gateway: HermesGatewayClient
+) async throws -> String? {
+  switch attachment.kind {
+  case .image:
+    _ = try await gateway.send("image.attach_bytes", .object([
+      "session_id": .string(sessionID),
+      "content_base64": .string(attachment.base64),
+      "filename": .string(attachment.filename),
+    ]))
+    return nil
+  case .pdf:
+    _ = try await gateway.send("pdf.attach", .object([
+      "session_id": .string(sessionID),
+      "content_base64": .string(attachment.base64),
+      "name": .string(attachment.filename),
+    ]))
+    return nil
+  case .file:
+    let result = try await gateway.send("file.attach", .object([
+      "session_id": .string(sessionID),
+      "data_url": .string(attachment.dataURL),
+      "name": .string(attachment.filename),
+    ]))
+    return result["ref_text"]?.stringValue
+  }
 }

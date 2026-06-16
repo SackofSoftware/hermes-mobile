@@ -527,4 +527,142 @@ struct ChatReductionTests {
     }
     await store.send(.attachPhotosTapped) // empty selection → no attachmentAdded, no change
   }
+
+  // MARK: Attachment upload + submit (#8)
+
+  private func pdfAttachment(_ n: Int) -> ComposerAttachment {
+    ComposerAttachment(
+      id: uuid(n), kind: .pdf, filename: "doc\(n).pdf",
+      mimeType: "application/pdf", data: Data([0x25, 0x50, UInt8(n)])
+    )
+  }
+
+  private func fileAttachment(_ n: Int) -> ComposerAttachment {
+    ComposerAttachment(
+      id: uuid(n), kind: .file, filename: "file\(n).txt",
+      mimeType: "text/plain", data: Data([0x41, UInt8(n)])
+    )
+  }
+
+  /// A submit store that records the outbound RPC method order and the `prompt.submit`
+  /// text. `file.attach` replies with `fileRef`; `fail` makes the first upload throw.
+  private func submitStore(
+    text: String,
+    attachments: [ComposerAttachment],
+    methods: LockIsolated<[String]>,
+    promptText: LockIsolated<String> = .init(""),
+    fileRef: String = "@file:uploads/doc.txt",
+    fail: GatewayError? = nil
+  ) -> TestStore<ChatFeature.State, ChatFeature.Action> {
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    initial.composerText = text
+    initial.attachments = attachments
+    return TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        methods.withValue { $0.append(method) }
+        if method == "prompt.submit" { promptText.setValue(params["text"]?.stringValue ?? "") }
+        if let fail { throw fail }
+        if method == "file.attach" { return .object(["attached": .bool(true), "ref_text": .string(fileRef)]) }
+        return .object(["attached": .bool(true)])
+      }
+    }
+  }
+
+  @Test func imageAttachmentUploadsBytesThenSubmits() async {
+    let methods = LockIsolated<[String]>([])
+    let store = submitStore(text: "look", attachments: [imageAttachment(5)], methods: methods)
+
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.attachments[0].uploadState = .uploading
+    }
+    await store.receive(\.attachmentsSubmitted) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "look", isComplete: true))]
+      $0.composerText = ""
+      $0.attachments = []
+    }
+    #expect(methods.value == ["image.attach_bytes", "prompt.submit"])
+  }
+
+  @Test func pdfAttachmentUploadsThenSubmits() async {
+    let methods = LockIsolated<[String]>([])
+    let store = submitStore(text: "read", attachments: [pdfAttachment(6)], methods: methods)
+
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.attachments[0].uploadState = .uploading
+    }
+    await store.receive(\.attachmentsSubmitted) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "read", isComplete: true))]
+      $0.composerText = ""
+      $0.attachments = []
+    }
+    #expect(methods.value == ["pdf.attach", "prompt.submit"])
+  }
+
+  @Test func fileAttachmentWeavesRefIntoPromptText() async {
+    let methods = LockIsolated<[String]>([])
+    let promptText = LockIsolated<String>("")
+    let store = submitStore(
+      text: "summarize", attachments: [fileAttachment(7)],
+      methods: methods, promptText: promptText, fileRef: "@file:uploads/file7.txt"
+    )
+
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.attachments[0].uploadState = .uploading
+    }
+    await store.receive(\.attachmentsSubmitted) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "summarize", isComplete: true))]
+      $0.composerText = ""
+      $0.attachments = []
+    }
+    #expect(methods.value == ["file.attach", "prompt.submit"])
+    #expect(promptText.value == "@file:uploads/file7.txt\nsummarize") // ref prepended on its own line
+  }
+
+  @Test func mixedAttachmentsUploadEachByKindThenSubmit() async {
+    let methods = LockIsolated<[String]>([])
+    let store = submitStore(
+      text: "", attachments: [imageAttachment(5), pdfAttachment(6), fileAttachment(7)], methods: methods
+    )
+
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.attachments[0].uploadState = .uploading
+      $0.attachments[1].uploadState = .uploading
+      $0.attachments[2].uploadState = .uploading
+    }
+    await store.receive(\.attachmentsSubmitted) {
+      // No text → the bubble shows the filenames.
+      $0.transcript = [ChatRow(
+        id: self.uuid(0),
+        kind: .message(role: .user, text: "photo5.png, doc6.pdf, file7.txt", isComplete: true)
+      )]
+      $0.attachments = []
+    }
+    #expect(methods.value == ["image.attach_bytes", "pdf.attach", "file.attach", "prompt.submit"])
+  }
+
+  @Test func uploadFailureAbortsSubmitAndKeepsAttachments() async {
+    let methods = LockIsolated<[String]>([])
+    let store = submitStore(
+      text: "keep me", attachments: [imageAttachment(5)], methods: methods, fail: .server("boom")
+    )
+
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.attachments[0].uploadState = .uploading
+    }
+    await store.receive(\.attachmentUploadFailed) {
+      $0.errorBanner = "Attachment failed: boom"
+      $0.isSending = false
+      $0.attachments[0].uploadState = .failed("boom")
+    }
+    #expect(store.state.composerText == "keep me") // input preserved for retry
+    #expect(store.state.attachments.count == 1)
+    #expect(methods.value == ["image.attach_bytes"]) // never reached prompt.submit
+  }
 }

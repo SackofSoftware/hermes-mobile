@@ -489,6 +489,38 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 
+  func testComposer_recordingWaveform() {
+    let view = ComposerHost {
+      ComposerView(
+        text: .constant(""),
+        isSending: false, canSend: false,
+        model: "claude-opus-4-8", reasoningEffort: "high",
+        recording: .recording,
+        waveformLevels: [0.1, 0.35, 0.6, 0.8, 0.5, 0.25, 0.4, 0.7, 0.9, 0.55, 0.3, 0.15, 0.45, 0.65],
+        recordingSeconds: 7,
+        focused: $0,
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+    }
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  func testComposer_transcribing() {
+    let view = ComposerHost {
+      ComposerView(
+        text: .constant(""),
+        isSending: false, canSend: false,
+        model: "claude-opus-4-8", reasoningEffort: "high",
+        recording: .transcribing,
+        focused: $0,
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+    }
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
   func testModelPickerSheet() {
     let picker = ChatFeature.State.ModelPicker(
       isLoading: false,

@@ -38,6 +38,24 @@ public struct ChatFeature {
     /// Token of the code block whose copy button was most recently tapped, for the
     /// transient "copied" checkmark. Cleared by a clock-driven effect (#9).
     public var recentlyCopiedToken: String?
+    /// Voice-input recording lifecycle (#7).
+    public var recording: RecordingState
+    /// Rolling window of normalized (0...1) mic amplitudes driving the recording waveform.
+    public var waveformLevels: [Float]
+    /// Seconds elapsed while recording, for the composer's mm:ss readout.
+    public var recordingSeconds: Int
+
+    /// Voice-input state machine: tap mic → permission → record (waveform) → stop →
+    /// transcribe → text appended to the composer.
+    public enum RecordingState: Equatable, Sendable {
+      case idle
+      case requestingPermission
+      case recording
+      case transcribing
+
+      /// Anything other than `.idle` means the composer is in voice mode.
+      public var isBusy: Bool { self != .idle }
+    }
 
     /// State for the interactive model + reasoning-effort picker.
     public struct ModelPicker: Equatable, Sendable {
@@ -106,6 +124,9 @@ public struct ChatFeature {
       self.modelPicker = nil
       self.renameDraft = nil
       self.recentlyCopiedToken = nil
+      self.recording = .idle
+      self.waveformLevels = []
+      self.recordingSeconds = 0
     }
 
     public var canSend: Bool {
@@ -137,6 +158,16 @@ public struct ChatFeature {
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
     case copyFeedbackExpired(token: String)
+    // Voice input (#7)
+    case voiceButtonTapped
+    case recordingPermission(Bool)
+    case recordingStarted
+    case recordingLevel(Float)
+    case recordingTick
+    case recordingStopped(RecordedAudio)
+    case transcriptionSucceeded(String)
+    case voiceInputFailed(message: String)
+    case recordingCancelled
     case toolTapped(id: ChatRow.ID)
     case toolDetailDismissed
     case modelChipTapped
@@ -150,13 +181,14 @@ public struct ChatFeature {
     case cancelRename
   }
 
-  private enum CancelID { case socket, reconnect, copyFeedback }
+  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer }
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
   @Dependency(\.continuousClock) var clock
   @Dependency(\.uuid) var uuid
   @Dependency(\.pasteboard) var pasteboard
+  @Dependency(\.audioRecorder) var audioRecorder
   @Dependency(\.debugLog) var debugLog
 
   public init() {}
@@ -176,7 +208,18 @@ public struct ChatFeature {
         return .merge(effects)
 
       case .onDisappear:
-        return .merge(.cancel(id: CancelID.socket), .cancel(id: CancelID.reconnect))
+        let wasRecording = state.recording.isBusy
+        state.recording = .idle
+        state.waveformLevels = []
+        state.recordingSeconds = 0
+        return .merge(
+          .cancel(id: CancelID.socket),
+          .cancel(id: CancelID.reconnect),
+          .cancel(id: CancelID.voiceLevels),
+          .cancel(id: CancelID.voiceTimer),
+          // Release the mic/session if we leave mid-recording.
+          wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
+        )
 
       case let .gatewayEvent(event):
         return reduce(event: event, into: &state)
@@ -340,6 +383,119 @@ public struct ChatFeature {
       case let .copyFeedbackExpired(token):
         if state.recentlyCopiedToken == token { state.recentlyCopiedToken = nil }
         return .none
+
+      // MARK: Voice input (#7)
+
+      case .voiceButtonTapped:
+        switch state.recording {
+        case .idle:
+          state.recording = .requestingPermission
+          return .run { [audioRecorder] send in
+            await send(.recordingPermission(audioRecorder.requestPermission()))
+          }
+        case .recording:
+          // Stop and hand the audio off to transcription.
+          state.recording = .transcribing
+          return .merge(
+            .cancel(id: CancelID.voiceLevels),
+            .cancel(id: CancelID.voiceTimer),
+            .run { [audioRecorder] send in
+              await send(.recordingStopped(try await audioRecorder.stopRecording()))
+            } catch: { _, send in
+              await send(.voiceInputFailed(message: "Couldn’t finish recording."))
+            }
+          )
+        case .requestingPermission, .transcribing:
+          return .none
+        }
+
+      case let .recordingPermission(granted):
+        guard granted else {
+          state.recording = .idle
+          state.errorBanner = "Microphone access is off. Enable it in Settings to use voice input."
+          return .none
+        }
+        return .run { [audioRecorder] send in
+          try await audioRecorder.startRecording()
+          await send(.recordingStarted)
+        } catch: { _, send in
+          await send(.voiceInputFailed(message: "Couldn’t start recording."))
+        }
+
+      case .recordingStarted:
+        state.recording = .recording
+        state.waveformLevels = []
+        state.recordingSeconds = 0
+        return .merge(
+          .run { [audioRecorder] send in
+            for await level in audioRecorder.levels() {
+              await send(.recordingLevel(level))
+            }
+          }
+          .cancellable(id: CancelID.voiceLevels, cancelInFlight: true),
+          .run { [clock] send in
+            while true {
+              try await clock.sleep(for: .seconds(1))
+              await send(.recordingTick)
+            }
+          }
+          .cancellable(id: CancelID.voiceTimer, cancelInFlight: true)
+        )
+
+      case let .recordingLevel(level):
+        state.waveformLevels.append(level)
+        let maxBars = 48
+        if state.waveformLevels.count > maxBars {
+          state.waveformLevels.removeFirst(state.waveformLevels.count - maxBars)
+        }
+        return .none
+
+      case .recordingTick:
+        state.recordingSeconds += 1
+        return .none
+
+      case let .recordingStopped(audio):
+        return .run { [rest, connection = state.connection] send in
+          do {
+            let text = try await rest.transcribe(connection, audio.dataURL, audio.mimeType)
+            await send(.transcriptionSucceeded(text))
+          } catch {
+            let message = (error as? RESTError)?.message ?? "Couldn’t transcribe the audio."
+            await send(.voiceInputFailed(message: message))
+          }
+        }
+
+      case let .transcriptionSucceeded(text):
+        state.recording = .idle
+        state.waveformLevels = []
+        state.recordingSeconds = 0
+        let transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !transcript.isEmpty {
+          // Append to whatever's already typed, with a single separating space.
+          if state.composerText.isEmpty {
+            state.composerText = transcript
+          } else {
+            state.composerText += (state.composerText.hasSuffix(" ") ? "" : " ") + transcript
+          }
+        }
+        return .none
+
+      case let .voiceInputFailed(message):
+        state.recording = .idle
+        state.waveformLevels = []
+        state.recordingSeconds = 0
+        state.errorBanner = message
+        return .merge(.cancel(id: CancelID.voiceLevels), .cancel(id: CancelID.voiceTimer))
+
+      case .recordingCancelled:
+        state.recording = .idle
+        state.waveformLevels = []
+        state.recordingSeconds = 0
+        return .merge(
+          .cancel(id: CancelID.voiceLevels),
+          .cancel(id: CancelID.voiceTimer),
+          .run { [audioRecorder] _ in await audioRecorder.cancel() }
+        )
 
       case let .toolTapped(id):
         guard let row = state.transcript[id: id], case .tool = row.kind else { return .none }

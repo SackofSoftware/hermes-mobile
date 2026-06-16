@@ -1,21 +1,43 @@
+import HermesKit
 import SwiftUI
 
 /// The message composer: a growing text field above a toolbar row with a model/reasoning
-/// chip (tappable → picker), a (disabled) voice button, and a send/interrupt button in the
-/// Hermes brand colour.
+/// chip (tappable → picker), a voice button, and a send/interrupt button in the Hermes
+/// brand colour. While recording (#7) the field is replaced by a live waveform, elapsed
+/// time, and cancel/stop controls.
 struct ComposerView: View {
   @Binding var text: String
   let isSending: Bool
   let canSend: Bool
   let model: String?
   let reasoningEffort: String?
+  /// Voice-input state (#7): drives whether the composer shows text entry or the recorder.
+  var recording: ChatFeature.State.RecordingState = .idle
+  var waveformLevels: [Float] = []
+  var recordingSeconds: Int = 0
   /// Owned by the parent's `@FocusState` so the transcript can dismiss the keyboard.
   var focused: FocusState<Bool>.Binding
   let onModelTap: () -> Void
   let onSend: () -> Void
   let onInterrupt: () -> Void
+  var onVoiceTap: () -> Void = {}
+  var onCancelRecording: () -> Void = {}
 
   var body: some View {
+    Group {
+      if recording.isBusy {
+        recordingBar
+      } else {
+        textComposer
+      }
+    }
+    .padding(12)
+    .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 22))
+    .padding(.horizontal)
+    .padding(.vertical, 8)
+  }
+
+  private var textComposer: some View {
     VStack(spacing: 10) {
       TextField("Message", text: $text, axis: .vertical)
         .lineLimit(1 ... 6)
@@ -29,10 +51,44 @@ struct ComposerView: View {
         sendButton
       }
     }
-    .padding(12)
-    .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 22))
-    .padding(.horizontal)
-    .padding(.vertical, 8)
+  }
+
+  @ViewBuilder
+  private var recordingBar: some View {
+    if recording == .transcribing {
+      HStack(spacing: 10) {
+        ProgressView().controlSize(.small)
+        Text("Transcribing…").font(.callout).foregroundStyle(.secondary)
+        Spacer()
+      }
+      .frame(minHeight: 40)
+    } else {
+      HStack(spacing: 12) {
+        Button(action: onCancelRecording) {
+          Image(systemName: "xmark").font(.body.weight(.semibold))
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Cancel recording")
+
+        RecordingWaveform(levels: waveformLevels)
+
+        Text(Self.elapsed(recordingSeconds))
+          .font(.callout.monospacedDigit())
+          .foregroundStyle(.secondary)
+
+        Button(action: onVoiceTap) {
+          Image(systemName: "stop.circle.fill").font(.title)
+        }
+        .foregroundStyle(Color.hermesAccent)
+        .accessibilityLabel("Stop and transcribe")
+      }
+      .frame(minHeight: 40)
+    }
+  }
+
+  /// `m:ss` elapsed-time readout for the recorder.
+  static func elapsed(_ seconds: Int) -> String {
+    String(format: "%d:%02d", seconds / 60, seconds % 60)
   }
 
   private var modelChip: some View {
@@ -56,12 +112,10 @@ struct ComposerView: View {
   }
 
   private var voiceButton: some View {
-    // Placeholder — voice input ships later.
-    Button(action: {}) {
+    Button(action: onVoiceTap) {
       Image(systemName: "mic.fill").font(.title3)
     }
-    .foregroundStyle(.tertiary)
-    .disabled(true)
+    .foregroundStyle(.secondary)
   }
 
   @ViewBuilder
@@ -83,5 +137,34 @@ struct ComposerView: View {
   private var modelLabel: String {
     if let model, !model.isEmpty { return model }
     return "Model"
+  }
+}
+
+/// Live amplitude bars for the active voice recording (#7). Newest sample is on the
+/// right; bars grow from the vertical center. Honors reduce-motion (no height animation).
+struct RecordingWaveform: View {
+  let levels: [Float]
+
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  var body: some View {
+    GeometryReader { geo in
+      HStack(alignment: .center, spacing: 2) {
+        ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+          Capsule()
+            .fill(Color.hermesAccent.opacity(0.85))
+            .frame(width: 2.5, height: barHeight(level, in: geo.size.height))
+        }
+        Spacer(minLength: 0)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+      .animation(reduceMotion ? nil : .linear(duration: 0.1), value: levels)
+    }
+    .frame(height: 28)
+    .accessibilityHidden(true)
+  }
+
+  private func barHeight(_ level: Float, in height: CGFloat) -> CGFloat {
+    max(3, CGFloat(min(max(level, 0), 1)) * height)
   }
 }

@@ -241,20 +241,22 @@ iOS-side (this repo):
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 
-- [ ] Add `recording: RecordingState` (`.idle`/`.requestingPermission`/`.recording`/`.transcribing`)
-      to State and actions: `.voiceButtonTapped`, `.recordingStarted`, `.recordingStopped`,
-      `.transcriptionResponse(Result<String,…>)`.
-- [ ] On stop → transcribe effect; on success **append** transcript to `composerText`
-      (don't overwrite); on failure set `errorBanner`, return to `.idle`.
-- [ ] Replace the disabled `voiceButton` placeholder with a live mic button reflecting
-      `recording` (mic / stop / spinner); disable send while transcribing as appropriate.
-- [ ] While `.recording`, show an **animated waveform** driven by `AudioRecorderClient.levels()`
-      (amplitude bars, like Claude/ChatGPT) plus an elapsed-time readout and a cancel control;
-      respect reduce-motion (fall back to a static/low-motion meter).
-- [ ] Reducer tests: permission-denied path; full record→stop→transcribe→append; transcribe
-      failure sets banner and resets state (override recorder + REST deps; `TestClock`).
-- [ ] Add composer snapshots for `.recording` and `.transcribing`; `tuist generate`; record/assert.
-- [ ] Run reducer + snapshot tests — must pass before next task.
+- [x] Added `recording: RecordingState` (`.idle`/`.requestingPermission`/`.recording`/`.transcribing`)
+      + `waveformLevels`/`recordingSeconds` to State, and actions `.voiceButtonTapped`,
+      `.recordingPermission`, `.recordingStarted`, `.recordingLevel`, `.recordingTick`,
+      `.recordingStopped`, `.transcriptionSucceeded`, `.voiceInputFailed`, `.recordingCancelled`.
+- [x] Stop → transcribe effect; success **appends** transcript to `composerText` (with a
+      separating space); failure sets `errorBanner` and returns to `.idle`. `onDisappear`
+      tears down voice effects + cancels the recorder mid-recording.
+- [x] Replaced the disabled `voiceButton` with a live mic button; recording/transcribing
+      swap the text field for the recorder bar.
+- [x] `.recording` shows an **animated waveform** (`RecordingWaveform`) driven by
+      `AudioRecorderClient.levels()`, an `m:ss` elapsed readout, and cancel (×) / stop controls;
+      reduce-motion disables the bar animation.
+- [x] Reducer tests: permission-denied banner; full record→stop→transcribe→append; transcribe
+      failure surfaces server reason; timer advances `recordingSeconds` (`TestClock`). 24/24 pass.
+- [x] Added `testComposer_recordingWaveform` + `testComposer_transcribing`; re-recorded the 4
+      composer-bearing baselines (mic restyle). Full snapshot suite green; change isolated.
 
 ---
 

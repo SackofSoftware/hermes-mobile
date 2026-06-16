@@ -388,4 +388,90 @@ struct ChatReductionTests {
     let store = TestStore(initialState: state) { ChatFeature() }
     await store.send(.copyFeedbackExpired(token: "stale")) // token mismatch → unchanged
   }
+
+  // MARK: Voice input (#7)
+
+  /// Drive the common path up to an active recording with the test recorder's 3 canned
+  /// level samples already folded in. Caller owns the clock so the timer stays paused.
+  private func startRecording(_ store: TestStore<ChatFeature.State, ChatFeature.Action>) async {
+    await store.send(.voiceButtonTapped) { $0.recording = .requestingPermission }
+    await store.receive(\.recordingPermission)
+    await store.receive(\.recordingStarted) { $0.recording = .recording }
+    await store.receive(\.recordingLevel) { $0.waveformLevels = [0.2] }
+    await store.receive(\.recordingLevel) { $0.waveformLevels = [0.2, 0.6] }
+    await store.receive(\.recordingLevel) { $0.waveformLevels = [0.2, 0.6, 0.4] }
+  }
+
+  @Test func voiceRecordingTranscribesAndAppendsToComposer() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.composerText = "draft"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.continuousClock = TestClock() // unadvanced → recording timer never ticks here
+      $0.audioRecorder = .testValue
+      $0.hermesREST.transcribe = { @Sendable _, _, _ in "hello world" }
+    }
+
+    await startRecording(store)
+
+    await store.send(.voiceButtonTapped) { $0.recording = .transcribing }
+    await store.receive(\.recordingStopped)
+    await store.receive(\.transcriptionSucceeded) {
+      $0.recording = .idle
+      $0.waveformLevels = []
+      $0.composerText = "draft hello world" // appended with a separating space
+    }
+  }
+
+  @Test func voicePermissionDeniedShowsBanner() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.audioRecorder = .testValue
+      $0.audioRecorder.requestPermission = { @Sendable in false }
+    }
+
+    await store.send(.voiceButtonTapped) { $0.recording = .requestingPermission }
+    await store.receive(\.recordingPermission) {
+      $0.recording = .idle
+      $0.errorBanner = "Microphone access is off. Enable it in Settings to use voice input."
+    }
+  }
+
+  @Test func voiceTranscriptionFailureSurfacesServerReason() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.audioRecorder = .testValue
+      $0.hermesREST.transcribe = { @Sendable _, _, _ in throw RESTError.transcriptionFailed("no speech detected") }
+    }
+
+    await startRecording(store)
+
+    await store.send(.voiceButtonTapped) { $0.recording = .transcribing }
+    await store.receive(\.recordingStopped)
+    await store.receive(\.voiceInputFailed) {
+      $0.recording = .idle
+      $0.waveformLevels = []
+      $0.errorBanner = "no speech detected"
+    }
+  }
+
+  @Test func recordingTimerAdvancesElapsedSeconds() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.continuousClock = clock
+      $0.audioRecorder = .testValue
+    }
+
+    await startRecording(store)
+
+    await clock.advance(by: .seconds(2))
+    await store.receive(\.recordingTick) { $0.recordingSeconds = 1 }
+    await store.receive(\.recordingTick) { $0.recordingSeconds = 2 }
+
+    // Cancelling tears down the timer/levels and discards the recording.
+    await store.send(.recordingCancelled) {
+      $0.recording = .idle
+      $0.waveformLevels = []
+      $0.recordingSeconds = 0
+    }
+  }
 }

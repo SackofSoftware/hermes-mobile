@@ -22,10 +22,15 @@ struct ChatView: View {
         canSend: store.canSend,
         model: store.model,
         reasoningEffort: store.reasoningEffort,
+        recording: store.recording,
+        waveformLevels: store.waveformLevels,
+        recordingSeconds: store.recordingSeconds,
         focused: $composerFocused,
         onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
-        onInterrupt: { store.send(.interruptTapped) }
+        onInterrupt: { store.send(.interruptTapped) },
+        onVoiceTap: { store.send(.voiceButtonTapped) },
+        onCancelRecording: { store.send(.recordingCancelled) }
       )
     }
     .navigationTitle(store.title ?? "Chat")

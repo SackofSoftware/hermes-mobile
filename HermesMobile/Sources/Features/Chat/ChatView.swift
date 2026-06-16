@@ -166,7 +166,12 @@ struct ChatView: View {
   private func rowView(_ row: ChatRow) -> some View {
     switch row.kind {
     case let .message(role, text, isComplete):
-      MessageBubbleView(role: role, text: text, isComplete: isComplete)
+      MessageBubbleView(
+        role: role, text: text, isComplete: isComplete,
+        copiedToken: store.recentlyCopiedToken,
+        tokenPrefix: "\(row.id)",
+        onCopyCode: { text, token in store.send(.copyCode(text: text, token: token)) }
+      )
     case let .tool(name, title, state, detail, durationS):
       ToolStatusView(
         name: name, title: title, state: state, durationS: durationS,

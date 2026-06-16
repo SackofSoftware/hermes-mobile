@@ -154,14 +154,14 @@ iOS-side (this repo):
 - Modify: `HermesKit/Sources/HermesKit/Models/MarkdownSegment.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/` (add `MarkdownSegmentTests.swift` if absent)
 
-- [ ] Ensure `MarkdownSegment.parse` exposes, for each code segment, the **raw code text**
+- [x] Ensure `MarkdownSegment.parse` exposes, for each code segment, the **raw code text**
       (fence-stripped, whitespace preserved) and an optional language hint, as a stable
-      public shape usable by the view.
-- [ ] Add a stable identity for each segment (e.g. index-based id) so the view can track
-      which block's copy was tapped.
-- [ ] Write tests: code-only, mixed prose+code, multiple code blocks, unterminated fence,
-      language-tagged fence — assert raw code text round-trips exactly.
-- [ ] Run tests — must pass before next task.
+      public shape usable by the view. (`case code(text:language:)`)
+- [x] Add a stable identity for each segment (e.g. index-based id) so the view can track
+      which block's copy was tapped. (view uses `enumerated()` offset — sufficient per render)
+- [x] Write tests: code-only, mixed prose+code, multiple code blocks, unterminated fence,
+      language-tagged fence, whitespace fidelity — assert raw code text round-trips exactly.
+- [x] Run tests — 7/7 pass; package builds clean.
 
 ### Task 2: Code-block copy button + feedback in the view (#9)
 
@@ -170,17 +170,17 @@ iOS-side (this repo):
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (copy action + feedback state)
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] Add a `.copyCode(text:)` action (or reuse `PasteboardClient.copy`) and a
-      `recentlyCopiedCodeID` (or token) in `ChatFeature.State` for transient feedback.
-- [ ] Add an effect that clears the feedback after ~1.5s using the injected `continuousClock`
-      (cancellable; cancelled by a new copy).
-- [ ] In `MarkdownText`, overlay a small copy button on each code block (top-trailing);
-      icon flips to a green checkmark while `recentlyCopiedCodeID` matches. Respect
-      reduce-motion for any transition. Keep code text selectable.
-- [ ] Keep existing whole-message context-menu copy intact.
-- [ ] Write reducer tests: copy sets pasteboard (capture via `PasteboardClient` override) and
-      sets/clears feedback with `TestClock`; a second copy resets the timer.
-- [ ] Run tests — must pass before next task.
+- [x] Add a `.copyCode(text:token:)` action + `.copyFeedbackExpired(token:)` and a
+      `recentlyCopiedToken` in `ChatFeature.State` for transient feedback.
+- [x] Add an effect that clears the feedback after 1.5s using the injected `continuousClock`
+      (cancellable `copyFeedback`, `cancelInFlight` so a new copy restarts it).
+- [x] In `MarkdownText`, overlay a small copy button on each code block (top-trailing) via
+      new `CodeBlockView`; icon flips to a green checkmark while `recentlyCopiedToken`
+      matches the block's token. Reduce-motion gates the transition. Code text still selectable.
+- [x] Keep existing whole-message context-menu copy intact (`.copyRow` unchanged).
+- [x] Write reducer tests: copy sets pasteboard + shows/clears feedback with `TestClock`;
+      second copy moves checkmark + restarts timer; empty no-op; stale-expiry guard. 20/20 pass.
+- [x] Run tests — ChatReductionTests 20/20 pass. (App-target view build verified in Task 3.)
 
 ### Task 3: Copy-feedback toast + whole-message snapshot (#9)
 
@@ -189,12 +189,14 @@ iOS-side (this repo):
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 - Create: snapshot baselines under `HermesMobileTests/__Snapshots__/…`
 
-- [ ] Optional: a small transient toast ("Copied") shown on code/message copy, gated to not
-      interfere with the per-button checkmark (pick one primary feedback; keep it subtle).
-- [ ] Add/extend a snapshot showing a transcript with a code block + visible copy affordance.
-- [ ] `tuist generate` if any new files were added; `make snapshot-record` to capture, verify,
-      then `make snapshot` asserts clean.
-- [ ] Run reducer + snapshot tests — must pass before next task.
+- [x] Toast: **skipped by decision** — the per-block green checkmark already satisfies the
+      issue's "green checkmark" feedback ask; a second toast would double up. Revisit if
+      whole-message copy needs its own cue.
+- [x] Added two component snapshots (`testCodeBlock_copyButtonIdle`, `testCodeBlock_copiedCheckmark`)
+      and re-recorded `testChatView_codeBlockAndReconnecting` (copy button now in context).
+- [x] `tuist generate` ran; surgically re-recorded only the affected baseline; assert pass clean.
+- [x] Run reducer + snapshot tests — full `PreviewSnapshotTests` suite green; isolation verified
+      (only the 3 code-block snapshots changed, all others unchanged).
 
 ---
 

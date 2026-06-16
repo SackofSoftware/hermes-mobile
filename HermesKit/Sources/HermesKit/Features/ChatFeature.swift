@@ -35,6 +35,9 @@ public struct ChatFeature {
     /// Draft text for the rename alert. `nil` = alert closed; non-nil = alert open
     /// with the in-progress title (Task 4).
     public var renameDraft: String?
+    /// Token of the code block whose copy button was most recently tapped, for the
+    /// transient "copied" checkmark. Cleared by a clock-driven effect (#9).
+    public var recentlyCopiedToken: String?
 
     /// State for the interactive model + reasoning-effort picker.
     public struct ModelPicker: Equatable, Sendable {
@@ -102,6 +105,7 @@ public struct ChatFeature {
       self.reasoningEffort = nil
       self.modelPicker = nil
       self.renameDraft = nil
+      self.recentlyCopiedToken = nil
     }
 
     public var canSend: Bool {
@@ -131,6 +135,8 @@ public struct ChatFeature {
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
+    case copyCode(text: String, token: String)
+    case copyFeedbackExpired(token: String)
     case toolTapped(id: ChatRow.ID)
     case toolDetailDismissed
     case modelChipTapped
@@ -144,7 +150,7 @@ public struct ChatFeature {
     case cancelRename
   }
 
-  private enum CancelID { case socket, reconnect }
+  private enum CancelID { case socket, reconnect, copyFeedback }
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
@@ -316,6 +322,24 @@ public struct ChatFeature {
       case let .copyRow(id):
         guard let text = state.transcript[id: id]?.copyText, !text.isEmpty else { return .none }
         return .run { [pasteboard] _ in pasteboard.copy(text) }
+
+      case let .copyCode(text, token):
+        guard !text.isEmpty else { return .none }
+        state.recentlyCopiedToken = token
+        // Copy now; clear the checkmark after a beat. Re-tapping any block restarts
+        // the timer (cancelInFlight) so the latest copy owns the feedback.
+        return .merge(
+          .run { [pasteboard] _ in pasteboard.copy(text) },
+          .run { [clock] send in
+            try await clock.sleep(for: .seconds(1.5))
+            await send(.copyFeedbackExpired(token: token))
+          }
+          .cancellable(id: CancelID.copyFeedback, cancelInFlight: true)
+        )
+
+      case let .copyFeedbackExpired(token):
+        if state.recentlyCopiedToken == token { state.recentlyCopiedToken = nil }
+        return .none
 
       case let .toolTapped(id):
         guard let row = state.transcript[id: id], case .tool = row.kind else { return .none }

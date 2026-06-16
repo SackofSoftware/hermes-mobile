@@ -9,20 +9,29 @@ import SwiftUI
 /// bullet/number, and each line keeps inline Markdown (bold, code, links).
 struct MarkdownText: View {
   let text: String
+  /// Token of the code block currently showing the "copied" checkmark (#9). Compared
+  /// against each block's per-instance token.
+  var copiedToken: String?
+  /// Disambiguates this message's code blocks from other messages' (typically the row id).
+  var tokenPrefix: String = ""
+  /// Invoked with the block's raw text and its token when its copy button is tapped.
+  /// When `nil`, no copy button is shown (e.g. previews/snapshots without a store).
+  var onCopyCode: ((_ text: String, _ token: String) -> Void)?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      ForEach(Array(MarkdownSegment.parse(text).enumerated()), id: \.offset) { _, segment in
+      ForEach(Array(MarkdownSegment.parse(text).enumerated()), id: \.offset) { index, segment in
         switch segment {
         case let .prose(value):
           prose(value)
-        case let .code(value):
-          Text(value)
-            .font(.callout.monospaced())
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
-            .background(Color(uiColor: .tertiarySystemBackground), in: .rect(cornerRadius: 8))
+        case let .code(value, language):
+          let token = "\(tokenPrefix)#\(index)"
+          CodeBlockView(
+            code: value,
+            language: language,
+            isCopied: copiedToken == token,
+            onCopy: onCopyCode.map { copy in { copy(value, token) } }
+          )
         }
       }
     }
@@ -75,5 +84,42 @@ struct MarkdownText: View {
       }
     }
     return nil
+  }
+}
+
+/// A fenced code block rendered in a monospaced box with an optional per-block copy
+/// button (#9). Tapping copy flips the icon to a green checkmark; the parent reducer
+/// owns the transient feedback so the checkmark clears on a timer.
+struct CodeBlockView: View {
+  let code: String
+  let language: String?
+  let isCopied: Bool
+  /// `nil` hides the copy button (previews/snapshots without a store).
+  let onCopy: (() -> Void)?
+
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  var body: some View {
+    Text(code)
+      .font(.callout.monospaced())
+      .textSelection(.enabled)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(8)
+      .background(Color(uiColor: .tertiarySystemBackground), in: .rect(cornerRadius: 8))
+      .overlay(alignment: .topTrailing) {
+        if let onCopy {
+          Button(action: onCopy) {
+            Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+              .font(.caption.weight(.medium))
+              .foregroundStyle(isCopied ? Color.green : Color.secondary)
+              .padding(6)
+              .background(.thinMaterial, in: .circle)
+          }
+          .buttonStyle(.plain)
+          .padding(6)
+          .accessibilityLabel(isCopied ? "Copied" : "Copy code")
+          .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isCopied)
+        }
+      }
   }
 }

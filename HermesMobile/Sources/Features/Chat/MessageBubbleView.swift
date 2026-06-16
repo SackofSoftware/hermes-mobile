@@ -6,6 +6,10 @@ struct MessageBubbleView: View {
   let role: ChatRow.Role
   let text: String
   let isComplete: Bool
+  /// Code-block copy plumbing (#9), forwarded to `MarkdownText` for assistant messages.
+  var copiedToken: String?
+  var tokenPrefix: String = ""
+  var onCopyCode: ((_ text: String, _ token: String) -> Void)?
 
   var body: some View {
     HStack(alignment: .top) {
@@ -13,7 +17,12 @@ struct MessageBubbleView: View {
       VStack(alignment: role == .user ? .trailing : .leading, spacing: 4) {
         Group {
           if role == .assistant {
-            MarkdownText(text: text)
+            MarkdownText(
+              text: text,
+              copiedToken: copiedToken,
+              tokenPrefix: tokenPrefix,
+              onCopyCode: onCopyCode
+            )
           } else {
             Text(text).textSelection(.enabled)
           }

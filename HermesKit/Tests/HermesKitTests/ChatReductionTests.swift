@@ -338,4 +338,54 @@ struct ChatReductionTests {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
     await store.send(.copyRow(id: uuid(9))) // no such row → no effect, no state change
   }
+
+  // MARK: Copy a code block with transient checkmark feedback (#9)
+
+  @Test func copyCodePutsTextOnPasteboardAndShowsThenClearsCheckmark() async {
+    let copied = LockIsolated<String?>(nil)
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyCode(text: "let x = 1", token: "row#0")) {
+      $0.recentlyCopiedToken = "row#0"
+    }
+    #expect(copied.value == "let x = 1")
+
+    await clock.advance(by: .seconds(1.5))
+    await store.receive(\.copyFeedbackExpired) {
+      $0.recentlyCopiedToken = nil
+    }
+  }
+
+  @Test func copyingAnotherBlockMovesTheCheckmarkAndRestartsTimer() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable _ in }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyCode(text: "a", token: "t1")) { $0.recentlyCopiedToken = "t1" }
+    // Re-tapping before the first timer fires cancels it (cancelInFlight) and the
+    // checkmark moves to the new block — only the second expiry arrives.
+    await store.send(.copyCode(text: "b", token: "t2")) { $0.recentlyCopiedToken = "t2" }
+
+    await clock.advance(by: .seconds(1.5))
+    await store.receive(\.copyFeedbackExpired) { $0.recentlyCopiedToken = nil }
+  }
+
+  @Test func copyEmptyCodeIsNoOp() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
+    await store.send(.copyCode(text: "", token: "t")) // guard → no effect, no state change
+  }
+
+  @Test func staleFeedbackExpiryDoesNotClearNewerCheckmark() async {
+    // A late expiry for an old token must not wipe a checkmark that has since moved.
+    var state = ChatFeature.State(connection: conn)
+    state.recentlyCopiedToken = "current"
+    let store = TestStore(initialState: state) { ChatFeature() }
+    await store.send(.copyFeedbackExpired(token: "stale")) // token mismatch → unchanged
+  }
 }

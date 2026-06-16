@@ -346,6 +346,33 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
+  // MARK: Code-block copy affordance (#9)
+
+  private static let copySample = "Run this:\n\n```bash\nmake snapshot\n```"
+
+  func testCodeBlock_copyButtonIdle() {
+    let view = MarkdownText(text: Self.copySample, tokenPrefix: "row", onCopyCode: { _, _ in })
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  func testCodeBlock_copiedCheckmark() {
+    // `copiedToken` matches the code block's token ("<prefix>#<segment index>"); the
+    // sample's code is the 2nd segment (after the prose line), so index 1.
+    let view = MarkdownText(
+      text: Self.copySample,
+      copiedToken: "row#1",
+      tokenPrefix: "row",
+      onCopyCode: { _, _ in }
+    )
+    .padding()
+    .frame(width: 320)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
   // MARK: Approval card (Task 9)
 
   func testApprovalCard() {

@@ -34,6 +34,16 @@ public enum GatewayError: Error, Equatable, Sendable {
     case let .timedOut(method): "request timed out: \(method)"
     }
   }
+
+  /// True when the server rejected the request as an unknown JSON-RPC method (`-32601`).
+  /// `InboundFrame` keeps only the error message, not the code, so we match the server's
+  /// stable `"unknown method: <name>"` text — used to gate attachment uploads (#8).
+  public var isUnknownMethod: Bool {
+    if case let .server(message) = self {
+      return message.lowercased().hasPrefix("unknown method")
+    }
+    return false
+  }
 }
 
 // MARK: - Live / factory

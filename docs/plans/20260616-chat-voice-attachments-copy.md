@@ -324,13 +324,14 @@ iOS-side (this repo):
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] When an attach RPC returns gateway error `-32601` ("unknown method"), set
-      `attachmentsUnsupported = true`, surface a clear "update your Hermes agent to attach files"
-      message (not a generic send failure), and abort the submit cleanly.
-- [ ] Hide/disable the attach affordance for the rest of the session when `attachmentsUnsupported`.
-- [ ] Tests: a `send` stub throwing `-32601` flips the flag + sets the specific message and does
-      not call `prompt.submit`.
-- [ ] Run tests — must pass before next task.
+- [x] Added `GatewayError.isUnknownMethod` (matches the server's `"unknown method"` text). The
+      upload catch branches to `.attachmentsUnsupportedDetected`, which sets `attachmentsUnsupported`,
+      a clear "agent too old, update it" banner, marks attachments failed, clears `isSending`, and
+      aborts before `prompt.submit`.
+- [x] Attach "+" affordance hides for the session when `attachmentsUnsupported` (wired in Task 8 via
+      `attachmentsSupported: !store.attachmentsUnsupported`).
+- [x] Tests: `isUnknownMethod` detection (case-insensitive, negatives); gating flow flips the flag +
+      message and never calls `prompt.submit`, preserving input. 211/211 pass.
 
 ### Task 11: Attachment chips UI + snapshots (#8)
 

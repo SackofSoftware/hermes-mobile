@@ -196,6 +196,7 @@ public struct ChatFeature {
     case removeAttachment(id: ComposerAttachment.ID)
     case attachmentsSubmitted(displayText: String, rowID: UUID)
     case attachmentUploadFailed(message: String)
+    case attachmentsUnsupportedDetected
   }
 
   private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer }
@@ -316,7 +317,12 @@ public struct ChatFeature {
                 : text
               await send(.attachmentsSubmitted(displayText: display, rowID: uuid()))
             } catch let error as GatewayError {
-              await send(.attachmentUploadFailed(message: error.message))
+              // An old agent without the byte-upload methods → gate the feature off.
+              if error.isUnknownMethod {
+                await send(.attachmentsUnsupportedDetected)
+              } else {
+                await send(.attachmentUploadFailed(message: error.message))
+              }
             } catch {
               await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
             }
@@ -594,6 +600,15 @@ public struct ChatFeature {
         state.errorBanner = "Attachment failed: \(message)"
         state.isSending = false
         for index in state.attachments.indices { state.attachments[index].uploadState = .failed(message) }
+        return .none
+
+      case .attachmentsUnsupportedDetected:
+        // The agent is too old to accept uploads: hide the affordance for the session and
+        // explain why, rather than leaving the user with a generic RPC error.
+        state.attachmentsUnsupported = true
+        state.isSending = false
+        state.errorBanner = "This Hermes agent is too old to accept attachments. Update the agent to send files."
+        for index in state.attachments.indices { state.attachments[index].uploadState = .failed("Attachments not supported") }
         return .none
 
       case let .toolTapped(id):

@@ -665,4 +665,35 @@ struct ChatReductionTests {
     #expect(store.state.attachments.count == 1)
     #expect(methods.value == ["image.attach_bytes"]) // never reached prompt.submit
   }
+
+  // MARK: Capability gating for old agents (#8, -32601)
+
+  @Test func gatewayErrorDetectsUnknownMethod() {
+    #expect(GatewayError.server("unknown method: image.attach_bytes").isUnknownMethod)
+    #expect(GatewayError.server("Unknown method: x").isUnknownMethod) // case-insensitive
+    #expect(!GatewayError.server("boom").isUnknownMethod)
+    #expect(!GatewayError.disconnected.isUnknownMethod)
+    #expect(!GatewayError.timedOut(method: "image.attach_bytes").isUnknownMethod)
+  }
+
+  @Test func unknownAttachMethodGatesFeatureAndAborts() async {
+    let methods = LockIsolated<[String]>([])
+    let store = submitStore(
+      text: "hi", attachments: [imageAttachment(5)], methods: methods,
+      fail: .server("unknown method: image.attach_bytes")
+    )
+
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.attachments[0].uploadState = .uploading
+    }
+    await store.receive(\.attachmentsUnsupportedDetected) {
+      $0.attachmentsUnsupported = true
+      $0.isSending = false
+      $0.errorBanner = "This Hermes agent is too old to accept attachments. Update the agent to send files."
+      $0.attachments[0].uploadState = .failed("Attachments not supported")
+    }
+    #expect(methods.value == ["image.attach_bytes"]) // aborted before prompt.submit
+    #expect(store.state.composerText == "hi") // input preserved
+  }
 }

@@ -351,20 +351,19 @@ iOS-side (this repo):
 
 ### Task 12: Verify acceptance criteria
 
-- [ ] #7: record → transcript inserted; permission-denied + transcribe-failure handled.
-- [ ] #8: photos (library + camera), PDFs, and other files attach and submit on a remote agent;
-      old-agent gating works; failures surfaced, no partial sends.
-- [ ] #9: per-code-block copy with checkmark feedback; whole-message copy still works.
-- [ ] Run full suites: `make test` (or `script -q /dev/null swift test --package-path HermesKit`)
-      and `make snapshot`.
-- [ ] Confirm no UIKit/AVFoundation/URLSession calls leaked into reducers.
+- [x] #7: record → transcript appended; permission-denied + transcribe-failure handled (reducer tests).
+- [x] #8: photos/camera/files attach + upload-by-kind then submit on a remote agent; old-agent
+      `-32601` gating; failures surfaced with input preserved, no partial sends (reducer tests).
+- [x] #9: per-code-block copy with checkmark feedback; whole-message copy intact (reducer + snapshots).
+- [x] Ran full suites: `make test` → 211/211; `make snapshot` → suite green.
+- [x] No UIKit/AVFoundation/URLSession in reducers — all behind `@DependencyClient`s.
 
 ### Task 13: [Final] Docs + plan move
 
-- [ ] Update `README.md` feature list (voice, attachments, granular copy).
-- [ ] Update `CLAUDE.md` if new conventions emerged (mic/picker clients; always-upload-bytes;
-      `-32601` capability gating).
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Updated `README.md` feature list (voice + waveform, attachments, granular copy).
+- [x] Updated `CLAUDE.md`: voice/attachment conventions, upload-bytes-not-paths, `-32601`
+      gating, and the iOS-only-client `#if canImport(UIKit)` + macOS-fallback rule.
+- [x] Moved this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 *Manual / external — no checkboxes.*

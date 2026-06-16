@@ -28,6 +28,11 @@ from your desk and still keep your agent moving.
 - **Watch it work.** Streaming responses render as native Markdown, with tool/skill
   activity rows (tap for args, results, and diffs), a collapsible thinking row, and a
   subtle glow on sessions that are actively running.
+- **Compose hands-free or with files.** Dictate a message with voice input (a live
+  waveform while recording; transcribed by your agent), and attach photos, camera
+  captures, PDFs, or any file straight from the composer.
+- **Copy what you need.** Copy a whole message, or just a single code block with a
+  one-tap button and a green-check confirmation.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
   and `sudo`/`secret` prompts the moment they arrive.
 - **Stays connected.** Automatic reconnect with backoff and a clear connection banner

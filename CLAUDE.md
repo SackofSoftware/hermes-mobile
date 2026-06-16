@@ -64,6 +64,17 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - **Gate UI by server capability, not assumptions** — e.g. reasoning effort is shown only
   when `model.options` capabilities say the selected model supports it (`?? true` on
   unknown). Mirror the desktop's behaviour where one exists; check the Hermes source.
+- **Voice input** records via `AudioRecorderClient` (AVAudioRecorder + metering → a
+  `levels()` `AsyncStream` drives the waveform) and transcribes through the agent's
+  `POST /api/audio/transcribe` (`HermesRESTClient.transcribe`, base64 `data_url`) — not
+  on-device `Speech`, so it respects the user's configured provider.
+- **Attachments upload BYTES, never device paths** — iOS shares no filesystem with the
+  agent, so `image.attach_bytes` (`content_base64`) / `pdf.attach` (`content_base64`) /
+  `file.attach` (`data_url`) run before `prompt.submit`; `file.attach`'s `@file:` ref is
+  prepended to the prompt text. (The desktop's path-based `image.attach` silently fails
+  against a remote agent — don't copy it.) Old agents lacking these methods return
+  JSON-RPC `-32601`; `InboundFrame` keeps only the message, so gate via
+  `GatewayError.isUnknownMethod` (matches `"unknown method"`) → hide the attach affordance.
 - **Commit messages**: capitalized verb, no conventional-commit prefixes, concise.
 
 ## Testing (required for every change)
@@ -90,4 +101,9 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   over iOS-18-only scroll APIs when behaviour must work on 17.
 - **A `public struct` nested in feature State** needs an explicit `public init` to be
   constructed from the app/snapshot target (the memberwise init is internal).
+- **HermesKit is tested on macOS via `swift test`**, but `AVAudioSession`/`PhotosUI`/UIKit
+  pickers are iOS-only — guard a client's `liveValue` with `#if canImport(UIKit)` and
+  provide a non-iOS fallback (`liveValue = testValue`) so the package still compiles for
+  the test host (see `AudioRecorderClient`, `AttachmentPickerClient`). Keep the pure logic
+  (e.g. `Kind.infer`, dB→0...1 normalization) outside the guard so it's unit-tested.
 - TestFlight **export must use manual signing** (cloud/API-key signing fails on export).

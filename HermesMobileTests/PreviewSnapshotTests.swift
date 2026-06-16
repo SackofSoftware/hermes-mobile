@@ -9,6 +9,13 @@ import XCTest
 /// Renders the feature views to PNGs (under `__Snapshots__/`). On first run there's
 /// no baseline, so each assertion records the image and reports a failure — that's
 /// expected; the PNGs are the deliverable.
+///
+/// Two render paths:
+/// - **Whole-screen views** (`.device` layout) use `drawHierarchyInKeyWindow: true` so the
+///   iOS 26 system chrome composites — bottom search field, Liquid Glass toolbar/buttons.
+///   That requires the host app (this target has one) and isn't pixel-exact, so they run at
+///   `perceptualPrecision: 0.98`.
+/// - **Singular components** (`.sizeThatFits`) keep the fast, deterministic layer render.
 final class PreviewSnapshotTests: XCTestCase {
   private let device = ViewImageConfig.iPhone13Pro
   /// Fixed reference "now" so relative timestamps are deterministic.
@@ -24,7 +31,7 @@ final class PreviewSnapshotTests: XCTestCase {
     let view = ConnectionView(
       store: Store(initialState: ConnectionFeature.State()) { ConnectionFeature() }
     )
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testConnectionView_reachable() {
@@ -37,7 +44,7 @@ final class PreviewSnapshotTests: XCTestCase {
         )
       ) { ConnectionFeature() }
     )
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testConnectionView_invalidToken() {
@@ -50,7 +57,7 @@ final class PreviewSnapshotTests: XCTestCase {
         )
       ) { ConnectionFeature() }
     )
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   // MARK: SessionRowView (Task 7)
@@ -149,7 +156,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testSessionList_pinnedSection() {
@@ -185,7 +192,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testSessionList_chronological() {
@@ -221,7 +228,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   // MARK: ArchivedSessionsView
@@ -252,7 +259,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testArchivedSessions_empty() {
@@ -272,7 +279,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   // MARK: ChatView (Task 8)
@@ -306,7 +313,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   /// Fenced code block + list rendering (Task 11 markdown polish).
@@ -336,7 +343,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   // MARK: Approval card (Task 9)
@@ -411,7 +418,7 @@ final class PreviewSnapshotTests: XCTestCase {
       ),
       durationS: 1.4
     )
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testComposer_idle() {
@@ -476,7 +483,7 @@ final class PreviewSnapshotTests: XCTestCase {
       isBusy: false,
       onSelectModel: { _ in }, onSelectEffort: { _ in }, onDone: {}
     )
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testModelPickerSheet_nonReasoningModelHidesEffort() {
@@ -501,7 +508,7 @@ final class PreviewSnapshotTests: XCTestCase {
       isBusy: false,
       onSelectModel: { _ in }, onSelectEffort: { _ in }, onDone: {}
     )
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testScrollToBottomButton() {
@@ -533,7 +540,7 @@ final class PreviewSnapshotTests: XCTestCase {
         }
       )
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 
   func testConnectionDebugView() {
@@ -545,7 +552,7 @@ final class PreviewSnapshotTests: XCTestCase {
         GatewayLogEntry(id: 3, type: "status.update", summary: "[lifecycle] thinking…"),
       ])
     }
-    assertSnapshot(of: view, as: .image(layout: .device(config: device)))
+    assertSnapshot(of: view, as: .image(drawHierarchyInKeyWindow: true, perceptualPrecision: 0.98, layout: .device(config: device)))
   }
 }
 

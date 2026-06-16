@@ -17,6 +17,7 @@ struct ComposerView: View {
   var recordingSeconds: Int = 0
   /// Attachments (#8): hide the attach control when the agent can't accept uploads.
   var attachmentsSupported: Bool = true
+  var attachments: [ComposerAttachment] = []
   /// Owned by the parent's `@FocusState` so the transcript can dismiss the keyboard.
   var focused: FocusState<Bool>.Binding
   let onModelTap: () -> Void
@@ -27,6 +28,7 @@ struct ComposerView: View {
   var onAttachPhotos: () -> Void = {}
   var onAttachCamera: () -> Void = {}
   var onAttachFiles: () -> Void = {}
+  var onRemoveAttachment: (ComposerAttachment.ID) -> Void = { _ in }
 
   var body: some View {
     Group {
@@ -44,6 +46,7 @@ struct ComposerView: View {
 
   private var textComposer: some View {
     VStack(spacing: 10) {
+      if !attachments.isEmpty { attachmentChips }
       TextField("Message", text: $text, axis: .vertical)
         .lineLimit(1 ... 6)
         .focused(focused)
@@ -57,6 +60,17 @@ struct ComposerView: View {
         sendButton
       }
     }
+  }
+
+  private var attachmentChips: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 8) {
+        ForEach(attachments) { attachment in
+          AttachmentChip(attachment: attachment) { onRemoveAttachment(attachment.id) }
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   private var attachButton: some View {
@@ -185,5 +199,78 @@ struct RecordingWaveform: View {
 
   private func barHeight(_ level: Float, in height: CGFloat) -> CGFloat {
     max(3, CGFloat(min(max(level, 0), 1)) * height)
+  }
+}
+
+/// A staged attachment shown above the composer input (#8): image thumbnail or a
+/// file/PDF glyph, the filename, and an upload-state indicator (spinner / error) or a
+/// remove button.
+struct AttachmentChip: View {
+  let attachment: ComposerAttachment
+  let onRemove: () -> Void
+
+  var body: some View {
+    HStack(spacing: 6) {
+      thumbnail
+      Text(attachment.filename)
+        .font(.caption)
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .frame(maxWidth: 120, alignment: .leading)
+      trailing
+    }
+    .padding(.horizontal, 8)
+    .padding(.vertical, 6)
+    .background(.quaternary, in: .rect(cornerRadius: 10))
+  }
+
+  @ViewBuilder private var thumbnail: some View {
+    switch attachment.kind {
+    case .image:
+      if let image = UIImage(data: attachment.data) {
+        Image(uiImage: image)
+          .resizable()
+          .scaledToFill()
+          .frame(width: 28, height: 28)
+          .clipShape(.rect(cornerRadius: 5))
+      } else {
+        glyph("photo")
+      }
+    case .pdf:
+      glyph("doc.richtext")
+    case .file:
+      glyph("doc")
+    }
+  }
+
+  private func glyph(_ name: String) -> some View {
+    Image(systemName: name)
+      .font(.title3)
+      .foregroundStyle(.secondary)
+      .frame(width: 28, height: 28)
+  }
+
+  @ViewBuilder private var trailing: some View {
+    switch attachment.uploadState {
+    case .uploading:
+      ProgressView().controlSize(.mini)
+    case .failed:
+      HStack(spacing: 4) {
+        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        removeButton
+      }
+      .font(.caption)
+    case .pending, .uploaded:
+      removeButton
+    }
+  }
+
+  private var removeButton: some View {
+    Button(action: onRemove) {
+      Image(systemName: "xmark.circle.fill").font(.caption)
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(.secondary)
+    .accessibilityLabel("Remove \(attachment.filename)")
   }
 }

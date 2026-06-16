@@ -340,11 +340,12 @@ iOS-side (this repo):
 - Modify: `HermesMobileTests/PreviewSnapshotTests.swift`
 - Create: snapshot baselines
 
-- [ ] Render attachment chips above the input: image thumbnail or file/PDF glyph + name,
-      per-chip remove (×) and upload-state indicator (spinner / error).
-- [ ] `tuist generate`; add composer snapshots (image chip, file chip, uploading, failed);
-      `make snapshot-record` then `make snapshot`.
-- [ ] Run reducer + snapshot tests — must pass before next task.
+- [x] `AttachmentChip` renders above the input: image thumbnail (`UIImage(data:)`) or pdf/file
+      glyph + filename, with a remove (×) button; upload state shows a spinner (uploading) or an
+      orange warning + remove (failed). Chips sit in a horizontal scroll row.
+- [x] Added `testComposer_attachmentChips` (image + pdf + file) and
+      `testComposer_attachmentUploadingAndFailed`; recorded baselines. Snapshot suite green;
+      isolated (existing snapshots unchanged — chips only show with attachments).
 
 ---
 

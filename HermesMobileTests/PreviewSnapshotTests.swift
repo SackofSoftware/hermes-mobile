@@ -521,6 +521,53 @@ final class PreviewSnapshotTests: XCTestCase {
     assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
   }
 
+  // Solid-color PNG so the image-chip thumbnail renders deterministically.
+  private func solidPNG(_ color: UIColor, _ side: CGFloat = 40) -> Data {
+    UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).pngData { ctx in
+      color.setFill()
+      ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+    }
+  }
+
+  func testComposer_attachmentChips() {
+    let attachments = [
+      ComposerAttachment(id: id(1), kind: .image, filename: "sunset.png", mimeType: "image/png", data: solidPNG(.systemOrange)),
+      ComposerAttachment(id: id(2), kind: .pdf, filename: "report.pdf", mimeType: "application/pdf", data: Data([0x25])),
+      ComposerAttachment(id: id(3), kind: .file, filename: "notes.txt", mimeType: "text/plain", data: Data([0x41])),
+    ]
+    let view = ComposerHost {
+      ComposerView(
+        text: .constant("What's in these?"),
+        isSending: false, canSend: true,
+        model: "claude-opus-4-8", reasoningEffort: "high",
+        attachments: attachments,
+        focused: $0,
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+    }
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
+  func testComposer_attachmentUploadingAndFailed() {
+    let attachments = [
+      ComposerAttachment(id: id(1), kind: .image, filename: "photo.png", mimeType: "image/png", data: solidPNG(.systemBlue), uploadState: .uploading),
+      ComposerAttachment(id: id(2), kind: .file, filename: "data.csv", mimeType: "text/csv", data: Data([0x41]), uploadState: .failed("boom")),
+    ]
+    let view = ComposerHost {
+      ComposerView(
+        text: .constant(""),
+        isSending: true, canSend: false,
+        model: "claude-opus-4-8", reasoningEffort: "high",
+        attachments: attachments,
+        focused: $0,
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+    }
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: .image(layout: .sizeThatFits))
+  }
+
   func testModelPickerSheet() {
     let picker = ChatFeature.State.ModelPicker(
       isLoading: false,

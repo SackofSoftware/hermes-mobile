@@ -26,6 +26,7 @@ struct ChatView: View {
         waveformLevels: store.waveformLevels,
         recordingSeconds: store.recordingSeconds,
         attachmentsSupported: !store.attachmentsUnsupported,
+        attachments: store.attachments,
         focused: $composerFocused,
         onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
@@ -34,7 +35,8 @@ struct ChatView: View {
         onCancelRecording: { store.send(.recordingCancelled) },
         onAttachPhotos: { store.send(.attachPhotosTapped) },
         onAttachCamera: { store.send(.attachCameraTapped) },
-        onAttachFiles: { store.send(.attachFilesTapped) }
+        onAttachFiles: { store.send(.attachFilesTapped) },
+        onRemoveAttachment: { store.send(.removeAttachment(id: $0)) }
       )
     }
     .navigationTitle(store.title ?? "Chat")

@@ -500,4 +500,31 @@ struct ChatReductionTests {
     state.attachments = [imageAttachment(0)]
     #expect(state.canSend == true) // an attachment alone is enough to send
   }
+
+  @Test func pickingFilesAddsEachWithFreshIDs() async {
+    let picked = [
+      PickedItem(data: Data([1]), filename: "a.pdf", mimeType: "application/pdf", kind: .pdf),
+      PickedItem(data: Data([2]), filename: "b.txt", mimeType: "text/plain", kind: .file),
+    ]
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.attachmentPicker.pickFiles = { @Sendable in picked }
+    }
+
+    await store.send(.attachFilesTapped)
+    await store.receive(\.attachmentAdded) {
+      $0.attachments = [picked[0].attachment(id: self.uuid(0))]
+    }
+    await store.receive(\.attachmentAdded) {
+      $0.attachments = [picked[0].attachment(id: self.uuid(0)), picked[1].attachment(id: self.uuid(1))]
+    }
+  }
+
+  @Test func cancelledPhotoPickerAddsNothing() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing // captured by the effect even though no item needs an id
+      $0.attachmentPicker.pickPhotos = { @Sendable in [] }
+    }
+    await store.send(.attachPhotosTapped) // empty selection → no attachmentAdded, no change
+  }
 }

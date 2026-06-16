@@ -282,15 +282,20 @@ iOS-side (this repo):
 - Modify: `HermesMobile/Sources/Features/Chat/ComposerView.swift` (present native pickers)
 - Create/Modify: tests for the test client + a thin view wiring
 
-- [ ] Define `@DependencyClient struct AttachmentPickerClient` returning `[PickedItem]`
-      (`{ data, filename, mimeType, kind }`) for `pickPhotos()`, `capturePhoto()`, `pickFiles()`.
-      `liveValue` bridges PhotosUI / camera / `UIDocumentPicker` (UIKit confined to the client/view,
-      not the reducer); `testValue` returns canned items.
-- [ ] Add an attach button + menu (Photos / Camera / Files) in the composer; on pick, dispatch
-      `.attachmentAdded`. Gate/hide the button when `attachmentsUnsupported`.
-- [ ] Add `Info.plist` usage strings (`NSCameraUsageDescription`, photo library if needed) via `Project.swift`.
-- [ ] Tests for the test client (returns items; empty selection no-ops).
-- [ ] `tuist generate` for new files. Run tests — must pass before next task.
+- [x] Defined `@DependencyClient struct AttachmentPickerClient` returning `[PickedItem]`
+      (`{ data, filename, mimeType, kind }`) for `pickPhotos`/`capturePhoto`/`pickFiles`.
+      `liveValue` (iOS-only) bridges `PHPickerViewController` / `UIImagePickerController` /
+      `UIDocumentPickerViewController` via top-VC presenters + continuations; `testValue` empty.
+      Pure `ComposerAttachment.Kind.infer(mimeType:filename:)` routes files to image/pdf/file.
+- [x] Added an attach "+" Menu (Photo Library / Camera / Files) in the composer, hidden when
+      `attachmentsUnsupported`; reducer `.attach{Photos,Camera,Files}Tapped` run the picker and
+      dispatch `.attachmentAdded` (fresh `uuid` per item).
+- [x] Added `NSCameraUsageDescription` via `Project.swift` (PHPicker needs no photo-library
+      string — it's out-of-process); regenerated the project.
+- [x] Tests: picker → `attachmentAdded` per item with fresh ids; cancelled picker no-ops;
+      `Kind.infer` by mime + extension fallback; `dataURL`/`base64` helpers. 204/204 pass.
+- [x] iOS build compiles the live picker code; re-recorded the 4 idle-composer baselines (attach
+      button). Snapshot suite green; change isolated.
 
 ### Task 9: Attachment upload effects + submit integration (#8)
 

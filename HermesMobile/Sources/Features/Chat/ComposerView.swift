@@ -15,6 +15,8 @@ struct ComposerView: View {
   var recording: ChatFeature.State.RecordingState = .idle
   var waveformLevels: [Float] = []
   var recordingSeconds: Int = 0
+  /// Attachments (#8): hide the attach control when the agent can't accept uploads.
+  var attachmentsSupported: Bool = true
   /// Owned by the parent's `@FocusState` so the transcript can dismiss the keyboard.
   var focused: FocusState<Bool>.Binding
   let onModelTap: () -> Void
@@ -22,6 +24,9 @@ struct ComposerView: View {
   let onInterrupt: () -> Void
   var onVoiceTap: () -> Void = {}
   var onCancelRecording: () -> Void = {}
+  var onAttachPhotos: () -> Void = {}
+  var onAttachCamera: () -> Void = {}
+  var onAttachFiles: () -> Void = {}
 
   var body: some View {
     Group {
@@ -45,12 +50,26 @@ struct ComposerView: View {
         .onSubmit(onSend)
 
       HStack(spacing: 12) {
+        if attachmentsSupported { attachButton }
         modelChip
         Spacer()
         voiceButton
         sendButton
       }
     }
+  }
+
+  private var attachButton: some View {
+    Menu {
+      Button { onAttachPhotos() } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+      Button { onAttachCamera() } label: { Label("Camera", systemImage: "camera") }
+      Button { onAttachFiles() } label: { Label("Files", systemImage: "folder") }
+    } label: {
+      Image(systemName: "plus")
+        .font(.title3)
+        .foregroundStyle(.secondary)
+    }
+    .accessibilityLabel("Add attachment")
   }
 
   @ViewBuilder

@@ -9,6 +9,20 @@ public struct ComposerAttachment: Equatable, Identifiable, Sendable {
     case image  // → image.attach_bytes (vision)
     case pdf    // → pdf.attach (rendered to page images)
     case file   // → file.attach (readable artifact, returns an @file: ref)
+
+    /// Route a picked file to its upload method by MIME, falling back to the filename
+    /// extension. Pure so the picker and reducer agree and it's unit-testable.
+    public static func infer(mimeType: String, filename: String) -> Kind {
+      let mime = mimeType.lowercased()
+      let name = filename.lowercased()
+      if mime.hasPrefix("image/") { return .image }
+      if mime == "application/pdf" || name.hasSuffix(".pdf") { return .pdf }
+      if name.hasSuffix(".png") || name.hasSuffix(".jpg") || name.hasSuffix(".jpeg")
+        || name.hasSuffix(".gif") || name.hasSuffix(".webp") || name.hasSuffix(".bmp") {
+        return .image
+      }
+      return .file
+    }
   }
 
   /// Per-attachment upload progress, surfaced as a chip indicator.

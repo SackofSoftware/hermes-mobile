@@ -25,12 +25,16 @@ struct ChatView: View {
         recording: store.recording,
         waveformLevels: store.waveformLevels,
         recordingSeconds: store.recordingSeconds,
+        attachmentsSupported: !store.attachmentsUnsupported,
         focused: $composerFocused,
         onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) },
         onVoiceTap: { store.send(.voiceButtonTapped) },
-        onCancelRecording: { store.send(.recordingCancelled) }
+        onCancelRecording: { store.send(.recordingCancelled) },
+        onAttachPhotos: { store.send(.attachPhotosTapped) },
+        onAttachCamera: { store.send(.attachCameraTapped) },
+        onAttachFiles: { store.send(.attachFilesTapped) }
       )
     }
     .navigationTitle(store.title ?? "Chat")

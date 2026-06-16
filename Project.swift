@@ -46,6 +46,9 @@ let project = Project(
         "NSLocalNetworkUsageDescription": "Hermes Mobile connects to your self-hosted Hermes server over your private network or Tailscale.",
         // Voice input records a short clip that's transcribed by your Hermes server.
         "NSMicrophoneUsageDescription": "Hermes Mobile records your voice so it can be transcribed into a message by your Hermes server.",
+        // Camera attachments let you take a photo to send with a message. (The photo-library
+        // picker uses PHPicker, which runs out-of-process and needs no usage string.)
+        "NSCameraUsageDescription": "Hermes Mobile uses the camera so you can attach a photo to your message.",
         // Only standard encryption (HTTPS/TLS) — exempt; lets TestFlight skip the
         // export-compliance prompt so builds are testable immediately.
         "ITSAppUsesNonExemptEncryption": false,

@@ -189,6 +189,9 @@ public struct ChatFeature {
     case renameFailed(previousTitle: String?)
     case cancelRename
     // Attachments (#8)
+    case attachPhotosTapped
+    case attachCameraTapped
+    case attachFilesTapped
     case attachmentAdded(ComposerAttachment)
     case removeAttachment(id: ComposerAttachment.ID)
   }
@@ -201,6 +204,7 @@ public struct ChatFeature {
   @Dependency(\.uuid) var uuid
   @Dependency(\.pasteboard) var pasteboard
   @Dependency(\.audioRecorder) var audioRecorder
+  @Dependency(\.attachmentPicker) var attachmentPicker
   @Dependency(\.debugLog) var debugLog
 
   public init() {}
@@ -510,6 +514,27 @@ public struct ChatFeature {
         )
 
       // MARK: Attachments (#8)
+
+      case .attachPhotosTapped:
+        return .run { [attachmentPicker, uuid] send in
+          for item in await attachmentPicker.pickPhotos() {
+            await send(.attachmentAdded(item.attachment(id: uuid())))
+          }
+        }
+
+      case .attachCameraTapped:
+        return .run { [attachmentPicker, uuid] send in
+          for item in await attachmentPicker.capturePhoto() {
+            await send(.attachmentAdded(item.attachment(id: uuid())))
+          }
+        }
+
+      case .attachFilesTapped:
+        return .run { [attachmentPicker, uuid] send in
+          for item in await attachmentPicker.pickFiles() {
+            await send(.attachmentAdded(item.attachment(id: uuid())))
+          }
+        }
 
       case let .attachmentAdded(attachment):
         state.attachments.append(attachment)

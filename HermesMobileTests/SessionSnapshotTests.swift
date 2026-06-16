@@ -59,6 +59,24 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  func testSessionRow_untitledPromotesPreview() {
+    // In the grouped list (showsPreview: false) a session with the server's "Untitled"
+    // placeholder and no real title promotes its first-message preview to the headline —
+    // it must never render the raw id (#13).
+    let view = SessionRowView(
+      session: Session(
+        id: "20260610_120231_afcca6",
+        title: "Untitled",
+        updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
+        preview: "Run the nightly backup and email me the report"
+      ),
+      now: now
+    )
+    .padding()
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
   // MARK: SessionListView
 
   func testSessionList() {

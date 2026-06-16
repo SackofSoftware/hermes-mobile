@@ -1,13 +1,16 @@
 import HermesKit
 import SwiftUI
 
-/// One row in the session list. Like the desktop sidebar: title (or id) + relative age +
-/// an unread dot. The first-message preview is only shown for search results (`showsPreview`).
+/// One row in the session list. Like the desktop sidebar: a human-readable name
+/// (`Session.displayName`: title → preview → id) + relative age + an unread dot. A
+/// *secondary* preview line is shown only for search results (`showsPreview`); when a
+/// session has no real title the preview is promoted to the headline everywhere.
 struct SessionRowView: View {
   let session: Session
   /// Reference date the timestamp is relative to (injected so it's controllable).
   var now: Date = Date()
-  /// Show the preview/snippet line (used for search results, not the grouped list).
+  /// Show the preview as a *secondary* line under a real title (search results). The
+  /// preview is still promoted to the headline for untitled sessions regardless of this.
   var showsPreview: Bool = false
   /// New activity since the user last opened this session.
   var isUnread: Bool = false
@@ -27,12 +30,12 @@ struct SessionRowView: View {
   }()
 
   var body: some View {
-    // Search results have no title and `session.id` is a meaningless stored id, so
-    // promote the snippet to the headline instead of showing the raw id.
-    let snippet = session.preview.flatMap { $0.isEmpty ? nil : $0 }
-    let promotedSnippet: String? = (showsPreview && session.title == nil) ? snippet : nil
-    let promotesSnippet = promotedSnippet != nil
-    let headline = session.title ?? promotedSnippet ?? session.id
+    // Never show the raw `session.id` as a name: with no real title (incl. the server's
+    // "Untitled" placeholder), promote the first-message preview to the headline — in the
+    // grouped list too, not just search. `displayName` is the shared rule (title → preview → id).
+    let snippet = session.resolvedPreview
+    let promotesSnippet = session.resolvedTitle == nil && snippet != nil
+    let headline = session.displayName
 
     return VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 8) {

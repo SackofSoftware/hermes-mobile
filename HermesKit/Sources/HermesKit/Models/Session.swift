@@ -39,6 +39,23 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.messageCount = messageCount
     self.isActive = isActive
   }
+
+  /// A real, user-facing title: non-empty and not the server's `"Untitled"` placeholder
+  /// (the agent sends that for auto-named/cron sessions before a real title exists).
+  /// Mirrors the web app's `session.title && session.title !== "Untitled"` check.
+  public var resolvedTitle: String? {
+    guard let title = title?.trimmedNonEmpty, title != "Untitled" else { return nil }
+    return title
+  }
+
+  /// The first-message preview, trimmed, or `nil` when blank.
+  public var resolvedPreview: String? { preview?.trimmedNonEmpty }
+
+  /// The human-readable name for the session: a real title, else the first-message
+  /// preview, else the raw `id` as an absolute last resort (a real session almost always
+  /// has a preview, so the id should rarely surface). One shared rule for the list rows,
+  /// search, and the chat header so they never diverge.
+  public var displayName: String { resolvedTitle ?? resolvedPreview ?? id }
 }
 
 /// Result of `session.create` / `session.resume` over the WebSocket. Verified shape

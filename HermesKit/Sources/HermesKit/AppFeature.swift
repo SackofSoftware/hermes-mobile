@@ -85,7 +85,9 @@ public struct AppFeature {
       case let .home(.delegate(.openSession(session))):
         guard let connection = state.home?.connection else { return .none }
         state.path.append(
-          ChatFeature.State(connection: connection, resumeStoredID: session.id, title: session.title)
+          // `resolvedTitle` keeps the server's "Untitled" placeholder out of the header
+          // (and the rename pre-fill); a real title arrives via `session.info` on resume.
+          ChatFeature.State(connection: connection, resumeStoredID: session.id, title: session.resolvedTitle)
         )
         return .none
 

@@ -206,15 +206,18 @@ iOS-side (this repo):
 - Create: `HermesKit/Sources/HermesKit/Clients/AudioRecorderClient.swift`
 - Create: `HermesKit/Tests/HermesKitTests/AudioRecorderClientTests.swift`
 
-- [ ] Define `@DependencyClient struct AudioRecorderClient` with: `requestPermission() async -> Bool`,
-      `startRecording() async throws`, `stopRecording() async throws -> RecordedAudio`
-      (`{ data: Data, mimeType: String }`), and `cancel()`. Provide `liveValue`
-      (AVAudioSession + AVAudioRecorder; m4a/aac is fine — endpoint accepts `audio/*`) and a
-      `testValue`/`.inMemory()` returning canned audio.
-- [ ] Register the `DependencyValues` accessor.
-- [ ] Add `Info.plist` `NSMicrophoneUsageDescription` via `Project.swift` (Tuist source of truth).
-- [ ] Write tests for the test/in-memory client behavior (permission denied, start→stop returns data).
-- [ ] Run tests — must pass before next task.
+- [x] Defined `@DependencyClient struct AudioRecorderClient` with `requestPermission`,
+      `startRecording`, `stopRecording -> RecordedAudio` (`{ data, mimeType }`), `cancel`, and
+      **`levels() -> AsyncStream<Float>`** (normalized 0...1 mic amplitude for the waveform).
+      `liveValue` (iOS-only, `#if canImport(UIKit)`): AVAudioSession + AVAudioRecorder w/
+      metering, an `AudioRecorderEngine` actor sampling `averagePower` at ~15 Hz; mime
+      `audio/m4a`. macOS falls back to the no-op double so `swift test` compiles.
+- [x] Registered the `DependencyValues.audioRecorder` accessor; explicit `testValue` (canned
+      audio + finite `[0.2, 0.6, 0.4]` levels).
+- [x] Added `NSMicrophoneUsageDescription` via `Project.swift`; `tuist generate` clean.
+- [x] Tests: dB→0...1 normalization (floor/full-scale/mid), test-double permission + audio,
+      levels stream emits-then-finishes. 5/5 pass.
+- [x] Run tests — 5/5 pass; package builds on macOS.
 
 ### Task 5: Transcription over REST (#7)
 
@@ -245,6 +248,9 @@ iOS-side (this repo):
       (don't overwrite); on failure set `errorBanner`, return to `.idle`.
 - [ ] Replace the disabled `voiceButton` placeholder with a live mic button reflecting
       `recording` (mic / stop / spinner); disable send while transcribing as appropriate.
+- [ ] While `.recording`, show an **animated waveform** driven by `AudioRecorderClient.levels()`
+      (amplitude bars, like Claude/ChatGPT) plus an elapsed-time readout and a cancel control;
+      respect reduce-motion (fall back to a static/low-motion meter).
 - [ ] Reducer tests: permission-denied path; full record→stop→transcribe→append; transcribe
       failure sets banner and resets state (override recorder + REST deps; `TestClock`).
 - [ ] Add composer snapshots for `.recording` and `.transcribing`; `tuist generate`; record/assert.

@@ -44,6 +44,8 @@ let project = Project(
         ],
         // On device, reaching a private/tailnet host can trigger the local-network prompt.
         "NSLocalNetworkUsageDescription": "Hermes Mobile connects to your self-hosted Hermes server over your private network or Tailscale.",
+        // Voice input records a short clip that's transcribed by your Hermes server.
+        "NSMicrophoneUsageDescription": "Hermes Mobile records your voice so it can be transcribed into a message by your Hermes server.",
         // Only standard encryption (HTTPS/TLS) — exempt; lets TestFlight skip the
         // export-compliance prompt so builds are testable immediately.
         "ITSAppUsesNonExemptEncryption": false,

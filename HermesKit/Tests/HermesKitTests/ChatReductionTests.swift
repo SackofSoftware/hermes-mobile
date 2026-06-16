@@ -474,4 +474,30 @@ struct ChatReductionTests {
       $0.recordingSeconds = 0
     }
   }
+
+  // MARK: Attachments (#8)
+
+  private func imageAttachment(_ n: Int) -> ComposerAttachment {
+    ComposerAttachment(
+      id: uuid(n), kind: .image, filename: "photo\(n).png",
+      mimeType: "image/png", data: Data([0x89, 0x50, UInt8(n)])
+    )
+  }
+
+  @Test func attachmentAddAndRemove() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
+    let a = imageAttachment(0)
+    let b = imageAttachment(1)
+    await store.send(.attachmentAdded(a)) { $0.attachments = [a] }
+    await store.send(.attachmentAdded(b)) { $0.attachments = [a, b] }
+    await store.send(.removeAttachment(id: a.id)) { $0.attachments = [b] }
+  }
+
+  @Test func attachmentOnlyMessageIsSendable() {
+    var state = ChatFeature.State(connection: conn)
+    state.liveSessionID = "live"
+    #expect(state.canSend == false) // empty text + no attachments
+    state.attachments = [imageAttachment(0)]
+    #expect(state.canSend == true) // an attachment alone is enough to send
+  }
 }

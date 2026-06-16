@@ -267,15 +267,13 @@ iOS-side (this repo):
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] Define `public struct ComposerAttachment` (explicit `public init`) with: `id`, `kind`
-      (`.image`/`.pdf`/`.file`), `filename`, `mimeType`, `data: Data` (or a thumbnail +
-      data accessor), and `uploadState` (`.pending`/`.uploading`/`.uploaded(ref:)`/`.failed`).
-- [ ] Add `attachments: [ComposerAttachment]` and `attachmentsUnsupported: Bool` to State;
-      update `canSend` so a message with only attachments (no text) is still sendable
-      (mirrors desktop's "What do you see in this image?" default — decide a sensible iOS default).
-- [ ] Add actions: `.attachmentAdded`, `.removeAttachment(id:)`.
-- [ ] Tests: add/remove attachment mutates state; `canSend` with attachments-only.
-- [ ] Run tests — must pass before next task.
+- [x] Defined `public struct ComposerAttachment` (explicit `public init`): `id`, `kind`
+      (`.image`/`.pdf`/`.file`), `filename`, `mimeType`, `data`, `uploadState`
+      (`.pending`/`.uploading`/`.uploaded(ref:)`/`.failed`), plus `dataURL`/`base64` helpers.
+- [x] Added `attachments: [ComposerAttachment]` + `attachmentsUnsupported: Bool` to State;
+      `canSend` now allows an attachments-only message (text OR attachments present).
+- [x] Added actions `.attachmentAdded`, `.removeAttachment(id:)` with reducer cases.
+- [x] Tests: add/remove mutates state; attachments-only `canSend`. Full suite 199/199 pass.
 
 ### Task 8: `AttachmentPickerClient` (library / camera / files) (#8)
 

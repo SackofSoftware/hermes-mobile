@@ -44,6 +44,11 @@ public struct ChatFeature {
     public var waveformLevels: [Float]
     /// Seconds elapsed while recording, for the composer's mm:ss readout.
     public var recordingSeconds: Int
+    /// Files staged for the next message (#8), uploaded on submit.
+    public var attachments: [ComposerAttachment]
+    /// Set once the agent rejects an attach RPC as unknown (`-32601`) — too old to support
+    /// uploads. Hides the attach affordance for the rest of the session.
+    public var attachmentsUnsupported: Bool
 
     /// Voice-input state machine: tap mic → permission → record (waveform) → stop →
     /// transcribe → text appended to the composer.
@@ -127,10 +132,14 @@ public struct ChatFeature {
       self.recording = .idle
       self.waveformLevels = []
       self.recordingSeconds = 0
+      self.attachments = []
+      self.attachmentsUnsupported = false
     }
 
     public var canSend: Bool {
-      !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      let hasContent = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        || !attachments.isEmpty
+      return hasContent
         && liveSessionID != nil
         && pendingInteraction == nil
     }
@@ -179,6 +188,9 @@ public struct ChatFeature {
     case confirmRename
     case renameFailed(previousTitle: String?)
     case cancelRename
+    // Attachments (#8)
+    case attachmentAdded(ComposerAttachment)
+    case removeAttachment(id: ComposerAttachment.ID)
   }
 
   private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer }
@@ -496,6 +508,16 @@ public struct ChatFeature {
           .cancel(id: CancelID.voiceTimer),
           .run { [audioRecorder] _ in await audioRecorder.cancel() }
         )
+
+      // MARK: Attachments (#8)
+
+      case let .attachmentAdded(attachment):
+        state.attachments.append(attachment)
+        return .none
+
+      case let .removeAttachment(id):
+        state.attachments.removeAll { $0.id == id }
+        return .none
 
       case let .toolTapped(id):
         guard let row = state.transcript[id: id], case .tool = row.kind else { return .none }

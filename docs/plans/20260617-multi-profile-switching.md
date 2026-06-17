@@ -239,12 +239,12 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - Modify: `HermesKit/Sources/HermesKit/Clients/PreferencesClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/PreferencesClientTests.swift` (or create)
 
-- [ ] add `loadSelectedProfileID: @Sendable () -> String?` / `saveSelectedProfileID:
+- [x] add `loadSelectedProfileID: @Sendable () -> String?` / `saveSelectedProfileID:
       @Sendable (String) -> Void` / `clearSelectedProfileID: @Sendable () -> Void`
       using key `hermes.selected-profile-id`; wire into `live(defaults:)` and `inMemory()`
-- [ ] write tests: save → load round-trip; clear removes it; `inMemory` variant behaves
+- [x] write tests: save → load round-trip; clear removes it; `inMemory` variant behaves
       identically
-- [ ] run tests — must pass before next task
+- [x] run tests — must pass before next task
 
 ### Task 6: Clear selected profile on logout
 

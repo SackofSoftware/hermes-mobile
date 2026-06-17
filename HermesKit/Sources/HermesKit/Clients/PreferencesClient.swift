@@ -20,6 +20,11 @@ public struct PreferencesClient: Sendable {
   /// How the session list groups its rows (workspace vs chronological). Device-local UI pref.
   public var loadGroupingMode: @Sendable () -> SessionGroupingMode = { .default }
   public var saveGroupingMode: @Sendable (_ mode: SessionGroupingMode) -> Void
+  /// Currently selected Hermes profile name. Device-local — we never change the server's
+  /// sticky active profile. `nil` means the default profile.
+  public var loadSelectedProfileID: @Sendable () -> String? = { nil }
+  public var saveSelectedProfileID: @Sendable (_ id: String) -> Void
+  public var clearSelectedProfileID: @Sendable () -> Void
 }
 
 public extension PreferencesClient {
@@ -29,6 +34,7 @@ public extension PreferencesClient {
     let seenKey = "hermes.seen-message-counts"
     let pinnedKey = "hermes.pinned-session-ids"
     let groupingKey = "hermes.session-grouping-mode"
+    let selectedProfileKey = "hermes.selected-profile-id"
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
     return PreferencesClient(
@@ -42,7 +48,10 @@ public extension PreferencesClient {
       loadGroupingMode: {
         store.string(forKey: groupingKey).flatMap(SessionGroupingMode.init(rawValue:)) ?? .default
       },
-      saveGroupingMode: { store.set($0.rawValue, forKey: groupingKey) }
+      saveGroupingMode: { store.set($0.rawValue, forKey: groupingKey) },
+      loadSelectedProfileID: { store.string(forKey: selectedProfileKey) },
+      saveSelectedProfileID: { store.set($0, forKey: selectedProfileKey) },
+      clearSelectedProfileID: { store.removeObject(forKey: selectedProfileKey) }
     )
   }
 
@@ -52,6 +61,7 @@ public extension PreferencesClient {
     let seen = LockIsolated<[String: Int]>([:])
     let pinned = LockIsolated<[String]>([])
     let grouping = LockIsolated<SessionGroupingMode>(.default)
+    let selectedProfile = LockIsolated<String?>(nil)
     return PreferencesClient(
       loadServerURL: { box.value },
       saveServerURL: { url in box.setValue(url) },
@@ -61,7 +71,10 @@ public extension PreferencesClient {
       loadPinnedIDs: { pinned.value },
       savePinnedIDs: { pinned.setValue($0) },
       loadGroupingMode: { grouping.value },
-      saveGroupingMode: { grouping.setValue($0) }
+      saveGroupingMode: { grouping.setValue($0) },
+      loadSelectedProfileID: { selectedProfile.value },
+      saveSelectedProfileID: { selectedProfile.setValue($0) },
+      clearSelectedProfileID: { selectedProfile.setValue(nil) }
     )
   }
 }

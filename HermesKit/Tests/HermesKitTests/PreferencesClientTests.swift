@@ -79,4 +79,30 @@ struct PreferencesClientTests {
     let prefs = PreferencesClient.live(defaults: suite)
     #expect(prefs.loadGroupingMode() == .workspace) // unknown raw value → default
   }
+
+  @Test func inMemorySelectedProfileRoundTripAndClear() {
+    let prefs = PreferencesClient.inMemory()
+    #expect(prefs.loadSelectedProfileID() == nil)
+
+    prefs.saveSelectedProfileID("work")
+    #expect(prefs.loadSelectedProfileID() == "work")
+
+    prefs.clearSelectedProfileID()
+    #expect(prefs.loadSelectedProfileID() == nil)
+  }
+
+  @Test func liveSelectedProfileBacksOntoProvidedDefaults() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.profile")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.profile")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    #expect(prefs.loadSelectedProfileID() == nil)
+    prefs.saveSelectedProfileID("work")
+    #expect(suite.string(forKey: "hermes.selected-profile-id") == "work")
+    #expect(prefs.loadSelectedProfileID() == "work")
+
+    prefs.clearSelectedProfileID()
+    #expect(suite.string(forKey: "hermes.selected-profile-id") == nil)
+    #expect(prefs.loadSelectedProfileID() == nil)
+  }
 }

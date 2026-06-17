@@ -866,11 +866,16 @@ public struct ChatFeature {
   }
 
   private func appendToThinking(_ text: String, into state: inout State) {
-    if let id = state.thinkingRowID, case let .thinking(existing) = state.transcript[id: id]?.kind {
-      state.transcript[id: id]?.kind = .thinking(text: existing + text)
+    if let id = state.thinkingRowID,
+       case let .thinking(reasoning, status, elapsed, isComplete) = state.transcript[id: id]?.kind {
+      state.transcript[id: id]?.kind = .thinking(
+        reasoning: reasoning + text, status: status, elapsedSeconds: elapsed, isComplete: isComplete
+      )
     } else {
       let id = uuid()
-      state.transcript.append(ChatRow(id: id, kind: .thinking(text: text)))
+      state.transcript.append(ChatRow(
+        id: id, kind: .thinking(reasoning: text, status: nil, elapsedSeconds: 0, isComplete: false)
+      ))
       state.thinkingRowID = id
     }
   }

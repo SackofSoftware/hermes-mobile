@@ -56,11 +56,11 @@ struct ChatReductionTests {
     } withDependencies: { $0.uuid = .incrementing }
 
     await store.send(.gatewayEvent(.thinkingDelta(text: "Thinking"))) {
-      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(text: "Thinking"))]
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "Thinking", status: nil, elapsedSeconds: 0, isComplete: false))]
       $0.thinkingRowID = uuid(0)
     }
     await store.send(.gatewayEvent(.thinkingDelta(text: "…"))) {
-      $0.transcript[id: uuid(0)]?.kind = .thinking(text: "Thinking…")
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Thinking…", status: nil, elapsedSeconds: 0, isComplete: false)
     }
     await store.send(.gatewayEvent(.messageStart)) {
       $0.thinkingRowID = nil

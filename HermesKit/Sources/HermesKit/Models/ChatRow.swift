@@ -23,8 +23,13 @@ public struct ChatRow: Equatable, Sendable, Identifiable {
     /// A tool/skill invocation. `title` is the human label (server summary/context →
     /// fallback to `name`); `detail` (args/result/diff) fills in over `tool.complete`.
     case tool(name: String, title: String, state: ToolState, detail: ToolDetail?, durationS: Double?)
-    /// Collapsible reasoning/thinking content, hidden by default.
-    case thinking(text: String)
+    /// Live/collapsible "Thinking" indicator that owns the turn's reasoning plus the
+    /// latest `status.update` line. `reasoning` accumulates over deltas; `status` is the
+    /// latest context-size/compaction message (shown only in the disclosed area);
+    /// `elapsedSeconds` is the frozen final elapsed (written at completion, ignored while
+    /// active — the view reads the live `thinkingSeconds`); `isComplete` is false while
+    /// the turn runs (live timer + shimmer) and true once frozen.
+    case thinking(reasoning: String, status: String?, elapsedSeconds: Int, isComplete: Bool)
     /// A transient status line (e.g. "searching…"); `kind` is an open string.
     case status(kind: String, text: String)
   }
@@ -36,7 +41,9 @@ public struct ChatRow: Equatable, Sendable, Identifiable {
     case let .message(_, text, _): return text
     case let .tool(name, title, _, detail, _):
       return detail?.resultText?.nonEmpty ?? title.nonEmpty ?? name
-    case let .thinking(text): return text
+    case let .thinking(reasoning, status, _, _):
+      guard let status, !status.isEmpty else { return reasoning }
+      return reasoning.isEmpty ? status : reasoning + "\n\n" + status
     case let .status(_, text): return text
     }
   }
@@ -79,4 +86,18 @@ public struct ToolDetail: Equatable, Sendable {
   public var isEmpty: Bool {
     argsText == nil && (args == nil || args == .null) && resultText == nil && inlineDiff == nil
   }
+}
+
+/// Format an elapsed duration in `1h 1m 1s` style for the Thinking indicator. Omits
+/// higher-order zero units but always keeps the seconds unit (so `5 → "5s"`,
+/// `61 → "1m 1s"`, `3600 → "1h 0m 0s"`, `3661 → "1h 1m 1s"`). Negative inputs floor to
+/// `"0s"`.
+public func formatElapsed(_ seconds: Int) -> String {
+  let total = max(0, seconds)
+  let h = total / 3600
+  let m = (total % 3600) / 60
+  let s = total % 60
+  if h > 0 { return "\(h)h \(m)m \(s)s" }
+  if m > 0 { return "\(m)m \(s)s" }
+  return "\(s)s"
 }

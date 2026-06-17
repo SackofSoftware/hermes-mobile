@@ -16,6 +16,8 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
+      // Old agent (no /api/profiles) → falls back to the unscoped session fetch.
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", title: "Hello", preview: "hi")]
       }
@@ -25,6 +27,7 @@ struct SessionListFeatureTests {
       $0.now = now
       $0.isLoading = true
     }
+    await store.receive(\.profilesResponse.failure) // capability probe → not supported
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1", title: "Hello", preview: "hi")]
@@ -39,6 +42,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -46,6 +50,7 @@ struct SessionListFeatureTests {
       $0.now = now
       $0.isLoading = true
     }
+    await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.failure) {
       $0.isLoading = false
       $0.loadError = RESTError.unreachable.message
@@ -63,6 +68,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = clock
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         fetchCount.withValue { $0 += 1 }
         return [Session(id: "s1", isActive: true)]
@@ -74,6 +80,7 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
+    await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1", isActive: true)]
@@ -316,6 +323,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.preferences = prefs
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
     }
 
@@ -324,6 +332,7 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.pinnedIDs = ["s1"]
     }
+    await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1")]
@@ -865,6 +874,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.preferences = prefs
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -873,6 +883,7 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.groupingMode = .chronological // seeded from prefs on load
     }
+    await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
     await store.send(.onDisappear)
   }
@@ -914,5 +925,260 @@ struct SessionListFeatureTests {
       $0.archived = nil // sheet dismissed
     }
     await store.receive(\.delegate.openSession) // forwarded to the main stack
+  }
+
+  // MARK: - Profiles (Task 8)
+
+  @Test func taskPopulatesProfilesAndScopedSessions() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveSelectedProfileID("work")
+    let scopedFetch = LockIsolated<[String]>([])
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.preferences = prefs
+      $0.hermesProfiles.list = { @Sendable _ in
+        [Profile(name: "default", isDefault: true), Profile(name: "work")]
+      }
+      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
+        scopedFetch.withValue { $0.append(profile) }
+        return [Session(id: "w1", title: "Work")]
+      }
+    }
+
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+      $0.selectedProfileName = "work" // loaded from the persisted pref
+    }
+    await store.receive(\.profilesResponse.success) {
+      $0.profilesSupported = true
+      $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work")]
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "w1", title: "Work")]
+      $0.seenCounts = ["w1": 0]
+    }
+    #expect(scopedFetch.value == ["work"]) // scoped to the active profile
+    await store.send(.onDisappear)
+  }
+
+  @Test func notFoundFromProfilesListFallsBackToUnscopedFetch() async {
+    let unscopedFetch = LockIsolated(0)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        unscopedFetch.withValue { $0 += 1 }
+        return [Session(id: "s1")]
+      }
+    }
+
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.profilesResponse.failure) // old agent → selector stays hidden
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1")]
+      $0.seenCounts = ["s1": 0]
+    }
+    #expect(store.state.profilesSupported == false)
+    #expect(unscopedFetch.value == 1) // today's /api/sessions, not the scoped endpoint
+    await store.send(.onDisappear)
+  }
+
+  @Test func selectProfilePersistsResetsAndRefetches() async {
+    let prefs = PreferencesClient.inMemory()
+    let scopedFetch = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        searchQuery: "stale",
+        expandedGroups: ["g1"],
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "default",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
+        scopedFetch.withValue { $0.append(profile) }
+        return [Session(id: "w1")]
+      }
+    }
+
+    await store.send(.selectProfile(name: "work")) {
+      $0.selectedProfileName = "work"
+      $0.searchQuery = "" // list UI reset on switch
+      $0.expandedGroups = []
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "w1")]
+      $0.seenCounts = ["w1": 0]
+    }
+    #expect(prefs.loadSelectedProfileID() == "work") // persisted
+    #expect(scopedFetch.value == ["work"]) // refetched scoped to the new profile
+
+    // Re-selecting the same profile is a no-op (no refetch).
+    await store.send(.selectProfile(name: "work"))
+    #expect(scopedFetch.value == ["work"])
+  }
+
+  @Test func createdProfileDelegateRefreshesAndSelects() async {
+    let prefs = PreferencesClient.inMemory()
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true)],
+        selectedProfileName: "default",
+        profilesSupported: true,
+        addProfile: AddProfileFeature.State(connection: connection)
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesProfiles.list = { @Sendable _ in
+        [Profile(name: "default", isDefault: true), Profile(name: "fresh")]
+      }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+    }
+
+    await store.send(.addProfile(.presented(.delegate(.created(name: "fresh"))))) {
+      $0.addProfile = nil // sheet dismissed
+    }
+    // Refresh the profile list (no fetch yet)…
+    await store.receive(\.profilesRefreshed) {
+      $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "fresh")]
+    }
+    // …then switch to the freshly-created profile and fetch its (scoped) sessions.
+    await store.receive(\.selectProfile) {
+      $0.selectedProfileName = "fresh"
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+    }
+    #expect(prefs.loadSelectedProfileID() == "fresh")
+  }
+
+  @Test func deleteConfirmationDeletesAndReHomesToDefault() async {
+    let prefs = PreferencesClient.inMemory()
+    let deleted = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "work",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesProfiles.delete = { @Sendable _, name in deleted.withValue { $0.append(name) } }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+    }
+
+    // Tapping delete presents the confirmation dialog.
+    await store.send(.deleteProfileButtonTapped(name: "work")) {
+      $0.confirmationDialog = ConfirmationDialogState {
+        TextState("Delete profile?")
+      } actions: {
+        ButtonState(role: .destructive, action: .confirmDeleteProfile(name: "work")) {
+          TextState("Delete")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState("This permanently deletes the profile and its sessions on the server.")
+      }
+    }
+
+    // Confirming deletes on the server.
+    await store.send(.confirmationDialog(.presented(.confirmDeleteProfile(name: "work")))) {
+      $0.confirmationDialog = nil
+    }
+    // Success removes the profile and, since it was active, re-homes to default + refetches.
+    await store.receive(\.deleteProfileSucceeded) {
+      $0.profiles = [Profile(name: "default", isDefault: true)]
+      $0.selectedProfileName = "default"
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+    }
+    #expect(deleted.value == ["work"])
+    #expect(prefs.loadSelectedProfileID() == "default")
+  }
+
+  @Test func defaultProfileCannotBeRenamedOrDeleted() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true)],
+        selectedProfileName: "default",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    }
+
+    // Both actions are guarded in the reducer — no state change, no effects.
+    await store.send(.renameProfileButtonTapped(name: "default", newName: "renamed"))
+    await store.send(.deleteProfileButtonTapped(name: "default"))
+    #expect(store.state.confirmationDialog == nil)
+    #expect(store.state.profiles.map(\.name) == ["default"])
+  }
+
+  @Test func renameCustomProfileIsOptimisticWithRollback() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveSelectedProfileID("work")
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "work",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+      $0.hermesProfiles.rename = { @Sendable _, _, _ in throw RESTError.server(status: 400) }
+    }
+
+    // Optimistic rename updates the profile + the active selection.
+    await store.send(.renameProfileButtonTapped(name: "work", newName: "work-renamed")) {
+      $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work-renamed")]
+      $0.selectedProfileName = "work-renamed"
+    }
+
+    // The PATCH throws → rollback restores the prior profiles + selection.
+    await store.receive(\.renameProfileFailed) {
+      $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work")]
+      $0.selectedProfileName = "work"
+      $0.loadError = "Couldn’t rename the profile."
+    }
+    #expect(prefs.loadSelectedProfileID() == "work")
   }
 }

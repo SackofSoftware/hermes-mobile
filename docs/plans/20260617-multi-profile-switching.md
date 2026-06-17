@@ -295,35 +295,35 @@ the response body — the banner only ever showed the generic `Server error (400
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] State: add `profiles: IdentifiedArrayOf<Profile>`, `selectedProfileName: String`
+- [x] State: add `profiles: IdentifiedArrayOf<Profile>`, `selectedProfileName: String`
       (default the persisted value or `"default"`), `profilesSupported: Bool`,
       `@Presents var addProfile: AddProfileFeature.State?`; reuse existing
       `confirmationDialog` for delete
-- [ ] on `.task`: load persisted selected profile; fetch `profiles.list` → on success
+- [x] on `.task`: load persisted selected profile; fetch `profiles.list` → on success
       populate `profiles`/`profilesSupported = true`, on 404 set
       `profilesSupported = false` (selector hidden); fetch sessions via the scoped
       endpoint when supported, else today's `/api/sessions`
-- [ ] `selectProfile(name)`: persist via `saveSelectedProfileID`, set
+- [x] `selectProfile(name)`: persist via `saveSelectedProfileID`, set
       `selectedProfileName`, reset list UI (clear `searchQuery`, `expandedGroups`),
       refetch scoped sessions
-- [ ] route session-scoped reads/mutations (messages-open path stays in ChatFeature;
+- [x] route session-scoped reads/mutations (messages-open path stays in ChatFeature;
       archive/rename here) through the active profile when non-default
-- [ ] add `addProfileTapped` → present `AddProfileFeature`; handle
+- [x] add `addProfileTapped` → present `AddProfileFeature`; handle
       `.addProfile(.presented(.delegate(.created(name))))` → refresh profiles, select
       the new one
-- [ ] add rename/delete for custom profiles: rename via `profiles.rename` (optimistic
+- [x] add rename/delete for custom profiles: rename via `profiles.rename` (optimistic
       with rollback, mirroring session rename); delete behind `ConfirmationDialogState`
       → `profiles.delete`, then if the deleted profile was active fall back to `default`
       and refetch. Guard: default profile is never renamable/deletable
-- [ ] `.ifLet(\.$addProfile, action: …)` scope; ensure logout/disappear cancels nothing
+- [x] `.ifLet(\.$addProfile, action: …)` scope; ensure logout/disappear cancels nothing
       new (no extra effects)
-- [ ] write tests: `.task` populates profiles + scoped sessions (TestStore + stub clients)
-- [ ] write tests: 404 from `profiles.list` sets `profilesSupported = false` and falls
+- [x] write tests: `.task` populates profiles + scoped sessions (TestStore + stub clients)
+- [x] write tests: 404 from `profiles.list` sets `profilesSupported = false` and falls
       back to the unscoped session fetch
-- [ ] write tests: `selectProfile` persists the pref, resets search/expanded, refetches
-- [ ] write tests: created-profile delegate refreshes + selects; delete confirmation
+- [x] write tests: `selectProfile` persists the pref, resets search/expanded, refetches
+- [x] write tests: created-profile delegate refreshes + selects; delete confirmation
       flow deletes and re-homes to default; default profile cannot be renamed/deleted
-- [ ] run tests — must pass before next task
+- [x] run tests — must pass before next task
 
 ### Task 9: `ChatFeature` — thread profile into `session.create`/`session.resume`
 

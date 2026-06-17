@@ -39,9 +39,22 @@ public struct SessionListFeature {
     public var renameDraft: String
     /// How the list groups its rows (workspace vs chronological); persisted, loaded on `task`.
     public var groupingMode: SessionGroupingMode
+    /// The profiles available on the connected agent (default + any custom). Populated from
+    /// `profiles.list` on `.task`; empty when the agent lacks the profiles API.
+    public var profiles: IdentifiedArrayOf<Profile>
+    /// The device-local selected profile name. Defaults to the persisted pref or `"default"`.
+    /// New chats + the scoped session list are bound to this profile.
+    public var selectedProfileName: String
+    /// Whether the agent exposes `/api/profiles` (set false on a 404 from `profiles.list`).
+    /// When false the selector is hidden and the list uses today's unscoped `/api/sessions`.
+    public var profilesSupported: Bool
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
+    @Presents public var addProfile: AddProfileFeature.State?
     @Presents public var confirmationDialog: ConfirmationDialogState<Action.Dialog>?
+
+    /// The default profile name — never renamable/deletable, and the implicit fallback.
+    public static let defaultProfileName = "default"
 
     /// Collapsed groups show at most this many rows before a "Show more".
     public static let collapsedLimit = 5
@@ -61,7 +74,11 @@ public struct SessionListFeature {
       renamingID: Session.ID? = nil,
       renameDraft: String = "",
       groupingMode: SessionGroupingMode = .default,
-      settings: SettingsFeature.State? = nil
+      profiles: IdentifiedArrayOf<Profile> = [],
+      selectedProfileName: String = SessionListFeature.State.defaultProfileName,
+      profilesSupported: Bool = false,
+      settings: SettingsFeature.State? = nil,
+      addProfile: AddProfileFeature.State? = nil
     ) {
       self.connection = connection
       self.sessions = sessions
@@ -77,7 +94,24 @@ public struct SessionListFeature {
       self.renamingID = renamingID
       self.renameDraft = renameDraft
       self.groupingMode = groupingMode
+      self.profiles = profiles
+      self.selectedProfileName = selectedProfileName
+      self.profilesSupported = profilesSupported
       self.settings = settings
+      self.addProfile = addProfile
+    }
+
+    /// Whether the currently-selected profile is the default (no `?profile=` scoping for
+    /// reads/mutations, and a `nil` profile threaded into archive/rename).
+    public var isDefaultProfileSelected: Bool {
+      selectedProfileName == Self.defaultProfileName
+    }
+
+    /// The profile name to thread into session-scoped REST calls (archive/rename): `nil`
+    /// for the default profile or when the agent lacks the profiles API, else the name.
+    public var scopedProfileName: String? {
+      guard profilesSupported, !isDefaultProfileSelected else { return nil }
+      return selectedProfileName
     }
 
     /// True while a search query is active — the list shows flat results, not workspace
@@ -165,11 +199,35 @@ public struct SessionListFeature {
     /// Open the Archived sessions sheet (from the top-trailing menu).
     case archivedButtonTapped
     case archived(PresentationAction<ArchivedSessionsFeature.Action>)
+    // MARK: Profiles
+    /// Switch the active profile (persist, reset list UI, refetch the scoped session list).
+    case selectProfile(name: String)
+    /// Response from the `profiles.list` capability probe on `.task` (also fetches sessions).
+    case profilesResponse(Result<[Profile], RESTError>)
+    /// Refresh of the profile list WITHOUT a session fetch (after create/delete, paired with a
+    /// subsequent `selectProfile` that does the single scoped fetch).
+    case profilesRefreshed([Profile])
+    /// Open the Add-profile sheet.
+    case addProfileTapped
+    case addProfile(PresentationAction<AddProfileFeature.Action>)
+    /// Begin renaming a custom profile (opens the inline rename via the dialog/menu path).
+    case renameProfileButtonTapped(name: String, newName: String)
+    /// Rename PATCH succeeded — the optimistic profile name stands.
+    case renameProfileSucceeded
+    /// Rename PATCH failed — restore `previousProfiles` and surface the error.
+    case renameProfileFailed(previousProfiles: IdentifiedArrayOf<Profile>, previousSelected: String)
+    /// Ask to delete a custom profile (presents the confirmation dialog).
+    case deleteProfileButtonTapped(name: String)
+    /// Delete PATCH succeeded — refresh profiles and (if the deleted one was active) re-home.
+    case deleteProfileSucceeded(name: String)
+    /// Delete failed — surface the error (no local state was changed yet).
+    case deleteProfileFailed
     case delegate(Delegate)
 
     @CasePathable
     public enum Dialog: Equatable {
       case confirmArchive(id: Session.ID)
+      case confirmDeleteProfile(name: String)
     }
 
     @CasePathable
@@ -189,6 +247,7 @@ public struct SessionListFeature {
   private static let pollInterval: Duration = .seconds(10)
 
   @Dependency(\.hermesREST) var rest
+  @Dependency(\.hermesProfiles) var profiles
   @Dependency(\.continuousClock) var clock
   @Dependency(\.date.now) var now
   @Dependency(\.preferences) var preferences
@@ -200,9 +259,28 @@ public struct SessionListFeature {
     Reduce { state, action in
       switch action {
       case .task:
-        // Load now AND start the auto-poll loop that keeps `isActive` fresh while visible.
+        // Refresh "now", reload persisted prefs (incl. the device-local selected profile),
+        // probe the profiles capability, and start the auto-poll loop.
+        state.now = now
+        state.loadError = nil
+        state.seenCounts = preferences.loadSeenCounts()
+        state.pinnedIDs = preferences.loadPinnedIDs()
+        state.groupingMode = preferences.loadGroupingMode()
+        state.selectedProfileName =
+          preferences.loadSelectedProfileID() ?? Self.State.defaultProfileName
+        state.isLoading = true
         return .merge(
-          load(&state),
+          .run { [profiles, connection = state.connection] send in
+            do {
+              let result = try await profiles.list(connection)
+              await send(.profilesResponse(.success(result)))
+            } catch let error as RESTError {
+              await send(.profilesResponse(.failure(error)))
+            } catch {
+              await send(.profilesResponse(.failure(.unreachable)))
+            }
+          }
+          .cancellable(id: CancelID.fetch, cancelInFlight: true),
           .run { [clock, interval = Self.pollInterval] send in
             while true {
               try await clock.sleep(for: interval)
@@ -234,9 +312,15 @@ public struct SessionListFeature {
       case .binding(\.searchQuery):
         // Only the searchQuery binding drives the debounced fetch; other bound fields
         // (renameDraft) must NOT trigger a search.
-        return .run { [rest, connection = state.connection, query = state.searchQuery, clock] send in
+        return .run { [
+          rest, profiles, connection = state.connection, query = state.searchQuery, clock,
+          profileName = state.selectedProfileName, profilesSupported = state.profilesSupported
+        ] send in
           try await clock.sleep(for: .milliseconds(300))
-          await send(fetchSessions(rest: rest, connection: connection, query: query))
+          await send(fetchSessions(
+            rest: rest, profiles: profiles, connection: connection, query: query,
+            profileName: profileName, profilesSupported: profilesSupported
+          ))
         }
         // Shared `fetch` id: cancels any in-flight list load so a late list response can't
         // overwrite these search results.
@@ -333,13 +417,14 @@ public struct SessionListFeature {
         let seenCounts = state.seenCounts
         // Cancel any in-flight fetch (list load OR search) too: one started before this
         // archive could land afterward and resurrect the row we just optimistically removed.
+        let archiveProfile = state.scopedProfileName
         return .merge(
           .cancel(id: CancelID.fetch),
           .run { [rest, preferences, connection = state.connection] send in
             preferences.savePinnedIDs(pinnedIDs)
             preferences.saveSeenCounts(seenCounts)
             do {
-              try await rest.archive(connection, id, true, nil)
+              try await rest.archive(connection, id, true, archiveProfile)
               await send(.archiveSucceeded(id: id))
             } catch {
               await send(.archiveFailed(
@@ -348,6 +433,17 @@ public struct SessionListFeature {
             }
           }
         )
+
+      case let .confirmationDialog(.presented(.confirmDeleteProfile(name))):
+        guard let profile = state.profiles[id: name], !profile.isDefault else { return .none }
+        return .run { [profiles, connection = state.connection] send in
+          do {
+            try await profiles.delete(connection, name)
+            await send(.deleteProfileSucceeded(name: name))
+          } catch {
+            await send(.deleteProfileFailed)
+          }
+        }
 
       case .confirmationDialog:
         return .none
@@ -402,11 +498,12 @@ public struct SessionListFeature {
         // before this PATCH could land mid-window and clobber the optimistic title with the
         // server's old one. Mirrors archive's protection.
         state.renamingInFlightIDs.insert(id)
+        let renameProfile = state.scopedProfileName
         return .merge(
           .cancel(id: CancelID.fetch),
           .run { [rest, connection = state.connection] send in
             do {
-              try await rest.rename(connection, id, trimmed, nil)
+              try await rest.rename(connection, id, trimmed, renameProfile)
               await send(.renameSucceeded(id: id))
             } catch {
               await send(.renameFailed(id: id, previousTitle: previousTitle))
@@ -454,6 +551,128 @@ public struct SessionListFeature {
       case .archived:
         return .none
 
+      // MARK: Profiles
+
+      case let .profilesResponse(.success(result)):
+        state.profilesSupported = true
+        state.profiles = IdentifiedArray(uniqueElements: result)
+        // If the persisted selection no longer exists on the server, re-home to default.
+        if state.profiles[id: state.selectedProfileName] == nil {
+          state.selectedProfileName = Self.State.defaultProfileName
+          preferences.saveSelectedProfileID(state.selectedProfileName)
+        }
+        return load(&state)
+
+      case .profilesResponse(.failure):
+        // A 404 (old agent) or any failure → behave as today: no scoping, unscoped fetch.
+        state.profilesSupported = false
+        state.profiles = []
+        return load(&state)
+
+      case let .profilesRefreshed(result):
+        state.profilesSupported = true
+        state.profiles = IdentifiedArray(uniqueElements: result)
+        return .none
+
+      case let .selectProfile(name):
+        // No-op when already selected (avoids a redundant refetch / UI reset).
+        guard name != state.selectedProfileName else { return .none }
+        state.selectedProfileName = name
+        // Reset the list UI on switch (search + group expansion don't carry across profiles).
+        state.searchQuery = ""
+        state.expandedGroups = []
+        preferences.saveSelectedProfileID(name)
+        return load(&state)
+
+      case .addProfileTapped:
+        state.addProfile = AddProfileFeature.State(connection: state.connection)
+        return .none
+
+      case let .addProfile(.presented(.delegate(.created(name)))):
+        // Dismiss the sheet, refresh the profile list (no fetch), THEN select the new profile
+        // (which does the single scoped fetch). Sequential so the refreshed list is in place
+        // before the switch, and avoids a redundant double fetch.
+        state.addProfile = nil
+        return .run { [profiles, connection = state.connection] send in
+          if let result = try? await profiles.list(connection) {
+            await send(.profilesRefreshed(result))
+          }
+          await send(.selectProfile(name: name))
+        }
+
+      case .addProfile:
+        return .none
+
+      case let .renameProfileButtonTapped(name, newName):
+        // The default profile is never renamable — guard even if the view slips up.
+        guard let profile = state.profiles[id: name], !profile.isDefault else { return .none }
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != name, ProfileName.isValid(trimmed) else { return .none }
+        // Optimistic rename with rollback (mirrors session rename).
+        let previousProfiles = state.profiles
+        let previousSelected = state.selectedProfileName
+        var renamed = profile
+        renamed.name = trimmed
+        state.profiles[id: name] = nil
+        state.profiles.append(renamed)
+        if state.selectedProfileName == name {
+          state.selectedProfileName = trimmed
+          preferences.saveSelectedProfileID(trimmed)
+        }
+        return .run { [profiles, connection = state.connection] send in
+          do {
+            try await profiles.rename(connection, name, trimmed)
+            await send(.renameProfileSucceeded)
+          } catch {
+            await send(.renameProfileFailed(
+              previousProfiles: previousProfiles, previousSelected: previousSelected
+            ))
+          }
+        }
+
+      case .renameProfileSucceeded:
+        return .none
+
+      case let .renameProfileFailed(previousProfiles, previousSelected):
+        state.profiles = previousProfiles
+        state.selectedProfileName = previousSelected
+        preferences.saveSelectedProfileID(previousSelected)
+        state.loadError = "Couldn’t rename the profile."
+        return .none
+
+      case let .deleteProfileButtonTapped(name):
+        // The default profile is never deletable — guard even if the view slips up.
+        guard let profile = state.profiles[id: name], !profile.isDefault else { return .none }
+        state.confirmationDialog = ConfirmationDialogState {
+          TextState("Delete profile?")
+        } actions: {
+          ButtonState(role: .destructive, action: .confirmDeleteProfile(name: name)) {
+            TextState("Delete")
+          }
+          ButtonState(role: .cancel) {
+            TextState("Cancel")
+          }
+        } message: {
+          TextState("This permanently deletes the profile and its sessions on the server.")
+        }
+        return .none
+
+      case let .deleteProfileSucceeded(name):
+        state.profiles[id: name] = nil
+        // If the deleted profile was active, re-home to default and refetch its sessions.
+        if state.selectedProfileName == name {
+          state.selectedProfileName = Self.State.defaultProfileName
+          state.searchQuery = ""
+          state.expandedGroups = []
+          preferences.saveSelectedProfileID(Self.State.defaultProfileName)
+          return load(&state)
+        }
+        return .none
+
+      case .deleteProfileFailed:
+        state.loadError = "Couldn’t delete the profile."
+        return .none
+
       case let .settings(.presented(.delegate(.tokenSaved(token)))):
         state.connection.token = token
         return .none
@@ -479,10 +698,14 @@ public struct SessionListFeature {
     .ifLet(\.$archived, action: \.archived) {
       ArchivedSessionsFeature()
     }
+    .ifLet(\.$addProfile, action: \.addProfile) {
+      AddProfileFeature()
+    }
     .ifLet(\.$confirmationDialog, action: \.confirmationDialog)
   }
 
-  /// Refresh "now", clear errors, reload persisted prefs, and fetch the session list.
+  /// Refresh "now", clear errors, reload persisted prefs, and fetch the session list
+  /// (profile-scoped when supported; unscoped otherwise — search always unscoped).
   private func load(_ state: inout State) -> Effect<Action> {
     state.now = now
     state.isLoading = true
@@ -490,8 +713,14 @@ public struct SessionListFeature {
     state.seenCounts = preferences.loadSeenCounts()
     state.pinnedIDs = preferences.loadPinnedIDs()
     state.groupingMode = preferences.loadGroupingMode()
-    return .run { [rest, connection = state.connection, query = state.searchQuery] send in
-      await send(fetchSessions(rest: rest, connection: connection, query: query))
+    return .run { [
+      rest, profiles, connection = state.connection, query = state.searchQuery,
+      profileName = state.selectedProfileName, profilesSupported = state.profilesSupported
+    ] send in
+      await send(fetchSessions(
+        rest: rest, profiles: profiles, connection: connection, query: query,
+        profileName: profileName, profilesSupported: profilesSupported
+      ))
     }
     // Shared `fetch` id: a newer load/search/poll cancels this one, so an older in-flight
     // fetch finishing late can't overwrite `state.sessions` (stale list or search results).
@@ -508,16 +737,29 @@ public struct SessionListFeature {
 }
 
 /// Fetch the list (or search results when a query is present) and map to a response.
+///
+/// When `profilesSupported` is true the active list is fetched via the profile-scoped
+/// endpoint (`profiles.sessions(profile:…)`); otherwise it falls back to today's
+/// unscoped `/api/sessions`. Search is never profile-scoped (mirrors the desktop) — it
+/// always goes through `rest.search`.
 private func fetchSessions(
   rest: HermesRESTClient,
+  profiles: HermesProfileClient,
   connection: ServerConnection,
-  query rawQuery: String
+  query rawQuery: String,
+  profileName: String,
+  profilesSupported: Bool
 ) async -> SessionListFeature.Action {
   let query = rawQuery.trimmingCharacters(in: .whitespaces)
   do {
-    let sessions = query.isEmpty
-      ? try await rest.sessions(connection, 50, 0, .recent)
-      : try await rest.search(connection, query)
+    let sessions: [Session]
+    if !query.isEmpty {
+      sessions = try await rest.search(connection, query)
+    } else if profilesSupported {
+      sessions = try await profiles.sessions(connection, profileName, .exclude, .recent, 50, 0)
+    } else {
+      sessions = try await rest.sessions(connection, 50, 0, .recent)
+    }
     return .sessionsResponse(.success(sessions))
   } catch let error as RESTError {
     return .sessionsResponse(.failure(error))

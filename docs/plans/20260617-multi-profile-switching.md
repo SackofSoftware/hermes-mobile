@@ -280,6 +280,15 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - [x] write tests: server 400 sets `errorBanner` to the server `detail` and clears `isCreating`
 - [x] run tests — must pass before next task
 
+### Task 7b: Surface server error `detail` in `RESTError` (discovered during Task 7)
+
+Task 7's banner requires the server's JSON `detail` verbatim, but `RESTError` discarded
+the response body — the banner only ever showed the generic `Server error (400).`.
+
+- [x] `validate` reads the response body; `RESTError` carries the server `detail`; `.message` shows it verbatim
+- [x] updated `HermesProfileClientTests` 400 assertion + added detail-vs-fallback tests
+- [x] full suite green
+
 ### Task 8: `SessionListFeature` — profiles state, switching, capability gating, presentation
 
 **Files:**

@@ -39,7 +39,9 @@ public struct ServerStatus: Equatable, Sendable, Decodable {
 public enum RESTError: Error, Equatable, Sendable {
   case unauthorized          // 401 — token missing/invalid
   case notFound              // 404
-  case server(status: Int)   // other non-2xx
+  /// Other non-2xx. `detail` carries the server's body verbatim when present (JSON
+  /// `{"detail": …}`, else trimmed plain-text body) so callers can surface it.
+  case server(status: Int, detail: String? = nil)
   case unreachable           // transport failure / non-HTTP response
   case decoding              // 2xx body didn't match the expected shape
   case transcriptionFailed(String) // 2xx but `{ok:false}` — carries the server's reason
@@ -48,7 +50,10 @@ public enum RESTError: Error, Equatable, Sendable {
     switch self {
     case .unauthorized: "Invalid or missing token."
     case .notFound: "Not found."
-    case let .server(status): "Server error (\(status))."
+    // Prefer the server's detail verbatim (e.g. an Add-profile 400 reason); fall back
+    // to the generic status message when the body was empty/unparseable.
+    case let .server(status, detail):
+      if let detail, !detail.isEmpty { detail } else { "Server error (\(status))." }
     case .unreachable: "Couldn’t reach the server."
     case .decoding: "Unexpected response — is this a Hermes server?"
     case let .transcriptionFailed(reason): reason.isEmpty ? "Couldn’t transcribe the audio." : reason
@@ -204,7 +209,7 @@ func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async th
     throw RESTError.unreachable
   }
 
-  try validate(response)
+  try validate(response, data: data)
 
   do {
     return try JSONDecoder().decode(T.self, from: data)
@@ -213,15 +218,29 @@ func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async th
   }
 }
 
-/// Validate an HTTP response status, mapping non-success codes to `RESTError`.
-func validate(_ response: URLResponse) throws {
+/// Validate an HTTP response status, mapping non-success codes to `RESTError`. The
+/// response `data` is read on failure so the server's error `detail` is surfaced
+/// verbatim (see `serverDetail`).
+func validate(_ response: URLResponse, data: Data) throws {
   guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
   switch http.statusCode {
   case 200..<300: break
   case 401: throw RESTError.unauthorized
   case 404: throw RESTError.notFound
-  default: throw RESTError.server(status: http.statusCode)
+  default: throw RESTError.server(status: http.statusCode, detail: serverDetail(from: data))
   }
+}
+
+/// Lenient extraction of a human-readable error reason from a non-2xx body: prefer the
+/// JSON `{"detail": …}` field, else the trimmed plain-text body, else `nil` (empty body).
+func serverDetail(from data: Data) -> String? {
+  if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+     let detail = object["detail"] as? String,
+     !detail.isEmpty {
+    return detail
+  }
+  let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+  return text.isEmpty ? nil : text
 }
 
 /// POST a JSON body and decode the response (used by `transcribe`).
@@ -242,7 +261,7 @@ func postJSON<T: Decodable>(
     throw RESTError.unreachable
   }
 
-  try validate(response)
+  try validate(response, data: data)
 
   do {
     return try JSONDecoder().decode(T.self, from: data)
@@ -263,14 +282,15 @@ func send(
   }
   if let token { request.setValue(token, forHTTPHeaderField: "X-Hermes-Session-Token") }
 
+  let data: Data
   let response: URLResponse
   do {
-    (_, response) = try await session.data(for: request)
+    (data, response) = try await session.data(for: request)
   } catch {
     throw RESTError.unreachable
   }
 
-  try validate(response)
+  try validate(response, data: data)
 }
 
 // MARK: - DTOs (verified against hermes_cli/web_server.py + hermes_state.py)

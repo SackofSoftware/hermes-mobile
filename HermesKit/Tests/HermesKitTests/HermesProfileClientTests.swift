@@ -81,11 +81,35 @@ struct HermesProfileClientTests {
     #expect(json?["clone_from_default"] as? Bool == true)
   }
 
-  @Test func createServer400SurfacesAsRESTError() async throws {
-    MockURLProtocol.set(status: 400, json: #"{"detail":"reserved name"}"#)
-    await #expect(throws: RESTError.server(status: 400)) {
+  @Test func createServer400SurfacesDetailVerbatim() async throws {
+    // The Add-profile banner must show the server's `detail` field verbatim.
+    let detail = "Profile name 'test' is reserved — pick a different name."
+    MockURLProtocol.set(status: 400, json: #"{"detail":"\#(detail)"}"#)
+    let error = await #expect(throws: RESTError.self) {
       try await makeClient().create(connection, "test", false)
     }
+    #expect(error == .server(status: 400, detail: detail))
+    #expect(error?.message == detail)
+  }
+
+  @Test func createServer400EmptyBodyFallsBackToGenericMessage() async throws {
+    // No body → no detail → the generic status message.
+    MockURLProtocol.set(status: 400)
+    let error = await #expect(throws: RESTError.self) {
+      try await makeClient().create(connection, "test", false)
+    }
+    #expect(error == .server(status: 400, detail: nil))
+    #expect(error?.message == "Server error (400).")
+  }
+
+  @Test func createServer400NonJSONBodySurfacesTrimmedText() async throws {
+    // A plain-text (non-JSON) body falls back to the trimmed body text.
+    MockURLProtocol.set(status: 400, json: "  Bad Request  ")
+    let error = await #expect(throws: RESTError.self) {
+      try await makeClient().create(connection, "test", false)
+    }
+    #expect(error == .server(status: 400, detail: "Bad Request"))
+    #expect(error?.message == "Bad Request")
   }
 
   // MARK: updateSoul

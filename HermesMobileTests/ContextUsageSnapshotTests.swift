@@ -28,6 +28,34 @@ final class ContextUsageSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  /// Expanded popover body, full data: input/output split, compaction count, cost, and the
+  /// critical near-full nudge (97% → red). Snapshotted directly since popovers don't render
+  /// in-place.
+  func testContextDetail_fullDataCritical() {
+    let view = ContextUsageDetail(
+      usage: Usage(
+        input: 150_000, output: 44_000, total: 194_000,
+        contextUsed: 194_000, contextMax: 200_000, contextPercent: 97,
+        costUSD: 0.4231, compressions: 2
+      )
+    )
+    .padding()
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Expanded popover body, minimal data: no cost, no compaction, non-critical (40%). Rows
+  /// for absent fields are omitted rather than shown as blanks/zeros, and no nudge appears.
+  func testContextDetail_minimal() {
+    let view = ContextUsageDetail(
+      usage: Usage(
+        input: 60_000, output: 20_000, total: 80_000,
+        contextUsed: 80_000, contextMax: 200_000, contextPercent: 40
+      )
+    )
+    .padding()
+    assertSnapshot(of: view, as: componentImage())
+  }
+
   /// The pill in place beside the model chip inside the composer toolbar.
   func testComposer_withContextPill() {
     let view = ComposerHost {

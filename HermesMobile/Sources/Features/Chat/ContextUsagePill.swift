@@ -15,25 +15,39 @@ struct ContextUsagePill: View {
   let usage: Usage
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  // Popover presentation is pure UI with no bearing on app/session state, so it lives in
+  // local view @State rather than `ChatFeature` — keeps the reducer lean (no action/state
+  // for a transient disclosure).
+  @State private var showDetail = false
 
   var body: some View {
     if let label = usage.tokenLabel {
       let fraction = usage.contextFraction
-      HStack(spacing: 6) {
-        if let fraction {
-          bar(fraction: fraction)
+      Button {
+        showDetail = true
+      } label: {
+        HStack(spacing: 6) {
+          if let fraction {
+            bar(fraction: fraction)
+          }
+          Text(label)
+            .font(.caption2.weight(.medium).monospacedDigit())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
-        Text(label)
-          .font(.caption2.weight(.medium).monospacedDigit())
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(.quaternary, in: Capsule())
       }
-      .padding(.horizontal, 9)
-      .padding(.vertical, 5)
-      .background(.quaternary, in: Capsule())
+      .buttonStyle(.plain)
+      .popover(isPresented: $showDetail) {
+        ContextUsageDetail(usage: usage)
+          .presentationCompactAdaptation(.popover)
+      }
       .accessibilityElement(children: .ignore)
       .accessibilityLabel("Context usage")
       .accessibilityValue(label)
+      .accessibilityHint("Shows the context breakdown")
     }
   }
 
@@ -50,6 +64,67 @@ struct ContextUsagePill: View {
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
     }
     .frame(width: 28, height: 6)
+  }
+}
+
+/// Expanded breakdown shown in the pill's popover: used / max, the input vs output split,
+/// the compaction count, and the running cost. Rows whose data is absent are omitted rather
+/// than rendered as blanks/zeros, and a near-full nudge appears at `.critical` severity.
+///
+/// All display values come straight from the HermesKit `Usage` helpers/fields — this view
+/// recomputes no thresholds or formatting. It's factored out (vs. an inline `.popover`
+/// closure) so it can be snapshot-tested directly, since popovers don't snapshot in-place.
+struct ContextUsageDetail: View {
+  let usage: Usage
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("Context usage")
+        .font(.subheadline.weight(.semibold))
+
+      VStack(alignment: .leading, spacing: 6) {
+        if let label = usage.tokenLabel {
+          row("Used", label)
+        }
+        if let input = usage.input {
+          row("Input", formatTokens(input))
+        }
+        if let output = usage.output {
+          row("Output", formatTokens(output))
+        }
+        if let compressions = usage.compressions, compressions > 0 {
+          row("Compactions", "compacted \(compressions)x")
+        }
+        if let cost = usage.costUSD {
+          row("Cost", formatCost(cost))
+        }
+      }
+      .font(.caption.monospacedDigit())
+
+      if usage.severity == .critical {
+        Label("Context almost full — Hermes may compact soon.", systemImage: "exclamationmark.triangle.fill")
+          .font(.caption2)
+          .foregroundStyle(.orange)
+          .labelStyle(.titleAndIcon)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+    }
+    .padding()
+    .frame(minWidth: 220, alignment: .leading)
+  }
+
+  private func row(_ title: String, _ value: String) -> some View {
+    HStack {
+      Text(title).foregroundStyle(.secondary)
+      Spacer(minLength: 16)
+      Text(value).fontWeight(.medium)
+    }
+  }
+
+  /// `$0.42`-style cost. Cents-scale costs keep more precision so they don't read as `$0.00`.
+  private func formatCost(_ cost: Double) -> String {
+    let decimals = cost < 1 ? 4 : 2
+    return "$\(String(format: "%.\(decimals)f", cost))"
   }
 }
 

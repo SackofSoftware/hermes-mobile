@@ -191,15 +191,21 @@ display model, and render it.
 - Modify: `HermesMobile/Sources/Features/Chat/ComposerView.swift` (or `ChatView.swift`)
 - Modify: snapshot test file from Task 3
 
-- [ ] Make the pill tappable → `.popover` (or sheet) with breakdown: used / max, input vs
+- [x] Make the pill tappable → `.popover` (or sheet) with breakdown: used / max, input vs
       output, compaction count (`compacted Nx` when `> 0`), estimated cost (`cost_usd`) when
-      present.
-- [ ] Near-full nudge: at `severity == .critical` (≥95%) show a subtle "context almost full
+      present. (Popover via `.presentationCompactAdaptation(.popover)`; `ContextUsageDetail`
+      view, absent rows omitted.)
+- [x] Near-full nudge: at `severity == .critical` (≥95%) show a subtle "context almost full
       — Hermes may compact soon" hint in the popover.
-- [ ] Decide the tap mechanism: prefer local view `@State` for popover presentation (pure UI,
+- [x] Decide the tap mechanism: prefer local view `@State` for popover presentation (pure UI,
       no reducer state) to keep `ChatFeature` lean — note rationale in the file.
-- [ ] Add a snapshot test for the expanded popover (with and without cost / compaction).
-- [ ] Run tests — must pass before Task 5.
+      (`@State private var showDetail`, rationale commented inline.)
+- [x] Add a snapshot test for the expanded popover (with and without cost / compaction).
+      (Factored `ContextUsageDetail` into its own view; snapshotted directly at full-data
+      critical + minimal non-critical.)
+- [x] Run tests — must pass before Task 5. (HermesKit 242 unit tests pass; snapshot suite
+      TEST SUCCEEDED — record hit the known post-record diagnostics-timeout but PNGs written
+      and `make snapshot` asserts them clean.)
 
 ### Task 5: Verify acceptance criteria
 

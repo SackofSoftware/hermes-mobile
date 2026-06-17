@@ -21,12 +21,35 @@ struct ThinkingIndicatorView: View {
   /// `false` while the turn runs (live timer + shimmer), `true` once frozen.
   let isComplete: Bool
 
-  @State private var isExpanded = false
+  /// Forces the reduce-motion (flat) shimmer variant when non-nil; `nil` reads the
+  /// `accessibilityReduceMotion` environment value (production default). Only set in
+  /// snapshot tests — that environment value is system-managed and can't be injected.
+  let reduceMotionOverride: Bool?
+
+  @State private var isExpanded: Bool
+
+  init(
+    liveSeconds: Int,
+    reasoning: String,
+    status: String?,
+    elapsedSeconds: Int,
+    isComplete: Bool,
+    initiallyExpanded: Bool = false,
+    reduceMotionOverride: Bool? = nil
+  ) {
+    self.liveSeconds = liveSeconds
+    self.reasoning = reasoning
+    self.status = status
+    self.elapsedSeconds = elapsedSeconds
+    self.isComplete = isComplete
+    self.reduceMotionOverride = reduceMotionOverride
+    _isExpanded = State(initialValue: initiallyExpanded)
+  }
 
   var body: some View {
     if isComplete {
       DisclosureGroup(isExpanded: $isExpanded) {
-        body
+        disclosedBody
       } label: {
         Text("Thinking · \(formatElapsed(elapsedSeconds))")
           .font(.caption)
@@ -35,9 +58,9 @@ struct ThinkingIndicatorView: View {
       .font(.caption)
     } else {
       DisclosureGroup(isExpanded: $isExpanded) {
-        body
+        disclosedBody
       } label: {
-        ThinkingLabel(elapsed: liveSeconds)
+        ThinkingLabel(elapsed: liveSeconds, reduceMotionOverride: reduceMotionOverride)
       }
       .font(.caption)
     }
@@ -45,7 +68,7 @@ struct ThinkingIndicatorView: View {
 
   /// Shared disclosed body: reasoning then the latest status line.
   @ViewBuilder
-  private var body: some View {
+  private var disclosedBody: some View {
     VStack(alignment: .leading, spacing: 6) {
       if !reasoning.isEmpty {
         Text(reasoning)
@@ -68,9 +91,13 @@ struct ThinkingIndicatorView: View {
 /// text while the turn runs. Held flat under reduce-motion.
 private struct ThinkingLabel: View {
   let elapsed: Int
+  /// When non-nil, overrides the environment reduce-motion value (snapshot tests only).
+  var reduceMotionOverride: Bool?
 
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.accessibilityReduceMotion) private var environmentReduceMotion
   @State private var shimmerPhase: CGFloat = -1
+
+  private var reduceMotion: Bool { reduceMotionOverride ?? environmentReduceMotion }
 
   var body: some View {
     HStack(spacing: 6) {

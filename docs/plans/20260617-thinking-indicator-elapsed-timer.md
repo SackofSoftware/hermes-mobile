@@ -270,11 +270,24 @@ turn's in-progress window:
 - Modify/Create: `HermesMobileTests/` chat snapshot suite (extend the existing chat snapshots
   or add `ThinkingIndicatorSnapshotTests.swift`)
 
-- [ ] Add snapshot states with `thinkingSeconds` pinned: active (0m2s, no reasoning), active
+- [x] Add snapshot states with `thinkingSeconds` pinned: active (0m2s, no reasoning), active
       (reasoning + status, expanded), completed collapsed `Thinking · 1m 3s`, completed
       expanded (reasoning + status), reduce-motion active.
-- [ ] Record with `make snapshot-record`, then assert with `make snapshot`.
-- [ ] Run tests — must pass before Task 5.
+      **Added `HermesMobileTests/ThinkingIndicatorSnapshotTests.swift` with 5 cases (liveSeconds
+      pinned 2 / 65, elapsedSeconds 63). Recorded references under
+      `__Snapshots__/ThinkingIndicatorSnapshotTests/`:
+      `testThinking_active_noReasoning.1.png`, `testThinking_active_reasoningAndStatus_expanded.1.png`,
+      `testThinking_completed_collapsed.1.png`, `testThinking_completed_expanded.1.png`,
+      `testThinking_active_reduceMotion.1.png`. Two view fixes were needed for the first real
+      compile of the snapshot target: renamed the private disclosed-area `body` → `disclosedBody`
+      (it shadowed `View.body`), and added a defaulted `initiallyExpanded` init param (to snapshot
+      the expanded disclosure) plus a defaulted `reduceMotionOverride` (the system-managed
+      `accessibilityReduceMotion` env value can't be injected in a snapshot). Production behaviour
+      unchanged.**
+- [x] Record with `make snapshot-record`, then assert with `make snapshot`.
+      **Recorded 39 baselines (34 prior + 5 new); `make snapshot` asserts all 39 with 0 failures.**
+- [x] Run tests — must pass before Task 5. **`make snapshot`: 39/39 pass. HermesKit:
+      `script -q /dev/null swift test --package-path HermesKit` → 225 tests, all pass.**
 
 ### Task 5: Verify acceptance criteria
 

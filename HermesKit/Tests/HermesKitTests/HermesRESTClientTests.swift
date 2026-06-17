@@ -138,7 +138,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"session_id":"sid","messages":[{"id":1,"role":"user","content":"hi","timestamp":1749550000.0},{"id":2,"role":"assistant","content":"hello","timestamp":1749550001.0,"tool_name":null}]}
     """#)
-    let messages = try await makeClient().messages(connection, "sid")
+    let messages = try await makeClient().messages(connection, "sid", nil)
     #expect(messages.count == 2)
     #expect(messages.first == SessionMessage(id: 1, role: "user", content: "hi", timestamp: 1749550000.0))
   }
@@ -150,7 +150,7 @@ struct HermesRESTClientTests {
       {"id":2,"role":"tool","content":"clean","tool_name":"terminal","tool_call_id":"call_1"}
     ]}
     """#)
-    let messages = try await makeClient().messages(connection, "sid")
+    let messages = try await makeClient().messages(connection, "sid", nil)
     let call = try #require(messages.first?.toolCalls?.first)
     #expect(call.id == "call_1")
     #expect(call.name == "terminal")
@@ -160,7 +160,7 @@ struct HermesRESTClientTests {
 
   @Test func archiveSendsPatchWithBodyAndAuthHeader() async throws {
     MockURLProtocol.set(status: 200)
-    try await makeClient().archive(connection, "20260610_120231_afcca6", true)
+    try await makeClient().archive(connection, "20260610_120231_afcca6", true, nil)
     let req = try #require(MockURLProtocol.lastRequest)
     #expect(req.httpMethod == "PATCH")
     #expect(req.url?.path == "/api/sessions/20260610_120231_afcca6")
@@ -186,7 +186,7 @@ struct HermesRESTClientTests {
 
   @Test func renameSendsPatchWithTitleBodyAndAuthHeader() async throws {
     MockURLProtocol.set(status: 200)
-    try await makeClient().rename(connection, "20260610_120231_afcca6", "New title")
+    try await makeClient().rename(connection, "20260610_120231_afcca6", "New title", nil)
     let req = try #require(MockURLProtocol.lastRequest)
     #expect(req.httpMethod == "PATCH")
     #expect(req.url?.path == "/api/sessions/20260610_120231_afcca6")
@@ -213,7 +213,7 @@ struct HermesRESTClientTests {
   @Test func renameWithEmptyTitleSendsEmptyStringBody() async throws {
     // The clear contract: an empty title round-trips as {"title": ""} (server clears it).
     MockURLProtocol.set(status: 200)
-    try await makeClient().rename(connection, "20260610_120231_afcca6", "")
+    try await makeClient().rename(connection, "20260610_120231_afcca6", "", nil)
     let req = try #require(MockURLProtocol.lastRequest)
     #expect(req.httpMethod == "PATCH")
     #expect(req.url?.path == "/api/sessions/20260610_120231_afcca6")
@@ -238,14 +238,14 @@ struct HermesRESTClientTests {
   @Test func renameRejectionMapsToServerError() async throws {
     MockURLProtocol.set(status: 400)
     await #expect(throws: RESTError.server(status: 400)) {
-      try await makeClient().rename(connection, "sid", "too long")
+      try await makeClient().rename(connection, "sid", "too long", nil)
     }
   }
 
   @Test func archiveUnauthorizedMapsToTypedError() async throws {
     MockURLProtocol.set(status: 401)
     await #expect(throws: RESTError.unauthorized) {
-      try await makeClient().archive(connection, "sid", true)
+      try await makeClient().archive(connection, "sid", true, nil)
     }
   }
 
@@ -268,6 +268,88 @@ struct HermesRESTClientTests {
     await #expect(throws: RESTError.decoding) {
       _ = try await makeClient().status(baseURL)
     }
+  }
+
+  // MARK: Profile scoping (#1 multi-profile)
+
+  /// Read the (possibly streamed) request body back as `Data`.
+  private func bodyData(_ req: URLRequest) -> Data {
+    req.httpBody ?? req.httpBodyStream.map { stream -> Data in
+      stream.open()
+      defer { stream.close() }
+      var data = Data()
+      let bufSize = 1024
+      let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+      defer { buffer.deallocate() }
+      while stream.hasBytesAvailable {
+        let read = stream.read(buffer, maxLength: bufSize)
+        if read <= 0 { break }
+        data.append(buffer, count: read)
+      }
+      return data
+    } ?? Data()
+  }
+
+  @Test func messagesWithNilProfileSendsNoProfileQuery() async throws {
+    // Regression guard: nil profile → byte-identical to today (no `profile` param).
+    MockURLProtocol.set(json: #"{"session_id":"sid","messages":[]}"#)
+    _ = try await makeClient().messages(connection, "sid", nil)
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/sessions/sid/messages")
+    #expect(req.url?.query == nil)
+  }
+
+  @Test func messagesWithProfileAddsProfileQuery() async throws {
+    MockURLProtocol.set(json: #"{"session_id":"sid","messages":[]}"#)
+    _ = try await makeClient().messages(connection, "sid", "work")
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/sessions/sid/messages")
+    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query == [URLQueryItem(name: "profile", value: "work")])
+  }
+
+  @Test func archiveWithNilProfileIsUnchanged() async throws {
+    // Regression guard: nil profile → no `profile` in query or body.
+    MockURLProtocol.set(status: 200)
+    try await makeClient().archive(connection, "sid", true, nil)
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/sessions/sid")
+    #expect(req.url?.query == nil)
+    let json = try JSONSerialization.jsonObject(with: bodyData(req)) as? [String: Bool]
+    #expect(json == ["archived": true])
+  }
+
+  @Test func archiveWithProfileAddsProfileToQueryAndBody() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().archive(connection, "sid", true, "work")
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/sessions/sid")
+    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query == [URLQueryItem(name: "profile", value: "work")])
+    let json = try JSONSerialization.jsonObject(with: bodyData(req)) as? [String: AnyHashable]
+    #expect(json == ["archived": true, "profile": "work"])
+  }
+
+  @Test func renameWithNilProfileIsUnchanged() async throws {
+    // Regression guard: nil profile → no `profile` in query or body.
+    MockURLProtocol.set(status: 200)
+    try await makeClient().rename(connection, "sid", "New title", nil)
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/sessions/sid")
+    #expect(req.url?.query == nil)
+    let json = try JSONSerialization.jsonObject(with: bodyData(req)) as? [String: String]
+    #expect(json == ["title": "New title"])
+  }
+
+  @Test func renameWithProfileAddsProfileToQueryAndBody() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().rename(connection, "sid", "New title", "work")
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/sessions/sid")
+    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query == [URLQueryItem(name: "profile", value: "work")])
+    let json = try JSONSerialization.jsonObject(with: bodyData(req)) as? [String: String]
+    #expect(json == ["title": "New title", "profile": "work"])
   }
 
   // MARK: Transcription (#7)

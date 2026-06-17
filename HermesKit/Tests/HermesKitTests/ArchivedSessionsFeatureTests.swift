@@ -54,7 +54,7 @@ struct ArchivedSessionsFeatureTests {
     let store = TestStore(initialState: state) {
       ArchivedSessionsFeature()
     } withDependencies: {
-      $0.hermesREST.archive = { @Sendable _, id, archived in restored.setValue((id, archived)) }
+      $0.hermesREST.archive = { @Sendable _, id, archived, _ in restored.setValue((id, archived)) }
     }
 
     await store.send(.restoreButtonTapped(id: "a")) {
@@ -74,7 +74,7 @@ struct ArchivedSessionsFeatureTests {
     let store = TestStore(initialState: state) {
       ArchivedSessionsFeature()
     } withDependencies: {
-      $0.hermesREST.archive = { @Sendable _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
     await store.send(.restoreButtonTapped(id: "a")) {

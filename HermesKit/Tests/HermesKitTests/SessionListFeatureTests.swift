@@ -424,7 +424,7 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.preferences = prefs
-      $0.hermesREST.archive = { @Sendable _, id, flag in
+      $0.hermesREST.archive = { @Sendable _, id, flag, _ in
         archived.withValue { $0.append((id, flag)) }
       }
     }
@@ -470,7 +470,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.preferences = prefs
-      $0.hermesREST.archive = { @Sendable _, _, _ in }
+      $0.hermesREST.archive = { @Sendable _, _, _, _ in }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         // Block until released, then return the OLD list (both sessions) — stale data.
         var iterator = gate.stream.makeAsyncIterator()
@@ -524,7 +524,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
-      $0.hermesREST.archive = { @Sendable _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did, it would throw — the row must come back regardless.
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
@@ -563,7 +563,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = prefs
-      $0.hermesREST.archive = { @Sendable _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did it would throw — restore must be purely local.
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
@@ -643,7 +643,7 @@ struct SessionListFeatureTests {
     ) {
       SessionListFeature()
     } withDependencies: {
-      $0.hermesREST.rename = { @Sendable _, id, title in
+      $0.hermesREST.rename = { @Sendable _, id, title, _ in
         renamed.withValue { $0.append((id, title)) }
       }
     }
@@ -720,7 +720,7 @@ struct SessionListFeatureTests {
     ) {
       SessionListFeature()
     } withDependencies: {
-      $0.hermesREST.rename = { @Sendable _, _, _ in throw RESTError.server(status: 400) }
+      $0.hermesREST.rename = { @Sendable _, _, _, _ in throw RESTError.server(status: 400) }
     }
 
     // Optimistic update, then the RPC throws → renameFailed restores the previous title.

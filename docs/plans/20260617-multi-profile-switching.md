@@ -224,14 +224,14 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift` (or create if absent)
 
-- [ ] add an optional `profile: String?` parameter (default `nil`) to `messages`,
+- [x] add an optional `profile: String?` parameter (default `nil`) to `messages`,
       `archive`, and `rename`; when non-nil add `?profile={name}` (reads) / include in
       body+query (PATCH). `nil` → byte-identical to today's request
-- [ ] update existing call sites that don't pass a profile (defaulted — no behavior change)
-- [ ] leave `search` un-scoped (mirrors desktop)
-- [ ] write tests: with `profile` nil the URL/body is unchanged (regression guard)
-- [ ] write tests: with a profile name the query/body carries `profile`
-- [ ] run tests — must pass before next task
+- [x] update existing call sites that don't pass a profile (defaulted — no behavior change)
+- [x] leave `search` un-scoped (mirrors desktop)
+- [x] write tests: with `profile` nil the URL/body is unchanged (regression guard)
+- [x] write tests: with a profile name the query/body carries `profile`
+- [x] run tests — must pass before next task
 
 ### Task 5: `PreferencesClient` selected-profile pref
 

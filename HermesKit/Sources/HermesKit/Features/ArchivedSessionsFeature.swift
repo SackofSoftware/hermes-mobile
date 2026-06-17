@@ -99,7 +99,7 @@ public struct ArchivedSessionsFeature {
         state.restoringIDs.insert(id)
         return .run { [rest, connection = state.connection] send in
           do {
-            try await rest.archive(connection, id, false) // archived:false = restore
+            try await rest.archive(connection, id, false, nil) // archived:false = restore
             await send(.restoreSucceeded(id: id))
           } catch {
             await send(.restoreFailed(id: id, session: session, index: index))

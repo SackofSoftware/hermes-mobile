@@ -66,12 +66,18 @@ public struct HermesRESTClient: Sendable {
   /// Just the archived (soft-hidden) sessions — `GET /api/sessions?archived=only`.
   public var archivedSessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int) async throws -> [Session]
   public var search: @Sendable (_ connection: ServerConnection, _ query: String) async throws -> [Session]
-  public var messages: @Sendable (_ connection: ServerConnection, _ sessionID: String) async throws -> [SessionMessage]
+  /// Fetch a session's message history. Pass `profile` (non-default) to scope the read to
+  /// that profile's `state.db`; `nil` → today's exact request (no `profile` param).
+  public var messages: @Sendable (_ connection: ServerConnection, _ sessionID: String, _ profile: String?) async throws -> [SessionMessage]
   /// Soft-hide (archive) or restore a session — `PATCH /api/sessions/{id}` `{"archived":…}`.
-  public var archive: @Sendable (_ connection: ServerConnection, _ id: String, _ archived: Bool) async throws -> Void
+  /// Pass `profile` (non-default) to scope to that profile (added to both query and body);
+  /// `nil` → today's exact request.
+  public var archive: @Sendable (_ connection: ServerConnection, _ id: String, _ archived: Bool, _ profile: String?) async throws -> Void
   /// Rename a session — `PATCH /api/sessions/{id}` `{"title":…}`. An empty title clears it.
   /// The server may reject with 400 (too long / invalid chars / duplicate).
-  public var rename: @Sendable (_ connection: ServerConnection, _ id: String, _ title: String) async throws -> Void
+  /// Pass `profile` (non-default) to scope to that profile (added to both query and body);
+  /// `nil` → today's exact request.
+  public var rename: @Sendable (_ connection: ServerConnection, _ id: String, _ title: String, _ profile: String?) async throws -> Void
   /// Transcribe recorded audio — `POST /api/audio/transcribe` `{data_url, mime_type?}` →
   /// `{ok, transcript}`. Returns the transcript text; throws `.transcriptionFailed` on `ok:false`.
   public var transcribe: @Sendable (_ connection: ServerConnection, _ dataURL: String, _ mimeType: String?) async throws -> String
@@ -109,23 +115,35 @@ public extension HermesRESTClient {
         let response: SearchResponse = try await get(url, token: conn.token, session: session)
         return response.results.map(\.asSession)
       },
-      messages: { conn, sessionID in
-        let url = try makeURL(conn.baseURL, "/api/sessions/\(sessionID)/messages")
+      messages: { conn, sessionID, profile in
+        // `nil` profile → no query item, byte-identical to today's request.
+        let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
+        let url = try makeURL(conn.baseURL, "/api/sessions/\(sessionID)/messages", query: query)
         let response: MessagesResponse = try await get(url, token: conn.token, session: session)
         return response.messages
       },
-      archive: { conn, id, archived in
+      archive: { conn, id, archived, profile in
         // `makeURL` percent-encodes `comps.path`, so interpolate the RAW id (matching
         // the `messages` endpoint) — pre-encoding here would double-encode reserved chars.
-        let url = try makeURL(conn.baseURL, "/api/sessions/\(id)")
-        let body = try JSONSerialization.data(withJSONObject: ["archived": archived])
+        // A non-nil profile is mirrored into both the query and the body (matches desktop);
+        // `nil` → no `profile` anywhere, byte-identical to today's request.
+        let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
+        let url = try makeURL(conn.baseURL, "/api/sessions/\(id)", query: query)
+        var payload: [String: Any] = ["archived": archived]
+        if let profile { payload["profile"] = profile }
+        let body = try JSONSerialization.data(withJSONObject: payload)
         try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
       },
-      rename: { conn, id, title in
+      rename: { conn, id, title, profile in
         // Same endpoint/shape as `archive`: interpolate the RAW id (`makeURL` percent-encodes
         // the path), send `{"title": …}` — an empty string clears the title server-side.
-        let url = try makeURL(conn.baseURL, "/api/sessions/\(id)")
-        let body = try JSONSerialization.data(withJSONObject: ["title": title])
+        // A non-nil profile is mirrored into both the query and the body (matches desktop);
+        // `nil` → no `profile` anywhere, byte-identical to today's request.
+        let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
+        let url = try makeURL(conn.baseURL, "/api/sessions/\(id)", query: query)
+        var payload: [String: Any] = ["title": title]
+        if let profile { payload["profile"] = profile }
+        let body = try JSONSerialization.data(withJSONObject: payload)
         try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
       },
       transcribe: { conn, dataURL, mimeType in

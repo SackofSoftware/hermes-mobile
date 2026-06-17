@@ -339,7 +339,7 @@ public struct SessionListFeature {
             preferences.savePinnedIDs(pinnedIDs)
             preferences.saveSeenCounts(seenCounts)
             do {
-              try await rest.archive(connection, id, true)
+              try await rest.archive(connection, id, true, nil)
               await send(.archiveSucceeded(id: id))
             } catch {
               await send(.archiveFailed(
@@ -406,7 +406,7 @@ public struct SessionListFeature {
           .cancel(id: CancelID.fetch),
           .run { [rest, connection = state.connection] send in
             do {
-              try await rest.rename(connection, id, trimmed)
+              try await rest.rename(connection, id, trimmed, nil)
               await send(.renameSucceeded(id: id))
             } catch {
               await send(.renameFailed(id: id, previousTitle: previousTitle))

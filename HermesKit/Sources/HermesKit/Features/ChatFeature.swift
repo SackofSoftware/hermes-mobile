@@ -1051,7 +1051,7 @@ public struct ChatFeature {
 
   private func loadHistory(_ storedID: String, connection: ServerConnection) -> Effect<Action> {
     .run { [rest] send in
-      if let messages = try? await rest.messages(connection, storedID) {
+      if let messages = try? await rest.messages(connection, storedID, nil) {
         await send(.historyResponse(messages))
       }
     }

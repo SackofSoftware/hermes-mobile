@@ -331,14 +331,14 @@ the response body — the banner only ever showed the generic `Server error (400
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 
-- [ ] add a `profileName: String?` to ChatFeature State (passed in by the parent when
+- [x] add a `profileName: String?` to ChatFeature State (passed in by the parent when
       opening/creating a chat under the selected profile)
-- [ ] in `bootstrapSession`, when `profileName` is non-nil/non-default add
+- [x] in `bootstrapSession`, when `profileName` is non-nil/non-default add
       `"profile": .string(name)` to the create/resume params object; default → unchanged
-- [ ] route the chat's history hydration (REST `messages`) through the same profile
-- [ ] write tests: create/resume params include `profile` when set; absent when nil
+- [x] route the chat's history hydration (REST `messages`) through the same profile
+- [x] write tests: create/resume params include `profile` when set; absent when nil
       (regression guard against today's exact params)
-- [ ] run tests — must pass before next task
+- [x] run tests — must pass before next task
 
 ### Task 10: Wire the selected profile through navigation (AppFeature / parent)
 

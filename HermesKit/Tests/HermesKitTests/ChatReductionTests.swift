@@ -516,6 +516,117 @@ struct ChatReductionTests {
     await store.send(.onDisappear)
   }
 
+  @Test func createUnderCustomProfileThreadsProfileParam() async {
+    let sent = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(
+      initialState: ChatFeature.State(connection: conn, profileName: "work")
+    ) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = ImmediateClock()
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "message_count": .number(0),
+        ])
+      }
+    }
+
+    await store.send(.task)
+    await store.receive(\.gatewayEvent) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "live123"
+      $0.storedSessionID = "stored123"
+      $0.status = .ready
+    }
+    #expect(sent.value?["method"]?.stringValue == "session.create")
+    #expect(sent.value?["params"] == .object(["profile": .string("work")]))
+    await store.send(.onDisappear)
+  }
+
+  @Test func defaultProfileNameThreadsNoProfileParam() async {
+    // A profileName of "default" must produce byte-identical params to nil (regression).
+    let sent = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(
+      initialState: ChatFeature.State(connection: conn, profileName: "default")
+    ) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = ImmediateClock()
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "message_count": .number(0),
+        ])
+      }
+    }
+
+    await store.send(.task)
+    await store.receive(\.gatewayEvent) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "live123"
+      $0.storedSessionID = "stored123"
+      $0.status = .ready
+    }
+    #expect(sent.value?["params"] == .object([:]))
+    await store.send(.onDisappear)
+  }
+
+  @Test func resumeUnderCustomProfileThreadsProfileParam() async {
+    let resumeParams = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(
+      initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123", profileName: "work")
+    ) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        if method == "session.resume" { resumeParams.setValue(params) }
+        if method == "session.usage" {
+          return .object([
+            "input": .number(0), "output": .number(0), "total": .number(0),
+            "context_used": .number(0), "context_max": .number(200_000), "context_percent": .number(0),
+          ])
+        }
+        return .object(["session_id": .string("live123"), "stored_session_id": .string("stored123")])
+      }
+    }
+
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "live123"
+      $0.storedSessionID = "stored123"
+      $0.status = .ready
+    }
+    await store.receive(\.usageResponse) {
+      $0.usage = Usage(
+        input: 0, output: 0, total: 0,
+        contextUsed: 0, contextMax: 200_000, contextPercent: 0
+      )
+    }
+    #expect(resumeParams.value == .object([
+      "session_id": .string("stored123"),
+      "profile": .string("work"),
+    ]))
+  }
+
   @Test func resumeReadyBootstrapsViaSessionResume() async {
     let methods = LockIsolated<[String]>([])
     let usageParams = LockIsolated<JSONValue?>(nil)

@@ -15,6 +15,11 @@ public struct ChatFeature {
   @ObservableState
   public struct State: Equatable {
     public var connection: ServerConnection
+    /// The active profile this chat is scoped to. `nil` (or `"default"`) means the
+    /// default profile — session create/resume and history hydration omit the `profile`
+    /// param, byte-identical to the single-profile behavior. A custom profile name is
+    /// threaded into `session.create`/`session.resume` and the REST `messages` fetch.
+    public var profileName: String?
     public var title: String?
     public var transcript: IdentifiedArrayOf<ChatRow>
     public var composerText: String
@@ -108,12 +113,14 @@ public struct ChatFeature {
     public init(
       connection: ServerConnection,
       resumeStoredID: String? = nil,
+      profileName: String? = nil,
       title: String? = nil,
       transcript: IdentifiedArrayOf<ChatRow> = [],
       composerText: String = "",
       status: Status = .connecting
     ) {
       self.connection = connection
+      self.profileName = profileName
       self.storedSessionID = resumeStoredID
       self.title = title
       self.transcript = transcript
@@ -154,6 +161,14 @@ public struct ChatFeature {
     /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
     /// silently no-ops) — drives whether the toolbar Rename control is enabled.
     public var canRename: Bool { liveSessionID != nil }
+
+    /// The profile name to thread into session create/resume + REST scoping, or `nil` for
+    /// the default profile. Treating `"default"` as `nil` keeps requests byte-identical to
+    /// the single-profile behavior.
+    var scopedProfile: String? {
+      guard let name = profileName, name != "default" else { return nil }
+      return name
+    }
   }
 
   public enum Action: BindableAction {
@@ -231,7 +246,7 @@ public struct ChatFeature {
       case .task:
         var effects: [Effect<Action>] = [connect(state.connection)]
         if let stored = state.storedSessionID {
-          effects.append(loadHistory(stored, connection: state.connection))
+          effects.append(loadHistory(stored, connection: state.connection, profile: state.scopedProfile))
         }
         return .merge(effects)
 
@@ -753,7 +768,7 @@ public struct ChatFeature {
       state.reconnectAttempt = 0
       guard !state.hasRequestedSession else { return .none }
       state.hasRequestedSession = true
-      return bootstrapSession(stored: state.storedSessionID)
+      return bootstrapSession(stored: state.storedSessionID, profile: state.scopedProfile)
 
     case .messageStart:
       // Defer creating the assistant row until the first delta — a tool-only turn emits
@@ -1006,13 +1021,16 @@ public struct ChatFeature {
     .cancellable(id: CancelID.socket, cancelInFlight: true)
   }
 
-  private func bootstrapSession(stored: String?) -> Effect<Action> {
+  private func bootstrapSession(stored: String?, profile: String?) -> Effect<Action> {
     .run { [gateway] send in
       let method = stored == nil ? "session.create" : "session.resume"
       // New sessions send no title so the server auto-names from the first message
       // (passing any title disables Hermes' auto-title generation).
-      let params: JSONValue = stored.map { .object(["session_id": .string($0)]) }
-        ?? .object([:])
+      var fields: [String: JSONValue] = stored.map { ["session_id": .string($0)] } ?? [:]
+      // Scope the turn to the active profile (binds that profile's HERMES_HOME +
+      // state.db). Default/nil → omit, byte-identical to the single-profile request.
+      if let profile { fields["profile"] = .string(profile) }
+      let params: JSONValue = .object(fields)
       do {
         let result = try await gateway.send(method, params)
         if let handle = result.decoded(SessionHandle.self) {
@@ -1049,9 +1067,9 @@ public struct ChatFeature {
     }
   }
 
-  private func loadHistory(_ storedID: String, connection: ServerConnection) -> Effect<Action> {
+  private func loadHistory(_ storedID: String, connection: ServerConnection, profile: String?) -> Effect<Action> {
     .run { [rest] send in
-      if let messages = try? await rest.messages(connection, storedID, nil) {
+      if let messages = try? await rest.messages(connection, storedID, profile) {
         await send(.historyResponse(messages))
       }
     }

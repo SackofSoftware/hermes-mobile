@@ -196,6 +196,156 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  // MARK: Profile pill
+
+  /// A list of fixtures shared by the profile-pill snapshots: a default + two custom
+  /// profiles.
+  private func profileFixtures() -> [Profile] {
+    [
+      Profile(name: "default", isDefault: true),
+      Profile(name: "work", isDefault: false, skillCount: 3),
+      Profile(name: "personal", isDefault: false, skillCount: 1),
+    ]
+  }
+
+  /// Default state: the profiles API is supported, the default profile is active, so the
+  /// principal toolbar shows the house-icon "default" pill.
+  func testSessionList_profilePill_default() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = (0..<3).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            profiles: IdentifiedArray(uniqueElements: profileFixtures()),
+            selectedProfileName: "default",
+            profilesSupported: true
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// A custom profile is active — the pill shows the name with no leading house icon.
+  func testSessionList_profilePill_customSelected() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = (0..<3).map { i in
+      Session(id: "w\(i)",
+              title: ["Quarterly planning", "Standup notes", "Roadmap review"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 8)
+    }
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            profiles: IdentifiedArray(uniqueElements: profileFixtures()),
+            selectedProfileName: "work",
+            profilesSupported: true
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Menu-open content. SwiftUI `Menu` popovers don't render in the snapshot host, so this
+  /// captures the menu's logical content inline — the same rows the pill's `Menu` builds:
+  /// the default profile (with a checkmark on the active one), each custom profile, a
+  /// divider, then the "Add profile" row.
+  func testSessionList_profileMenu_content() {
+    let profiles = profileFixtures()
+    let selected = "work"
+    let view = List {
+      ForEach(profiles) { profile in
+        let isSelected = profile.name == selected
+        if profile.isDefault {
+          Label(profile.name, systemImage: isSelected ? "checkmark" : "house")
+        } else {
+          Label(profile.name, systemImage: isSelected ? "checkmark" : "person.crop.circle")
+        }
+      }
+      Divider()
+      Label("Add profile", systemImage: "plus")
+    }
+    .listStyle(.plain)
+    .frame(width: device.size?.width ?? 390, height: 240)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Fallback: the agent doesn't expose `/api/profiles` (`profilesSupported == false`), so
+  /// the static "Sessions" title is shown and no pill renders.
+  func testSessionList_profilePill_unsupportedFallback() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = (0..<3).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            profilesSupported: false
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   // MARK: ArchivedSessionsView
 
   func testArchivedSessions() {

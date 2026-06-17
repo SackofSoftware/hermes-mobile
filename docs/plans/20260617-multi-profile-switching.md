@@ -358,19 +358,22 @@ the response body — the banner only ever showed the generic `Server error (400
 - Modify: `HermesMobile/Sources/.../SessionListView.swift`
 - Modify: `HermesMobileTests/.../SessionListSnapshotTests.swift`
 
-- [ ] replace `navigationTitle("Sessions")` with a centered **profile pill** (principal
+- [x] replace `navigationTitle("Sessions")` with a centered **profile pill** (principal
       toolbar item): icon + profile name + chevron. Default profile shows
       `house`/`house.fill`; custom profiles show no leading icon. When
       `profilesSupported == false`, render the static `Sessions` title (no pill)
-- [ ] tapping the pill opens a `Menu`: profiles list with a checkmark on the active one,
+- [x] tapping the pill opens a `Menu`: profiles list with a checkmark on the active one,
       a divider, then a `+ Add profile` row → `addProfileTapped`
-- [ ] add rename/delete affordances for custom profiles (context menu / menu actions),
-      hidden/disabled for default
-- [ ] present the `AddProfileFeature` sheet via `.sheet(item: $store.scope(...))`; keep
-      existing Settings (leading) + Organize (trailing) toolbar items
-- [ ] run `tuist generate`; add/record snapshots: pill default state, menu open
-      (with custom profiles + checkmark + divider + Add row), single-profile fallback
-- [ ] `make snapshot` — must pass before next task
+- [x] add rename/delete affordances for custom profiles (context menu / menu actions),
+      hidden/disabled for default (nested submenu on each custom profile row;
+      default profile is a plain select-only button)
+- [x] present the `AddProfileFeature` sheet via `.sheet(item: $store.scope(...))`; keep
+      existing Settings (leading) + Organize (trailing) toolbar items. `AddProfileView`
+      is a minimal placeholder (Task 12 builds the full form)
+- [x] run `tuist generate`; add/record snapshots: pill default state, menu open
+      (rendered inline — `Menu` popovers don't render in the snapshot host),
+      single-profile fallback (+ custom-profile-selected)
+- [x] `make snapshot` — must pass before next task
 
 ### Task 12: `AddProfileView` — form (UI)
 

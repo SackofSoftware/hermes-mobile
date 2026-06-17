@@ -50,13 +50,21 @@ struct SessionListView: View {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
       }
     }
-    .navigationTitle("Sessions")
+    .navigationTitle(store.profilesSupported ? "" : "Sessions")
+    // The principal pill needs the inline bar (a large title pushes it out); the static
+    // "Sessions" fallback keeps its default (large) title so it's byte-identical to today.
+    .navigationBarTitleDisplayMode(store.profilesSupported ? .inline : .automatic)
     .searchable(text: $store.searchQuery, prompt: "Search sessions")
     .refreshable { store.send(.pulledToRefresh) }
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
         Button("Settings", systemImage: "gearshape") {
           store.send(.settingsButtonTapped)
+        }
+      }
+      if store.profilesSupported {
+        ToolbarItem(placement: .principal) {
+          profilePill
         }
       }
       ToolbarItem(placement: .topBarTrailing) {
@@ -93,6 +101,88 @@ struct SessionListView: View {
         ArchivedSessionsView(store: archivedStore)
       }
     }
+    .sheet(item: $store.scope(state: \.addProfile, action: \.addProfile)) { addProfileStore in
+      NavigationStack {
+        AddProfileView(store: addProfileStore)
+      }
+    }
+  }
+
+  // MARK: Profile pill
+
+  /// Safari-style centered pill in the navigation bar: the active profile's icon (a house
+  /// for the default profile; none for custom ones), its name, and a chevron. Tapping it
+  /// opens the profile `Menu`. Rendered only when the agent supports profiles
+  /// (`profilesSupported`); otherwise the static "Sessions" title is shown instead.
+  private var profilePill: some View {
+    Menu {
+      profileMenuContent
+    } label: {
+      HStack(spacing: 4) {
+        if isSelectedDefault {
+          Image(systemName: "house.fill")
+            .imageScale(.small)
+        }
+        Text(store.selectedProfileName)
+          .fontWeight(.semibold)
+          .lineLimit(1)
+        Image(systemName: "chevron.down")
+          .font(.caption2.weight(.semibold))
+      }
+      .foregroundStyle(.primary)
+    }
+    .accessibilityLabel("Profile: \(store.selectedProfileName)")
+  }
+
+  /// The profile `Menu`'s contents: each profile (checkmark on the active one; custom
+  /// profiles offer rename/delete in a nested menu), a divider, then "Add profile".
+  @ViewBuilder
+  private var profileMenuContent: some View {
+    ForEach(store.profiles) { profile in
+      let isSelected = profile.name == store.selectedProfileName
+      if profile.isDefault {
+        Button {
+          store.send(.selectProfile(name: profile.name))
+        } label: {
+          Label(profile.name, systemImage: isSelected ? "checkmark" : "house")
+        }
+      } else {
+        // Custom profiles: select on tap, with a nested menu for rename/delete.
+        Menu {
+          Button {
+            store.send(.selectProfile(name: profile.name))
+          } label: {
+            Label("Switch to this profile", systemImage: "arrow.right.circle")
+          }
+          Divider()
+          Button {
+            store.send(.renameProfileButtonTapped(name: profile.name, newName: profile.name))
+          } label: {
+            Label("Rename", systemImage: "pencil")
+          }
+          Button(role: .destructive) {
+            store.send(.deleteProfileButtonTapped(name: profile.name))
+          } label: {
+            Label("Delete", systemImage: "trash")
+          }
+        } label: {
+          Label(profile.name, systemImage: isSelected ? "checkmark" : "person.crop.circle")
+        }
+      }
+    }
+
+    Divider()
+
+    Button {
+      store.send(.addProfileTapped)
+    } label: {
+      Label("Add profile", systemImage: "plus")
+    }
+  }
+
+  private var isSelectedDefault: Bool {
+    store.profiles[id: store.selectedProfileName]?.isDefault
+      ?? (store.selectedProfileName == "default")
   }
 
   /// The bottom "new session" button — a trailing circular FAB in the Hermes accent

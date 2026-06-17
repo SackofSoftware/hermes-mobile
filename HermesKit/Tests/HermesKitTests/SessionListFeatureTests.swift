@@ -330,11 +330,11 @@ struct SessionListFeatureTests {
     )
 
     // Cron rows only, recency-ordered (c2 > c1 > c3 with nil last).
-    #expect(state.cronSessions.map { $0.id } == ["c2", "c1", "c3"])
+    #expect(state.cronSessions.map(\.id) == ["c2", "c1", "c3"])
     // Interactive sections see only non-cron rows.
-    #expect(state.interactiveSessions.map { $0.id } == ["i1", "i2"])
-    #expect(state.chronologicalSessions.map { $0.id } == ["i2", "i1"]) // updatedAt desc
-    let groupedIDs = state.groups.flatMap { $0.sessions.map { $0.id } }
+    #expect(state.interactiveSessions.map(\.id) == ["i1", "i2"])
+    #expect(state.chronologicalSessions.map(\.id) == ["i2", "i1"]) // updatedAt desc
+    let groupedIDs = state.groups.flatMap { $0.sessions.map(\.id) }
     #expect(groupedIDs.sorted() == ["i1", "i2"])
     #expect(groupedIDs.contains(where: { $0.hasPrefix("c") }) == false)
   }
@@ -350,9 +350,9 @@ struct SessionListFeatureTests {
       pinnedIDs: ["c1"] // pinned, but also cron
     )
 
-    #expect(state.cronSessions.map { $0.id } == ["c1"]) // appears under Cron Jobs
+    #expect(state.cronSessions.map(\.id) == ["c1"]) // appears under Cron Jobs
     #expect(state.pinnedSessions.isEmpty) // NOT in pinned
-    #expect(state.chronologicalSessions.map { $0.id } == ["i1"]) // not in interactive list either
+    #expect(state.chronologicalSessions.map(\.id) == ["i1"]) // not in interactive list either
   }
 
   @Test func noCronSessionsLeavesInteractiveListUnchanged() {
@@ -368,11 +368,11 @@ struct SessionListFeatureTests {
 
     #expect(state.cronSessions.isEmpty)
     // Interactive computeds behave exactly as before the cron partition.
-    #expect(state.interactiveSessions.map { $0.id } == ["a", "b"])
-    #expect(state.pinnedSessions.map { $0.id } == ["a"])
-    #expect(state.unpinnedSessions.map { $0.id } == ["b"])
-    #expect(state.chronologicalSessions.map { $0.id } == ["b"])
-    #expect(state.groups.flatMap { $0.sessions.map { $0.id } } == ["b"])
+    #expect(state.interactiveSessions.map(\.id) == ["a", "b"])
+    #expect(state.pinnedSessions.map(\.id) == ["a"])
+    #expect(state.unpinnedSessions.map(\.id) == ["b"])
+    #expect(state.chronologicalSessions.map(\.id) == ["b"])
+    #expect(state.groups.flatMap { $0.sessions.map(\.id) } == ["b"])
   }
 
   @Test func taskLoadsPinnedIDsFromPreferences() async {

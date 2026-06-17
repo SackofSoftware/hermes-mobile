@@ -147,8 +147,10 @@ struct ChatView: View {
         .onPreferenceChange(BottomDistanceKey.self) { distance in
           isAtBottom = distance < 60 // within ~60pt of the bottom counts as "at bottom"
         }
-        .onChange(of: store.transcript.last?.id) { _, last in
-          guard last != nil else { return }
+        // Scroll on row count changes, not just the last row's id: the thinking row is
+        // pinned last, so appending a tool/answer row reorders without changing `last?.id`.
+        .onChange(of: store.transcript.count) { _, count in
+          guard count > 0 else { return }
           withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
         }
         .overlay(alignment: .bottomTrailing) {

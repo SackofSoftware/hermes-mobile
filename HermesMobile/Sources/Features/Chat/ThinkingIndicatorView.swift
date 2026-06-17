@@ -6,9 +6,9 @@ import SwiftUI
 /// While the turn is in flight (`isComplete == false`) it shows a shimmering
 /// "Thinking" label with a live `1h 1m 1s` elapsed timer (read from
 /// `store.thinkingSeconds` via `liveSeconds`); its disclosed area accumulates the
-/// reasoning text and the latest `status.update` line. On completion it freezes into a
-/// static, collapsed `Thinking · <elapsed>` disclosure kept in the transcript so past
-/// reasoning + status stay reviewable.
+/// reasoning text and the latest `status.update` line and shimmers alongside the label.
+/// On completion it freezes into a static, collapsed `Thought · <elapsed>` disclosure kept
+/// in the transcript so past reasoning + status stay reviewable.
 struct ThinkingIndicatorView: View {
   /// Live elapsed seconds while active (`store.thinkingSeconds`); ignored once complete.
   let liveSeconds: Int
@@ -29,6 +29,7 @@ struct ThinkingIndicatorView: View {
   let reduceMotionOverride: Bool?
 
   @State private var isExpanded: Bool
+  @Environment(\.accessibilityReduceMotion) private var environmentReduceMotion
 
   init(
     liveSeconds: Int,
@@ -48,23 +49,34 @@ struct ThinkingIndicatorView: View {
     _isExpanded = State(initialValue: initiallyExpanded)
   }
 
+  private var reduceMotion: Bool { reduceMotionOverride ?? environmentReduceMotion }
+  /// The disclosed area shimmers in lock-step with the header while the turn is live.
+  private var isShimmering: Bool { !isComplete && !reduceMotion }
+
   var body: some View {
+    DisclosureGroup(isExpanded: $isExpanded) {
+      disclosedBody
+        .shimmering(active: isShimmering)
+    } label: {
+      label
+    }
+    .font(.caption)
+    // Default disclosure styling tints the label + chevron with the accent colour, which
+    // reads as a low-contrast dark blue on black. Force the primary colour so the row stays
+    // legible in dark mode (the active label manages its own colour + shimmer).
+    .tint(.primary)
+  }
+
+  /// Header label: the live shimmering "Thinking …" while running, a static high-contrast
+  /// "Thought · <elapsed>" once frozen.
+  @ViewBuilder
+  private var label: some View {
     if isComplete {
-      DisclosureGroup(isExpanded: $isExpanded) {
-        disclosedBody
-      } label: {
-        Text("Thinking · \(formatElapsed(elapsedSeconds))")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-      .font(.caption)
+      Text("Thought · \(formatElapsed(elapsedSeconds))")
+        .font(.caption)
+        .foregroundStyle(.primary)
     } else {
-      DisclosureGroup(isExpanded: $isExpanded) {
-        disclosedBody
-      } label: {
-        ThinkingLabel(elapsed: liveSeconds, reduceMotionOverride: reduceMotionOverride)
-      }
-      .font(.caption)
+      ThinkingLabel(elapsed: liveSeconds, reduceMotionOverride: reduceMotionOverride)
     }
   }
 
@@ -97,57 +109,59 @@ private struct ThinkingLabel: View {
   var reduceMotionOverride: Bool?
 
   @Environment(\.accessibilityReduceMotion) private var environmentReduceMotion
-  @State private var shimmerPhase: CGFloat = -1
 
   private var reduceMotion: Bool { reduceMotionOverride ?? environmentReduceMotion }
 
   var body: some View {
-    // Visible label dims the timer (`.secondary`); the shimmer mask uses full alpha across
-    // the whole label so the band reads evenly over both words.
-    labelContent(dimTimer: true)
-      .foregroundStyle(.primary)
-      .overlay { shimmer }
-      .mask { labelContent(dimTimer: false) }
-  }
-
-  /// "Thinking" + elapsed timer. Single source of the label's text/layout for both the
-  /// visible content and the shimmer mask so the two can't drift; `dimTimer` applies the
-  /// `.secondary` timer tint for the visible copy only (the mask wants full alpha).
-  @ViewBuilder
-  private func labelContent(dimTimer: Bool) -> some View {
     HStack(spacing: 6) {
       Text("Thinking")
         .font(.caption.weight(.medium))
+        .foregroundStyle(.primary)
       Text(formatElapsed(elapsed))
         .font(.caption.monospacedDigit())
-        .foregroundStyle(dimTimer ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+        .foregroundStyle(.secondary)
       Spacer(minLength: 0)
     }
+    .shimmering(active: !reduceMotion)
   }
+}
 
-  /// A bright band swept across the text via a moving linear gradient. Disabled (and
-  /// invisible) under reduce-motion so the label simply reads flat.
-  @ViewBuilder
-  private var shimmer: some View {
-    if reduceMotion {
-      EmptyView()
-    } else {
-      GeometryReader { geo in
-        LinearGradient(
-          colors: [.clear, Color.white.opacity(0.65), .clear],
-          startPoint: .leading,
-          endPoint: .trailing
-        )
-        .frame(width: geo.size.width * 0.5)
-        .offset(x: shimmerPhase * geo.size.width * 1.5)
-        .blendMode(.plusLighter)
-      }
-      .allowsHitTesting(false)
-      .onAppear {
-        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
-          shimmerPhase = 1
+/// A bright band swept across the modified content via a moving linear gradient, masked to
+/// the content's own shape so only the text (label or reasoning/status) lights up. Shared by
+/// the header label and the disclosed body so they shimmer identically; a no-op (flat) when
+/// `active` is false (turn complete or reduce-motion).
+private struct ShimmerModifier: ViewModifier {
+  let active: Bool
+  @State private var phase: CGFloat = -1
+
+  func body(content: Content) -> some View {
+    content.overlay {
+      if active {
+        GeometryReader { geo in
+          LinearGradient(
+            colors: [.clear, Color.white.opacity(0.65), .clear],
+            startPoint: .leading,
+            endPoint: .trailing
+          )
+          .frame(width: geo.size.width * 0.5)
+          .offset(x: phase * geo.size.width * 1.5)
+          .blendMode(.plusLighter)
+        }
+        .allowsHitTesting(false)
+        .mask { content }
+        .onAppear {
+          withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+            phase = 1
+          }
         }
       }
     }
+  }
+}
+
+extension View {
+  /// Sweep a shimmer band across this view's content while `active`; flat otherwise.
+  func shimmering(active: Bool) -> some View {
+    modifier(ShimmerModifier(active: active))
   }
 }

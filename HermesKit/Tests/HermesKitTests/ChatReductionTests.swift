@@ -30,7 +30,11 @@ struct ChatReductionTests {
       $0.thinkingRowID = uuid(0)
     }
     await store.send(.gatewayEvent(.messageDelta(text: "Hel"))) {
-      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Hel", isComplete: false)))
+      // The assistant row streams in; the live thinking row stays pinned below it.
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Hel", isComplete: false)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
       $0.streamingRowID = uuid(1)
     }
     await store.send(.gatewayEvent(.messageDelta(text: "lo"))) {
@@ -44,6 +48,57 @@ struct ChatReductionTests {
       $0.thinkingRowID = nil
       $0.isSending = false
     }
+  }
+
+  // The live thinking row is pinned to the bottom of the transcript: tool rows and the
+  // streaming answer slot in above it, and on completion it freezes (as the "Thought" row)
+  // still below the answer.
+  @Test func thinkingRowStaysLastAsToolsAndAnswerStreamIn() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    await store.send(.gatewayEvent(.thinkingDelta(text: "Hmm"))) {
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 0, isComplete: false)
+    }
+    // A tool starts mid-turn: it slots in above the thinking row, which stays last.
+    await store.send(.gatewayEvent(.toolStart(toolID: "t1", name: "search", title: "Searching", argsText: nil))) {
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .tool(name: "search", title: "Searching", state: .running, detail: nil, durationS: nil)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
+      $0.toolRowIDs["t1"] = uuid(1)
+    }
+    // The answer streams in below the tool, still above the pinned thinking row.
+    await store.send(.gatewayEvent(.messageDelta(text: "Answer"))) {
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .tool(name: "search", title: "Searching", state: .running, detail: nil, durationS: nil)),
+        ChatRow(id: uuid(2), kind: .message(role: .assistant, text: "Answer", isComplete: false)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
+      $0.streamingRowID = uuid(2)
+    }
+    // Completion: answer finalizes, thinking freezes into the "Thought" row — still last.
+    await store.send(.gatewayEvent(.messageComplete(text: "Answer", usage: nil))) {
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .tool(name: "search", title: "Searching", state: .running, detail: nil, durationS: nil)),
+        ChatRow(id: uuid(2), kind: .message(role: .assistant, text: "Answer", isComplete: true)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 0, isComplete: true)),
+      ]
+      $0.streamingRowID = nil
+      $0.thinkingRowID = nil
+      $0.isSending = false
+    }
+    #expect(store.state.transcript.last?.id == uuid(0))
   }
 
   @Test func toolOnlyTurnLeavesNoEmptyMessageBubble() async {
@@ -100,7 +155,11 @@ struct ChatReductionTests {
       $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Thinking…", status: nil, elapsedSeconds: 0, isComplete: false)
     }
     await store.send(.gatewayEvent(.messageDelta(text: "pong"))) {
-      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "pong", isComplete: false)))
+      // The assistant row streams in; the live thinking row is pinned below it.
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "pong", isComplete: false)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "Thinking…", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
       $0.streamingRowID = uuid(1)
     }
     // Completion freezes the thinking row (3s baked in), keeps it (had reasoning), cancels
@@ -189,8 +248,11 @@ struct ChatReductionTests {
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
     await store.send(.gatewayEvent(.messageComplete(text: "done", usage: nil))) {
-      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "done", isComplete: true)))
-      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "First", status: nil, elapsedSeconds: 2, isComplete: true)
+      // The answer lands, then the thinking row freezes into a "Thought" row below it.
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "done", isComplete: true)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "First", status: nil, elapsedSeconds: 2, isComplete: true)),
+      ]
       $0.thinkingRowID = nil
       $0.thinkingSeconds = 0
       $0.isSending = false

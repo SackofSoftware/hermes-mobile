@@ -770,6 +770,7 @@ public struct ChatFeature {
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
+      keepThinkingLast(into: &state)
       return .none
 
     case let .messageComplete(text, usage):
@@ -782,6 +783,9 @@ public struct ChatFeature {
       }
       // else: empty tool-only turn → no row at all.
       state.streamingRowID = nil
+      // Move the thinking row below the answer, then freeze it in place so the turn ends as
+      // […answer][Thought · <elapsed>].
+      keepThinkingLast(into: &state)
       freezeThinking(into: &state)
       state.isSending = false
       return .cancel(id: CancelID.thinkingTimer)
@@ -805,6 +809,7 @@ public struct ChatFeature {
         name: name, title: title?.nonEmpty ?? name, state: .running, detail: detail, durationS: nil
       )))
       if let toolID { state.toolRowIDs[toolID] = id }
+      keepThinkingLast(into: &state)
       return .none
 
     case let .toolComplete(toolID, name, title, args, resultText, inlineDiff, durationS):
@@ -834,6 +839,7 @@ public struct ChatFeature {
           durationS: durationS
         )))
       }
+      keepThinkingLast(into: &state)
       return .none
 
     case let .error(message):
@@ -964,6 +970,18 @@ public struct ChatFeature {
     }
     state.thinkingRowID = nil
     state.thinkingSeconds = 0
+  }
+
+  /// Keep the active thinking row pinned to the bottom of the transcript so the live
+  /// "Thinking …" indicator (and the frozen "Thought" row it becomes) always sits below the
+  /// turn's answer and tool rows, even as they stream in. Called after every row append
+  /// during a turn; a no-op when no thinking row is active or it is already last.
+  private func keepThinkingLast(into state: inout State) {
+    guard let id = state.thinkingRowID,
+          state.transcript.last?.id != id,
+          let row = state.transcript.remove(id: id)
+    else { return }
+    state.transcript.append(row)
   }
 
   // MARK: - Effects

@@ -252,10 +252,10 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - Modify: `HermesKit/Sources/HermesKit/Features/SettingsFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SettingsFeatureTests.swift`
 
-- [ ] in the `.clearTokenTapped` handler (line ~92) add
+- [x] in the `.clearTokenTapped` handler (line ~92) add
       `preferences.clearSelectedProfileID()` alongside the existing prefs clears
-- [ ] update/extend the logout test to assert the selected profile is cleared
-- [ ] run tests — must pass before next task
+- [x] update/extend the logout test to assert the selected profile is cleared
+- [x] run tests — must pass before next task
 
 ### Task 7: `AddProfileFeature` reducer
 

@@ -169,14 +169,14 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - Create: `HermesKit/Sources/HermesKit/Models/Profile.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ProfileTests.swift`
 
-- [ ] add `public struct Profile: Equatable, Sendable, Identifiable, Decodable` with
+- [x] add `public struct Profile: Equatable, Sendable, Identifiable, Decodable` with
       `name`, `isDefault`, `model: String?`, `provider: String?`, `skillCount: Int`,
       `hasEnv: Bool`; `id` = `name`; explicit `public init`
-- [ ] `CodingKeys` mapping `is_default`/`skill_count`/`has_env`; tolerate missing
+- [x] `CodingKeys` mapping `is_default`/`skill_count`/`has_env`; tolerate missing
       optional fields (lenient decode, never crash)
-- [ ] write tests: decode a full `ProfileInfo` JSON payload (default + custom)
-- [ ] write tests: decode with missing optionals (`model`/`provider` absent) succeeds
-- [ ] run tests — must pass before next task
+- [x] write tests: decode a full `ProfileInfo` JSON payload (default + custom)
+- [x] write tests: decode with missing optionals (`model`/`provider` absent) succeeds
+- [x] run tests — must pass before next task
 
 ### Task 2: `ProfileName` validation (pure)
 

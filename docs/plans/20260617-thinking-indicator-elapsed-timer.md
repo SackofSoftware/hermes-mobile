@@ -291,16 +291,43 @@ turn's in-progress window:
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] Indicator appears as soon as a turn starts and shows a live `1h 1m 1s` elapsed timer.
-- [ ] Reasoning accumulates in one in-place indicator (no per-burst duplicate rows).
-- [ ] The context-size / `status.update` text shows **inside** the indicator's disclosure —
-      not as a persistent footer above the composer.
-- [ ] On completion the indicator freezes and collapses to `Thinking · <elapsed>`, kept in
-      scrollback; a no-reasoning/no-status turn leaves nothing.
-- [ ] Shimmer plays while active and is held flat under reduce-motion.
-- [ ] `usage == nil` / old agents / tool-only turns: no crash, graceful render.
-- [ ] Full unit/reducer suite: `script -q /dev/null swift test --package-path HermesKit`.
-- [ ] Snapshots: `make snapshot`.
+- [x] Indicator appears as soon as a turn starts and shows a live `1h 1m 1s` elapsed timer.
+      (`.messageStart` eagerly appends the thinking row + `startThinkingTimer`,
+      `ChatFeature.swift:748-754`; live `1h 1m 1s` format `formatElapsed` `ChatRow.swift:95-103`
+      with boundary tests `ThinkingModelTests.formatElapsedBoundaries`; ticks proven by
+      `ChatReductionTests.messageStartCreatesLiveThinkingRowTimerTicksThenFreezes`; on-device
+      visual deferred.)
+- [x] Reasoning accumulates in one in-place indicator (no per-burst duplicate rows).
+      (`appendToThinking` mutates the single `thinkingRowID` row `ChatFeature.swift:899-912`;
+      `ChatReductionTests.messageStartCreatesLiveThinkingRowTimerTicksThenFreezes` asserts two
+      deltas fold into one row `"Thinking…"`.)
+- [x] The context-size / `status.update` text shows **inside** the indicator's disclosure —
+      not as a persistent footer above the composer. (`.statusUpdate` → `setThinkingStatus`
+      writes the row's `status` `ChatFeature.swift:781-783,916-929`; `state.activity` removed
+      and footer now error-only `ChatView.swift:254-261`; status rendered inside `disclosedBody`
+      `ThinkingIndicatorView.swift:79-84`; backed by
+      `ChatReductionTests.statusUpdateRoutesIntoThinkingRowAndKeepsIt`; on-device visual deferred.)
+- [x] On completion the indicator freezes and collapses to `Thinking · <elapsed>`, kept in
+      scrollback; a no-reasoning/no-status turn leaves nothing. (`freezeThinking` bakes
+      `elapsedSeconds`/`isComplete=true` and removes the row when reasoning empty & status nil
+      `ChatFeature.swift:935-950`; complete state renders collapsed `Thinking · <elapsed>`
+      `ThinkingIndicatorView.swift:50-57`; backed by
+      `ChatReductionTests.messageStartCreatesLiveThinkingRowTimerTicksThenFreezes` (kept) and
+      `.toolOnlyTurnLeavesNoEmptyMessageBubble` (removed); snapshots
+      `testThinking_completed_collapsed`/`_expanded`.)
+- [x] Shimmer plays while active and is held flat under reduce-motion.
+      (`ThinkingLabel.shimmer` gated by `accessibilityReduceMotion` `ThinkingIndicatorView.swift:124-146`;
+      snapshot `testThinking_active_reduceMotion` records the flat variant; on-device animation
+      deferred.)
+- [x] `usage == nil` / old agents / tool-only turns: no crash, graceful render.
+      (status/reasoning paths create the row defensively if `.messageStart` was missed
+      `ChatFeature.swift:905-928`; backed by
+      `ChatReductionTests.toolOnlyTurnLeavesNoEmptyMessageBubble`,
+      `.statusUpdateDefensivelyCreatesRowAndErrorFreezes`, and
+      `.historyReconstructsToolRowsAndDropsEmptyTurns`; full suite green.)
+- [x] Full unit/reducer suite: `script -q /dev/null swift test --package-path HermesKit`.
+      (225 tests, all passed.)
+- [x] Snapshots: `make snapshot`. (39 tests, 0 failures.)
 
 ### Task 6: Documentation
 

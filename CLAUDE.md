@@ -32,6 +32,11 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - **Streaming has no message id** (verified by the M0 probe) — the fold tracks a single
   in-flight assistant row, created **lazily on the first delta** (a `message.start` with no
   text would otherwise render as an empty bubble). `session_id` is on the event *frame*.
+- **The live "Thinking" indicator** owns the turn's reasoning + latest `status.update` line in
+  one in-place row (created eagerly at `message.start`); elapsed ticks via a cancellable
+  `continuousClock` (`thinkingSeconds`) frozen into the row's `elapsedSeconds` on
+  completion/error/drop, then collapses to a static `Thinking · <elapsed>` disclosure. Status
+  is shown inside that disclosure — **never** as a persistent footer above the composer.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
 - **Persistence**: secrets (token) → `KeychainClient`; non-secret prefs (server URL,
   per-session seen counts, client-side pinned session ids) → `PreferencesClient`

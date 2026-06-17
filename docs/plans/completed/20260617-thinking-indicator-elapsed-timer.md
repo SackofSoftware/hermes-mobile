@@ -331,11 +331,13 @@ turn's in-progress window:
 
 ### Task 6: Documentation
 
-- [ ] Update `README.md` chat-feature overview if it enumerates chat-screen affordances.
-- [ ] Add a one-line convention to `CLAUDE.md` (e.g. "the live Thinking indicator owns the
+- [x] Update `README.md` chat-feature overview if it enumerates chat-screen affordances.
+      (The "Watch it work" bullet enumerated "a collapsible thinking row" — replaced with the
+      live "Thinking" indicator: elapsed timer + collapse-to-disclosure of reasoning + status.)
+- [x] Add a one-line convention to `CLAUDE.md` (e.g. "the live Thinking indicator owns the
       turn's reasoning + status; elapsed via a cancellable `continuousClock` tick, frozen into
       the row on completion; status no longer rendered as a persistent footer").
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Move this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 

@@ -87,6 +87,38 @@ struct HermesRESTClientTests {
     #expect(s.startedAt == Date(timeIntervalSince1970: 1749550000.0))
   }
 
+  @Test func sessionsDecodesCronSource() async throws {
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"Nightly job","last_active":1749556800.0,"source":"cron"}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.source == "cron")
+    #expect(s.isCron == true)
+  }
+
+  @Test func sessionsDecodesAbsentSourceAsNil() async throws {
+    // Backward-compat: older agents omit `source` entirely → nil, not cron.
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.source == nil)
+    #expect(s.isCron == false)
+  }
+
+  @Test func sessionsDecodesNullSourceAsNil() async throws {
+    // Leniency: a local interactive session reports `source: null` → nil, not cron.
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0,"source":null}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.source == nil)
+    #expect(s.isCron == false)
+  }
+
   @Test func sessionsAttachesSessionTokenHeaderAndQuery() async throws {
     MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
     _ = try await makeClient().sessions(connection, 20, 0, .recent)

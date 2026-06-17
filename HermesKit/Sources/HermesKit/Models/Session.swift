@@ -19,6 +19,11 @@ public struct Session: Equatable, Sendable, Identifiable {
   public var messageCount: Int?
   /// Whether the session is currently active (a turn ran recently).
   public var isActive: Bool?
+  /// Where the session originated (`cron`, `cli`, `telegram`, `discord`, `slack`,
+  /// `whatsapp`), or `nil` for local interactive sessions / older agents that omit it.
+  /// Kept as a raw string (not enum-ified) so we stay lenient about unknown sources and
+  /// only special-case `"cron"` (see `isCron`).
+  public var source: String?
 
   public init(
     id: String,
@@ -28,7 +33,8 @@ public struct Session: Equatable, Sendable, Identifiable {
     cwd: String? = nil,
     startedAt: Date? = nil,
     messageCount: Int? = nil,
-    isActive: Bool? = nil
+    isActive: Bool? = nil,
+    source: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -38,7 +44,12 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.startedAt = startedAt
     self.messageCount = messageCount
     self.isActive = isActive
+    self.source = source
   }
+
+  /// Whether this is a cron-scheduled session — the single source of truth for the
+  /// Cron Jobs list partition (mirrors the desktop's `source === "cron"` special-case).
+  public var isCron: Bool { source == "cron" }
 
   /// A real, user-facing title: non-empty and not the server's `"Untitled"` placeholder
   /// (the agent sends that for auto-named/cron sessions before a real title exists).

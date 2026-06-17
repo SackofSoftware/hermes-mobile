@@ -139,16 +139,16 @@ Dependencies identified:
 - Modify: `HermesKit/Tests/HermesKitTests/` (DTO/decoding test — extend the existing
   REST client test file if present, else add `SessionSourceTests.swift`)
 
-- [ ] add `public var source: String?` to `Session` with a default-`nil` param in
+- [x] add `public var source: String?` to `Session` with a default-`nil` param in
       the memberwise `init` (keep it last so existing call sites compile unchanged)
-- [ ] add `public var isCron: Bool { source == "cron" }` to `Session`
-- [ ] add `let source: String?` + `case source` to `SessionListDTO.CodingKeys` and
+- [x] add `public var isCron: Bool { source == "cron" }` to `Session`
+- [x] add `let source: String?` + `case source` to `SessionListDTO.CodingKeys` and
       pass `source: source` in `asSession`
-- [ ] write a test decoding a `/api/sessions` row JSON with `"source":"cron"` →
+- [x] write a test decoding a `/api/sessions` row JSON with `"source":"cron"` →
       `Session.isCron == true`
-- [ ] write a test decoding a row with `source` **absent** and `source: null` →
+- [x] write a test decoding a row with `source` **absent** and `source: null` →
       `source == nil`, `isCron == false` (backward-compat / leniency)
-- [ ] run tests — must pass before Task 2
+- [x] run tests — must pass before Task 2
 
 ### Task 2: Partition cron sessions in `SessionListFeature` computed state
 

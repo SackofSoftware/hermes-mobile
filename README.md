@@ -32,6 +32,9 @@ from your desk and still keep your agent moving.
 - **Compose hands-free or with files.** Dictate a message with voice input (a live
   waveform while recording; transcribed by your agent), and attach photos, camera
   captures, PDFs, or any file straight from the composer.
+- **See how full the context is.** A color-coded pill in the composer shows
+  used/max tokens and percent (mirroring the Hermes TUI thresholds); tap it for a
+  breakdown of input/output split, compactions, and estimated cost.
 - **Copy what you need.** Copy a whole message, or just a single code block with a
   one-tap button and a green-check confirmation.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,

@@ -80,6 +80,10 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   against a remote agent — don't copy it.) Old agents lacking these methods return
   JSON-RPC `-32601`; `InboundFrame` keeps only the message, so gate via
   `GatewayError.isUnknownMethod` (matches `"unknown method"`) → hide the attach affordance.
+- **Context-usage pill** derives all display (label / fraction / severity / `formatTokens`)
+  from `Usage` helpers in HermesKit — thresholds (green `<50` / yellow `≥50` / amber `>80` /
+  red `≥95`) mirror the Hermes TUI and are unit-tested in HermesKit; the severity→color
+  switch and popover presentation are local view state (`@State`), kept out of the reducer.
 - **Commit messages**: capitalized verb, no conventional-commit prefixes, concise.
 
 ## Testing (required for every change)

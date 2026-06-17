@@ -228,10 +228,12 @@ display model, and render it.
 
 ### Task 6: Documentation
 
-- [ ] Update `README.md` feature overview if it enumerates chat-screen features.
-- [ ] Add a one-line convention to `CLAUDE.md` if a new pattern emerged (e.g. "context pill
-      derives display from `Usage`; thresholds tested in HermesKit").
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Update `README.md` feature overview if it enumerates chat-screen features. (Added a
+      "See how full the context is" bullet to the "What it does" list.)
+- [x] Add a one-line convention to `CLAUDE.md` if a new pattern emerged. (Added a bullet:
+      the context pill derives display from `Usage` helpers in HermesKit; thresholds
+      unit-tested there; severity→color + popover are local view `@State`.)
+- [x] Move this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 

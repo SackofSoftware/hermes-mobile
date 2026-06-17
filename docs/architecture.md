@@ -28,9 +28,11 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 ├─ ConnectionFeature       // auto-validating URL + token
 ├─ SessionListFeature      // flat list, grouped by workspace OR chronological (persisted) /
 │  │                       //   search / create; pin (client-side) + archive/rename (server) +
-│  │                       //   working-glow auto-poll; presents Settings + Archived sheets
+│  │                       //   working-glow auto-poll; profile pill/switcher (per-call scoped) +
+│  │                       //   presents Settings + Archived + AddProfile sheets
 │  ├─ SettingsFeature      // token mgmt, manual reconnect, debug log
-│  └─ ArchivedSessionsFeature // archived list (?archived=only); restore + open delegate
+│  ├─ ArchivedSessionsFeature // archived list (?archived=only); restore + open delegate
+│  └─ AddProfileFeature    // create-then-PUT-soul; inline name validation + server-400 banner
 └─ ChatFeature             // owns the WS lifecycle + streaming reduction; also folds in
                            //   approvals, clarify/sudo/secret, the tool-detail sheet,
                            //   and the model/reasoning picker, reconnect
@@ -42,15 +44,20 @@ All side effects go through `@DependencyClient` structs (each with a `liveValue`
 a `testValue`/`.inMemory()` variant):
 
 - **`HermesRESTClient`** — status, sessions, archived sessions (`?archived=only`), search,
-  messages, archive/rename (`PATCH /api/sessions/{id}`).
+  messages, archive/rename (`PATCH /api/sessions/{id}`). Session-scoped reads/mutations take
+  an optional `profile` (omitted for default).
+- **`HermesProfileClient`** — profile CRUD + SOUL.md (`PUT /api/profiles/{name}/soul`) +
+  profile-scoped session lists (`GET /api/profiles/sessions?profile=`). Capability-gated: a
+  404 from `GET /api/profiles` hides the selector.
 - **`HermesGatewayClient`** — WebSocket JSON-RPC connect/send. The socket is one
   long-running cancellable effect; reconnect/backoff lives in the reducer (testable
   with `TestClock`). Each `send` enforces a per-request timeout (default 30s) so a
   stuck/never-acking RPC throws `GatewayError.timedOut` instead of hanging forever.
 - **`KeychainClient`** — the auth token (the only secret).
 - **`PreferencesClient`** — non-secret prefs: server URL (for auto-login), per-session
-  seen counts, client-side pinned session ids, and the session-list grouping mode
-  (`SessionGroupingMode`). All cleared/reset on logout.
+  seen counts, client-side pinned session ids, the session-list grouping mode
+  (`SessionGroupingMode`), and the selected profile name (`hermes.selected-profile-id`). All
+  cleared/reset on logout.
 - **`PasteboardClient`** — copy.
 - **`DebugLogClient`** — an event ring buffer for the in-app debug log.
 
@@ -73,3 +80,10 @@ not assumed):
 - **Rename is server-side**, optimistic with rollback (mirrors archive): the session
   list uses `PATCH /api/sessions/{id}` `{"title": …}` over REST; the chat screen uses
   the `session.title` gateway method.
+- **Profiles are device-local with per-call scoping** — the selected profile *name* lives
+  in `PreferencesClient`; we never call `POST /api/profiles/active`. Instead the scoped list
+  comes from `GET /api/profiles/sessions?profile=`, and an optional `profile` param threads
+  into `session.create`/`session.resume` (gateway) and session-scoped messages/archive/rename
+  (REST) — omitted for `"default"` so single-profile agents are byte-identical to today.
+  **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
+  intentionally omitted.

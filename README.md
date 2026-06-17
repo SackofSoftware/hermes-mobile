@@ -25,6 +25,10 @@ from your desk and still keep your agent moving.
 - **Find any session.** Browse sessions grouped by workspace, search across all of
   them, pin the ones you care about, rename or archive them, and resume or start a
   new one.
+- **Switch profiles.** Keep multiple Hermes profiles on one agent and switch between
+  them from a Safari-style header pill — each profile has its own scoped session list,
+  and new chats are created under the selected one. Create custom profiles (with an
+  optional SOUL.md) right from the app.
 - **Watch it work.** Streaming responses render as native Markdown, with tool/skill
   activity rows (tap for args, results, and diffs), a live "Thinking" indicator with an
   elapsed timer that collapses into a reviewable reasoning + status disclosure when the

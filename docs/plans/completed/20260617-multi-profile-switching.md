@@ -427,11 +427,14 @@ the response body — the banner only ever showed the generic `Server error (400
 **Files:**
 - Modify: `CLAUDE.md`, `docs/architecture.md` (if profile scoping warrants a note)
 
-- [ ] add a CLAUDE.md convention note: profiles are device-local (selected name pref,
+- [x] add a CLAUDE.md convention note: profiles are device-local (selected name pref,
       cleared on logout), per-call scoping over `/api/profiles/sessions` +
       `?profile=`, create-then-PUT-soul, capability-gated selector, color omitted
-- [ ] update `docs/architecture.md`/`README.md` feature list if needed
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `docs/architecture.md`/`README.md` feature list if needed
+      — README "Switch profiles" feature bullet; architecture.md feature tree
+      (`AddProfileFeature` + profile pill), `HermesProfileClient` + `PreferencesClient`
+      selected-profile pref, and a wire-protocol per-call-scoping note
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

@@ -84,6 +84,18 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   from `Usage` helpers in HermesKit — thresholds (green `<50` / yellow `≥50` / amber `>80` /
   red `≥95`) mirror the Hermes TUI and are unit-tested in HermesKit; the severity→color
   switch and popover presentation are local view state (`@State`), kept out of the reducer.
+- **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
+  profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
+  logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky
+  default for all clients); instead the mobile client lists via `GET /api/profiles/sessions?profile=`
+  and threads an optional `profile` param into `session.create`/`session.resume` (gateway) and
+  session-scoped messages/archive/rename (REST) — **omitted for `"default"`** so single-profile
+  agents get byte-identical requests. **Search is intentionally NOT profile-scoped** (mirrors the
+  desktop). Add-profile is **create-then-PUT-soul** (`POST /api/profiles` then
+  `PUT /api/profiles/{name}/soul {content}`). The selector is **capability-gated** — hidden when
+  `GET /api/profiles` 404s, falling back to today's single-list behavior. `RESTError` surfaces the
+  server 400 `detail` verbatim (the Add-profile banner). The desktop's **per-profile color is
+  intentionally OMITTED** on mobile.
 - **Commit messages**: capitalized verb, no conventional-commit prefixes, concise.
 
 ## Testing (required for every change)

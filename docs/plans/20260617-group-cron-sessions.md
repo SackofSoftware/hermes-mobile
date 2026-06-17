@@ -179,17 +179,21 @@ Dependencies identified:
 **Files:**
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 
-- [ ] add a `cronJobsSection` (a `Section` with a `clock`-icon header styled like
+- [x] add a `cronJobsSection` (a `Section` with a `clock`-icon header styled like
       `sessionsSectionHeader`) iterating `store.cronSessions` via the existing
       `row(_:)` builder
-- [ ] render it (non-search branch only) after the interactive sections, gated on
+- [x] render it (non-search branch only) after the interactive sections, gated on
       `!store.cronSessions.isEmpty`
-- [ ] confirm `tuist generate` is run if the build needs the source picked up
-      (no new file here, so regeneration is likely unnecessary — note if it is)
-- [ ] build the app target to confirm it compiles (`make` / `xcodebuild` per
-      `docs/development.md`)
-- [ ] (no unit tests in the app target — view behavior is covered by Task 4
-      snapshots; note this here so the no-test slot is intentional)
+- [x] confirm `tuist generate` is run if the build needs the source picked up
+      (no NEW file in this task — `tuist generate` not needed for my `SessionListView.swift`
+      edit; the non-search body was also extracted into a `sessionListContent`
+      `@ViewBuilder` to stay within the compiler's type-check budget. NOTE: regeneration
+      was nonetheless required to pick up a pre-existing `AddProfileView.swift` from an
+      earlier commit, unrelated to this change.)
+- [x] build the app target to confirm it compiles (`make build` — exit 0, no errors,
+      after `make generate` for the pre-existing AddProfileView source)
+- [x] (no unit tests in the app target — view behavior is covered by Task 4
+      snapshots; intentional no-test slot)
 
 ### Task 4: Snapshot tests for the Cron Jobs section
 

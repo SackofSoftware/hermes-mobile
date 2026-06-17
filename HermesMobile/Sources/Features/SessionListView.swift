@@ -22,28 +22,7 @@ struct SessionListView: View {
           row(session, showsPreview: true)
         }
       } else {
-        // Top-level "Sessions" section header. Future sibling areas (e.g. "Cron jobs")
-        // render their own header the same way, all scoped to the active profile pill.
-        sessionsSectionHeader
-        // Pinned sessions float to the top in both grouping modes.
-        if !store.pinnedSessions.isEmpty {
-          Section("Pinned") {
-            ForEach(store.pinnedSessions) { session in
-              row(session)
-            }
-          }
-        }
-        switch store.groupingMode {
-        case .workspace:
-          ForEach(store.groups) { group in
-            groupSection(group)
-          }
-        case .chronological:
-          // One flat, last-active-ordered list — no workspace headers.
-          ForEach(store.chronologicalSessions) { session in
-            row(session)
-          }
-        }
+        sessionListContent
       }
     }
     .listStyle(.plain)
@@ -127,6 +106,42 @@ struct SessionListView: View {
     }
   }
 
+  /// The non-search list body: the "Sessions" header, the pinned section, the interactive
+  /// sessions (workspace groups or chronological), then the always-on Cron Jobs section.
+  /// Extracted from `body` to keep the `List` builder within the compiler's type-check
+  /// budget.
+  @ViewBuilder
+  private var sessionListContent: some View {
+    // Top-level "Sessions" section header. Future sibling areas (e.g. "Cron jobs")
+    // render their own header the same way, all scoped to the active profile pill.
+    sessionsSectionHeader
+    // Pinned sessions float to the top in both grouping modes.
+    if !store.pinnedSessions.isEmpty {
+      Section("Pinned") {
+        ForEach(store.pinnedSessions) { session in
+          row(session)
+        }
+      }
+    }
+    switch store.groupingMode {
+    case .workspace:
+      ForEach(store.groups) { group in
+        groupSection(group)
+      }
+    case .chronological:
+      // One flat, last-active-ordered list — no workspace headers.
+      ForEach(store.chronologicalSessions) { session in
+        row(session)
+      }
+    }
+    // Cron-scheduled sessions live in their own always-on section below the
+    // interactive list, in both grouping modes (filtered out of pinned/groups/
+    // chronological by the reducer). Hidden when there are none.
+    if !store.cronSessions.isEmpty {
+      cronJobsSection
+    }
+  }
+
   /// Top-level content section header. The active profile is shown in the pill (the
   /// centered nav title); this labels the sessions list as one section so future sibling
   /// sections (e.g. "Cron jobs") can sit alongside it under the same profile.
@@ -136,6 +151,22 @@ struct SessionListView: View {
       .listRowSeparator(.hidden)
       .listRowBackground(Color.clear)
       .accessibilityAddTraits(.isHeader)
+  }
+
+  /// Always-on "Cron Jobs" section for `source == "cron"` sessions. The header mirrors
+  /// `sessionsSectionHeader`'s visual weight but adds the Clock icon to match desktop. Rows
+  /// reuse the standard `row(_:)` builder so swipe/context actions and unread/active styling
+  /// stay identical to the interactive list.
+  @ViewBuilder
+  private var cronJobsSection: some View {
+    Label("Cron Jobs", systemImage: "clock")
+      .font(.title2.weight(.bold))
+      .listRowSeparator(.hidden)
+      .listRowBackground(Color.clear)
+      .accessibilityAddTraits(.isHeader)
+    ForEach(store.cronSessions) { session in
+      row(session)
+    }
   }
 
   // MARK: Profile pill

@@ -531,6 +531,49 @@ struct ChatReductionTests {
     }
   }
 
+  // MARK: Context usage capture
+
+  @Test func sessionInfoCapturesUsage() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    }
+    let usage = Usage(contextUsed: 125_000, contextMax: 200_000, contextPercent: 62)
+    await store.send(.gatewayEvent(.sessionInfo(SessionInfo(model: "claude-opus-4-8", usage: usage)))) {
+      $0.model = "claude-opus-4-8"
+      $0.usage = usage
+    }
+  }
+
+  @Test func messageCompleteCapturesUsage() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    let usage = Usage(input: 800, output: 200, total: 1_000, contextUsed: 1_000, contextMax: 200_000, contextPercent: 1)
+    await store.send(.gatewayEvent(.messageComplete(text: "Hi", usage: usage))) {
+      $0.usage = usage
+      $0.transcript.append(
+        ChatRow(id: self.uuid(0), kind: .message(role: .assistant, text: "Hi", isComplete: true))
+      )
+      $0.isSending = false
+    }
+  }
+
+  @Test func partialSessionInfoDoesNotClobberUsage() async {
+    let usage = Usage(contextUsed: 125_000, contextMax: 200_000, contextPercent: 62)
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    }
+    await store.send(.gatewayEvent(.sessionInfo(SessionInfo(usage: usage)))) {
+      $0.usage = usage
+    }
+    // A later partial session.info (model only, no usage) must not clear the usage.
+    await store.send(.gatewayEvent(.sessionInfo(SessionInfo(model: "claude-sonnet-4-6")))) {
+      $0.model = "claude-sonnet-4-6"
+    }
+  }
+
   // MARK: Reconnect / backoff
 
   @Test func reconnectsAfterBackoffOnClose() async {

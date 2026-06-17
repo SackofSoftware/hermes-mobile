@@ -147,17 +147,17 @@ display model, and render it.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] Add `public var usage: Usage?` to `ChatFeature.State` (near `model`/`reasoningEffort`,
+- [x] Add `public var usage: Usage?` to `ChatFeature.State` (near `model`/`reasoningEffort`,
       ~`:31`); update the `State` init / default if applicable.
-- [ ] In `.sessionInfo`, set `if let u = info.usage { state.usage = u }` (overwrite only
+- [x] In `.sessionInfo`, set `if let u = info.usage { state.usage = u }` (overwrite only
       when present — mirrors model/effort partial-update handling at `:834-835`).
-- [ ] In `.messageComplete`, bind the usage arg (replace `_` at `:742`) and set
+- [x] In `.messageComplete`, bind the usage arg (replace `_` at `:742`) and set
       `if let u = usage { state.usage = u }`.
-- [ ] Write reducer test: a `session.info` carrying `usage` populates `state.usage`.
-- [ ] Write reducer test: a `message.complete` carrying `usage` populates `state.usage`.
-- [ ] Write reducer test: a later partial `session.info` **without** usage does not clobber
+- [x] Write reducer test: a `session.info` carrying `usage` populates `state.usage`.
+- [x] Write reducer test: a `message.complete` carrying `usage` populates `state.usage`.
+- [x] Write reducer test: a later partial `session.info` **without** usage does not clobber
       an existing `state.usage`.
-- [ ] Run tests — must pass before Task 3.
+- [x] Run tests — must pass before Task 3.
 
 ### Task 3: Context pill in the composer (compact view)
 

@@ -29,6 +29,9 @@ public struct ChatFeature {
     /// Current model + reasoning effort (from `session.info`), shown in the composer chip.
     public var model: String?
     public var reasoningEffort: String?
+    /// Latest context-window usage (from `session.info` / `message.complete`), driving the
+    /// composer's context pill. `nil` until the agent reports usage (old agents never do).
+    public var usage: Usage?
     /// The model/reasoning picker sheet, when open (Task 7).
     public var modelPicker: ModelPicker?
     /// Draft text for the rename alert. `nil` = alert closed; non-nil = alert open
@@ -128,6 +131,7 @@ public struct ChatFeature {
       self.presentedTool = nil
       self.model = nil
       self.reasoningEffort = nil
+      self.usage = nil
       self.modelPicker = nil
       self.renameDraft = nil
       self.recentlyCopiedToken = nil
@@ -768,7 +772,8 @@ public struct ChatFeature {
       appendToStreamingMessage(text, into: &state)
       return .none
 
-    case let .messageComplete(text, _):
+    case let .messageComplete(text, usage):
+      if let u = usage { state.usage = u }
       if let id = state.streamingRowID {
         state.transcript[id: id]?.kind = .message(role: .assistant, text: text, isComplete: true)
       } else if !text.isEmpty {
@@ -860,6 +865,7 @@ public struct ChatFeature {
       // only overwrite fields that are present.
       if let model = info.model?.nonEmpty { state.model = model }
       if let effort = info.reasoningEffort?.nonEmpty { state.reasoningEffort = effort }
+      if let u = info.usage { state.usage = u }
       return .none
 
     case .unknown:

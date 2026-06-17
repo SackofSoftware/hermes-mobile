@@ -35,6 +35,14 @@ import Testing
     #expect(formatTokens(1_000_000) == "1M")
   }
 
+  @Test func formatTokensRollsOverToMillion() {
+    // Values that round up to a full 1000k roll over to "1M" rather than "1000k".
+    #expect(formatTokens(999_000) == "999k")
+    #expect(formatTokens(999_500) == "1M")
+    #expect(formatTokens(999_999) == "1M")
+    #expect(formatTokens(1_000_000) == "1M")
+  }
+
   @Test func formatTokensNegativeClampsToZero() {
     #expect(formatTokens(-5) == "0")
   }

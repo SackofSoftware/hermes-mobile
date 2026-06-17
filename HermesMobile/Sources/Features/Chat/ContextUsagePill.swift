@@ -51,15 +51,16 @@ struct ContextUsagePill: View {
     }
   }
 
-  /// A thin capsule track with a tinted fill clamped to `fraction`. Fill width animates
-  /// gently as the conversation grows, but is held flat under reduce-motion.
+  /// A thin capsule track with a tinted fill set to `fraction` (already clamped to `0...1`
+  /// by `usage.contextFraction`). Fill width animates gently as the conversation grows, but
+  /// is held flat under reduce-motion.
   private func bar(fraction: Double) -> some View {
     GeometryReader { geo in
       ZStack(alignment: .leading) {
         Capsule().fill(.tertiary)
         Capsule()
           .fill(usage.severity.tint)
-          .frame(width: geo.size.width * CGFloat(min(1, max(0, fraction))))
+          .frame(width: geo.size.width * CGFloat(fraction))
       }
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
     }

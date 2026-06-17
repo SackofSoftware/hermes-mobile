@@ -10,10 +10,12 @@ import XCTest
 /// unknown-max (text-only) state. Severity tint and label come from the HermesKit `Usage`
 /// helpers; this suite only verifies the rendered pill.
 final class ContextUsageSnapshotTests: SnapshotTestCase {
-  /// 40% (moderate → yellow), 85% (high → orange), 97% (critical → red), all bar + label.
+  /// 40% (normal → green), 62% (moderate → yellow), 85% (high → orange), 97% (critical →
+  /// red), all bar + label.
   func testContextPill_fillLevels() {
     let view = VStack(spacing: 16) {
       ContextUsagePill(usage: Usage(total: 80_000, contextUsed: 80_000, contextMax: 200_000, contextPercent: 40))
+      ContextUsagePill(usage: Usage(total: 124_000, contextUsed: 124_000, contextMax: 200_000, contextPercent: 62))
       ContextUsagePill(usage: Usage(total: 170_000, contextUsed: 170_000, contextMax: 200_000, contextPercent: 85))
       ContextUsagePill(usage: Usage(total: 194_000, contextUsed: 194_000, contextMax: 200_000, contextPercent: 97))
     }

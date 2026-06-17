@@ -184,12 +184,12 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - Create: `HermesKit/Sources/HermesKit/Models/ProfileName.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ProfileNameTests.swift`
 
-- [ ] add `public enum ProfileName` with `static let hint: String` (verbatim desktop
+- [x] add `public enum ProfileName` with `static let hint: String` (verbatim desktop
       copy) and `static func isValid(_:) -> Bool` using `^[a-z0-9][a-z0-9_-]{0,63}$`
       (validate the trimmed string)
-- [ ] write tests: valid names (`my-profile`, `a`, `a_b-c`, 64-char max)
-- [ ] write tests: invalid (`testOS` uppercase, leading `-`/`_`, empty, 65 chars, spaces)
-- [ ] run tests — must pass before next task
+- [x] write tests: valid names (`my-profile`, `a`, `a_b-c`, 64-char max)
+- [x] write tests: invalid (`testOS` uppercase, leading `-`/`_`, empty, 65 chars, spaces)
+- [x] run tests — must pass before next task
 
 ### Task 3: `HermesProfileClient` — CRUD + SOUL.md + scoped sessions
 

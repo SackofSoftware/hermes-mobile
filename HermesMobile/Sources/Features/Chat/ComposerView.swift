@@ -56,8 +56,11 @@ struct ComposerView: View {
         .onSubmit(onSend)
 
       HStack(spacing: 12) {
+        // Let the model chip claim its ideal width before the Spacer, so the model name
+        // shows in full when there's room (it truncated even with space to spare otherwise).
         modelChip
-        if let usage { ContextUsagePill(usage: usage) }
+          .layoutPriority(1)
+        if let usage { ContextUsageRing(usage: usage) }
         Spacer()
         if attachmentsSupported { attachButton }
         voiceButton

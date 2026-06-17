@@ -517,13 +517,22 @@ struct ChatReductionTests {
   }
 
   @Test func resumeReadyBootstrapsViaSessionResume() async {
-    let sent = LockIsolated<JSONValue?>(nil)
+    let methods = LockIsolated<[String]>([])
+    let usageParams = LockIsolated<JSONValue?>(nil)
     let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable method, params in
-        sent.setValue(.object(["method": .string(method), "params": params]))
+        methods.withValue { $0.append(method) }
+        if method == "session.usage" {
+          usageParams.setValue(params)
+          // Resuming an existing session reports its accumulated context immediately.
+          return .object([
+            "input": .number(120_000), "output": .number(30_000), "total": .number(150_000),
+            "context_used": .number(150_000), "context_max": .number(200_000), "context_percent": .number(75),
+          ])
+        }
         return .object(["session_id": .string("live123"), "stored_session_id": .string("stored123")])
       }
     }
@@ -538,8 +547,44 @@ struct ChatReductionTests {
       $0.storedSessionID = "stored123"
       $0.status = .ready
     }
-    #expect(sent.value?["method"]?.stringValue == "session.resume")
-    #expect(sent.value?["params"]?["session_id"]?.stringValue == "stored123")
+    // Resume immediately pulls usage so the gauge isn't blank until the next turn.
+    await store.receive(\.usageResponse) {
+      $0.usage = Usage(
+        input: 120_000, output: 30_000, total: 150_000,
+        contextUsed: 150_000, contextMax: 200_000, contextPercent: 75
+      )
+    }
+    #expect(methods.value.first == "session.resume")
+    #expect(methods.value.contains("session.usage"))
+    #expect(usageParams.value?["session_id"]?.stringValue == "live123")
+  }
+
+  @Test func resumeWithUnknownUsageMethodLeavesGaugeHidden() async {
+    // Old agents that don't implement session.usage answer -32601 ("unknown method"); the
+    // fetch must swallow it and leave `usage` nil (gauge stays hidden), no crash.
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "session.usage" {
+          throw GatewayError.server("unknown method: session.usage")
+        }
+        return .object(["session_id": .string("live123"), "stored_session_id": .string("stored123")])
+      }
+    }
+
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "live123"
+      $0.storedSessionID = "stored123"
+      $0.status = .ready
+    }
+    // No usageResponse arrives; usage stays nil.
+    #expect(store.state.usage == nil)
   }
 
   @Test func historyReconstructsToolRowsAndDropsEmptyTurns() async {

@@ -208,6 +208,13 @@ extension Usage {
     return nil
   }
 
+  /// Whole-percent label shown inside the composer ring (e.g. `"69%"`), or `nil` when the
+  /// max is unknown (no fraction) so the ring renders without a centered number.
+  public var contextPercentLabel: String? {
+    guard let fraction = contextFraction else { return nil }
+    return "\(Int((fraction * 100).rounded()))%"
+  }
+
   /// Severity bucket derived from `contextPercent` (falling back to `contextFraction * 100`).
   /// Defaults to `.normal` when nothing is known.
   public var severity: ContextSeverity {

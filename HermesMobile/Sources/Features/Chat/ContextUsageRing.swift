@@ -1,17 +1,19 @@
 import HermesKit
 import SwiftUI
 
-/// Compact context-window gauge for the composer toolbar, mirroring the Hermes TUI
-/// status-bar pill. A thin capsule track filled to `usage.contextFraction`, tinted by
-/// `usage.severity`, paired with the numeric `usage.tokenLabel` (never color-only).
+/// Compact context-window gauge for the composer toolbar: a small ring filled to
+/// `usage.contextFraction`, tinted by `usage.severity`, with the whole-percent label
+/// centered inside. Replaces the older labeled capsule pill — on a real device three
+/// labeled controls truncated, so the numbers now live in the tap popover and the toolbar
+/// only carries the ring (#4 follow-up).
 ///
-/// When the max is unknown (`contextFraction == nil`) only the token label is shown — no
-/// bar — so we never render a misleading empty track. The view returns nothing when the
-/// usage has no usable label; callers may also gate on `usage == nil`.
+/// When the max is unknown (`contextFraction == nil`) only the faint track ring renders —
+/// no fill, no percent — so we never show a misleading gauge; tapping still reveals the
+/// token count. The view returns nothing when usage has no usable label.
 ///
-/// Display values come straight from the HermesKit `Usage` helpers; this view recomputes
-/// no thresholds or formatting.
-struct ContextUsagePill: View {
+/// Display values come straight from the HermesKit `Usage` helpers; this view recomputes no
+/// thresholds or formatting.
+struct ContextUsageRing: View {
   let usage: Usage
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -20,24 +22,15 @@ struct ContextUsagePill: View {
   // for a transient disclosure).
   @State private var showDetail = false
 
+  private let diameter: CGFloat = 24
+  private let lineWidth: CGFloat = 3
+
   var body: some View {
     if let label = usage.tokenLabel {
-      let fraction = usage.contextFraction
       Button {
         showDetail = true
       } label: {
-        HStack(spacing: 6) {
-          if let fraction {
-            bar(fraction: fraction)
-          }
-          Text(label)
-            .font(.caption2.weight(.medium).monospacedDigit())
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(.quaternary, in: Capsule())
+        ring
       }
       .buttonStyle(.plain)
       .popover(isPresented: $showDetail) {
@@ -51,24 +44,36 @@ struct ContextUsagePill: View {
     }
   }
 
-  /// A thin capsule track with a tinted fill set to `fraction` (already clamped to `0...1`
-  /// by `usage.contextFraction`). Fill width animates gently as the conversation grows, but
-  /// is held flat under reduce-motion.
-  private func bar(fraction: Double) -> some View {
-    GeometryReader { geo in
-      ZStack(alignment: .leading) {
-        Capsule().fill(.tertiary)
-        Capsule()
-          .fill(usage.severity.tint)
-          .frame(width: geo.size.width * CGFloat(fraction))
+  /// A faint full track ring with a tinted arc trimmed to `fraction` (already clamped to
+  /// `0...1` by `usage.contextFraction`), starting at 12 o'clock. The percent sits centered.
+  /// The arc animates gently as the conversation grows, held flat under reduce-motion.
+  private var ring: some View {
+    ZStack {
+      Circle()
+        .stroke(.tertiary, lineWidth: lineWidth)
+
+      if let fraction = usage.contextFraction {
+        Circle()
+          .trim(from: 0, to: fraction)
+          .stroke(usage.severity.tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+          .rotationEffect(.degrees(-90))
+          .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
       }
-      .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
+
+      if let percent = usage.contextPercentLabel {
+        Text(percent)
+          .font(.system(size: 9, weight: .semibold).monospacedDigit())
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+          .minimumScaleFactor(0.7)
+      }
     }
-    .frame(width: 28, height: 6)
+    .frame(width: diameter, height: diameter)
+    .padding(.vertical, 2)
   }
 }
 
-/// Expanded breakdown shown in the pill's popover: used / max, the input vs output split,
+/// Expanded breakdown shown in the ring's popover: used / max, the input vs output split,
 /// the compaction count, and the running cost. Rows whose data is absent are omitted rather
 /// than rendered as blanks/zeros, and a near-full nudge appears at `.critical` severity.
 ///

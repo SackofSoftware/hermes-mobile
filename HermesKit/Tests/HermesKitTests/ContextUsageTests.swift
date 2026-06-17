@@ -107,6 +107,24 @@ import Testing
     #expect(u.contextFraction == 0.90)
   }
 
+  // MARK: contextPercentLabel — ring center
+
+  @Test func contextPercentLabelFromPercent() {
+    #expect(Usage(contextPercent: 69).contextPercentLabel == "69%")
+    #expect(Usage(contextPercent: 0).contextPercentLabel == "0%")
+    #expect(Usage(contextPercent: 100).contextPercentLabel == "100%")
+  }
+
+  @Test func contextPercentLabelFromRatioRounds() {
+    // 124k/200k = 62%, rounded from the fraction when no explicit percent is present.
+    #expect(Usage(contextUsed: 124_000, contextMax: 200_000).contextPercentLabel == "62%")
+  }
+
+  @Test func contextPercentLabelNilWhenMaxUnknown() {
+    #expect(Usage(contextUsed: 125_000).contextPercentLabel == nil)
+    #expect(Usage().contextPercentLabel == nil)
+  }
+
   // MARK: severity — boundary percents
 
   @Test(arguments: [

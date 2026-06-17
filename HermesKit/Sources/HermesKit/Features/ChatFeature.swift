@@ -165,6 +165,7 @@ public struct ChatFeature {
     case gatewayClosed
     case reconnectTick
     case sessionResult(Result<SessionHandle, GatewayError>)
+    case usageResponse(Usage)
     case historyResponse([SessionMessage])
     case composerSubmitted
     case promptSubmitFailed(message: String)
@@ -277,9 +278,17 @@ public struct ChatFeature {
         return connect(state.connection)
 
       case let .sessionResult(.success(handle)):
+        // A non-nil stored id before we overwrite it means this was a *resume* (vs. a fresh
+        // create) — pull the current context usage so the gauge shows immediately instead of
+        // staying blank until the next turn. New sessions have no context yet, so skip.
+        let wasResume = state.storedSessionID != nil
         state.liveSessionID = handle.sessionID
         state.storedSessionID = handle.storedSessionID ?? state.storedSessionID
         state.status = .ready
+        return wasResume ? fetchUsage(sessionID: handle.sessionID) : .none
+
+      case let .usageResponse(usage):
+        state.usage = usage
         return .none
 
       case let .sessionResult(.failure(error)):
@@ -1015,6 +1024,27 @@ public struct ChatFeature {
         await send(.sessionResult(.failure(error)))
       } catch {
         await send(.sessionResult(.failure(.disconnected)))
+      }
+    }
+  }
+
+  /// Pull current context-window usage right after a session resolves. `session.info` /
+  /// `message.complete` only deliver usage mid/after a turn, so a resumed session would
+  /// otherwise show a blank gauge until the next reply. The gateway's on-demand
+  /// `session.usage` RPC returns the same `Usage` shape (mirrors the TUI's `/usage`). Old
+  /// agents lacking the method answer `-32601` → ignored (gauge stays hidden); other errors
+  /// are transient and the value still arrives on the next `message.complete`.
+  private func fetchUsage(sessionID: String) -> Effect<Action> {
+    .run { [gateway] send in
+      do {
+        let result = try await gateway.send("session.usage", .object(["session_id": .string(sessionID)]))
+        if let usage = result.decoded(Usage.self) {
+          await send(.usageResponse(usage))
+        }
+      } catch let error as GatewayError where error.isUnknownMethod {
+        // Agent too old to support session.usage — leave the gauge hidden.
+      } catch {
+        // Transient failure; usage will still arrive on the next message.complete.
       }
     }
   }

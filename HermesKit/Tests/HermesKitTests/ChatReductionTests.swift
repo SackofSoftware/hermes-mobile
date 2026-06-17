@@ -14,64 +14,154 @@ struct ChatReductionTests {
   // MARK: Streaming fold (no message id — single in-flight row)
 
   @Test func streamingMessageFold() async {
+    let clock = TestClock()
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
-    } withDependencies: { $0.uuid = .incrementing }
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
 
-    // message.start no longer creates a row (would render as an empty bubble); the row
-    // is materialised lazily on the first delta.
+    // message.start no longer creates the assistant row (would render as an empty bubble),
+    // but it eagerly creates the live thinking row (uuid 0) and starts the timer.
     await store.send(.gatewayEvent(.messageStart)) {
       $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
     }
     await store.send(.gatewayEvent(.messageDelta(text: "Hel"))) {
-      $0.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "Hel", isComplete: false))]
-      $0.streamingRowID = uuid(0)
+      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Hel", isComplete: false)))
+      $0.streamingRowID = uuid(1)
     }
     await store.send(.gatewayEvent(.messageDelta(text: "lo"))) {
-      $0.transcript[id: uuid(0)]?.kind = .message(role: .assistant, text: "Hello", isComplete: false)
+      $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "Hello", isComplete: false)
     }
+    // No reasoning/status arrived → the empty thinking row is removed on completion.
     await store.send(.gatewayEvent(.messageComplete(text: "Hello", usage: nil))) {
-      $0.transcript[id: uuid(0)]?.kind = .message(role: .assistant, text: "Hello", isComplete: true)
+      $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "Hello", isComplete: true)
+      $0.transcript.remove(id: self.uuid(0))
       $0.streamingRowID = nil
+      $0.thinkingRowID = nil
       $0.isSending = false
     }
   }
 
   @Test func toolOnlyTurnLeavesNoEmptyMessageBubble() async {
+    let clock = TestClock()
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
-    } withDependencies: { $0.uuid = .incrementing }
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
 
-    // start → (tool activity) → complete with no text: no assistant message row at all.
-    await store.send(.gatewayEvent(.messageStart)) { $0.isSending = true }
+    // start → (tool activity) → complete with no text and no reasoning/status: no assistant
+    // message row and the empty thinking row is removed too.
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
     await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil))) {
+      $0.transcript.remove(id: self.uuid(0))
+      $0.thinkingRowID = nil
       $0.isSending = false
     }
     #expect(store.state.transcript.isEmpty)
   }
 
-  @Test func thinkingFoldsIntoOneRowThenMessageStarts() async {
+  // message.start eagerly creates the live thinking row + starts the elapsed timer;
+  // reasoning deltas accumulate into that one row; ticks advance thinkingSeconds; the turn
+  // completing bakes the elapsed in and freezes the row as a static disclosure.
+  @Test func messageStartCreatesLiveThinkingRowTimerTicksThenFreezes() async {
+    let clock = TestClock()
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
-    } withDependencies: { $0.uuid = .incrementing }
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
 
-    await store.send(.gatewayEvent(.thinkingDelta(text: "Thinking"))) {
-      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "Thinking", status: nil, elapsedSeconds: 0, isComplete: false))]
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
       $0.thinkingRowID = uuid(0)
+    }
+    // The 1s tick loop drives thinkingSeconds.
+    await clock.advance(by: .seconds(3))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 3 }
+    // Reasoning accumulates into the existing row, then the assistant message streams.
+    await store.send(.gatewayEvent(.thinkingDelta(text: "Thinking"))) {
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Thinking", status: nil, elapsedSeconds: 0, isComplete: false)
     }
     await store.send(.gatewayEvent(.thinkingDelta(text: "…"))) {
       $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Thinking…", status: nil, elapsedSeconds: 0, isComplete: false)
     }
-    await store.send(.gatewayEvent(.messageStart)) {
-      $0.thinkingRowID = nil
-      $0.isSending = true
+    await store.send(.gatewayEvent(.messageDelta(text: "pong"))) {
+      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "pong", isComplete: false)))
+      $0.streamingRowID = uuid(1)
     }
-    // No deltas → message.complete materialises the finalised row directly (uuid 1).
+    // Completion freezes the thinking row (3s baked in), keeps it (had reasoning), cancels
+    // the timer, and resets the counter.
     await store.send(.gatewayEvent(.messageComplete(text: "pong", usage: nil))) {
-      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "pong", isComplete: true)))
+      $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "pong", isComplete: true)
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Thinking…", status: nil, elapsedSeconds: 3, isComplete: true)
       $0.streamingRowID = nil
+      $0.thinkingRowID = nil
+      $0.thinkingSeconds = 0
       $0.isSending = false
     }
+  }
+
+  // statusUpdate routes the context-size line into the active thinking row's status (no
+  // longer a persistent footer), and a status-only turn keeps its row on completion.
+  @Test func statusUpdateRoutesIntoThinkingRowAndKeepsIt() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    await store.send(.gatewayEvent(.statusUpdate(kind: "lifecycle", text: "Context: 42% used"))) {
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "", status: "Context: 42% used", elapsedSeconds: 0, isComplete: false)
+    }
+    // A status-only turn (no reasoning, no message text) keeps the frozen row.
+    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil))) {
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "", status: "Context: 42% used", elapsedSeconds: 0, isComplete: true)
+      $0.thinkingRowID = nil
+      $0.isSending = false
+    }
+  }
+
+  // Leaving the screen mid-turn cancels the live thinking timer (no leaked tick loop).
+  @Test func onDisappearCancelsThinkingTimer() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    // onDisappear cancels the loop; advancing further yields no more ticks.
+    await store.send(.onDisappear)
+    await clock.advance(by: .seconds(5))
   }
 
   @Test func toolStartThenComplete() async {
@@ -127,14 +217,21 @@ struct ChatReductionTests {
     }
   }
 
-  @Test func statusUpdateAndError() async {
-    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
+  // statusUpdate with no active thinking row creates one defensively (so the line is never
+  // dropped); .error then freezes that row and surfaces the banner.
+  @Test func statusUpdateDefensivelyCreatesRowAndErrorFreezes() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: { $0.uuid = .incrementing }
 
     await store.send(.gatewayEvent(.statusUpdate(kind: "lifecycle", text: "searching…"))) {
-      $0.activity = "searching…"
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: "searching…", elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
     }
     await store.send(.gatewayEvent(.error(message: "boom"))) {
       $0.errorBanner = "boom"
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "", status: "searching…", elapsedSeconds: 0, isComplete: true)
+      $0.thinkingRowID = nil
     }
   }
 
@@ -298,9 +395,13 @@ struct ChatReductionTests {
   @Test func closeFinalizesInFlightStreamingRow() async {
     let clock = TestClock()
     var initial = ChatFeature.State(connection: conn, status: .ready)
-    initial.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "Half", isComplete: false))]
-    initial.streamingRowID = uuid(0)
-    initial.thinkingRowID = uuid(1)
+    initial.transcript = [
+      ChatRow(id: uuid(0), kind: .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Half", isComplete: false)),
+    ]
+    initial.streamingRowID = uuid(1)
+    initial.thinkingRowID = uuid(0)
+    initial.thinkingSeconds = 7
     initial.isSending = true
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.continuousClock = clock
@@ -308,11 +409,15 @@ struct ChatReductionTests {
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
     }
 
+    // A dropped socket finalizes the streaming message and freezes the live thinking row
+    // (7s baked in) so it doesn't spin forever; the timer is cancelled.
     await store.send(.gatewayClosed) {
       $0.status = .reconnecting
-      $0.transcript[id: self.uuid(0)]?.kind = .message(role: .assistant, text: "Half", isComplete: true)
+      $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Half", isComplete: true)
+      $0.transcript[id: self.uuid(0)]?.kind = .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 7, isComplete: true)
       $0.streamingRowID = nil
       $0.thinkingRowID = nil
+      $0.thinkingSeconds = 0
       $0.isSending = false
       $0.reconnectAttempt = 1
     }

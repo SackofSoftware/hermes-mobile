@@ -295,7 +295,6 @@ struct ChatInteractionTests {
   @Test func promptSubmitFailureSurfacesBannerAndClearsSpinner() async {
     var initial = readyState()
     initial.composerText = "hello"
-    initial.activity = "compacting context…"
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       // A stuck server: prompt.submit times out (Task 6's per-request timeout).
@@ -313,7 +312,6 @@ struct ChatInteractionTests {
     await store.receive(\.promptSubmitFailed) {
       $0.errorBanner = "Prompt failed: request timed out: prompt.submit"
       $0.isSending = false
-      $0.activity = nil // the stuck "compacting…" footer is cleared
     }
   }
 
@@ -338,7 +336,6 @@ struct ChatInteractionTests {
     await store.receive(\.promptSubmitFailed) {
       $0.errorBanner = "Prompt failed: Connection lost."
       $0.isSending = false
-      $0.activity = nil
     }
   }
 }

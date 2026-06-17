@@ -19,7 +19,6 @@ public struct ChatFeature {
     public var transcript: IdentifiedArrayOf<ChatRow>
     public var composerText: String
     public var status: Status
-    public var activity: String?     // latest status.update text (transient footer)
     public var errorBanner: String?
     public var isSending: Bool
     /// A blocking request from the agent (approval/clarify/secret). While set, the
@@ -44,6 +43,10 @@ public struct ChatFeature {
     public var waveformLevels: [Float]
     /// Seconds elapsed while recording, for the composer's mm:ss readout.
     public var recordingSeconds: Int
+    /// Seconds elapsed in the in-flight turn's live "Thinking" indicator. Ticked by a
+    /// cancellable `continuousClock` loop while a turn runs; baked into the row's
+    /// `elapsedSeconds` and reset to 0 on completion. The active row's view renders this.
+    public var thinkingSeconds: Int
     /// Files staged for the next message (#8), uploaded on submit.
     public var attachments: [ComposerAttachment]
     /// Set once the agent rejects an attach RPC as unknown (`-32601`) — too old to support
@@ -113,7 +116,6 @@ public struct ChatFeature {
       self.transcript = transcript
       self.composerText = composerText
       self.status = status
-      self.activity = nil
       self.errorBanner = nil
       self.isSending = false
       self.liveSessionID = nil
@@ -132,6 +134,7 @@ public struct ChatFeature {
       self.recording = .idle
       self.waveformLevels = []
       self.recordingSeconds = 0
+      self.thinkingSeconds = 0
       self.attachments = []
       self.attachmentsUnsupported = false
     }
@@ -153,6 +156,7 @@ public struct ChatFeature {
     case binding(BindingAction<State>)
     case task
     case onDisappear
+    case thinkingTick
     case gatewayEvent(GatewayEvent)
     case gatewayClosed
     case reconnectTick
@@ -199,7 +203,7 @@ public struct ChatFeature {
     case attachmentsUnsupportedDetected
   }
 
-  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer }
+  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer, thinkingTimer }
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
@@ -236,9 +240,14 @@ public struct ChatFeature {
           .cancel(id: CancelID.reconnect),
           .cancel(id: CancelID.voiceLevels),
           .cancel(id: CancelID.voiceTimer),
+          .cancel(id: CancelID.thinkingTimer),
           // Release the mic/session if we leave mid-recording.
           wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
         )
+
+      case .thinkingTick:
+        state.thinkingSeconds += 1
+        return .none
 
       case let .gatewayEvent(event):
         return reduce(event: event, into: &state)
@@ -251,11 +260,14 @@ public struct ChatFeature {
         finalizeInFlight(into: &state)
         state.reconnectAttempt += 1
         let delay = backoffDelay(attempt: state.reconnectAttempt)
-        return .run { [clock] send in
-          try await clock.sleep(for: delay)
-          await send(.reconnectTick)
-        }
-        .cancellable(id: CancelID.reconnect, cancelInFlight: true)
+        return .merge(
+          .cancel(id: CancelID.thinkingTimer),
+          .run { [clock] send in
+            try await clock.sleep(for: delay)
+            await send(.reconnectTick)
+          }
+          .cancellable(id: CancelID.reconnect, cancelInFlight: true)
+        )
 
       case .reconnectTick:
         return connect(state.connection)
@@ -353,7 +365,6 @@ public struct ChatFeature {
       case let .promptSubmitFailed(message):
         state.errorBanner = "Prompt failed: \(message)"
         state.isSending = false
-        state.activity = nil
         return .none
 
       case .interruptTapped:
@@ -729,11 +740,18 @@ public struct ChatFeature {
       // Defer creating the assistant row until the first delta — a tool-only turn emits
       // message.start with no text, and an eager empty row renders as a blank bubble.
       state.streamingRowID = nil
-      state.thinkingRowID = nil
-      state.activity = nil
       state.errorBanner = nil
       state.isSending = true
-      return .none
+      // Unlike the assistant bubble, the thinking row is created eagerly so an immediate
+      // "Thinking 0s" indicator appears even before any reasoning text arrives. Start the
+      // live elapsed timer (mirrors the voice-recording tick).
+      let thinkingID = uuid()
+      state.transcript.append(ChatRow(
+        id: thinkingID, kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)
+      ))
+      state.thinkingRowID = thinkingID
+      state.thinkingSeconds = 0
+      return startThinkingTimer()
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
@@ -748,10 +766,9 @@ public struct ChatFeature {
       }
       // else: empty tool-only turn → no row at all.
       state.streamingRowID = nil
-      state.thinkingRowID = nil
-      state.activity = nil
+      freezeThinking(into: &state)
       state.isSending = false
-      return .none
+      return .cancel(id: CancelID.thinkingTimer)
 
     case let .thinkingDelta(text):
       appendToThinking(text, into: &state)
@@ -762,7 +779,7 @@ public struct ChatFeature {
       return .none
 
     case let .statusUpdate(_, text):
-      state.activity = text
+      setThinkingStatus(text, into: &state)
       return .none
 
     case let .toolStart(toolID, name, title, argsText):
@@ -806,26 +823,25 @@ public struct ChatFeature {
     case let .error(message):
       state.errorBanner = message
       state.isSending = false
-      return .none
+      freezeThinking(into: &state)
+      return .cancel(id: CancelID.thinkingTimer)
 
     case let .approvalRequest(request):
+      // Nice-to-have skipped: the thinking timer keeps running while a blocking card is the
+      // focus rather than pausing — simpler reducer, and wall-clock still reflects the turn.
       state.pendingInteraction = .approval(request)
-      state.activity = nil
       return .none
 
     case let .clarifyRequest(request):
       state.pendingInteraction = .clarify(request)
-      state.activity = nil
       return .none
 
     case let .sudoRequest(prompt):
       state.pendingInteraction = .secret(.sudo, prompt)
-      state.activity = nil
       return .none
 
     case let .secretRequest(prompt):
       state.pendingInteraction = .secret(.secret, prompt)
-      state.activity = nil
       return .none
 
     case let .sessionInfo(info):
@@ -853,18 +869,33 @@ public struct ChatFeature {
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the
-  /// in-flight assistant message complete and clear the streaming/thinking pointers
-  /// so reconnect starts clean. Idempotent.
+  /// in-flight assistant message complete and freeze the in-flight thinking row so a
+  /// dropped socket leaves a static `Thinking · <elapsed>` rather than a live one.
+  /// Idempotent.
   private func finalizeInFlight(into state: inout State) {
     if let id = state.streamingRowID,
        case let .message(role, text, _) = state.transcript[id: id]?.kind {
       state.transcript[id: id]?.kind = .message(role: role, text: text, isComplete: true)
     }
     state.streamingRowID = nil
-    state.thinkingRowID = nil
+    freezeThinking(into: &state)
     state.isSending = false
   }
 
+  /// 1s `continuousClock` loop that drives the live "Thinking" elapsed timer. Mirrors the
+  /// voice-recording tick. Cancel any prior loop first so a fresh turn starts at 0.
+  private func startThinkingTimer() -> Effect<Action> {
+    .run { [clock] send in
+      while true {
+        try await clock.sleep(for: .seconds(1))
+        await send(.thinkingTick)
+      }
+    }
+    .cancellable(id: CancelID.thinkingTimer, cancelInFlight: true)
+  }
+
+  /// Append reasoning text into the active thinking row, creating it defensively (with the
+  /// current `thinkingSeconds`) if `.messageStart` was missed so reasoning never drops.
   private func appendToThinking(_ text: String, into state: inout State) {
     if let id = state.thinkingRowID,
        case let .thinking(reasoning, status, elapsed, isComplete) = state.transcript[id: id]?.kind {
@@ -878,6 +909,44 @@ public struct ChatFeature {
       ))
       state.thinkingRowID = id
     }
+  }
+
+  /// Set the latest `status.update` line on the active thinking row, creating it
+  /// defensively if `.messageStart` was missed so status never drops.
+  private func setThinkingStatus(_ text: String, into state: inout State) {
+    if let id = state.thinkingRowID,
+       case let .thinking(reasoning, _, elapsed, isComplete) = state.transcript[id: id]?.kind {
+      state.transcript[id: id]?.kind = .thinking(
+        reasoning: reasoning, status: text, elapsedSeconds: elapsed, isComplete: isComplete
+      )
+    } else {
+      let id = uuid()
+      state.transcript.append(ChatRow(
+        id: id, kind: .thinking(reasoning: "", status: text, elapsedSeconds: 0, isComplete: false)
+      ))
+      state.thinkingRowID = id
+    }
+  }
+
+  /// Freeze the in-flight thinking row at turn end (completion / error / socket drop): bake
+  /// the live `thinkingSeconds` into `elapsedSeconds`, flip `isComplete = true`, and remove
+  /// the row entirely if it carried neither reasoning nor status. Resets the timer counter
+  /// and clears the pointer. Idempotent. The caller cancels `CancelID.thinkingTimer`.
+  private func freezeThinking(into state: inout State) {
+    let elapsed = state.thinkingSeconds
+    if let id = state.thinkingRowID,
+       case let .thinking(reasoning, status, _, _) = state.transcript[id: id]?.kind {
+      if reasoning.isEmpty, status == nil {
+        state.transcript.remove(id: id)
+      } else {
+        state.transcript[id: id]?.kind = .thinking(
+          reasoning: reasoning, status: status,
+          elapsedSeconds: elapsed, isComplete: true
+        )
+      }
+    }
+    state.thinkingRowID = nil
+    state.thinkingSeconds = 0
   }
 
   // MARK: - Effects

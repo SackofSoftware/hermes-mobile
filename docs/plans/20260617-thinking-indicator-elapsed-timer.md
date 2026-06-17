@@ -215,32 +215,34 @@ turn's in-progress window:
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] Add `public var thinkingSeconds: Int` to `State` (default 0); update the `State` init.
-- [ ] Remove `public var activity: String?` and every assignment to it
+- [x] Add `public var thinkingSeconds: Int` to `State` (default 0); update the `State` init.
+- [x] Remove `public var activity: String?` and every assignment to it
       (`:733,752,765,813,818,823,828`).
-- [ ] Add `CancelID.thinkingTimer` and a `.thinkingTick` action; `.thinkingTick` →
+- [x] Add `CancelID.thinkingTimer` and a `.thinkingTick` action; `.thinkingTick` →
       `state.thinkingSeconds += 1`.
-- [ ] `.messageStart`: create the active thinking row (empty reasoning, nil status, elapsed 0,
+- [x] `.messageStart`: create the active thinking row (empty reasoning, nil status, elapsed 0,
       `isComplete: false`), store `thinkingRowID`, reset `thinkingSeconds = 0`, and return a
       cancellable 1s `continuousClock` loop sending `.thinkingTick` (model on the voice timer
       `:497-503`; cancel any prior `thinkingTimer` first).
-- [ ] `appendToThinking`: append into the active row's `reasoning`; create the row defensively
+- [x] `appendToThinking`: append into the active row's `reasoning`; create the row defensively
       if `thinkingRowID` is missing.
-- [ ] `.statusUpdate`: set the active row's `status` (create the row defensively if missing).
-- [ ] `.messageComplete`: bake `elapsedSeconds = state.thinkingSeconds`, set
+- [x] `.statusUpdate`: set the active row's `status` (create the row defensively if missing).
+- [x] `.messageComplete`: bake `elapsedSeconds = state.thinkingSeconds`, set
       `isComplete = true`; **remove the row if reasoning empty and status nil**; cancel
       `thinkingTimer`; reset `thinkingSeconds = 0`; clear `thinkingRowID`.
-- [ ] `.error` and `finalizeInFlight`: freeze the active row (same bake + `isComplete = true`),
+- [x] `.error` and `finalizeInFlight`: freeze the active row (same bake + `isComplete = true`),
       cancel `thinkingTimer`, reset `thinkingSeconds`.
-- [ ] `.onDisappear`: cancel `thinkingTimer` (add to the existing cancellation set `:229-241`).
-- [ ] *(Nice-to-have)* On a blocking interaction, pause the timer; resume on response. Skip if
-      it complicates the reducer — note the choice in a comment.
-- [ ] Reducer tests (TestStore + TestClock): messageStart creates active row + ticks
+- [x] `.onDisappear`: cancel `thinkingTimer` (add to the existing cancellation set `:229-241`).
+- [x] *(Nice-to-have)* On a blocking interaction, pause the timer; resume on response. Skip if
+      it complicates the reducer — note the choice in a comment. **Skipped: the timer keeps
+      running through approval/clarify/secret/sudo cards (simpler reducer; wall-clock still
+      reflects the turn). Noted in a comment on the `approvalRequest` case.**
+- [x] Reducer tests (TestStore + TestClock): messageStart creates active row + ticks
       (`clock.advance` → `thinkingTick` × N → `thinkingSeconds`); thinkingDelta accumulates
       reasoning; statusUpdate sets row status; messageComplete freezes/collapses and removes an
       empty row; socket drop + `.error` freeze + cancel; `.onDisappear` cancels the timer.
-- [ ] Update any existing reducer test that asserted `state.activity`.
-- [ ] Run tests — must pass before Task 3.
+- [x] Update any existing reducer test that asserted `state.activity`.
+- [x] Run tests — must pass before Task 3.
 
 ### Task 3: `ThinkingIndicatorView` + ChatView wiring
 

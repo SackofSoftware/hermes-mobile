@@ -392,17 +392,35 @@ the response body — the banner only ever showed the generic `Server error (400
 
 ### Task 13: Verify acceptance criteria
 
-- [ ] header shows the active profile as a Safari-style pill; tap lists all profiles
+- [x] header shows the active profile as a Safari-style pill; tap lists all profiles
       (checkmark on active) + divider + `+ Add profile`
-- [ ] default profile shows a home icon; custom profiles don't
-- [ ] switching reloads the scoped session list; new chats create under it
-- [ ] Add-profile form matches desktop fields with inline regex validation **and**
+      — `SessionListView.profilePill`/`profileMenuContent` (principal toolbar item, checkmark
+      on active, `Divider()` + "Add profile" → `.addProfileTapped`)
+- [x] default profile shows a home icon; custom profiles don't
+      — `SessionListView.isSelectedDefault` → `house.fill`; custom profiles render no leading icon
+- [x] switching reloads the scoped session list; new chats create under it
+      — `SessionListFeature.selectProfile` (persist + reset + `load`); `fetchSessions` uses
+      `profiles.sessions(profile:…)`; `ChatFeature.bootstrapSession` adds `"profile"` to
+      create/resume params; `AppFeature` passes `selectedProfileName` on open + new chat
+- [x] Add-profile form matches desktop fields with inline regex validation **and**
       server-400 banner
-- [ ] custom profiles rename/delete (delete confirmed); default cannot
-- [ ] selected profile persists across launches and clears on logout
-- [ ] graceful fallback (selector hidden) on agents without the profiles API
-- [ ] run full suite: `script -q /dev/null swift test --package-path HermesKit` and
+      — `AddProfileView` (Name + inline `ProfileName.hint`, Clone-from-default, optional SOUL.md,
+      banner); `AddProfileFeature.nameError`/`canCreate`; banner from `RESTError.message`
+      (`.server(detail:)` surfaces server detail verbatim)
+- [x] custom profiles rename/delete (delete confirmed); default cannot
+      — `SessionListFeature.renameProfileButtonTapped` (optimistic + rollback),
+      `deleteProfileButtonTapped` (`ConfirmationDialogState`); both guard `!profile.isDefault`
+- [x] selected profile persists across launches and clears on logout
+      — `PreferencesClient.load/saveSelectedProfileID` (key `hermes.selected-profile-id`), read on
+      `.task`; `SettingsFeature.clearTokenTapped` calls `clearSelectedProfileID()`
+- [x] graceful fallback (selector hidden) on agents without the profiles API
+      — `profilesResponse(.failure)` → `profilesSupported = false`; view renders static "Sessions"
+      title and unscoped fetch
+- [x] run full suite: `script -q /dev/null swift test --package-path HermesKit` and
       `make snapshot`; color setting confirmed omitted
+      — HermesKit 308 tests green; snapshots: only the 3 known pre-existing flakes fail
+      (sentImageAttachment, attachmentChips, attachmentUploadingAndFailed); all 7 profile
+      snapshots pass. Color confirmed omitted (no color attr in Profile model/client/reducer/view)
 
 ### Task 14: [Final] Documentation
 

@@ -218,13 +218,13 @@ Dependencies identified:
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] cron sessions appear only under "Cron Jobs", in both `.workspace` and
+- [x] cron sessions appear only under "Cron Jobs", in both `.workspace` and
       `.chronological` modes (not in Pinned/groups/chronological)
-- [ ] agents without `source` (or `source: null`) show no Cron Jobs section and
+- [x] agents without `source` (or `source: null`) show no Cron Jobs section and
       behave exactly as before
-- [ ] search remains flat and un-partitioned
-- [ ] run full HermesKit suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run snapshot suite: `make snapshot`
+- [x] search remains flat and un-partitioned
+- [x] run full HermesKit suite: `script -q /dev/null swift test --package-path HermesKit`
+- [x] run snapshot suite: `make snapshot`
 
 ### Task 6: [Final] Update documentation
 

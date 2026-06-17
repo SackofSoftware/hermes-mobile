@@ -370,9 +370,15 @@ public struct ChatFeature {
       case .interruptTapped:
         guard let sessionID = state.liveSessionID else { return .none }
         state.isSending = false
-        return .run { [gateway] _ in
-          _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
-        }
+        // Freeze the live thinking row + stop the elapsed timer (mirrors the `.error` /
+        // socket-drop turn-ending paths) so an interrupt doesn't leave it shimmering forever.
+        freezeThinking(into: &state)
+        return .merge(
+          .cancel(id: CancelID.thinkingTimer),
+          .run { [gateway] _ in
+            _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
+          }
+        )
 
       case let .respondToApproval(approve, all):
         guard case let .approval(request) = state.pendingInteraction,
@@ -742,6 +748,11 @@ public struct ChatFeature {
       state.streamingRowID = nil
       state.errorBanner = nil
       state.isSending = true
+      // Defensive: a second message.start without an intervening message.complete would
+      // otherwise orphan the prior live thinking row (shimmering forever). Freeze/clear it
+      // first (idempotent; removes the row if it carried no reasoning/status) before
+      // creating the fresh one. Also resets `thinkingSeconds = 0` for the new turn.
+      freezeThinking(into: &state)
       // Unlike the assistant bubble, the thinking row is created eagerly so an immediate
       // "Thinking 0s" indicator appears even before any reasoning text arrives. Start the
       // live elapsed timer (mirrors the voice-recording tick).

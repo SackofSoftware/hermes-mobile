@@ -338,4 +338,44 @@ struct ChatInteractionTests {
       $0.isSending = false
     }
   }
+
+  // Interrupting mid-turn freezes the live thinking row (bakes the elapsed, isComplete=true)
+  // and cancels the timer (no further ticks; TestStore fails on a leaked effect) while still
+  // firing session.interrupt.
+  @Test func interruptFreezesThinkingRowAndCancelsTimer() async {
+    let clock = TestClock()
+    let sent = LockIsolated<String?>(nil)
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.hermesGateway.send = { @Sendable method, _ in
+        sent.setValue(method)
+        return .object([:])
+      }
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = self.uuid(0)
+    }
+    await store.send(.gatewayEvent(.thinkingDelta(text: "Pondering"))) {
+      $0.transcript[id: self.uuid(0)]?.kind = .thinking(reasoning: "Pondering", status: nil, elapsedSeconds: 0, isComplete: false)
+    }
+    await clock.advance(by: .seconds(2))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
+
+    // Interrupt: the row freezes (2s baked in, isComplete=true), the timer is cancelled, and
+    // session.interrupt is dispatched. A leaked tick loop would fail the test.
+    await store.send(.interruptTapped) {
+      $0.isSending = false
+      $0.transcript[id: self.uuid(0)]?.kind = .thinking(reasoning: "Pondering", status: nil, elapsedSeconds: 2, isComplete: true)
+      $0.thinkingRowID = nil
+      $0.thinkingSeconds = 0
+    }
+    await clock.advance(by: .seconds(5)) // no further ticks — timer was cancelled
+    await store.finish()
+    #expect(sent.value == "session.interrupt")
+  }
 }

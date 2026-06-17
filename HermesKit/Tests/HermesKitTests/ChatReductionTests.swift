@@ -164,6 +164,168 @@ struct ChatReductionTests {
     await clock.advance(by: .seconds(5))
   }
 
+  // Two back-to-back turns: a second message.start (with no intervening message.complete)
+  // freezes/clears the first live row before creating the second, and the timer restarts
+  // cleanly from 0 (cancelInFlight + reset) — no orphaned shimmering row, no double-ticking.
+  @Test func secondMessageStartFreezesPriorRowAndRestartsTimerFromZero() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    // Turn 1: start, accumulate reasoning, tick twice, then complete normally.
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    await store.send(.gatewayEvent(.thinkingDelta(text: "First"))) {
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "First", status: nil, elapsedSeconds: 0, isComplete: false)
+    }
+    await clock.advance(by: .seconds(2))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
+    await store.send(.gatewayEvent(.messageComplete(text: "done", usage: nil))) {
+      $0.transcript.append(ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "done", isComplete: true)))
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "First", status: nil, elapsedSeconds: 2, isComplete: true)
+      $0.thinkingRowID = nil
+      $0.thinkingSeconds = 0
+      $0.isSending = false
+    }
+
+    // Turn 2: a fresh message.start creates a new live row and restarts the timer at 0;
+    // exactly one tick per second (no leaked first-turn loop double-ticking).
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript.append(ChatRow(id: uuid(2), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)))
+      $0.thinkingRowID = uuid(2)
+    }
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    await store.send(.onDisappear)
+    await clock.advance(by: .seconds(3))
+  }
+
+  // Defensive: a second message.start with the first row still LIVE (no message.complete in
+  // between) freezes the orphaned row rather than leaving it shimmering forever.
+  @Test func secondMessageStartFreezesAStillLiveFirstRow() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    await store.send(.gatewayEvent(.thinkingDelta(text: "Live one"))) {
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Live one", status: nil, elapsedSeconds: 0, isComplete: false)
+    }
+    await clock.advance(by: .seconds(2))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
+
+    // No message.complete arrives — a fresh message.start freezes the orphan (2s baked in,
+    // isComplete=true, kept since it had reasoning) and starts a new live row.
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Live one", status: nil, elapsedSeconds: 2, isComplete: true)
+      $0.transcript.append(ChatRow(id: uuid(1), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)))
+      $0.thinkingRowID = uuid(1)
+      $0.thinkingSeconds = 0
+    }
+    await store.send(.onDisappear)
+    await clock.advance(by: .seconds(3))
+  }
+
+  // An empty live thinking row (no reasoning, no status) is removed on `.error`, the timer
+  // cancelled, and the counter reset.
+  @Test func errorRemovesEmptyThinkingRowAndCancelsTimer() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    await clock.advance(by: .seconds(2))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
+    // Error on an empty turn: the row is removed entirely, pointer + counter reset, timer
+    // cancelled (a leaked tick would fail the test).
+    await store.send(.gatewayEvent(.error(message: "boom"))) {
+      $0.errorBanner = "boom"
+      $0.transcript.remove(id: self.uuid(0))
+      $0.thinkingRowID = nil
+      $0.thinkingSeconds = 0
+      $0.isSending = false
+    }
+    await clock.advance(by: .seconds(5))
+    #expect(store.state.transcript.isEmpty)
+  }
+
+  // A socket drop on an empty live turn (no reasoning, no status) removes the thinking row
+  // rather than freezing an empty one.
+  @Test func socketDropRemovesEmptyThinkingRow() async {
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.transcript = [
+      ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
+    ]
+    initial.thinkingRowID = uuid(0)
+    initial.thinkingSeconds = 4
+    initial.isSending = true
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.continuousClock = clock
+      $0.uuid = .incrementing
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+    }
+
+    await store.send(.gatewayClosed) {
+      $0.status = .reconnecting
+      $0.transcript.remove(id: self.uuid(0))
+      $0.thinkingRowID = nil
+      $0.thinkingSeconds = 0
+      $0.isSending = false
+      $0.reconnectAttempt = 1
+    }
+    #expect(store.state.transcript.isEmpty)
+    await store.send(.onDisappear)
+  }
+
+  // A bare thinkingDelta arriving FIRST (no prior message.start) defensively creates the
+  // thinking row with the text and sets thinkingRowID — but does NOT start the timer (that's
+  // tied to message.start), so no tick effect leaks.
+  @Test func bareThinkingDeltaDefensivelyCreatesRowWithoutStartingTimer() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.thinkingDelta(text: "Orphan reasoning"))) {
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "Orphan reasoning", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    // No timer was started by a bare delta — advancing the clock yields no ticks.
+    await clock.advance(by: .seconds(3))
+    #expect(store.state.thinkingSeconds == 0)
+  }
+
   @Test func toolStartThenComplete() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()

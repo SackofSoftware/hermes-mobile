@@ -23,7 +23,9 @@ struct ThinkingIndicatorView: View {
 
   /// Forces the reduce-motion (flat) shimmer variant when non-nil; `nil` reads the
   /// `accessibilityReduceMotion` environment value (production default). Only set in
-  /// snapshot tests — that environment value is system-managed and can't be injected.
+  /// snapshot tests: `accessibilityReduceMotion` is a read-only `KeyPath`, not a
+  /// `WritableKeyPath`, so `.environment(\.accessibilityReduceMotion, …)` does not compile
+  /// and the value can't be injected into the snapshot host.
   let reduceMotionOverride: Bool?
 
   @State private var isExpanded: Bool
@@ -100,22 +102,26 @@ private struct ThinkingLabel: View {
   private var reduceMotion: Bool { reduceMotionOverride ?? environmentReduceMotion }
 
   var body: some View {
+    // Visible label dims the timer (`.secondary`); the shimmer mask uses full alpha across
+    // the whole label so the band reads evenly over both words.
+    labelContent(dimTimer: true)
+      .foregroundStyle(.primary)
+      .overlay { shimmer }
+      .mask { labelContent(dimTimer: false) }
+  }
+
+  /// "Thinking" + elapsed timer. Single source of the label's text/layout for both the
+  /// visible content and the shimmer mask so the two can't drift; `dimTimer` applies the
+  /// `.secondary` timer tint for the visible copy only (the mask wants full alpha).
+  @ViewBuilder
+  private func labelContent(dimTimer: Bool) -> some View {
     HStack(spacing: 6) {
       Text("Thinking")
         .font(.caption.weight(.medium))
       Text(formatElapsed(elapsed))
         .font(.caption.monospacedDigit())
-        .foregroundStyle(.secondary)
+        .foregroundStyle(dimTimer ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
       Spacer(minLength: 0)
-    }
-    .foregroundStyle(.primary)
-    .overlay { shimmer }
-    .mask {
-      HStack(spacing: 6) {
-        Text("Thinking").font(.caption.weight(.medium))
-        Text(formatElapsed(elapsed)).font(.caption.monospacedDigit())
-        Spacer(minLength: 0)
-      }
     }
   }
 

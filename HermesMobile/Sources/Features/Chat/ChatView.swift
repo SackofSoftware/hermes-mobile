@@ -2,7 +2,7 @@ import ComposableArchitecture
 import HermesKit
 import SwiftUI
 
-/// The chat screen: a scrolling transcript, a transient activity/error footer, and
+/// The chat screen: a scrolling transcript, a transient error footer, and
 /// the composer. Streams over the gateway via `ChatFeature`.
 struct ChatView: View {
   @Bindable var store: StoreOf<ChatFeature>

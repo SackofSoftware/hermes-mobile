@@ -82,8 +82,9 @@ final class ThinkingIndicatorSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
-  /// Active under reduce-motion — the shimmer is held flat. `accessibilityReduceMotion` is
-  /// system-managed and can't be injected, so the view exposes a test-only override.
+  /// Active under reduce-motion — the shimmer is held flat. `accessibilityReduceMotion` is a
+  /// read-only `KeyPath` (not `WritableKeyPath`), so it can't be injected via `.environment`;
+  /// the view exposes a test-only override instead.
   func testThinking_active_reduceMotion() {
     let view = host(
       ThinkingIndicatorView(

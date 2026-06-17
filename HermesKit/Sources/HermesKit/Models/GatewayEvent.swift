@@ -99,13 +99,121 @@ public struct Usage: Equatable, Sendable, Decodable {
   public var contextMax: Int?
   public var contextPercent: Int?
   public var costUSD: Double?
+  /// Number of context compactions ("compressions") so far this session. The
+  /// gateway sends this as `compressions` (verified in `tui_gateway/server.py`
+  /// `_get_usage`); only present once a context compressor is attached.
+  public var compressions: Int?
 
   enum CodingKeys: String, CodingKey {
-    case model, input, output, total
+    case model, input, output, total, compressions
     case contextUsed = "context_used"
     case contextMax = "context_max"
     case contextPercent = "context_percent"
     case costUSD = "cost_usd"
+  }
+
+  public init(
+    model: String? = nil, input: Int? = nil, output: Int? = nil, total: Int? = nil,
+    contextUsed: Int? = nil, contextMax: Int? = nil, contextPercent: Int? = nil,
+    costUSD: Double? = nil, compressions: Int? = nil
+  ) {
+    self.model = model
+    self.input = input
+    self.output = output
+    self.total = total
+    self.contextUsed = contextUsed
+    self.contextMax = contextMax
+    self.contextPercent = contextPercent
+    self.costUSD = costUSD
+    self.compressions = compressions
+  }
+}
+
+// MARK: - Context-usage display model
+
+/// Severity buckets for the context-window gauge, mirroring the Hermes TUI status-bar
+/// thresholds: `<50` normal, `≥50` moderate, `>80` high, `≥95` critical.
+public enum ContextSeverity: String, Equatable, Sendable, CaseIterable {
+  case normal
+  case moderate
+  case high
+  case critical
+
+  /// Map a context-usage percent (`0...100+`) to its severity bucket.
+  /// Thresholds: `<50` normal, `[50, 80]` moderate, `(80, 95)` high, `≥95` critical.
+  public init(percent: Double) {
+    if percent >= 95 {
+      self = .critical
+    } else if percent > 80 {
+      self = .high
+    } else if percent >= 50 {
+      self = .moderate
+    } else {
+      self = .normal
+    }
+  }
+}
+
+/// Compact `k`/`M` token formatting mirroring the TUI's compact display.
+/// Examples: `999 → "999"`, `1_250 → "1k"`, `125_000 → "125k"`, `1_500_000 → "1.5M"`.
+/// The `k` range rounds to a whole thousand; the `M` range keeps one decimal.
+public func formatTokens(_ n: Int) -> String {
+  let value = max(0, n)
+  if value < 1_000 {
+    return "\(value)"
+  }
+  if value < 1_000_000 {
+    let k = (Double(value) / 1_000).rounded()
+    return "\(Int(k))k"
+  }
+  let m = (Double(value) / 1_000_000 * 10).rounded() / 10
+  if m == m.rounded() {
+    return "\(Int(m))M"
+  }
+  return "\(String(format: "%.1f", m))M"
+}
+
+extension Usage {
+  /// Short label for the gauge:
+  /// - `"125k/200k"` when `contextMax` is known,
+  /// - `"125k tok"` when only used/total tokens are known,
+  /// - `nil` when nothing usable is known.
+  public var tokenLabel: String? {
+    let used = contextUsed ?? total
+    if let maxTokens = contextMax, maxTokens > 0 {
+      let usedValue = used ?? 0
+      return "\(formatTokens(usedValue))/\(formatTokens(maxTokens))"
+    }
+    if let used, used > 0 {
+      return "\(formatTokens(used)) tok"
+    }
+    return nil
+  }
+
+  /// Fill fraction `0...1` for the bar:
+  /// - `contextPercent/100` (clamped) when present,
+  /// - else `contextUsed/contextMax` when both known,
+  /// - `nil` when the max is unknown (caller renders text-only, no bar).
+  public var contextFraction: Double? {
+    if let percent = contextPercent {
+      return min(1, max(0, Double(percent) / 100))
+    }
+    if let used = contextUsed, let maxTokens = contextMax, maxTokens > 0 {
+      return min(1, max(0, Double(used) / Double(maxTokens)))
+    }
+    return nil
+  }
+
+  /// Severity bucket derived from `contextPercent` (falling back to `contextFraction * 100`).
+  /// Defaults to `.normal` when nothing is known.
+  public var severity: ContextSeverity {
+    if let percent = contextPercent {
+      return ContextSeverity(percent: Double(percent))
+    }
+    if let fraction = contextFraction {
+      return ContextSeverity(percent: fraction * 100)
+    }
+    return .normal
   }
 }
 

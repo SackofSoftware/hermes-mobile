@@ -127,18 +127,19 @@ display model, and render it.
 - Modify: `HermesKit/Sources/HermesKit/Models/GatewayEvent.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ContextUsageTests.swift`
 
-- [ ] Add a `ContextSeverity` enum (`normal`/`moderate`/`high`/`critical`) — public, `Sendable`.
-- [ ] Add `formatTokens(_ n: Int) -> String` (`k`/`M` compaction) as a pure func/static.
-- [ ] Add computed props on `Usage`: `tokenLabel: String?`, `contextFraction: Double?`,
+- [x] Add a `ContextSeverity` enum (`normal`/`moderate`/`high`/`critical`) — public, `Sendable`.
+- [x] Add `formatTokens(_ n: Int) -> String` (`k`/`M` compaction) as a pure func/static.
+- [x] Add computed props on `Usage`: `tokenLabel: String?`, `contextFraction: Double?`,
       `severity: ContextSeverity` per the thresholds in Technical Details.
-- [ ] Verify whether the wire carries a compaction count; if so add an optional
-      `compressions: Int?` field + `CodingKey` to `Usage` (lenient, optional).
-- [ ] Write tests: `formatTokens` boundaries (`<1k`, `k`, `M`, exact thresholds);
+- [x] Verify whether the wire carries a compaction count; if so add an optional
+      `compressions: Int?` field + `CodingKey` to `Usage` (lenient, optional). (Confirmed:
+      gateway sends `compressions` Int — `tui_gateway/server.py` `_get_usage`. Added.)
+- [x] Write tests: `formatTokens` boundaries (`<1k`, `k`, `M`, exact thresholds);
       `tokenLabel` for max-known / used-only / total-only / empty; `contextFraction`
       clamping and percent-vs-ratio fallback.
-- [ ] Write tests: `severity` at boundary percents (49/50/80/81/94/95/100) — success +
+- [x] Write tests: `severity` at boundary percents (49/50/80/81/94/95/100) — success +
       edge cases.
-- [ ] Run tests — must pass before Task 2: `script -q /dev/null swift test --package-path HermesKit`
+- [x] Run tests — must pass before Task 2: `script -q /dev/null swift test --package-path HermesKit`
 
 ### Task 2: Capture usage in `ChatFeature`
 

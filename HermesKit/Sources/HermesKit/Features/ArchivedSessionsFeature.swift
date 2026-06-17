@@ -10,6 +10,11 @@ public struct ArchivedSessionsFeature {
   @ObservableState
   public struct State: Equatable {
     public var connection: ServerConnection
+    /// Active profile to scope the archived list/restore to — `nil` for the default
+    /// profile or when profiles are unsupported (matches `scopedProfileName`). When set,
+    /// listing/restore go through the profile-scoped endpoints so they hit the right
+    /// profile's `state.db` rather than the default's.
+    public var profileName: String?
     public var sessions: IdentifiedArrayOf<Session>
     public var isLoading: Bool
     public var loadError: String?
@@ -20,6 +25,7 @@ public struct ArchivedSessionsFeature {
 
     public init(
       connection: ServerConnection,
+      profileName: String? = nil,
       sessions: IdentifiedArrayOf<Session> = [],
       isLoading: Bool = false,
       loadError: String? = nil,
@@ -27,6 +33,7 @@ public struct ArchivedSessionsFeature {
       restoringIDs: Set<String> = []
     ) {
       self.connection = connection
+      self.profileName = profileName
       self.sessions = sessions
       self.isLoading = isLoading
       self.loadError = loadError
@@ -54,6 +61,7 @@ public struct ArchivedSessionsFeature {
   }
 
   @Dependency(\.hermesREST) var rest
+  @Dependency(\.hermesProfiles) var profiles
   @Dependency(\.date.now) var now
 
   public init() {}
@@ -65,9 +73,15 @@ public struct ArchivedSessionsFeature {
         state.now = now
         state.isLoading = true
         state.loadError = nil
-        return .run { [rest, connection = state.connection] send in
+        return .run { [rest, profiles, connection = state.connection, profileName = state.profileName] send in
           do {
-            let sessions = try await rest.archivedSessions(connection, 100, 0)
+            let sessions: [Session]
+            if let profileName {
+              // Profile-scoped list → hits this profile's `state.db`, not the default's.
+              sessions = try await profiles.sessions(connection, profileName, .only, .recent, 100, 0)
+            } else {
+              sessions = try await rest.archivedSessions(connection, 100, 0)
+            }
             await send(.archivedResponse(.success(sessions)))
           } catch let error as RESTError {
             await send(.archivedResponse(.failure(error)))
@@ -97,9 +111,9 @@ public struct ArchivedSessionsFeature {
         let session = state.sessions[index]
         state.sessions.remove(id: id)
         state.restoringIDs.insert(id)
-        return .run { [rest, connection = state.connection] send in
+        return .run { [rest, connection = state.connection, profileName = state.profileName] send in
           do {
-            try await rest.archive(connection, id, false, nil) // archived:false = restore
+            try await rest.archive(connection, id, false, profileName) // archived:false = restore
             await send(.restoreSucceeded(id: id))
           } catch {
             await send(.restoreFailed(id: id, session: session, index: index))

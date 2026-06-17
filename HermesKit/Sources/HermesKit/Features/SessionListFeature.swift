@@ -551,7 +551,11 @@ public struct SessionListFeature {
         return .none
 
       case .archivedButtonTapped:
-        state.archived = ArchivedSessionsFeature.State(connection: state.connection, now: state.now)
+        state.archived = ArchivedSessionsFeature.State(
+          connection: state.connection,
+          profileName: state.scopedProfileName,
+          now: state.now
+        )
         return .none
 
       case let .archived(.presented(.delegate(.openSession(session)))):

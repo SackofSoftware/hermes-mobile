@@ -381,14 +381,14 @@ the response body — the banner only ever showed the generic `Server error (400
 - Create: `HermesMobile/Sources/.../AddProfileView.swift`
 - Modify: `HermesMobileTests/.../AddProfileSnapshotTests.swift`
 
-- [ ] build the form: Name field (with inline error styling + `ProfileName.hint` helper
+- [x] build the form: Name field (with inline error styling + `ProfileName.hint` helper
       text), "Clone from default" toggle (default on, with the desktop helper copy),
       optional multiline SOUL.md field (placeholder copy), a server-error warning banner
       below the form, primary **Create profile** (disabled unless `canCreate`) +
       secondary **Cancel**
-- [ ] run `tuist generate`; add/record snapshots: pristine, inline-invalid-name
+- [x] run `tuist generate`; add/record snapshots: pristine, inline-invalid-name
       (`testOS`), and server-400-banner states
-- [ ] `make snapshot` — must pass before next task
+- [x] `make snapshot` — must pass before next task
 
 ### Task 13: Verify acceptance criteria
 

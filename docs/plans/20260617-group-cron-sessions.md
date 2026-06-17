@@ -201,13 +201,20 @@ Dependencies identified:
 - Modify: `HermesMobileTests/SessionSnapshotTests.swift`
 - Modify: `HermesMobileTests/__Snapshots__/` (recorded images)
 
-- [ ] add `testSessionList_cronSection` with a fixture mixing cron + interactive
+- [x] add `testSessionList_cronSection` with a fixture mixing cron + interactive
       sessions (pin/timestamps pinned for determinism, mirroring existing cases)
-- [ ] add a case asserting the Cron Jobs section is absent when no cron sessions
+      — added `testSessionList_cronSection` (workspace) plus a
+      `testSessionList_cronSection_chronological` variant covering the other mode
+- [x] add a case asserting the Cron Jobs section is absent when no cron sessions
       exist (e.g. reuse `testSessionList` expectations — guards an empty header)
-- [ ] record snapshots: `make snapshot-record`, then verify with `make snapshot`
-- [ ] visually inspect the recorded image (Clock icon, section placement)
-- [ ] run snapshot suite — must pass before Task 5
+      — added explicit `testSessionList_noCronSection` (all `source == nil`)
+- [x] record snapshots: `make snapshot-record`, then verify with `make snapshot`
+      — recorded 3 new PNGs under `__Snapshots__/SessionSnapshotTests/`;
+      `make snapshot` → TEST SUCCEEDED
+- [x] visually inspect the recorded image (Clock icon, section placement)
+      — NOTE: agent cannot view images; verified the 3 PNGs were created/updated and
+      `make snapshot` passes. Visual confirmation (Clock icon, placement) deferred to human.
+- [x] run snapshot suite — must pass before Task 5 — `make snapshot` passes
 
 ### Task 5: Verify acceptance criteria
 

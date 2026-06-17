@@ -196,6 +196,139 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  // MARK: Cron Jobs section
+
+  /// A mix of interactive + cron sessions: the cron rows are pulled out into a dedicated
+  /// "Cron Jobs" section (Clock icon) below the interactive workspace groups, in workspace
+  /// grouping mode.
+  func testSessionList_cronSection() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    // 3 interactive sessions in one workspace.
+    var sessions: [Session] = (0..<3).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    // 2 cron sessions — recency-ordered into their own Cron Jobs section.
+    sessions.append(contentsOf: (0..<2).map { i in
+      Session(id: "c\(i)",
+              title: ["Nightly backup", "Weekly digest"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_540_000 - Double(i) * 3_600),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_540_000 - Double(i) * 3_600),
+              messageCount: 5,
+              source: "cron")
+    })
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            expandedGroups: [mobile]
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// The Cron Jobs section is orthogonal to the grouping mode: even in chronological mode
+  /// the interactive list stays flat while cron rows still break out into their own section.
+  func testSessionList_cronSection_chronological() {
+    let now = self.now
+    var sessions: [Session] = (0..<4).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass",
+                      "Model picker"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: i.isMultiple(of: 2) ? "/Users/me/dev/hermes-mobile" : "/Users/me/dev/hermes-agent",
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    sessions.append(
+      Session(id: "c0", title: "Nightly backup",
+              updatedAt: Date(timeIntervalSince1970: 1_749_540_000),
+              cwd: "/Users/me/dev/hermes-mobile",
+              startedAt: Date(timeIntervalSince1970: 1_749_540_000),
+              messageCount: 5, source: "cron")
+    )
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            groupingMode: .chronological
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Regression guard: with zero cron sessions, no "Cron Jobs" section header renders —
+  /// the list is just the interactive sessions (mirrors `testSessionList`'s no-cron
+  /// fixture). All sessions here are interactive (`source == nil`).
+  func testSessionList_noCronSection() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = (0..<3).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            expandedGroups: [mobile]
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   // MARK: Profile pill
 
   /// A list of fixtures shared by the profile-pill snapshots: a default + two custom

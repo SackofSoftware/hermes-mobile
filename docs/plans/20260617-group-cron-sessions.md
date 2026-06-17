@@ -158,21 +158,21 @@ Dependencies identified:
 - Modify: `HermesKit/Tests/HermesKitTests/SessionGroupTests.swift` (only if a pure
   grouping helper is added there; otherwise leave untouched)
 
-- [ ] add a private/computed `interactiveSessions` = non-cron sessions, and rebase
+- [x] add a private/computed `interactiveSessions` = non-cron sessions, and rebase
       `pinnedSessions` / `unpinnedSessions` onto it (so cron never feeds pinned or
       the workspace/chronological groups)
-- [ ] add `public var cronSessions: [Session]` — cron sessions sorted by
+- [x] add `public var cronSessions: [Session]` — cron sessions sorted by
       `updatedAt` desc (nil last), matching `chronologicalSessions`
-- [ ] verify `groups` / `chronologicalSessions` now derive from the non-cron
+- [x] verify `groups` / `chronologicalSessions` now derive from the non-cron
       remainder (no separate change if they already build on `unpinnedSessions`)
-- [ ] write a test: mixed cron + interactive sessions → `cronSessions` contains only
+- [x] write a test: mixed cron + interactive sessions → `cronSessions` contains only
       cron (recency-ordered) and `groups`/`chronologicalSessions`/`pinnedSessions`
       exclude them
-- [ ] write a test: a pinned id that is also cron → appears in `cronSessions`, not
+- [x] write a test: a pinned id that is also cron → appears in `cronSessions`, not
       in `pinnedSessions` (documents the edge-case resolution)
-- [ ] write a test: zero cron sessions → `cronSessions == []`, interactive list
+- [x] write a test: zero cron sessions → `cronSessions == []`, interactive list
       identical to pre-change behavior (regression guard)
-- [ ] run tests — must pass before Task 3
+- [x] run tests — must pass before Task 3
 
 ### Task 3: Render the Cron Jobs section in `SessionListView`
 

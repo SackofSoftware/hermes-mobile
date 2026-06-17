@@ -128,15 +128,31 @@ public struct SessionListFeature {
       !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// Pinned sessions resolved from `pinnedIDs`, in pin order; stale ids are dropped.
-    public var pinnedSessions: [Session] {
-      pinnedIDs.compactMap { sessions[id: $0] }
+    /// Cron-scheduled sessions, pulled out of the interactive list and shown in their own
+    /// always-on "Cron Jobs" section. Sorted by recency (`updatedAt` desc, `nil` last),
+    /// mirroring `chronologicalSessions`.
+    public var cronSessions: [Session] {
+      sessions.filter(\.isCron)
+        .sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
     }
 
-    /// Sessions not pinned — these feed the workspace grouping.
+    /// The non-cron remainder — everything the pinning/workspace/chronological computeds
+    /// operate on, so cron sessions never feed the interactive sections (a pinned-but-cron
+    /// id surfaces only under Cron Jobs).
+    public var interactiveSessions: [Session] {
+      sessions.filter { !$0.isCron }
+    }
+
+    /// Pinned sessions resolved from `pinnedIDs`, in pin order; stale ids are dropped. Cron
+    /// sessions are excluded (they belong to the Cron Jobs section), even if pinned.
+    public var pinnedSessions: [Session] {
+      pinnedIDs.compactMap { id in sessions[id: id].flatMap { $0.isCron ? nil : $0 } }
+    }
+
+    /// Non-cron sessions not pinned — these feed the workspace grouping.
     public var unpinnedSessions: [Session] {
       let pinned = Set(pinnedIDs)
-      return sessions.filter { !pinned.contains($0.id) }
+      return interactiveSessions.filter { !pinned.contains($0.id) }
     }
 
     /// Sessions grouped by workspace for the (non-search) list, desktop-style.

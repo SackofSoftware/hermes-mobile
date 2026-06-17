@@ -11,6 +11,9 @@ struct ComposerView: View {
   let canSend: Bool
   let model: String?
   let reasoningEffort: String?
+  /// Context-window usage (#4): a compact gauge beside the model chip. Hidden when nil or
+  /// when the usage has no usable label.
+  var usage: Usage? = nil
   /// Voice-input state (#7): drives whether the composer shows text entry or the recorder.
   var recording: ChatFeature.State.RecordingState = .idle
   var waveformLevels: [Float] = []
@@ -54,6 +57,7 @@ struct ComposerView: View {
 
       HStack(spacing: 12) {
         modelChip
+        if let usage { ContextUsagePill(usage: usage) }
         Spacer()
         if attachmentsSupported { attachButton }
         voiceButton

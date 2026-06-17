@@ -167,19 +167,22 @@ display model, and render it.
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 - Modify: `HermesMobile/Sources/Features/Chat/Color+Hermes.swift` (severity → color)
 
-- [ ] Create `ContextUsagePill` view: thin capsule progress bar + label (`62%` or
+- [x] Create `ContextUsagePill` view: thin capsule progress bar + label (`62%` or
       `125k/200k`), color from `severity`, paired numeric label (no color-only meaning).
-- [ ] Unknown-max state: render `125k tok` text only, no bar.
-- [ ] Animate fraction/bar changes gently; hold flat under reduce-motion
+      (Label uses `usage.tokenLabel`; bar fraction `usage.contextFraction`.)
+- [x] Unknown-max state: render `125k tok` text only, no bar.
+- [x] Animate fraction/bar changes gently; hold flat under reduce-motion
       (`@Environment(\.accessibilityReduceMotion)`).
-- [ ] Add `usage: Usage?` param to `ComposerView`; place the pill in the toolbar `HStack`
+- [x] Add `usage: Usage?` param to `ComposerView`; place the pill in the toolbar `HStack`
       beside `modelChip` (`:55-56`). Hide the pill entirely when `usage == nil` / no label.
-- [ ] Pass `store.usage` from `ChatView` into `ComposerView`.
-- [ ] Run `tuist generate` so the new source file is picked up by the app/snapshot target.
-- [ ] Add snapshot tests (`HermesMobileTests/ComposerSnapshotTests.swift` or a new
-      `ContextUsageSnapshotTests.swift`) at 40% / 85% / 97% and unknown-max; record with
-      `make snapshot-record`, then assert with `make snapshot`.
-- [ ] Run tests — must pass before Task 4.
+- [x] Pass `store.usage` from `ChatView` into `ComposerView`.
+- [x] Run `tuist generate` so the new source file is picked up by the app/snapshot target.
+      (`make generate`.)
+- [x] Add snapshot tests (new `ContextUsageSnapshotTests.swift`) at 40% / 85% / 97% and
+      unknown-max (plus an in-composer case); recorded with `make snapshot-record`, asserted
+      with `make snapshot`. (Severity→color mapping lives local to the pill, so
+      `Color+Hermes.swift` was left unchanged.)
+- [x] Run tests — must pass before Task 4. (37 snapshot tests pass; 242 HermesKit unit tests pass.)
 
 ### Task 4: Expandable detail popover
 

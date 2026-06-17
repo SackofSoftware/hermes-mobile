@@ -22,6 +22,7 @@ struct ChatView: View {
         canSend: store.canSend,
         model: store.model,
         reasoningEffort: store.reasoningEffort,
+        usage: store.usage,
         recording: store.recording,
         waveformLevels: store.waveformLevels,
         recordingSeconds: store.recordingSeconds,

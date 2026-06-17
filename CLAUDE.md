@@ -56,7 +56,13 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   chat" is a bottom bar via **`.safeAreaInset(edge: .bottom)`** (a `.bottomBar` toolbar
   renders blank in the snapshot host). **Archived** is a server query (`?archived=only`)
   shown in a sheet (`ArchivedSessionsFeature`); restore = `archive(id, false)`; tap-to-open
-  bubbles up the existing `openSession` delegate.
+  bubbles up the existing `openSession` delegate. **Cron sessions** (`source == "cron"`,
+  decoded onto `Session` via `SessionListDTO`) are pulled into an **always-on, separate
+  "Cron Jobs" section** — orthogonal to the grouping mode (no new `SessionGroupingMode`
+  case). The partition lives in the reducer's computed state (`cronSessions` vs the
+  non-cron `interactiveSessions` that feeds `pinnedSessions`/`groups`/`chronologicalSessions`),
+  so cron rows never appear in Pinned/workspace/chronological. Rendered with a `clock`-icon
+  header below the interactive sections, and **not shown during search** (search stays flat).
 - **Auto-poll** (e.g. the session-list working glow): a cancellable `continuousClock`
   `sleep`-loop effect started on `.task` and cancelled by an explicit `.onDisappear`
   action — not a bare `.task` cancellation. Pause it while searching. Testable with

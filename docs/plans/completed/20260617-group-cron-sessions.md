@@ -228,10 +228,10 @@ Dependencies identified:
 
 ### Task 6: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` session-list grouping note if the Cron Jobs partition is a
+- [x] update `CLAUDE.md` session-list grouping note if the Cron Jobs partition is a
       convention worth recording (always-on, cron-only, filtered in the reducer)
-- [ ] update `README.md` feature overview if it enumerates session-list grouping
-- [ ] move this plan to `docs/plans/completed/`
+- [x] README does not enumerate grouping — no change needed
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

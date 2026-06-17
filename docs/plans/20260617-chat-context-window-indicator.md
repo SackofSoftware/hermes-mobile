@@ -209,13 +209,22 @@ display model, and render it.
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] Verify the pill shows used/max + percent on the chat screen, color-coded per TUI
-      thresholds, matching issue #4's intent.
-- [ ] Verify unknown-max renders `tok`-only (no misleading empty bar).
-- [ ] Verify `usage == nil` (fresh session, old agent) renders nothing — no crash, no empty
-      pill.
-- [ ] Run full unit suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] Run snapshots: `make snapshot`.
+- [x] Verify the pill shows used/max + percent on the chat screen, color-coded per TUI
+      thresholds, matching issue #4's intent. (Verified: `ContextUsagePill.swift:24-67` renders
+      bar + `usage.tokenLabel`; tint from `ContextSeverity.tint` (`:131-143`, green/yellow/orange/red);
+      thresholds in `GatewayEvent.swift:144-154` `<50`/`≥50`/`>80`/`≥95`; baselines at 40/85/97%
+      in `testContextPill_fillLevels`.)
+- [x] Verify unknown-max renders `tok`-only (no misleading empty bar). (Verified:
+      `contextFraction == nil` when max absent (`GatewayEvent.swift:197-205`) so `bar()` is gated
+      by `if let fraction` (`ContextUsagePill.swift:30`); `testContextPill_unknownMax` baseline
+      shows text only.)
+- [x] Verify `usage == nil` (fresh session, old agent) renders nothing — no crash, no empty
+      pill. (Verified: `ComposerView.swift:60` gates `if let usage`; the pill itself wraps
+      everything in `if let label = usage.tokenLabel` (`ContextUsagePill.swift:24`), so a usage
+      with no usable label is EmptyView. No defect.)
+- [x] Run full unit suite: `script -q /dev/null swift test --package-path HermesKit` (242 tests
+      in 22 suites passed).
+- [x] Run snapshots: `make snapshot`. (TEST SUCCEEDED — 39 tests passed, 0 failed.)
 
 ### Task 6: Documentation
 

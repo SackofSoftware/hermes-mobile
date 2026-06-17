@@ -232,7 +232,8 @@ public struct SessionListFeature {
     case renameProfileFailed(previousProfiles: IdentifiedArrayOf<Profile>, previousSelected: String)
     /// Ask to delete a custom profile (presents the confirmation dialog).
     case deleteProfileButtonTapped(name: String)
-    /// Delete PATCH succeeded — refresh profiles and (if the deleted one was active) re-home.
+    /// Delete PATCH succeeded — remove the profile locally and, if it was active, re-home to
+    /// default and refetch sessions.
     case deleteProfileSucceeded(name: String)
     /// Delete failed — surface the error (no local state was changed yet).
     case deleteProfileFailed

@@ -263,22 +263,22 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - Create: `HermesKit/Sources/HermesKit/Features/AddProfileFeature.swift`
 - Create: `HermesKit/Tests/HermesKitTests/AddProfileFeatureTests.swift`
 
-- [ ] State: `name`, `cloneFromDefault: Bool = true`, `soul: String`, `isCreating: Bool`,
+- [x] State: `name`, `cloneFromDefault: Bool = true`, `soul: String`, `isCreating: Bool`,
       `errorBanner: String?`, `connection: ServerConnection`; computed
       `nameError: String?` (nil unless non-empty & invalid → `ProfileName.hint`) and
       `canCreate: Bool` (non-empty, valid, not creating)
-- [ ] Actions: `binding`, `createTapped`, `createResponse(Result<String, …>)`,
+- [x] Actions: `binding`, `createTapped`, `createResponse(Result<String, …>)`,
       `cancelTapped`; delegate `.created(name:)` so the parent refreshes/selects
-- [ ] `createTapped` effect: `profiles.create` then, if `soul` non-blank,
+- [x] `createTapped` effect: `profiles.create` then, if `soul` non-blank,
       `profiles.updateSoul`; success → `.delegate(.created(name))`; failure → map to
       `errorBanner` (surface server 400 `detail` verbatim via `RESTError.message`)
-- [ ] use `@Dependency(\.hermesProfiles)`; capture it explicitly in the `@Sendable` effect
-- [ ] write tests: typing `testOS` sets `nameError` and `canCreate == false`; valid name
+- [x] use `@Dependency(\.hermesProfiles)`; capture it explicitly in the `@Sendable` effect
+- [x] write tests: typing `testOS` sets `nameError` and `canCreate == false`; valid name
       enables create
-- [ ] write tests: create success emits `.delegate(.created)` and calls `updateSoul` only
+- [x] write tests: create success emits `.delegate(.created)` and calls `updateSoul` only
       when soul non-blank
-- [ ] write tests: server 400 sets `errorBanner` to the server `detail` and clears `isCreating`
-- [ ] run tests — must pass before next task
+- [x] write tests: server 400 sets `errorBanner` to the server `detail` and clears `isCreating`
+- [x] run tests — must pass before next task
 
 ### Task 8: `SessionListFeature` — profiles state, switching, capability gating, presentation
 

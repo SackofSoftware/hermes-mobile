@@ -91,7 +91,7 @@ public struct AppFeature {
           ChatFeature.State(
             connection: home.connection,
             resumeStoredID: session.id,
-            profileName: home.selectedProfileName,
+            profileName: home.scopedProfileName,
             title: session.resolvedTitle
           )
         )
@@ -101,7 +101,7 @@ public struct AppFeature {
         guard let home = state.home else { return .none }
         // New chats are created under the currently-selected profile.
         state.path.append(
-          ChatFeature.State(connection: home.connection, profileName: home.selectedProfileName)
+          ChatFeature.State(connection: home.connection, profileName: home.scopedProfileName)
         )
         return .none
 

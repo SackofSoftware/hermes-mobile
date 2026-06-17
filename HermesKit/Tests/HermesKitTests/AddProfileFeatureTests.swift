@@ -109,4 +109,16 @@ struct AddProfileFeatureTests {
       $0.errorBanner = RESTError.server(status: 400).message
     }
   }
+
+  @Test func cancelTappedDismissesTheSheet() async {
+    let dismissed = LockIsolated(false)
+    let store = TestStore(initialState: AddProfileFeature.State(connection: connection)) {
+      AddProfileFeature()
+    } withDependencies: {
+      $0.dismiss = DismissEffect { dismissed.setValue(true) }
+    }
+
+    await store.send(.cancelTapped)
+    #expect(dismissed.value == true)
+  }
 }

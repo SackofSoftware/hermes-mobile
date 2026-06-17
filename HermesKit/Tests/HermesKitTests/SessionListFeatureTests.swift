@@ -1181,4 +1181,229 @@ struct SessionListFeatureTests {
     }
     #expect(prefs.loadSelectedProfileID() == "work")
   }
+
+  // (a) The persisted profile no longer exists on the server → re-home to default and fetch
+  // the default's (scoped) sessions unscoped-by-default-name.
+  @Test func taskReHomesWhenPersistedProfileMissing() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveSelectedProfileID("gone")
+    let scopedFetch = LockIsolated<[String]>([])
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.preferences = prefs
+      $0.hermesProfiles.list = { @Sendable _ in
+        [Profile(name: "default", isDefault: true), Profile(name: "work")]
+      }
+      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
+        scopedFetch.withValue { $0.append(profile) }
+        return [Session(id: "d1")]
+      }
+    }
+
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+      $0.selectedProfileName = "gone" // loaded from the (now-stale) persisted pref
+    }
+    await store.receive(\.profilesResponse.success) {
+      $0.profilesSupported = true
+      $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work")]
+      $0.selectedProfileName = "default" // re-homed because "gone" is absent
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "d1")]
+      $0.seenCounts = ["d1": 0]
+    }
+    #expect(prefs.loadSelectedProfileID() == "default") // persisted re-home
+    #expect(scopedFetch.value == ["default"]) // scoped to default
+    await store.send(.onDisappear)
+  }
+
+  // (b) Deleting a NON-active profile removes it without touching the selection or refetching.
+  @Test func deleteNonActiveProfileLeavesSelectionAndDoesNotRefetch() async {
+    let prefs = PreferencesClient.inMemory()
+    let deleted = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "default",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesProfiles.delete = { @Sendable _, name in deleted.withValue { $0.append(name) } }
+    }
+
+    await store.send(.deleteProfileButtonTapped(name: "work")) {
+      $0.confirmationDialog = ConfirmationDialogState {
+        TextState("Delete profile?")
+      } actions: {
+        ButtonState(role: .destructive, action: .confirmDeleteProfile(name: "work")) {
+          TextState("Delete")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState("This permanently deletes the profile and its sessions on the server.")
+      }
+    }
+    await store.send(.confirmationDialog(.presented(.confirmDeleteProfile(name: "work")))) {
+      $0.confirmationDialog = nil
+    }
+    // Non-active deletion: profile removed, selection untouched, no re-home/refetch.
+    await store.receive(\.deleteProfileSucceeded) {
+      $0.profiles = [Profile(name: "default", isDefault: true)]
+    }
+    #expect(deleted.value == ["work"])
+    #expect(store.state.selectedProfileName == "default")
+  }
+
+  // (c) Delete RPC throws → surface the error and leave the list intact.
+  @Test func deleteProfileFailureSetsErrorAndRestoresList() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "default",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.hermesProfiles.delete = { @Sendable _, _ in throw RESTError.server(status: 500) }
+    }
+
+    await store.send(.deleteProfileButtonTapped(name: "work")) {
+      $0.confirmationDialog = ConfirmationDialogState {
+        TextState("Delete profile?")
+      } actions: {
+        ButtonState(role: .destructive, action: .confirmDeleteProfile(name: "work")) {
+          TextState("Delete")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState("This permanently deletes the profile and its sessions on the server.")
+      }
+    }
+    await store.send(.confirmationDialog(.presented(.confirmDeleteProfile(name: "work")))) {
+      $0.confirmationDialog = nil
+    }
+    await store.receive(\.deleteProfileFailed) {
+      $0.loadError = "Couldn’t delete the profile."
+    }
+    // The list is untouched — nothing was optimistically removed.
+    #expect(store.state.profiles.map(\.name) == ["default", "work"])
+  }
+
+  // (d) A real differing rename succeeds: the RPC is called with (name, newName), the
+  // optimistic name stands, no rollback.
+  @Test func renameCustomProfileSucceeds() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveSelectedProfileID("work")
+    let renamed = LockIsolated<[(String, String)]>([])
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "work",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+      $0.hermesProfiles.rename = { @Sendable _, name, newName in
+        renamed.withValue { $0.append((name, newName)) }
+      }
+    }
+
+    await store.send(.renameProfileButtonTapped(name: "work", newName: "work-renamed")) {
+      $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work-renamed")]
+      $0.selectedProfileName = "work-renamed"
+    }
+    await store.receive(\.renameProfileSucceeded) // optimistic value stands, no rollback
+    #expect(renamed.value.count == 1)
+    #expect(renamed.value.first?.0 == "work")
+    #expect(renamed.value.first?.1 == "work-renamed")
+    #expect(prefs.loadSelectedProfileID() == "work-renamed")
+  }
+
+  // The rename ALERT flow: open seeds the draft, confirm forwards the entered name.
+  @Test func renameProfileAlertOpensAndConfirms() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveSelectedProfileID("work")
+    let renamed = LockIsolated<[(String, String)]>([])
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "work",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+      $0.hermesProfiles.rename = { @Sendable _, name, newName in
+        renamed.withValue { $0.append((name, newName)) }
+      }
+    }
+
+    // Opening the alert seeds the draft with the current name.
+    await store.send(.renameProfileTapped(name: "work")) {
+      $0.renamingProfileName = "work"
+      $0.profileRenameDraft = "work"
+    }
+    // User edits the draft.
+    await store.send(.binding(.set(\.profileRenameDraft, "work-2"))) {
+      $0.profileRenameDraft = "work-2"
+    }
+    // Confirm clears the alert and forwards the entered name to the rename action.
+    await store.send(.confirmRenameProfile) {
+      $0.renamingProfileName = nil
+      $0.profileRenameDraft = ""
+    }
+    await store.receive(\.renameProfileButtonTapped) {
+      $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work-2")]
+      $0.selectedProfileName = "work-2"
+    }
+    await store.receive(\.renameProfileSucceeded)
+    #expect(renamed.value.first?.1 == "work-2")
+  }
+
+  // Cancelling the rename alert dismisses it without renaming.
+  @Test func renameProfileAlertCancelDismisses() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
+        selectedProfileName: "work",
+        profilesSupported: true
+      )
+    ) {
+      SessionListFeature()
+    }
+
+    await store.send(.renameProfileTapped(name: "work")) {
+      $0.renamingProfileName = "work"
+      $0.profileRenameDraft = "work"
+    }
+    await store.send(.cancelRenameProfile) {
+      $0.renamingProfileName = nil
+      $0.profileRenameDraft = ""
+    }
+    #expect(store.state.profiles.map(\.name) == ["default", "work"])
+  }
 }

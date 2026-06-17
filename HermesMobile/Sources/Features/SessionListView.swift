@@ -90,6 +90,21 @@ struct SessionListView: View {
       Button("Save") { store.send(.confirmRename) }
       Button("Cancel", role: .cancel) { store.send(.cancelRename) }
     }
+    .alert(
+      "Rename profile",
+      isPresented: Binding(
+        get: { store.renamingProfileName != nil },
+        set: { presented in if !presented { store.send(.cancelRenameProfile) } }
+      )
+    ) {
+      TextField("Profile name", text: $store.profileRenameDraft)
+        .textInputAutocapitalization(.never)
+        .autocorrectionDisabled()
+      Button("Save") { store.send(.confirmRenameProfile) }
+      Button("Cancel", role: .cancel) { store.send(.cancelRenameProfile) }
+    } message: {
+      Text(ProfileName.hint)
+    }
     .confirmationDialog($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .sheet(item: $store.scope(state: \.settings, action: \.settings)) { settingsStore in
       NavigationStack {
@@ -156,7 +171,7 @@ struct SessionListView: View {
           }
           Divider()
           Button {
-            store.send(.renameProfileButtonTapped(name: profile.name, newName: profile.name))
+            store.send(.renameProfileTapped(name: profile.name))
           } label: {
             Label("Rename", systemImage: "pencil")
           }
@@ -182,7 +197,7 @@ struct SessionListView: View {
 
   private var isSelectedDefault: Bool {
     store.profiles[id: store.selectedProfileName]?.isDefault
-      ?? (store.selectedProfileName == "default")
+      ?? (store.selectedProfileName == SessionListFeature.State.defaultProfileName)
   }
 
   /// The bottom "new session" button — a trailing circular FAB in the Hermes accent

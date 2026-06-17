@@ -74,7 +74,8 @@ struct AppFeatureTests {
         ChatFeature.State(
           connection: self.connection,
           resumeStoredID: "20260610_abc",
-          profileName: SessionListFeature.State.defaultProfileName,
+          // Default profile → unscoped (nil), so the chat is byte-identical to single-profile.
+          profileName: nil,
           title: "Protocol chat"
         )
       )
@@ -90,10 +91,7 @@ struct AppFeatureTests {
 
     await store.send(.home(.delegate(.createSession))) {
       $0.path.append(
-        ChatFeature.State(
-          connection: self.connection,
-          profileName: SessionListFeature.State.defaultProfileName
-        )
+        ChatFeature.State(connection: self.connection, profileName: nil)
       )
     }
   }
@@ -101,7 +99,9 @@ struct AppFeatureTests {
   @Test func openingSessionUnderCustomProfilePassesProfileToChat() async {
     let store = TestStore(
       initialState: AppFeature.State(
-        home: SessionListFeature.State(connection: connection, selectedProfileName: "work")
+        home: SessionListFeature.State(
+          connection: connection, selectedProfileName: "work", profilesSupported: true
+        )
       )
     ) {
       AppFeature()
@@ -123,7 +123,9 @@ struct AppFeatureTests {
   @Test func creatingSessionUnderCustomProfilePassesProfileToChat() async {
     let store = TestStore(
       initialState: AppFeature.State(
-        home: SessionListFeature.State(connection: connection, selectedProfileName: "work")
+        home: SessionListFeature.State(
+          connection: connection, selectedProfileName: "work", profilesSupported: true
+        )
       )
     ) {
       AppFeature()
@@ -132,6 +134,26 @@ struct AppFeatureTests {
     await store.send(.home(.delegate(.createSession))) {
       $0.path.append(
         ChatFeature.State(connection: self.connection, profileName: "work")
+      )
+    }
+  }
+
+  // When the agent lacks the profiles API, a stale custom pref must NOT leak into chats —
+  // `scopedProfileName` returns nil so the chat is unscoped (matches the unscoped list).
+  @Test func customProfileDoesNotLeakIntoChatWhenProfilesUnsupported() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, selectedProfileName: "work", profilesSupported: false
+        )
+      )
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.home(.delegate(.createSession))) {
+      $0.path.append(
+        ChatFeature.State(connection: self.connection, profileName: nil)
       )
     }
   }

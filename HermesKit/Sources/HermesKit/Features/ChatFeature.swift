@@ -163,10 +163,12 @@ public struct ChatFeature {
     public var canRename: Bool { liveSessionID != nil }
 
     /// The profile name to thread into session create/resume + REST scoping, or `nil` for
-    /// the default profile. Treating `"default"` as `nil` keeps requests byte-identical to
-    /// the single-profile behavior.
+    /// the default profile. Treating the default name as `nil` keeps requests byte-identical
+    /// to the single-profile behavior. The canonical default name lives on
+    /// `SessionListFeature.State.defaultProfileName` (single source of truth).
     var scopedProfile: String? {
-      guard let name = profileName, name != "default" else { return nil }
+      guard let name = profileName, name != SessionListFeature.State.defaultProfileName
+      else { return nil }
       return name
     }
   }

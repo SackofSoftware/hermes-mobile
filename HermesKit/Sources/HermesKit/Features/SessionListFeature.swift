@@ -48,6 +48,10 @@ public struct SessionListFeature {
     /// Whether the agent exposes `/api/profiles` (set false on a 404 from `profiles.list`).
     /// When false the selector is hidden and the list uses today's unscoped `/api/sessions`.
     public var profilesSupported: Bool
+    /// Custom profile currently being renamed (drives the rename alert); nil = no alert.
+    public var renamingProfileName: String?
+    /// The editable text bound to the profile-rename alert's `TextField`.
+    public var profileRenameDraft: String
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
     @Presents public var addProfile: AddProfileFeature.State?
@@ -77,6 +81,8 @@ public struct SessionListFeature {
       profiles: IdentifiedArrayOf<Profile> = [],
       selectedProfileName: String = SessionListFeature.State.defaultProfileName,
       profilesSupported: Bool = false,
+      renamingProfileName: String? = nil,
+      profileRenameDraft: String = "",
       settings: SettingsFeature.State? = nil,
       addProfile: AddProfileFeature.State? = nil
     ) {
@@ -97,6 +103,8 @@ public struct SessionListFeature {
       self.profiles = profiles
       self.selectedProfileName = selectedProfileName
       self.profilesSupported = profilesSupported
+      self.renamingProfileName = renamingProfileName
+      self.profileRenameDraft = profileRenameDraft
       self.settings = settings
       self.addProfile = addProfile
     }
@@ -210,6 +218,12 @@ public struct SessionListFeature {
     /// Open the Add-profile sheet.
     case addProfileTapped
     case addProfile(PresentationAction<AddProfileFeature.Action>)
+    /// Open the rename alert for a custom profile: seeds `profileRenameDraft` with its name.
+    case renameProfileTapped(name: String)
+    /// Commit the profile rename from the alert (sends the entered draft as `newName`).
+    case confirmRenameProfile
+    /// Dismiss the profile-rename alert without applying changes.
+    case cancelRenameProfile
     /// Begin renaming a custom profile (opens the inline rename via the dialog/menu path).
     case renameProfileButtonTapped(name: String, newName: String)
     /// Rename PATCH succeeded — the optimistic profile name stands.
@@ -261,11 +275,7 @@ public struct SessionListFeature {
       case .task:
         // Refresh "now", reload persisted prefs (incl. the device-local selected profile),
         // probe the profiles capability, and start the auto-poll loop.
-        state.now = now
-        state.loadError = nil
-        state.seenCounts = preferences.loadSeenCounts()
-        state.pinnedIDs = preferences.loadPinnedIDs()
-        state.groupingMode = preferences.loadGroupingMode()
+        reloadPrefs(&state)
         state.selectedProfileName =
           preferences.loadSelectedProfileID() ?? Self.State.defaultProfileName
         state.isLoading = true
@@ -603,6 +613,25 @@ public struct SessionListFeature {
       case .addProfile:
         return .none
 
+      case let .renameProfileTapped(name):
+        // Open the rename alert (default profile is never renamable).
+        guard let profile = state.profiles[id: name], !profile.isDefault else { return .none }
+        state.renamingProfileName = name
+        state.profileRenameDraft = profile.name
+        return .none
+
+      case .confirmRenameProfile:
+        guard let name = state.renamingProfileName else { return .none }
+        let newName = state.profileRenameDraft
+        state.renamingProfileName = nil
+        state.profileRenameDraft = ""
+        return .send(.renameProfileButtonTapped(name: name, newName: newName))
+
+      case .cancelRenameProfile:
+        state.renamingProfileName = nil
+        state.profileRenameDraft = ""
+        return .none
+
       case let .renameProfileButtonTapped(name, newName):
         // The default profile is never renamable — guard even if the view slips up.
         guard let profile = state.profiles[id: name], !profile.isDefault else { return .none }
@@ -704,15 +733,22 @@ public struct SessionListFeature {
     .ifLet(\.$confirmationDialog, action: \.confirmationDialog)
   }
 
-  /// Refresh "now", clear errors, reload persisted prefs, and fetch the session list
-  /// (profile-scoped when supported; unscoped otherwise — search always unscoped).
-  private func load(_ state: inout State) -> Effect<Action> {
+  /// Refresh "now", clear errors, and reload the non-secret persisted prefs (seen counts,
+  /// pins, grouping). Shared by `.task` and `load()` — `.task` additionally reloads the
+  /// selected profile before probing the profiles capability.
+  private func reloadPrefs(_ state: inout State) {
     state.now = now
-    state.isLoading = true
     state.loadError = nil
     state.seenCounts = preferences.loadSeenCounts()
     state.pinnedIDs = preferences.loadPinnedIDs()
     state.groupingMode = preferences.loadGroupingMode()
+  }
+
+  /// Refresh "now", clear errors, reload persisted prefs, and fetch the session list
+  /// (profile-scoped when supported; unscoped otherwise — search always unscoped).
+  private func load(_ state: inout State) -> Effect<Action> {
+    reloadPrefs(&state)
+    state.isLoading = true
     return .run { [
       rest, profiles, connection = state.connection, query = state.searchQuery,
       profileName = state.selectedProfileName, profilesSupported = state.profilesSupported
@@ -756,6 +792,9 @@ private func fetchSessions(
     if !query.isEmpty {
       sessions = try await rest.search(connection, query)
     } else if profilesSupported {
+      // The dedicated profiles endpoint takes the literal name (incl. "default") — unlike the
+      // legacy per-session mutation endpoints, which use `scopedProfileName` (default→nil). The
+      // canonical default name is `SessionListFeature.State.defaultProfileName`.
       sessions = try await profiles.sessions(connection, profileName, .exclude, .recent, 50, 0)
     } else {
       sessions = try await rest.sessions(connection, 50, 0, .recent)

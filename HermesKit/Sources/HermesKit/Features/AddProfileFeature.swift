@@ -69,6 +69,7 @@ public struct AddProfileFeature {
   }
 
   @Dependency(\.hermesProfiles) var profiles
+  @Dependency(\.dismiss) var dismiss
 
   public init() {}
 
@@ -109,7 +110,7 @@ public struct AddProfileFeature {
         return .none
 
       case .cancelTapped:
-        return .none
+        return .run { [dismiss] _ in await dismiss() }
 
       case .delegate:
         return .none

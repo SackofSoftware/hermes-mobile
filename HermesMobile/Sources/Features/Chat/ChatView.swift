@@ -190,12 +190,14 @@ struct ChatView: View {
         hasDetail: detail?.isEmpty == false,
         onTap: { store.send(.toolTapped(id: row.id)) }
       )
-    case let .thinking(text):
-      DisclosureGroup("Thinking") {
-        Text(text).font(.caption).foregroundStyle(.secondary)
-          .frame(maxWidth: .infinity, alignment: .leading)
-      }
-      .font(.caption)
+    case let .thinking(reasoning, status, elapsedSeconds, isComplete):
+      ThinkingIndicatorView(
+        liveSeconds: store.thinkingSeconds,
+        reasoning: reasoning,
+        status: status,
+        elapsedSeconds: elapsedSeconds,
+        isComplete: isComplete
+      )
     case let .status(_, text):
       Text(text).font(.caption).foregroundStyle(.secondary)
     }
@@ -253,13 +255,6 @@ struct ChatView: View {
     if let error = store.errorBanner {
       Label(error, systemImage: "exclamationmark.triangle")
         .font(.caption).foregroundStyle(.red)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal)
-    } else if let activity = store.activity {
-      // No lineLimit: the compacting/activity message is often long and must wrap
-      // so it stays fully visible (Issue #6).
-      Label(activity, systemImage: "ellipsis.circle")
-        .font(.caption).foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal)
     }

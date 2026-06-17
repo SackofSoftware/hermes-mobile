@@ -250,17 +250,19 @@ turn's in-progress window:
 - Create: `HermesMobile/Sources/Features/Chat/ThinkingIndicatorView.swift`
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 
-- [ ] Create `ThinkingIndicatorView`: active state ("Thinking" + live `formatElapsed`, shimmer,
+- [x] Create `ThinkingIndicatorView`: active state ("Thinking" + live `formatElapsed`, shimmer,
       `DisclosureGroup` body = reasoning + status) vs. complete state (static collapsed
       `Thinking · <elapsed>`, same body). Shimmer gated by `@Environment(\.accessibilityReduceMotion)`
       (held flat when on).
-- [ ] Replace the `.thinking` branch in `ChatView.rowView` (`:193-198`) to render
+- [x] Replace the `.thinking` branch in `ChatView.rowView` (`:193-198`) to render
       `ThinkingIndicatorView`, passing `liveSeconds: store.thinkingSeconds` and the row's
       `reasoning`/`status`/`elapsedSeconds`/`isComplete`.
-- [ ] Remove the `activity` branch from `ChatView.footer` (`:258-265`); keep the error branch.
-      Remove any other `store.activity` reference in the view.
-- [ ] Run `tuist generate` so the new source file is picked up by the app/snapshot target.
-- [ ] Run a build (`swift test` for the package still green) — must pass before Task 4.
+- [x] Remove the `activity` branch from `ChatView.footer` (`:258-265`); keep the error branch.
+      Remove any other `store.activity` reference in the view (none remained).
+- [x] Run `tuist generate` so the new source file is picked up by the app/snapshot target.
+      (`make generate` succeeded; `ThinkingIndicatorView` now referenced in the generated project.)
+- [x] Run a build (`swift test` for the package still green) — must pass before Task 4.
+      (225 HermesKit tests pass; full simulator build deferred to Task 4's snapshot build.)
 
 ### Task 4: Snapshot tests + reduce-motion
 

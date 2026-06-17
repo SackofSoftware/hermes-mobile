@@ -40,7 +40,13 @@ final class MockURLProtocol: URLProtocol {
   }
 }
 
+/// Parent suite for everything that drives the process-global `MockURLProtocol` stub.
+/// `.serialized` on the parent serializes its nested suites too, so the REST and profile
+/// client tests never clobber each other's shared stub by running concurrently.
 @Suite(.serialized)
+struct RESTTransportSuite {}
+
+extension RESTTransportSuite {
 struct HermesRESTClientTests {
   private let baseURL = URL(string: "http://test.local:9119")!
   private var connection: ServerConnection { ServerConnection(baseURL: baseURL, token: "tok") }
@@ -290,6 +296,7 @@ struct HermesRESTClientTests {
     }
   }
 }
+} // extension RESTTransportSuite
 
 @Suite struct KeychainClientTests {
   @Test func inMemoryRoundTrip() throws {

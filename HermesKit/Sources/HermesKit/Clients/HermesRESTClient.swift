@@ -159,8 +159,12 @@ public extension DependencyValues {
 }
 
 // MARK: - Transport helpers
+//
+// These are `internal` (not `private`) so sibling clients in the package
+// (e.g. `HermesProfileClient`) can reuse the exact same request/decoding/validation
+// path rather than duplicating it.
 
-private func makeURL(_ base: URL, _ path: String, query: [URLQueryItem] = []) throws -> URL {
+func makeURL(_ base: URL, _ path: String, query: [URLQueryItem] = []) throws -> URL {
   guard var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
     throw RESTError.unreachable
   }
@@ -170,7 +174,7 @@ private func makeURL(_ base: URL, _ path: String, query: [URLQueryItem] = []) th
   return url
 }
 
-private func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async throws -> T {
+func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async throws -> T {
   var request = URLRequest(url: url)
   if let token { request.setValue(token, forHTTPHeaderField: "X-Hermes-Session-Token") }
 
@@ -192,7 +196,7 @@ private func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) 
 }
 
 /// Validate an HTTP response status, mapping non-success codes to `RESTError`.
-private func validate(_ response: URLResponse) throws {
+func validate(_ response: URLResponse) throws {
   guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
   switch http.statusCode {
   case 200..<300: break
@@ -203,7 +207,7 @@ private func validate(_ response: URLResponse) throws {
 }
 
 /// POST a JSON body and decode the response (used by `transcribe`).
-private func postJSON<T: Decodable>(
+func postJSON<T: Decodable>(
   _ url: URL, body: Data, token: String?, session: URLSession
 ) async throws -> T {
   var request = URLRequest(url: url)
@@ -230,7 +234,7 @@ private func postJSON<T: Decodable>(
 }
 
 /// Fire a write request (e.g. PATCH) and validate the status, discarding the body.
-private func send(
+func send(
   _ url: URL, method: String, body: Data?, token: String?, session: URLSession
 ) async throws {
   var request = URLRequest(url: url)
@@ -258,7 +262,9 @@ private struct SessionsResponse: Decodable {
   let total: Int?
 }
 
-private struct SessionListDTO: Decodable {
+// `internal` so sibling clients (e.g. `HermesProfileClient`'s scoped-session list,
+// which returns rows in the same shape) can reuse the decoding.
+struct SessionListDTO: Decodable {
   let id: String
   let title: String?
   let preview: String?

@@ -197,26 +197,26 @@ Source: `/Users/eugene/Documents/Development/Personal/hermes-agent/apps/desktop`
 - Create: `HermesKit/Sources/HermesKit/Clients/HermesProfileClient.swift`
 - Create: `HermesKit/Tests/HermesKitTests/HermesProfileClientTests.swift`
 
-- [ ] add `public struct HermesProfileClient: Sendable` with `@Sendable` closures:
+- [x] add `public struct HermesProfileClient: Sendable` with `@Sendable` closures:
       `list(ServerConnection) -> [Profile]`,
       `create(ServerConnection, name, cloneFromDefault) -> Void`,
       `updateSoul(ServerConnection, name, content) -> Void`,
       `rename(ServerConnection, name, newName) -> Void`,
       `delete(ServerConnection, name) -> Void`,
       `sessions(ServerConnection, profile, archived, order, limit, offset) -> [Session]`
-- [ ] implement `live(session:)` hitting the endpoints in the API table (reuse the
+- [x] implement `live(session:)` hitting the endpoints in the API table (reuse the
       existing `makeURL`/`get`/`postJSON`/`send` helpers — promote to internal or
       duplicate minimally; prefer reuse); `archived` enum → `exclude|only`
-- [ ] add `liveValue`, `testValue` (empty), `inMemory()` (in-memory profile store) and a
+- [x] add `liveValue`, `testValue` (empty), `inMemory()` (in-memory profile store) and a
       `DependencyValues.hermesProfiles` accessor
-- [ ] write tests: `list` decodes `{ profiles: [...] }` via an injected stub
+- [x] write tests: `list` decodes `{ profiles: [...] }` via an injected stub
       `URLSession`/transport; request hits `/api/profiles`
-- [ ] write tests: `create` posts `{ name, clone_from_default }`; `updateSoul` PUTs
+- [x] write tests: `create` posts `{ name, clone_from_default }`; `updateSoul` PUTs
       `{ content }` to `/api/profiles/{name}/soul`; `rename` PATCHes `{ new_name }`;
       `sessions` builds the `?profile=&archived=&order=` query and decodes rows
-- [ ] write tests: a 404 from `list` surfaces a `RESTError` the caller can detect for
+- [x] write tests: a 404 from `list` surfaces a `RESTError` the caller can detect for
       gating
-- [ ] run tests — must pass before next task
+- [x] run tests — must pass before next task
 
 ### Task 4: Profile-scope existing session-scoped REST calls
 

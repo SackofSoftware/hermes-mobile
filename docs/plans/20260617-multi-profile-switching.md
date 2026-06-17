@@ -346,11 +346,11 @@ the response body — the banner only ever showed the generic `Server error (400
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift` (or wherever SessionList opens Chat)
 - Modify: relevant feature tests
 
-- [ ] when `SessionListFeature` opens a chat (`openSession` / new chat), pass
+- [x] when `SessionListFeature` opens a chat (`openSession` / new chat), pass
       `selectedProfileName` into the `ChatFeature.State`
-- [ ] write tests: opening a session under a non-default profile constructs Chat state
+- [x] write tests: opening a session under a non-default profile constructs Chat state
       with that profile
-- [ ] run tests — must pass before next task
+- [x] run tests — must pass before next task
 
 ### Task 11: `SessionListView` — profile pill + menu (UI)
 

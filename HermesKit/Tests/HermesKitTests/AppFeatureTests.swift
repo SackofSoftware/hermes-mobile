@@ -71,7 +71,12 @@ struct AppFeatureTests {
 
     await store.send(.home(.delegate(.openSession(session)))) {
       $0.path.append(
-        ChatFeature.State(connection: self.connection, resumeStoredID: "20260610_abc", title: "Protocol chat")
+        ChatFeature.State(
+          connection: self.connection,
+          resumeStoredID: "20260610_abc",
+          profileName: SessionListFeature.State.defaultProfileName,
+          title: "Protocol chat"
+        )
       )
     }
   }
@@ -84,7 +89,50 @@ struct AppFeatureTests {
     }
 
     await store.send(.home(.delegate(.createSession))) {
-      $0.path.append(ChatFeature.State(connection: self.connection))
+      $0.path.append(
+        ChatFeature.State(
+          connection: self.connection,
+          profileName: SessionListFeature.State.defaultProfileName
+        )
+      )
+    }
+  }
+
+  @Test func openingSessionUnderCustomProfilePassesProfileToChat() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, selectedProfileName: "work")
+      )
+    ) {
+      AppFeature()
+    }
+    let session = Session(id: "20260610_abc", title: "Protocol chat")
+
+    await store.send(.home(.delegate(.openSession(session)))) {
+      $0.path.append(
+        ChatFeature.State(
+          connection: self.connection,
+          resumeStoredID: "20260610_abc",
+          profileName: "work",
+          title: "Protocol chat"
+        )
+      )
+    }
+  }
+
+  @Test func creatingSessionUnderCustomProfilePassesProfileToChat() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, selectedProfileName: "work")
+      )
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.home(.delegate(.createSession))) {
+      $0.path.append(
+        ChatFeature.State(connection: self.connection, profileName: "work")
+      )
     }
   }
 }

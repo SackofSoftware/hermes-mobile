@@ -83,17 +83,26 @@ public struct AppFeature {
         return .none
 
       case let .home(.delegate(.openSession(session))):
-        guard let connection = state.home?.connection else { return .none }
+        guard let home = state.home else { return .none }
         state.path.append(
           // `resolvedTitle` keeps the server's "Untitled" placeholder out of the header
           // (and the rename pre-fill); a real title arrives via `session.info` on resume.
-          ChatFeature.State(connection: connection, resumeStoredID: session.id, title: session.resolvedTitle)
+          // Carry the active profile so resume/history scope to the right `state.db`.
+          ChatFeature.State(
+            connection: home.connection,
+            resumeStoredID: session.id,
+            profileName: home.selectedProfileName,
+            title: session.resolvedTitle
+          )
         )
         return .none
 
       case .home(.delegate(.createSession)):
-        guard let connection = state.home?.connection else { return .none }
-        state.path.append(ChatFeature.State(connection: connection))
+        guard let home = state.home else { return .none }
+        // New chats are created under the currently-selected profile.
+        state.path.append(
+          ChatFeature.State(connection: home.connection, profileName: home.selectedProfileName)
+        )
         return .none
 
       case .home(.delegate(.disconnect)):

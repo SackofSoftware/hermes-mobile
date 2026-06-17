@@ -11,40 +11,40 @@ import Testing
   // MARK: formatTokens
 
   @Test func formatTokensBelowOneThousand() {
-    #expect(formatTokens(0) == "0")
-    #expect(formatTokens(1) == "1")
-    #expect(formatTokens(999) == "999")
+    #expect(Usage.formatTokens(0) == "0")
+    #expect(Usage.formatTokens(1) == "1")
+    #expect(Usage.formatTokens(999) == "999")
   }
 
   @Test func formatTokensThousands() {
-    #expect(formatTokens(1_000) == "1k")
-    #expect(formatTokens(1_250) == "1k")        // rounds down to nearest whole k
-    #expect(formatTokens(1_500) == "2k")        // rounds up to nearest whole k
-    #expect(formatTokens(125_000) == "125k")
-    #expect(formatTokens(999_000) == "999k")
+    #expect(Usage.formatTokens(1_000) == "1k")
+    #expect(Usage.formatTokens(1_250) == "1k")        // rounds down to nearest whole k
+    #expect(Usage.formatTokens(1_500) == "2k")        // rounds up to nearest whole k
+    #expect(Usage.formatTokens(125_000) == "125k")
+    #expect(Usage.formatTokens(999_000) == "999k")
   }
 
   @Test func formatTokensMillions() {
-    #expect(formatTokens(1_000_000) == "1M")
-    #expect(formatTokens(1_500_000) == "1.5M")
-    #expect(formatTokens(2_000_000) == "2M")
+    #expect(Usage.formatTokens(1_000_000) == "1M")
+    #expect(Usage.formatTokens(1_500_000) == "1.5M")
+    #expect(Usage.formatTokens(2_000_000) == "2M")
   }
 
   @Test func formatTokensExactThresholds() {
-    #expect(formatTokens(1_000) == "1k")
-    #expect(formatTokens(1_000_000) == "1M")
+    #expect(Usage.formatTokens(1_000) == "1k")
+    #expect(Usage.formatTokens(1_000_000) == "1M")
   }
 
   @Test func formatTokensRollsOverToMillion() {
     // Values that round up to a full 1000k roll over to "1M" rather than "1000k".
-    #expect(formatTokens(999_000) == "999k")
-    #expect(formatTokens(999_500) == "1M")
-    #expect(formatTokens(999_999) == "1M")
-    #expect(formatTokens(1_000_000) == "1M")
+    #expect(Usage.formatTokens(999_000) == "999k")
+    #expect(Usage.formatTokens(999_500) == "1M")
+    #expect(Usage.formatTokens(999_999) == "1M")
+    #expect(Usage.formatTokens(1_000_000) == "1M")
   }
 
   @Test func formatTokensNegativeClampsToZero() {
-    #expect(formatTokens(-5) == "0")
+    #expect(Usage.formatTokens(-5) == "0")
   }
 
   // MARK: tokenLabel

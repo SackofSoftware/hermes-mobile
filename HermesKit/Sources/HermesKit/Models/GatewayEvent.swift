@@ -154,30 +154,30 @@ public enum ContextSeverity: String, Equatable, Sendable, CaseIterable {
   }
 }
 
-/// Compact `k`/`M` token formatting mirroring the TUI's compact display.
-/// Examples: `999 → "999"`, `1_250 → "1k"`, `125_000 → "125k"`, `1_500_000 → "1.5M"`.
-/// The `k` range rounds to a whole thousand; the `M` range keeps one decimal. A value that
-/// rounds up to a full 1000k (e.g. `999_500`) rolls over to `"1M"`.
-public func formatTokens(_ n: Int) -> String {
-  let value = max(0, n)
-  if value < 1_000 {
-    return "\(value)"
-  }
-  if value < 1_000_000 {
-    let k = Int((Double(value) / 1_000).rounded())
-    // Rounding can push the boundary (e.g. 999_500) up to a full 1000k — roll over to "1M".
-    if k < 1_000 {
-      return "\(k)k"
-    }
-  }
-  let m = (Double(value) / 1_000_000 * 10).rounded() / 10
-  if m == m.rounded() {
-    return "\(Int(m))M"
-  }
-  return "\(String(format: "%.1f", m))M"
-}
-
 extension Usage {
+  /// Compact `k`/`M` token formatting mirroring the TUI's compact display.
+  /// Examples: `999 → "999"`, `1_250 → "1k"`, `125_000 → "125k"`, `1_500_000 → "1.5M"`.
+  /// The `k` range rounds to a whole thousand; the `M` range keeps one decimal. A value that
+  /// rounds up to a full 1000k (e.g. `999_500`) rolls over to `"1M"`.
+  public static func formatTokens(_ n: Int) -> String {
+    let value = max(0, n)
+    if value < 1_000 {
+      return "\(value)"
+    }
+    if value < 1_000_000 {
+      let k = Int((Double(value) / 1_000).rounded())
+      // Rounding can push the boundary (e.g. 999_500) up to a full 1000k — roll over to "1M".
+      if k < 1_000 {
+        return "\(k)k"
+      }
+    }
+    let m = (Double(value) / 1_000_000 * 10).rounded() / 10
+    if m == m.rounded() {
+      return "\(Int(m))M"
+    }
+    return "\(String(format: "%.1f", m))M"
+  }
+
   /// Short label for the gauge:
   /// - `"125k/200k"` when `contextMax` is known,
   /// - `"125k tok"` when only used/total tokens are known,
@@ -186,10 +186,10 @@ extension Usage {
     let used = contextUsed ?? total
     if let maxTokens = contextMax, maxTokens > 0 {
       let usedValue = used ?? 0
-      return "\(formatTokens(usedValue))/\(formatTokens(maxTokens))"
+      return "\(Self.formatTokens(usedValue))/\(Self.formatTokens(maxTokens))"
     }
     if let used, used > 0 {
-      return "\(formatTokens(used)) tok"
+      return "\(Self.formatTokens(used)) tok"
     }
     return nil
   }

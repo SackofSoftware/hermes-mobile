@@ -88,10 +88,10 @@ struct ContextUsageDetail: View {
           row("Used", label)
         }
         if let input = usage.input {
-          row("Input", formatTokens(input))
+          row("Input", Usage.formatTokens(input))
         }
         if let output = usage.output {
-          row("Output", formatTokens(output))
+          row("Output", Usage.formatTokens(output))
         }
         if let compressions = usage.compressions, compressions > 0 {
           row("Compactions", "compacted \(compressions)x")

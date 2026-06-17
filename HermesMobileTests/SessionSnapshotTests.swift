@@ -291,14 +291,15 @@ final class SessionSnapshotTests: SnapshotTestCase {
   /// divider, then the "Add profile" row.
   func testSessionList_profileMenu_content() {
     let profiles = profileFixtures()
-    let selected = "work"
+    // Mirrors the production `profileMenuContent`: no checkmarks (Safari-style) — the
+    // default profile shows a house, custom profiles a neutral person glyph. The active
+    // profile is indicated by the pill title, not a menu checkmark.
     let view = List {
       ForEach(profiles) { profile in
-        let isSelected = profile.name == selected
         if profile.isDefault {
-          Label(profile.name, systemImage: isSelected ? "checkmark" : "house")
+          Label(profile.name, systemImage: "house")
         } else {
-          Label(profile.name, systemImage: isSelected ? "checkmark" : "person.crop.circle")
+          Label(profile.name, systemImage: "person.crop.circle")
         }
       }
       Divider()
@@ -310,7 +311,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
   }
 
   /// Fallback: the agent doesn't expose `/api/profiles` (`profilesSupported == false`), so
-  /// the static "Sessions" title is shown and no pill renders.
+  /// no profile pill renders — just the "Sessions" list section header and toolbar icons.
   func testSessionList_profilePill_unsupportedFallback() {
     let now = self.now
     let mobile = "/Users/me/dev/hermes-mobile"

@@ -22,6 +22,9 @@ struct SessionListView: View {
           row(session, showsPreview: true)
         }
       } else {
+        // Top-level "Sessions" section header. Future sibling areas (e.g. "Cron jobs")
+        // render their own header the same way, all scoped to the active profile pill.
+        sessionsSectionHeader
         // Pinned sessions float to the top in both grouping modes.
         if !store.pinnedSessions.isEmpty {
           Section("Pinned") {
@@ -50,10 +53,11 @@ struct SessionListView: View {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
       }
     }
-    .navigationTitle(store.profilesSupported ? "" : "Sessions")
-    // The principal pill needs the inline bar (a large title pushes it out); the static
-    // "Sessions" fallback keeps its default (large) title so it's byte-identical to today.
-    .navigationBarTitleDisplayMode(store.profilesSupported ? .inline : .automatic)
+    // The profile pill is the centered (principal) title; "Sessions" is a list section
+    // header instead, leaving room for future sibling sections (e.g. "Cron jobs"). The
+    // pill needs the inline bar, so keep the nav title empty + inline in both cases.
+    .navigationTitle("")
+    .navigationBarTitleDisplayMode(.inline)
     .searchable(text: $store.searchQuery, prompt: "Search sessions")
     .refreshable { store.send(.pulledToRefresh) }
     .toolbar {
@@ -123,6 +127,17 @@ struct SessionListView: View {
     }
   }
 
+  /// Top-level content section header. The active profile is shown in the pill (the
+  /// centered nav title); this labels the sessions list as one section so future sibling
+  /// sections (e.g. "Cron jobs") can sit alongside it under the same profile.
+  private var sessionsSectionHeader: some View {
+    Text("Sessions")
+      .font(.title2.weight(.bold))
+      .listRowSeparator(.hidden)
+      .listRowBackground(Color.clear)
+      .accessibilityAddTraits(.isHeader)
+  }
+
   // MARK: Profile pill
 
   /// Safari-style centered pill in the navigation bar: the active profile's icon (a house
@@ -145,6 +160,9 @@ struct SessionListView: View {
           .font(.caption2.weight(.semibold))
       }
       .foregroundStyle(.primary)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 6)
+      .modifier(GlassCapsule())
     }
     .accessibilityLabel("Profile: \(store.selectedProfileName)")
   }
@@ -154,12 +172,11 @@ struct SessionListView: View {
   @ViewBuilder
   private var profileMenuContent: some View {
     ForEach(store.profiles) { profile in
-      let isSelected = profile.name == store.selectedProfileName
       if profile.isDefault {
         Button {
           store.send(.selectProfile(name: profile.name))
         } label: {
-          Label(profile.name, systemImage: isSelected ? "checkmark" : "house")
+          Label(profile.name, systemImage: "house")
         }
       } else {
         // Custom profiles: select on tap, with a nested menu for rename/delete.
@@ -181,7 +198,7 @@ struct SessionListView: View {
             Label("Delete", systemImage: "trash")
           }
         } label: {
-          Label(profile.name, systemImage: isSelected ? "checkmark" : "person.crop.circle")
+          Label(profile.name, systemImage: "person.crop.circle")
         }
       }
     }
@@ -324,6 +341,20 @@ struct SessionListView: View {
       Button("Pin", systemImage: "pin") {
         store.send(.pinSession(id: session.id), animation: .snappy)
       }
+    }
+  }
+}
+
+/// Liquid-glass capsule background on iOS 26+, material + hairline fallback below.
+/// Gives the profile pill the Safari-style glass chip look in the navigation bar.
+private struct GlassCapsule: ViewModifier {
+  func body(content: Content) -> some View {
+    if #available(iOS 26.0, *) {
+      content.glassEffect(.regular.interactive(), in: .capsule)
+    } else {
+      content
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().stroke(.quaternary, lineWidth: 0.5))
     }
   }
 }

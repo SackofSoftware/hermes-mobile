@@ -2,12 +2,15 @@
 
 <img src="HermesMobile/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png" alt="Hermes Mobile" width="120" />
 
-# Hermes Mobile
+# Hermes Agent Mobile Companion
 
 **Drive your self-hosted Hermes agent from your iPhone.**
 
 Chat with sessions, watch the agent work in real time, and approve or clarify its
 actions — all from your pocket, while the real runtime stays on your Mac or server.
+
+<img src="app-store-preview.png" alt="Hermes Mobile screenshots" width="100%" />
+<br/>
 
 Native SwiftUI · [The Composable Architecture](https://github.com/pointfreeco/swift-composable-architecture) · no agent logic on the phone
 

@@ -1,0 +1,138 @@
+defaults:
+  background:
+    type: radial
+    center: ['50%', '54%']
+    radius: 78%
+    colors: ['#F6A828', '#0C0805']
+
+project:
+  name: Hermes Mobile
+  device: iPhone 16 Pro Max - Black Titanium - Portrait
+  output_dir: screenshots/framed
+  output_size: iPhone6_9
+
+screenshots:
+  01_chat:
+    background:
+      type: radial
+      center: ['50%', '54%']
+      radius: 78%
+      colors: ['#F6A828', '#0C0805']
+    content:
+      - type: text
+        content: Your assistant,
+        position: ['50%', '7%']
+        size: 58
+        weight: semibold
+        color: '#F7EFE4'
+      - type: text
+        content: wherever life takes you
+        position: ['50%', '12.5%']
+        size: 64
+        weight: bold
+        color: '#FFB02E'
+      - type: image
+        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/chat.png
+        frame: true
+        position: ['50%', '62%']
+        scale: 0.84
+
+  02_sessions:
+    background:
+      type: radial
+      center: ['50%', '54%']
+      radius: 78%
+      colors: ['#EC9626', '#0C0805']
+    content:
+      - type: text
+        content: Pick up every chat
+        position: ['50%', '7%']
+        size: 58
+        weight: semibold
+        color: '#F7EFE4'
+      - type: text
+        content: right where you left off
+        position: ['50%', '12.5%']
+        size: 66
+        weight: bold
+        color: '#FFB02E'
+      - type: image
+        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/sessions.png
+        frame: true
+        position: ['50%', '62%']
+        scale: 0.84
+
+  03_work:
+    background:
+      type: radial
+      center: ['50%', '54%']
+      radius: 78%
+      colors: ['#E6852C', '#0C0805']
+    content:
+      - type: text
+        content: It researches, plans,
+        position: ['50%', '7%']
+        size: 56
+        weight: semibold
+        color: '#F7EFE4'
+      - type: text
+        content: and gets things done
+        position: ['50%', '12.5%']
+        size: 66
+        weight: bold
+        color: '#FFB02E'
+      - type: image
+        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/work.png
+        frame: true
+        position: ['50%', '62%']
+        scale: 0.84
+
+  04_voice:
+    background:
+      type: radial
+      center: ['50%', '54%']
+      radius: 78%
+      colors: ['#DE7A30', '#0C0805']
+    content:
+      - type: text
+        content: Talk, type, or attach —
+        position: ['50%', '7%']
+        size: 56
+        weight: semibold
+        color: '#F7EFE4'
+      - type: text
+        content: ask it anything
+        position: ['50%', '12.5%']
+        size: 72
+        weight: bold
+        color: '#FFB02E'
+      - type: image
+        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/voice.png
+        frame: true
+        position: ['50%', '62%']
+        scale: 0.84
+
+  05_connect:
+    background:
+      type: radial
+      center: ['50%', '54%']
+      radius: 78%
+      colors: ['#7A5320', '#0C0805']
+    content:
+      - type: text
+        content: Self-hosted & private —
+        position: ['50%', '7%']
+        size: 58
+        weight: semibold
+        color: '#F7EFE4'
+      - type: text
+        content: your data stays yours
+        position: ['50%', '12.5%']
+        size: 66
+        weight: bold
+        color: '#FFB02E'
+      - type: image
+        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/connect.png
+        frame: true
+        position: ['50%', '62%']
+        scale: 0.84

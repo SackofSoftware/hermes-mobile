@@ -28,6 +28,18 @@ public struct PreferencesClient: Sendable {
 }
 
 public extension PreferencesClient {
+  /// Drop the prefs that are scoped to a *specific user/account* — pins, per-session unread
+  /// counts, and the selected profile. Used on a re-auth **user-switch** (different account
+  /// signs in mid-session) where the prior user's device-local state must not leak across.
+  /// The server URL (and grouping mode) survive — the user stays on the same server.
+  func clearIdentityScopedPrefs() {
+    savePinnedIDs([])
+    saveSeenCounts([:])
+    clearSelectedProfileID()
+  }
+}
+
+public extension PreferencesClient {
   /// `UserDefaults`-backed implementation.
   static func live(defaults: UserDefaults = .standard) -> PreferencesClient {
     let key = "hermes.server-url"

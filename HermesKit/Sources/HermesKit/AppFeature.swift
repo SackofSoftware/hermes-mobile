@@ -12,17 +12,22 @@ public struct AppFeature {
     /// True during the launch auto-connect probe — `AppView` shows a brief placeholder
     /// instead of flashing the onboarding screen.
     public var autoConnecting: Bool
+    /// The re-auth modal, presented when a live (gated) session dies mid-use. While shown,
+    /// the dead chat's reconnect stays paused (it pauses itself via `awaitingReauth`).
+    @Presents public var reauth: ReauthFeature.State?
 
     public init(
       onboarding: ConnectionFeature.State = .init(),
       home: SessionListFeature.State? = nil,
       path: StackState<ChatFeature.State> = .init(),
-      autoConnecting: Bool = false
+      autoConnecting: Bool = false,
+      reauth: ReauthFeature.State? = nil
     ) {
       self.onboarding = onboarding
       self.home = home
       self.path = path
       self.autoConnecting = autoConnecting
+      self.reauth = reauth
     }
   }
 
@@ -33,6 +38,7 @@ public struct AppFeature {
     case onboarding(ConnectionFeature.Action)
     case home(SessionListFeature.Action)
     case path(StackActionOf<ChatFeature>)
+    case reauth(PresentationAction<ReauthFeature.Action>)
   }
 
   @Dependency(\.keychain) var keychain
@@ -112,15 +118,68 @@ public struct AppFeature {
         state.onboarding = .init()
         return .none
 
-      case .onboarding, .home, .path:
+      case .path(.element(id: _, action: .delegate(.sessionExpired))):
+        // A live (gated) session died. The chat already paused its own reconnect; raise the
+        // re-auth modal seeded from that chat's connection (server URL + regime + identity).
+        // Ignore if a modal is already up (only the first dead session raises it).
+        guard state.reauth == nil, let chat = state.path.last else { return .none }
+        state.reauth = makeReauthState(for: chat.connection)
+        return .none
+
+      case let .reauth(.presented(.delegate(.reauthenticated(connection, sameUser)))):
+        state.reauth = nil
+        if sameUser {
+          // Same user → resume the dead chat in place with the fresh auth regime.
+          guard let id = state.path.ids.last else { return .none }
+          return .send(.path(.element(id: id, action: .resumeAfterReauth(connection))))
+        }
+        // Different user signed in → drop everything identity-scoped and force a fresh list.
+        preferences.clearIdentityScopedPrefs()
+        state.path = .init()
+        state.home = SessionListFeature.State(connection: connection)
+        return .none
+
+      case .reauth(.presented(.delegate(.quit))):
+        // "Quit to start" → full logout (Keychain session + every pref) → onboarding.
+        try? keychain.deleteSession()
+        preferences.clearServerURL()
+        preferences.clearIdentityScopedPrefs()
+        preferences.saveGroupingMode(.default)
+        state.reauth = nil
+        state.path = .init()
+        state.home = nil
+        state.onboarding = .init()
+        return .none
+
+      case .onboarding, .home, .path, .reauth:
         return .none
       }
     }
     .ifLet(\.home, action: \.home) {
       SessionListFeature()
     }
+    .ifLet(\.$reauth, action: \.reauth) {
+      ReauthFeature()
+    }
     .forEach(\.path, action: \.path) {
       ChatFeature()
+    }
+  }
+
+  /// Seed a `ReauthFeature.State` from the connection of the expired chat: a fixed server
+  /// URL, the matching auth regime, and (cookie mode) the prefilled username + provider used
+  /// for the same-user vs user-switch decision.
+  private func makeReauthState(for connection: ServerConnection) -> ReauthFeature.State {
+    switch connection.auth {
+    case .token:
+      return ReauthFeature.State(serverURL: connection.baseURL, method: .token)
+    case let .cookie(session):
+      return ReauthFeature.State(
+        serverURL: connection.baseURL,
+        method: .password,
+        provider: session.provider,
+        previousUsername: session.username
+      )
     }
   }
 }

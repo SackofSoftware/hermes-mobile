@@ -186,6 +186,9 @@ public struct ChatFeature {
     case gatewayEvent(GatewayEvent)
     case gatewayClosed
     case reconnectTick
+    /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
+    /// and reconnect the (previously paused) socket so the chat resumes in place.
+    case resumeAfterReauth(ServerConnection)
     case sessionResult(Result<SessionHandle, GatewayError>)
     case usageResponse(Usage)
     case historyResponse([SessionMessage])
@@ -313,6 +316,19 @@ public struct ChatFeature {
 
       case .reconnectTick:
         return connect(state.connection)
+
+      case let .resumeAfterReauth(connection):
+        // The re-auth modal minted a fresh session for the same user. Swap in the new auth
+        // regime (fresh cookies), lift the pause, and reconnect — the socket re-mints a
+        // ws-ticket from the new cookies and the transcript resumes in place.
+        state.connection = connection
+        state.awaitingReauth = false
+        state.status = .reconnecting
+        state.reconnectAttempt = 0
+        return .merge(
+          .cancel(id: CancelID.reconnect),
+          connect(connection)
+        )
 
       case let .sessionResult(.success(handle)):
         // A non-nil stored id before we overwrite it means this was a *resume* (vs. a fresh

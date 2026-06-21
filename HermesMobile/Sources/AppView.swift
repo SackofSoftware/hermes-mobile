@@ -10,6 +10,9 @@ struct AppView: View {
   var body: some View {
     content
       .task { store.send(.task) }
+      .sheet(item: $store.scope(state: \.reauth, action: \.reauth)) { reauthStore in
+        ReauthView(store: reauthStore)
+      }
   }
 
   @ViewBuilder

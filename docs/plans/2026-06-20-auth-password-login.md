@@ -218,13 +218,13 @@ byte-identical throughout.
 - Create: `HermesKit/Tests/HermesKitTests/ReauthFeatureTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] `ReauthFeature`: fixed server URL, prefilled username, password (or token) field, Sign in + "Quit to start"; reuse the Task 3 login effect
-- [ ] AppFeature presents it on `delegate(.sessionExpired)` and **pauses** reconnect while shown
-- [ ] outcome routing via identity-compare: same user → dismiss + reconnect (stay put); different user → pop to session list + force reload + clear identity-scoped prefs
-- [ ] Quit → full logout (clear Keychain session + all prefs) → onboarding
-- [ ] token-mode parity: same modal with a token field (identity-compare skipped)
-- [ ] write tests: sessionExpired presents + pauses reconnect; same-user dismiss+reconnect; different-user pop+reload+clear; Quit → logout→onboarding; pure identity-compare helper
-- [ ] run tests — must pass before next task
+- [x] `ReauthFeature`: fixed server URL, prefilled username, password (or token) field, Sign in + "Quit to start"; reuse the Task 3 login effect
+- [x] AppFeature presents it on `delegate(.sessionExpired)` and **pauses** reconnect while shown
+- [x] outcome routing via identity-compare: same user → dismiss + reconnect (stay put); different user → pop to session list + force reload + clear identity-scoped prefs
+- [x] Quit → full logout (clear Keychain session + all prefs) → onboarding
+- [x] token-mode parity: same modal with a token field (identity-compare skipped)
+- [x] write tests: sessionExpired presents + pauses reconnect; same-user dismiss+reconnect; different-user pop+reload+clear; Quit → logout→onboarding; pure identity-compare helper
+- [x] run tests — must pass before next task
 
 ### Task 7: Token-mode disclaimer + "How to connect securely" screen
 

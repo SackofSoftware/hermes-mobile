@@ -93,8 +93,9 @@ public enum GatewayEvent: Equatable, Sendable {
 // MARK: - Payload helper types
 
 /// Token / context / cost accounting attached to `message.complete` and `session.info`.
-/// Lenient: every field is optional. Verified shape from the M0 probe.
-public struct Usage: Equatable, Sendable, Decodable {
+/// Lenient: every field is optional. Verified shape from the M0 probe. `Encodable` too so
+/// the non-authoritative snapshot cache (`ChatSnapshotClient`) can round-trip it as JSON.
+public struct Usage: Equatable, Sendable, Codable {
   public var model: String?
   public var input: Int?
   public var output: Int?

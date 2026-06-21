@@ -166,14 +166,14 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Create: `HermesKit/Sources/HermesKit/Clients/ChatSnapshotStore.swift` (GRDB/SQLiteData schema + migrations)
 - Create: `HermesKit/Tests/HermesKitTests/ChatSnapshotClientTests.swift`
 
-- [ ] add SQLiteData (Point-Free) to `HermesKit/Package.swift` and resolve (confirm exact package URL/product name)
-- [ ] define the schema (sessions, turn_anchors, snapshot_rows) with a versioned migration
-- [ ] define `ChatSnapshotClient` `@DependencyClient`: `loadSnapshot(sessionID)`, `saveSnapshot(...)`, `setTurnAnchor(sessionID, Date)`, `clearTurnAnchor(sessionID)`, `turnAnchor(sessionID)`, `wipeAll()`; row/session caps
-- [ ] `liveValue` backed by the SQLite store; `.inMemory()` test variant (in-memory DB)
-- [ ] keep it BEHIND the client boundary (no reactive `@FetchAll`); read once on init
-- [ ] write tests: snapshot write/read round-trip, anchor set/clear/get, `wipeAll`, row/session caps
-- [ ] write a migration test (fresh DB → schema present)
-- [ ] run tests — must pass before next task
+- [x] add SQLiteData (Point-Free) to `HermesKit/Package.swift` and resolve (confirm exact package URL/product name) — `https://github.com/pointfreeco/sqlite-data` product `SQLiteData` (resolved 1.6.6, GRDB 7.11.1)
+- [x] define the schema (sessions, turn_anchors, snapshot_rows) with a versioned migration
+- [x] define `ChatSnapshotClient` `@DependencyClient`: `loadSnapshot(sessionID)`, `saveSnapshot(...)`, `setTurnAnchor(sessionID, Date)`, `clearTurnAnchor(sessionID)`, `turnAnchor(sessionID)`, `wipeAll()`; row/session caps
+- [x] `liveValue` backed by the SQLite store; `.inMemory()` test variant (in-memory DB)
+- [x] keep it BEHIND the client boundary (no reactive `@FetchAll`); read once on init
+- [x] write tests: snapshot write/read round-trip, anchor set/clear/get, `wipeAll`, row/session caps
+- [x] write a migration test (fresh DB → schema present)
+- [x] run tests — must pass before next task
 
 ### Task 2: Pure `reconstructTranscript([StoredMessage]) -> [ChatRow]`
 

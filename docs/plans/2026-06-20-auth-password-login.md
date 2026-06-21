@@ -186,12 +186,12 @@ byte-identical throughout.
 - Modify: `HermesMobile/Sources/Features/*` (ConnectionView/auth screen)
 - Modify: `HermesKit/Tests/HermesKitTests/ConnectionFeatureTests.swift`
 
-- [ ] add `method: AuthMethod (.password/.token)` + `username`/`password` to state; fold the capability into `serverStatusResponse` (probe providers when gated)
-- [ ] capability-aware toggle: both segments by default; token-only → preselect+disable Password (hint); gated → de-emphasize Token
-- [ ] `connectTapped` branches: password → `rest.passwordLogin` → validate (`sessions?limit=1`) → persist `.cookie` AuthSession → `delegate(.connected)`; token → today's path unchanged
-- [ ] surface error copy from Task 3's `RESTError` mapping in `State.Status`
-- [ ] write reducer tests: capability drives enable/preselect; password success → connected with `.cookie`; each error → status copy; token path regression (unchanged)
-- [ ] run `tuist generate` (new view files) and the suite — must pass before next task
+- [x] add `method: AuthMethod (.password/.token)` + `username`/`password` to state; fold the capability into `serverStatusResponse` (probe providers when gated)
+- [x] capability-aware toggle: both segments by default; token-only → preselect+disable Password (hint); gated → de-emphasize Token
+- [x] `connectTapped` branches: password → `rest.passwordLogin` → validate (`sessions?limit=1`) → persist `.cookie` AuthSession → `delegate(.connected)`; token → today's path unchanged
+- [x] surface error copy from Task 3's `RESTError` mapping in `State.Status`
+- [x] write reducer tests: capability drives enable/preselect; password success → connected with `.cookie`; each error → status copy; token path regression (unchanged)
+- [x] run `tuist generate` (new view files) and the suite — must pass before next task
 
 ### Task 5: Gateway `ws-ticket` handshake + auth-failure vs transient
 

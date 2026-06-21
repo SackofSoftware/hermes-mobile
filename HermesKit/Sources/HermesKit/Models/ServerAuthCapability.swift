@@ -66,4 +66,17 @@ public enum ServerAuthCapability: Equatable, Sendable {
       self = .tokenOnly
     }
   }
+
+  /// The wire provider name to pass to `POST /auth/password-login`, when this capability
+  /// offers a password regime; `nil` otherwise.
+  public var passwordProvider: String? {
+    if case let .passwordAvailable(provider, _) = self { return provider }
+    return nil
+  }
+}
+
+public extension Optional where Wrapped == ServerAuthCapability {
+  /// Convenience for the reducer: the password provider name, or `nil` when unknown / not a
+  /// password regime (callers default to `"basic"`).
+  var passwordProvider: String? { self?.passwordProvider }
 }

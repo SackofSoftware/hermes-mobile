@@ -2,7 +2,8 @@ import ComposableArchitecture
 import HermesKit
 import SwiftUI
 
-/// Onboarding screen: type a server URL (validated automatically), paste a token, connect.
+/// Onboarding screen: type a server URL (validated automatically), pick an auth method
+/// (Password / Token, gated by the server's advertised capability), then connect.
 struct ConnectionView: View {
   @Bindable var store: StoreOf<ConnectionFeature>
   @FocusState private var urlFocused: Bool
@@ -26,13 +27,53 @@ struct ConnectionView: View {
         statusFooter
       }
 
-      Section("Token") {
-        SecureField("Session token", text: $store.token)
-          .textInputAutocapitalization(.never)
-          .autocorrectionDisabled()
+      Section {
+        Picker("Auth method", selection: $store.method) {
+          Text("Password")
+            .tag(AuthMethod.password)
+          Text("Token")
+            .tag(AuthMethod.token)
+        }
+        .pickerStyle(.segmented)
+        .disabled(!store.isPasswordEnabled && store.method == .token)
+
+        switch store.method {
+        case .password:
+          TextField("Username", text: $store.username)
+            .textContentType(.username)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+          SecureField("Password", text: $store.password)
+            .textContentType(.password)
+        case .token:
+          SecureField("Session token", text: $store.token)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+        }
+
         Button("Connect") { store.send(.connectTapped) }
           .disabled(!store.canConnect)
+      } header: {
+        Text("Sign in")
+      } footer: {
+        methodHint
       }
+    }
+  }
+
+  /// Capability-driven hint under the auth section.
+  @ViewBuilder
+  private var methodHint: some View {
+    if !store.isPasswordEnabled, store.method == .token, store.capability != nil {
+      // Token-only server: Password is disabled — explain why.
+      Text("This server only supports token sign-in.")
+        .foregroundStyle(.secondary)
+    } else if store.isTokenDeemphasized, store.method == .token {
+      // Gated server: token is a poor fit — nudge toward password.
+      Text("This server uses password login. Token sign-in is for private-network setups only.")
+        .foregroundStyle(.secondary)
+    } else {
+      EmptyView()
     }
   }
 
@@ -56,9 +97,12 @@ struct ConnectionView: View {
       Label("Reachable — Hermes \(version ?? "?")", systemImage: "checkmark.circle")
         .foregroundStyle(.green)
     case .validating:
-      Label("Validating token…", systemImage: "ellipsis.circle")
+      Label("Signing in…", systemImage: "ellipsis.circle")
     case .invalidToken:
       Label("Invalid token.", systemImage: "xmark.octagon")
+        .foregroundStyle(.red)
+    case .invalidCredentials:
+      Label("Invalid username or password.", systemImage: "xmark.octagon")
         .foregroundStyle(.red)
     case let .failed(message):
       Label(message, systemImage: "exclamationmark.triangle")

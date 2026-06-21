@@ -38,6 +38,24 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   completion/error/drop, then collapses to a static `Thinking · <elapsed>` disclosure. Status
   is shown inside that disclosure — **never** as a persistent footer above the composer.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
+- **Auth has two regimes**, modeled by `AuthSession` (`.token` | `.cookie(CookieSession)`) so
+  the REST/Gateway clients adapt transport without scattering regime checks. **Token mode**
+  (loopback/`--insecure`, `auth_required=false`): `X-Hermes-Session-Token` header + `?token=`
+  WS — **must stay byte-identical** to the legacy single-token path (backward-compat guard).
+  **Gated mode** (`auth_required=true`, password provider): `POST /auth/password-login` →
+  rotating session cookies (refresh is **transparent server-side**, no client refresh
+  endpoint — persist + resend the jar). The onboarding **Password | Token** toggle is
+  **capability-gated** by a pure `ServerAuthCapability(from:providers:)` mapper over
+  `/api/status` + `GET /api/auth/providers` (providers 404 → token-only); OAuth is out of
+  scope (#19). The **cookie `AuthSession` (cookies + username + provider) is stored in
+  `KeychainClient`** and rehydrated into `HTTPCookieStorage` on launch. The gated WS **mints a
+  fresh single-use `?ticket=` per connect via `POST /api/auth/ws-ticket` — never cached**; a
+  `401` mint is `GatewayError.authExpired` (non-retryable → `.sessionExpired`), other failures
+  are `.ticketUnavailable` (transient → reducer backoff). `.sessionExpired` raises
+  `ReauthFeature` (reconnect paused) with **identity-aware routing** via a pure
+  normalized-username compare: same user → dismiss + reconnect; different user → pop to list +
+  reload + clear identity-scoped prefs; Quit → full logout → onboarding. Foreground reconnect
+  shares the same `connect` (re-mints the ticket) — see #18 (state-sync).
 - **Persistence**: secrets (token) → `KeychainClient`; non-secret prefs (server URL,
   per-session seen counts, client-side pinned session ids) → `PreferencesClient`
   (UserDefaults-backed `@DependencyClient`). Both have `.inMemory()` test variants. (We

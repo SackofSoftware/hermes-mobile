@@ -265,10 +265,10 @@ byte-identical throughout.
 **Files:**
 - Modify: `docs/architecture.md`, `CLAUDE.md`, `README.md` (if user-facing)
 
-- [ ] document the two auth regimes + `AuthSession`/ws-ticket in `docs/architecture.md` (update the wire-protocol section)
-- [ ] note new conventions in `CLAUDE.md` (capability-aware toggle; cookie session in Keychain; ws-ticket per connect; sessionExpired→re-auth routing; token-mode byte-identical)
-- [ ] cross-reference backlog #19 (OAuth) and #18 (state-sync foreground reconnect shares `connect`)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] document the two auth regimes + `AuthSession`/ws-ticket in `docs/architecture.md` (update the wire-protocol section)
+- [x] note new conventions in `CLAUDE.md` (capability-aware toggle; cookie session in Keychain; ws-ticket per connect; sessionExpired→re-auth routing; token-mode byte-identical)
+- [x] cross-reference backlog #19 (OAuth) and #18 (state-sync foreground reconnect shares `connect`)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

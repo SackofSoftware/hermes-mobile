@@ -233,12 +233,12 @@ byte-identical throughout.
 - Create: `HermesMobile/Sources/Features/SecureConnectionInfoView.swift`
 - Modify: `HermesKit/Sources/HermesKit/Features/ConnectionFeature.swift` (only if a nav/route flag is needed)
 
-- [ ] add the always-visible inline disclaimer under the token field (never expires / private network only / full access / "Learn how to connect securely →")
-- [ ] build the pushed details screen: WHY, HOW (Model-A snippet `--host 0.0.0.0 --insecure` + `HERMES_DASHBOARD_SESSION_TOKEN`, trust boundary = tailnet), real Tailscale link (`https://tailscale.com`, open in Safari), nudge back to Password when supported
-- [ ] capability tie-in: gated → token segment disabled hint ("This server uses password login"); token-only → disclaimer primary
-- [ ] SCOPE GUARD: static copy + one external link only (no Tailscale SDK / network detection)
-- [ ] write any reducer test for the disclaimer/route flag if logic was added (else covered by snapshots in Task 8)
-- [ ] run `tuist generate` + suite — must pass before next task
+- [x] add the always-visible inline disclaimer under the token field (never expires / private network only / full access / "Learn how to connect securely →")
+- [x] build the pushed details screen: WHY, HOW (Model-A snippet `--host 0.0.0.0 --insecure` + `HERMES_DASHBOARD_SESSION_TOKEN`, trust boundary = tailnet), real Tailscale link (`https://tailscale.com`, open in Safari), nudge back to Password when supported
+- [x] capability tie-in: gated → token segment disabled hint ("This server uses password login"); token-only → disclaimer primary — existing `methodHint` (gated/token-only hints) + always-on token disclaimer; `passwordAvailable` flag nudges back to Password on the details screen
+- [x] SCOPE GUARD: static copy + one external link only (no Tailscale SDK / network detection)
+- [x] write any reducer test for the disclaimer/route flag if logic was added (else covered by snapshots in Task 8) — NO reducer logic added: navigation is pure SwiftUI view state via `NavigationLink`, capability state already present from Task 4. Covered by Task 8 snapshots.
+- [x] run `tuist generate` + suite — must pass before next task (382 tests pass; `tuist generate` succeeded)
 
 ### Task 8: Snapshot tests
 

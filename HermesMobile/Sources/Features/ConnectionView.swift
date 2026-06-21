@@ -49,6 +49,7 @@ struct ConnectionView: View {
           SecureField("Session token", text: $store.token)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+          tokenDisclaimer
         }
 
         Button("Connect") { store.send(.connectTapped) }
@@ -59,6 +60,29 @@ struct ConnectionView: View {
         methodHint
       }
     }
+  }
+
+  /// Always-visible honesty note under the token field: what a token grants, where it's
+  /// safe, and a push to the details screen. Static copy + one nav link (no logic).
+  @ViewBuilder
+  private var tokenDisclaimer: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Label {
+        Text("Never expires · private network only · full access")
+      } icon: {
+        Image(systemName: "exclamationmark.shield")
+          .foregroundStyle(.orange)
+      }
+      .font(.footnote)
+
+      NavigationLink {
+        SecureConnectionInfoView(passwordAvailable: store.isPasswordEnabled)
+      } label: {
+        Text("Learn how to connect securely")
+          .font(.footnote)
+      }
+    }
+    .padding(.vertical, 2)
   }
 
   /// Capability-driven hint under the auth section.

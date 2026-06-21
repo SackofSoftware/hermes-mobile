@@ -319,6 +319,23 @@ struct HermesRESTClientTests {
     }
   }
 
+  /// Regression (review finding #5): a transient 429/503 on a non-login call must NOT surface
+  /// the login-specific `.rateLimited`/`.serviceUnavailable` copy — it stays a generic
+  /// `.server(status:)`. The login-specific mapping is scoped to `passwordLogin` only.
+  @Test func nonLoginRateLimitedMapsToGenericServerError() async throws {
+    MockURLProtocol.set(status: 429, json: #"{"detail":"slow down"}"#)
+    await #expect(throws: RESTError.server(status: 429, detail: "slow down")) {
+      _ = try await makeClient().sessions(connection, 20, 0, .recent)
+    }
+  }
+
+  @Test func nonLoginServiceUnavailableMapsToGenericServerError() async throws {
+    MockURLProtocol.set(status: 503, json: #"{"detail":"down"}"#)
+    await #expect(throws: RESTError.server(status: 503, detail: "down")) {
+      try await makeClient().archive(connection, "sid", true, nil)
+    }
+  }
+
   @Test func transportFailureMapsToUnreachable() async throws {
     MockURLProtocol.set(fail: true)
     await #expect(throws: RESTError.unreachable) {

@@ -3,7 +3,10 @@ import Testing
 
 @testable import HermesKit
 
-@Suite struct KeychainClientTests {
+// Serialized: several cases touch the process-global `HTTPCookieStorage.shared`, and
+// `deleteSession` now flushes it — running them concurrently would let one test wipe
+// another's cookies.
+@Suite(.serialized) struct KeychainClientTests {
   // MARK: Token-mode (byte-identical to before)
 
   @Test func inMemoryTokenRoundTrip() throws {
@@ -76,6 +79,28 @@ import Testing
     #expect(kc.loadSession(HTTPCookieStorage()) != nil)
     try kc.deleteSession()
     #expect(kc.loadSession(HTTPCookieStorage()) == nil)
+  }
+
+  /// Logout (`deleteSession`) must flush gated cookies out of the shared jar the live
+  /// transports read — not just clear the Keychain item. Without this, stale gated-session
+  /// cookies linger after logout (review finding #6).
+  @Test func deleteSessionClearsRehydratedSharedCookies() throws {
+    let kc = KeychainClient.inMemory()
+    let storage = HTTPCookieStorage.shared
+    let unique = "hermes_session_at_\(UUID().uuidString)"
+    defer { storage.cookies?.filter { $0.name == unique }.forEach(storage.deleteCookie) }
+
+    let cookieSession = CookieSession(
+      cookies: [SerializedCookie(name: unique, value: "ACCESS", domain: "test.local", path: "/")],
+      username: "alice", provider: "basic"
+    )
+    try kc.saveSession(.cookie(cookieSession))
+    _ = kc.loadSession(storage) // rehydrates into the shared jar
+    #expect((storage.cookies ?? []).contains { $0.name == unique })
+
+    try kc.deleteSession()
+    // The shared jar is flushed, so the gated cookie no longer lingers.
+    #expect(!(storage.cookies ?? []).contains { $0.name == unique })
   }
 
   @Test func savingTokenThenCookieReplacesSession() throws {

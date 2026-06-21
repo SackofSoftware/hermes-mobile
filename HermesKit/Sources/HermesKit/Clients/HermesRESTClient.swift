@@ -277,7 +277,8 @@ func login(
     throw RESTError.unreachable
   }
 
-  try validate(response, data: data)
+  // Login-specific 429/503 copy is scoped here only (see `validate`'s `loginSpecific`).
+  try validate(response, data: data, loginSpecific: true)
 
   guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
   // Parse Set-Cookie straight from the response headers — `allHeaderFields` is
@@ -324,14 +325,20 @@ func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async th
 /// Validate an HTTP response status, mapping non-success codes to `RESTError`. The
 /// response `data` is read on failure so the server's error `detail` is surfaced
 /// verbatim (see `serverDetail`).
-func validate(_ response: URLResponse, data: Data) throws {
+///
+/// `loginSpecific` opts into the password-login copy for 429/503 (`.rateLimited` /
+/// `.serviceUnavailable`). It is **only** set on the `POST /auth/password-login` path —
+/// for every other (authenticated) REST call a transient 429/503 stays a generic
+/// `.server(status:)`, so it never surfaces misleading "too many login attempts" /
+/// "auth provider unreachable" copy mid-session.
+func validate(_ response: URLResponse, data: Data, loginSpecific: Bool = false) throws {
   guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
   switch http.statusCode {
   case 200..<300: break
   case 401: throw RESTError.unauthorized
   case 404: throw RESTError.notFound
-  case 429: throw RESTError.rateLimited
-  case 503: throw RESTError.serviceUnavailable
+  case 429 where loginSpecific: throw RESTError.rateLimited
+  case 503 where loginSpecific: throw RESTError.serviceUnavailable
   default: throw RESTError.server(status: http.statusCode, detail: serverDetail(from: data))
   }
 }

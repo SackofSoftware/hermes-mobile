@@ -34,7 +34,7 @@ public struct AppFeature {
   public enum Action {
     case task
     case autoConnectSucceeded(ServerConnection)
-    case autoConnectFailed(url: String, token: String)
+    case autoConnectFailed(ServerConnection)
     case onboarding(ConnectionFeature.Action)
     case home(SessionListFeature.Action)
     case path(StackActionOf<ChatFeature>)
@@ -54,21 +54,26 @@ public struct AppFeature {
     Reduce { state, action in
       switch action {
       case .task:
-        // Launch auto-connect: if a token + server URL are persisted, silently
-        // validate and skip onboarding. Only runs once, before we have a home.
+        // Launch auto-connect: if a persisted session (token *or* gated cookie) + server
+        // URL exist, silently validate and skip onboarding. Only runs once, before we have
+        // a home. `loadSession` rehydrates a `.cookie` session's cookies into `.shared` so
+        // the REST/WS transports authenticate on this fresh launch.
         guard state.home == nil, !state.autoConnecting,
-              let token = keychain.loadToken(), !token.isEmpty,
+              let session = keychain.loadSession(.shared),
               let urlString = preferences.loadServerURL(),
               let url = parseServerURL(urlString)
         else { return .none }
+        // A `.token` session with an empty token is treated as "no creds" (matches the old
+        // `loadToken()`-non-empty guard) so we stay on onboarding rather than probe blindly.
+        if case .token("") = session { return .none }
         state.autoConnecting = true
-        let connection = ServerConnection(baseURL: url, token: token)
+        let connection = ServerConnection(baseURL: url, auth: session)
         return .run { [rest] send in
           do {
             _ = try await rest.sessions(connection, 1, 0, .recent)
             await send(.autoConnectSucceeded(connection))
           } catch {
-            await send(.autoConnectFailed(url: urlString, token: token))
+            await send(.autoConnectFailed(connection))
           }
         }
 
@@ -77,11 +82,15 @@ public struct AppFeature {
         state.home = SessionListFeature.State(connection: connection)
         return .none
 
-      case let .autoConnectFailed(url, token):
-        // Stored creds didn't validate (expired token / server moved) — fall back to
-        // onboarding with the fields prefilled so the user can fix them.
+      case let .autoConnectFailed(connection):
+        // Stored creds didn't validate (expired token / dead cookies / server moved) — fall
+        // back to onboarding. Token mode prefills the fields so the user can fix them; cookie
+        // mode prefills only the URL (the password is never persisted), so they re-enter it.
         state.autoConnecting = false
-        state.onboarding = ConnectionFeature.State(serverURL: url, token: token)
+        state.onboarding = ConnectionFeature.State(
+          serverURL: connection.baseURL.absoluteString,
+          token: connection.auth.token ?? ""
+        )
         return .none
 
       case let .onboarding(.delegate(.connected(connection))):

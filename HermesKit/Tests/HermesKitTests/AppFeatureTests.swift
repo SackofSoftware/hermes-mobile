@@ -14,7 +14,7 @@ struct AppFeatureTests {
     let store = TestStore(initialState: AppFeature.State()) {
       AppFeature()
     } withDependencies: {
-      $0.keychain.loadToken = { "tok" }
+      $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
@@ -26,11 +26,37 @@ struct AppFeatureTests {
     }
   }
 
+  /// A persisted **gated (cookie) session** must auto-restore on relaunch — the production
+  /// path now reads `loadSession` (rehydrating cookies), not `loadToken` (which is `nil` for
+  /// cookie sessions). Without this it would force the user through onboarding every launch.
+  @Test func autoLoginWithStoredCookieSessionOpensSessionList() async {
+    let cookieSession = CookieSession(
+      cookies: [SerializedCookie(name: "hermes_session_at", value: "abc", domain: "mac.tailnet", path: "/")],
+      username: "alice", provider: "basic"
+    )
+    let cookieConnection = ServerConnection(
+      baseURL: URL(string: "http://mac.tailnet:9119")!, auth: .cookie(cookieSession)
+    )
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadSession = { @Sendable _ in .cookie(cookieSession) }
+      $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+    }
+
+    await store.send(.task) { $0.autoConnecting = true }
+    await store.receive(\.autoConnectSucceeded) {
+      $0.autoConnecting = false
+      $0.home = SessionListFeature.State(connection: cookieConnection)
+    }
+  }
+
   @Test func autoLoginWithInvalidTokenFallsBackToPrefilledOnboarding() async {
     let store = TestStore(initialState: AppFeature.State()) {
       AppFeature()
     } withDependencies: {
-      $0.keychain.loadToken = { "bad" }
+      $0.keychain.loadSession = { @Sendable _ in .token("bad") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
     }
@@ -42,11 +68,30 @@ struct AppFeatureTests {
     }
   }
 
+  /// A dead **cookie** session falls back to onboarding with only the URL prefilled (the
+  /// password is never persisted, so the token field stays empty).
+  @Test func autoLoginWithDeadCookieSessionFallsBackToOnboarding() async {
+    let cookieSession = CookieSession(cookies: [], username: "alice", provider: "basic")
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadSession = { @Sendable _ in .cookie(cookieSession) }
+      $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+    }
+
+    await store.send(.task) { $0.autoConnecting = true }
+    await store.receive(\.autoConnectFailed) {
+      $0.autoConnecting = false
+      $0.onboarding = ConnectionFeature.State(serverURL: "http://mac.tailnet:9119", token: "")
+    }
+  }
+
   @Test func launchWithoutStoredCredsStaysOnOnboarding() async {
     let store = TestStore(initialState: AppFeature.State()) {
       AppFeature()
     } withDependencies: {
-      $0.keychain.loadToken = { nil }
+      $0.keychain.loadSession = { @Sendable _ in nil }
       $0.preferences.loadServerURL = { nil }
     }
     // No creds → no state change, no auto-connect effect.

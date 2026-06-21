@@ -90,7 +90,9 @@ public struct SettingsFeature {
         return .send(.delegate(.tokenSaved(token)))
 
       case .clearTokenTapped:
-        try? keychain.deleteToken()
+        // Clear the full session (token + any gated cookies in the shared jar), not just the
+        // token — a gated logout must leave no cookie behind.
+        try? keychain.deleteSession()
         preferences.clearServerURL()
         preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
         preferences.saveSeenCounts([:]) // unread state is per-server; drop it too

@@ -19,7 +19,9 @@ public struct KeychainClient: Sendable {
   public var loadSession: @Sendable (_ storage: HTTPCookieStorage) -> AuthSession? = { _ in nil }
   /// Persist the full session (token payload, or cookie jar + username).
   public var saveSession: @Sendable (_ session: AuthSession) throws -> Void
-  /// Clear the persisted session.
+  /// Clear the persisted session. The live implementation also flushes any gated-session
+  /// cookies rehydrated into `HTTPCookieStorage.shared` (used by the REST/WS transports) so
+  /// no stale cookie outlives logout — call this, not `deleteToken`, on logout.
   public var deleteSession: @Sendable () throws -> Void
 
   // Token-mode shims — retained as dependency endpoints for byte-identical token behaviour.
@@ -80,6 +82,9 @@ public extension KeychainClient {
       guard status == errSecSuccess || status == errSecItemNotFound else {
         throw KeychainError.unhandled(status)
       }
+      // Flush gated-session cookies rehydrated into the shared jar (where the REST/WS live
+      // transports read them) so logout leaves nothing behind for the next user.
+      clearSharedCookies()
     }
     return KeychainClient(
       loadSession: { load($0) },
@@ -102,12 +107,21 @@ public extension KeychainClient {
     return KeychainClient(
       loadSession: { load($0) },
       saveSession: { box.set($0) },
-      deleteSession: { box.set(nil) },
+      deleteSession: { box.set(nil); clearSharedCookies() },
       loadToken: { box.get()?.token },
       saveToken: { box.set(.token($0)) },
       deleteToken: { box.set(nil) }
     )
   }
+}
+
+/// Remove every cookie from `HTTPCookieStorage.shared` — the jar the live REST/WS transports
+/// read (and into which a `.cookie` session is rehydrated). Called on session deletion so a
+/// gated logout leaves no cookie behind. (We own the shared jar in this app — no third-party
+/// cookies share it — so clearing all of them is safe and avoids domain-matching guesswork.)
+func clearSharedCookies() {
+  let storage = HTTPCookieStorage.shared
+  for cookie in storage.cookies ?? [] { storage.deleteCookie(cookie) }
 }
 
 /// Decode a persisted `AuthSession`. Falls back to treating a legacy raw-string payload

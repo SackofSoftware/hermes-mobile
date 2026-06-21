@@ -74,9 +74,3 @@ public enum ServerAuthCapability: Equatable, Sendable {
     return nil
   }
 }
-
-public extension Optional where Wrapped == ServerAuthCapability {
-  /// Convenience for the reducer: the password provider name, or `nil` when unknown / not a
-  /// password regime (callers default to `"basic"`).
-  var passwordProvider: String? { self?.passwordProvider }
-}

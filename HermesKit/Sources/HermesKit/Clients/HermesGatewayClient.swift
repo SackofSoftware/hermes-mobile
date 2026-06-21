@@ -104,6 +104,10 @@ public extension HermesGatewayClient {
     return HermesGatewayClient(
       connect: { baseURL, auth in
         let (stream, continuation) = AsyncStream<GatewayEvent>.makeStream()
+        // The connection opened by this `connect` (set once the transport is built). Held in
+        // a box so the single `onTermination` handler can shut it down — `onTermination` is
+        // last-writer-wins, so we must NOT overwrite it per-open (that clobbers cleanup).
+        let opened = LockIsolated<GatewayConnection?>(nil)
         // Open a connection over the resolved WS URL: build the transport + connection
         // actor, register it for `send`/`disconnect`, and start the receive loop.
         @Sendable func open(_ wsURL: URL) {
@@ -114,14 +118,18 @@ public extension HermesGatewayClient {
             clock: clock
           )
           store.set(connection)
-          continuation.onTermination = { _ in Task { await connection.shutdown() } }
+          opened.setValue(connection)
           Task { await connection.start() }
         }
         switch auth {
         case let .token(token):
           // Token mode: no async work — open synchronously so an immediate `send` finds the
-          // connection (byte-identical to the legacy path).
+          // connection (byte-identical to the legacy path). No setup task to cancel.
           open(webSocketURL(base: baseURL, token: token))
+          // Single termination handler: shut down the opened connection on consumer cancel.
+          continuation.onTermination = { _ in
+            if let connection = opened.value { Task { await connection.shutdown() } }
+          }
         case let .cookie(cookieSession):
           // Cookie mode: mint a fresh single-use ticket first. Done in a Task because
           // `connect` returns the stream synchronously; mint failures surface on the stream.
@@ -139,7 +147,13 @@ public extension HermesGatewayClient {
               continuation.finish()
             }
           }
-          continuation.onTermination = { _ in setupTask.cancel() }
+          // Single termination handler composing BOTH cleanups (last-writer-wins, so we can
+          // only register one): cancel the in-flight mint AND shut down a connection that has
+          // already opened. Either may be the live one depending on the cancel timing.
+          continuation.onTermination = { _ in
+            setupTask.cancel()
+            if let connection = opened.value { Task { await connection.shutdown() } }
+          }
         }
         return stream
       },

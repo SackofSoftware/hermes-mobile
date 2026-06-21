@@ -224,7 +224,7 @@ public struct ConnectionFeature {
         case .password:
           // Password path: log in for cookies, validate them with one authenticated call,
           // then persist the cookie session + server URL and signal the parent.
-          let provider = state.capability.passwordProvider ?? "basic"
+          let provider = state.capability?.passwordProvider ?? "basic"
           let username = state.username
           let password = state.password
           return .run { [rest, keychain, preferences] send in

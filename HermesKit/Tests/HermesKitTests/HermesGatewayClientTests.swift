@@ -21,6 +21,11 @@ final class FakeTransport: WebSocketTransport, @unchecked Sendable {
     self.onSend = onSend
   }
 
+  private var _cancelled = false
+  /// True once `cancel()` has run — lets a test assert the connection actor actually shut the
+  /// transport down (e.g. on consumer cancel / stream termination).
+  var cancelled: Bool { lock.withLock { _cancelled } }
+
   var sent: [String] { lock.withLock { _sent } }
 
   func send(_ text: String) async throws {
@@ -33,7 +38,10 @@ final class FakeTransport: WebSocketTransport, @unchecked Sendable {
     return next
   }
 
-  func cancel() { inboundContinuation.finish() }
+  func cancel() {
+    lock.withLock { _cancelled = true }
+    inboundContinuation.finish()
+  }
   func inject(_ frame: String) { inboundContinuation.yield(frame) }
 }
 
@@ -266,5 +274,28 @@ private func requestID(_ frame: String) -> Int? {
 
     var iterator = stream.makeAsyncIterator()
     #expect(await iterator.next() == nil) // finished, no .authExpired emitted
+  }
+
+  /// After a successful **cookie** connect, terminating the stream (consumer cancels →
+  /// `onTermination`) must shut the opened transport down. Guards the lost-shutdown leak
+  /// where the cookie-path `onTermination` clobbered the connection's shutdown handler.
+  @Test func cookieModeStreamTerminationShutsDownOpenedConnection() async throws {
+    let captured = LockIsolated<URL?>(nil)
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make(
+      mintTicket: { _, _ in "T1CKET" },
+      makeTransport: { wsURL in captured.setValue(wsURL); return transport }
+    )
+    // Scope the stream so it's fully released (its `onTermination` then fires) after connect.
+    do {
+      let stream = client.connect(url, .cookie(CookieSession(cookies: [], username: "u", provider: "basic")))
+      // Wait for the async mint+open to build the transport before dropping the stream.
+      for _ in 0..<100 where captured.value == nil { await Task.yield() }
+      #expect(captured.value != nil) // connection opened
+      _ = stream
+    }
+    // The dropped stream's termination handler shuts the opened connection down (async).
+    for _ in 0..<100 where !transport.cancelled { await Task.yield() }
+    #expect(transport.cancelled) // socket was torn down, not leaked
   }
 }

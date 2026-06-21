@@ -245,11 +245,11 @@ byte-identical throughout.
 **Files:**
 - Modify: `HermesMobileTests/*` (snapshot host + baselines)
 
-- [ ] auth screen — Password segment and Token segment
-- [ ] token disclaimer + the "How to connect securely" details screen
-- [ ] capability-disabled segment state (gated → token disabled; token-only → password disabled)
-- [ ] re-auth sheet — password variant and token variant
-- [ ] record baselines with `make snapshot-record` (pinned timestamps); run `make snapshot` — must pass before next task
+- [x] auth screen — Password segment and Token segment (`AuthSnapshotTests.testAuthScreen_passwordSegment` / `testAuthScreen_tokenSegment`)
+- [x] token disclaimer + the "How to connect securely" details screen (`testAuthScreen_tokenDisclaimer_tokenOnly`; `testSecureConnectionInfo_passwordAvailable` / `_passwordUnavailable` — tall fixed render so the full form incl. the bottom password-nudge section is captured)
+- [x] capability-disabled segment state (gated → token disabled; token-only → password disabled) (`testAuthScreen_gated_tokenDeemphasized` / `testAuthScreen_tokenOnly_passwordDisabled`)
+- [x] re-auth sheet — password variant and token variant (`testReauthSheet_password` / `testReauthSheet_token`)
+- [x] record baselines with `make snapshot-record` (pinned timestamps); run `make snapshot` — must pass before next task (9 baselines recorded under `HermesMobileTests/__Snapshots__/AuthSnapshotTests/`; the AuthSnapshotTests suite asserts green on iPhone 17 Pro / iOS 26)
 
 ### Task 9: Verify acceptance criteria
 

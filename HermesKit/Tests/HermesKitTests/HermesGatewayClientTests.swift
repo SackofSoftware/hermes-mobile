@@ -298,4 +298,31 @@ private func requestID(_ frame: String) -> Int? {
     for _ in 0..<100 where !transport.cancelled { await Task.yield() }
     #expect(transport.cancelled) // socket was torn down, not leaked
   }
+
+  /// Cancel *during* the mint (stream released while `mintTicket` is still awaiting): the
+  /// resumed setup task must observe cancellation and NOT open an orphan connection that
+  /// nothing would ever shut down. Guards the narrow mint-race the prior fix left open.
+  @Test func cookieModeCancelDuringMintDoesNotOpenOrphanConnection() async throws {
+    let built = LockIsolated(false)
+    let mintEntered = LockIsolated(false)
+    let (gate, release) = AsyncStream<Void>.makeStream()
+    let client = HermesGatewayClient.make(
+      mintTicket: { _, _ in
+        mintEntered.setValue(true)
+        var it = gate.makeAsyncIterator()
+        _ = await it.next() // block until the test releases the gate
+        return "T1CKET"
+      },
+      makeTransport: { _ in built.setValue(true); return FakeTransport() }
+    )
+    do {
+      let stream = client.connect(url, .cookie(CookieSession(cookies: [], username: "u", provider: "basic")))
+      for _ in 0..<200 where !mintEntered.value { await Task.yield() } // wait until mint is in-flight
+      #expect(mintEntered.value)
+      _ = stream // drop the stream here → onTermination cancels the setup task mid-mint
+    }
+    release.yield(()) // let the mint return; the task should bail on cancellation, not open()
+    for _ in 0..<200 { await Task.yield() }
+    #expect(built.value == false) // no orphan connection was opened
+  }
 }

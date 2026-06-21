@@ -238,6 +238,9 @@ public struct ConnectionFeature {
               await send(.passwordLoginResponse(.failure(.unreachable)))
               return
             }
+            // Activate the captured cookies into the shared jar BEFORE the validating call —
+            // otherwise the live REST transport reads an empty `.shared` and 401s.
+            keychain.activateCookieSession(cookieSession)
             let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
             do {
               _ = try await rest.sessions(connection, 1, 0, .recent)

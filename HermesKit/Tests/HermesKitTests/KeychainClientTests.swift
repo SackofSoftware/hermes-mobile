@@ -81,26 +81,49 @@ import Testing
     #expect(kc.loadSession(HTTPCookieStorage()) == nil)
   }
 
-  /// Logout (`deleteSession`) must flush gated cookies out of the shared jar the live
-  /// transports read — not just clear the Keychain item. Without this, stale gated-session
-  /// cookies linger after logout (review finding #6).
-  @Test func deleteSessionClearsRehydratedSharedCookies() throws {
-    let kc = KeychainClient.inMemory()
+  /// Logout must flush gated cookies out of the shared jar the live transports read — not
+  /// just clear the Keychain item. `clearSharedCookies()` is what the live `deleteSession`
+  /// runs (review finding #6). Without this, stale gated-session cookies linger after logout.
+  @Test func clearSharedCookiesFlushesTheSharedJar() throws {
     let storage = HTTPCookieStorage.shared
     let unique = "hermes_session_at_\(UUID().uuidString)"
     defer { storage.cookies?.filter { $0.name == unique }.forEach(storage.deleteCookie) }
-
-    let cookieSession = CookieSession(
-      cookies: [SerializedCookie(name: unique, value: "ACCESS", domain: "test.local", path: "/")],
-      username: "alice", provider: "basic"
-    )
-    try kc.saveSession(.cookie(cookieSession))
-    _ = kc.loadSession(storage) // rehydrates into the shared jar
+    if let cookie = SerializedCookie(name: unique, value: "ACCESS", domain: "test.local", path: "/").httpCookie {
+      storage.setCookie(cookie)
+    }
     #expect((storage.cookies ?? []).contains { $0.name == unique })
 
-    try kc.deleteSession()
-    // The shared jar is flushed, so the gated cookie no longer lingers.
+    clearSharedCookies()
     #expect(!(storage.cookies ?? []).contains { $0.name == unique })
+  }
+
+  /// A fresh in-app login must push its captured cookies into the shared jar immediately
+  /// (not just on next launch) so the live REST/WS transports authenticate — and must flush
+  /// any prior cookies first so a user-switch can't mix jars (review recheck finding). This
+  /// is the standalone op the live keychain's `activateCookieSession` runs.
+  @Test func activateCookieSessionRehydratesAndFlushesSharedJar() throws {
+    let storage = HTTPCookieStorage.shared
+    let staleName = "hermes_stale_\(UUID().uuidString)"
+    let freshName = "hermes_session_at_\(UUID().uuidString)"
+    defer {
+      storage.cookies?
+        .filter { $0.name == staleName || $0.name == freshName }
+        .forEach(storage.deleteCookie)
+    }
+    // Seed a stale cookie as if a prior session left it behind.
+    if let stale = SerializedCookie(name: staleName, value: "OLD", domain: "test.local", path: "/").httpCookie {
+      storage.setCookie(stale)
+    }
+    #expect((storage.cookies ?? []).contains { $0.name == staleName })
+
+    activateSharedCookieSession(CookieSession(
+      cookies: [SerializedCookie(name: freshName, value: "NEW", domain: "test.local", path: "/")],
+      username: "alice", provider: "basic"
+    ))
+
+    let names = (storage.cookies ?? []).map(\.name)
+    #expect(names.contains(freshName))      // fresh cookie is now live
+    #expect(!names.contains(staleName))     // prior cookies flushed
   }
 
   @Test func savingTokenThenCookieReplacesSession() throws {

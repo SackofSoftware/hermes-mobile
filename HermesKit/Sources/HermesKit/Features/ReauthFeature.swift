@@ -146,6 +146,9 @@ public struct ReauthFeature {
               await send(.reauthResponse(.failure(.unreachable)))
               return
             }
+            // Swap the new rotated cookies into the shared jar BEFORE validating — otherwise
+            // the validating call would send the stale (dead) cookies that triggered expiry.
+            keychain.activateCookieSession(cookieSession)
             let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
             do {
               _ = try await rest.sessions(connection, 1, 0, .recent)

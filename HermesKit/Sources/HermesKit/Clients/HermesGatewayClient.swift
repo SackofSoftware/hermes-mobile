@@ -136,7 +136,13 @@ public extension HermesGatewayClient {
           let setupTask = Task {
             do {
               let ticket = try await mintTicket(baseURL, cookieSession)
+              // The mint awaited above; if the consumer cancelled meanwhile, the termination
+              // handler already ran (and saw no `opened` connection). Bail before `open()` so
+              // we don't spawn an orphan connection nothing will ever shut down.
+              try Task.checkCancellation()
               open(webSocketURL(base: baseURL, ticket: ticket))
+            } catch is CancellationError {
+              continuation.finish()
             } catch GatewayError.authExpired {
               // Session fully dead → non-retryable. Signal re-auth and finish.
               continuation.yield(.authExpired)

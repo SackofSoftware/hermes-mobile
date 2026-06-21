@@ -31,6 +31,7 @@ struct ReauthFeatureTests {
 
   @Test func passwordReauthSameUserBubblesReauthenticated() async {
     let session = cookieSession(username: "alice")
+    let activated = LockIsolated(false)
     let store = TestStore(
       initialState: ReauthFeature.State(
         serverURL: url, method: .password, provider: "basic", previousUsername: "alice"
@@ -39,7 +40,16 @@ struct ReauthFeatureTests {
       ReauthFeature()
     } withDependencies: {
       $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in session }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      // The fresh rotated cookies must be activated into the shared jar BEFORE validating —
+      // otherwise the validating call would send the stale (expired) cookies.
+      $0.keychain.activateCookieSession = { @Sendable s in
+        #expect(s == session)
+        activated.setValue(true)
+      }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        #expect(activated.value, "cookies must be activated before the validating call")
+        return []
+      }
     }
 
     await store.send(.binding(.set(\.password, "pw"))) { $0.password = "pw" }
@@ -48,6 +58,7 @@ struct ReauthFeatureTests {
     let expected = ServerConnection(baseURL: url, auth: .cookie(session))
     await store.receive(\.reauthResponse.success)
     await store.receive(\.delegate, .reauthenticated(connection: expected, sameUser: true))
+    #expect(activated.value)
   }
 
   @Test func passwordReauthDifferentUserReportsNotSameUser() async {

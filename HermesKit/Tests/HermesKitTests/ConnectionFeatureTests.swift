@@ -185,6 +185,7 @@ struct ConnectionFeatureTests {
   @Test func passwordLoginSuccessConnectsWithCookieSession() async {
     let keychain = KeychainClient.inMemory()
     let preferences = PreferencesClient.inMemory()
+    let activated = LockIsolated(false)
     let cookieSession = CookieSession(
       cookies: [SerializedCookie(name: "hermes_session_at", value: "abc", domain: "mac", path: "/")],
       username: "alice",
@@ -207,8 +208,18 @@ struct ConnectionFeatureTests {
         #expect(username == "alice")
         return cookieSession
       }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
-      $0.keychain = keychain
+      // The captured cookies must be activated into the shared jar BEFORE the validating
+      // `sessions` call — otherwise the live REST transport reads an empty `.shared` and 401s.
+      $0.keychain.activateCookieSession = { @Sendable session in
+        #expect(session == cookieSession)
+        activated.setValue(true)
+      }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        #expect(activated.value, "cookies must be activated before the validating call")
+        return []
+      }
+      $0.keychain.saveSession = { @Sendable in try keychain.saveSession($0) }
+      $0.keychain.loadSession = { @Sendable in keychain.loadSession($0) }
       $0.preferences = preferences
     }
 
@@ -216,6 +227,7 @@ struct ConnectionFeatureTests {
     await store.receive(\.passwordLoginResponse.success)
     await store.receive(\.delegate.connected)
 
+    #expect(activated.value) // cookies activated into the shared jar
     // Persisted as a cookie session, not a bare token.
     #expect(keychain.loadSession(.shared) == .cookie(cookieSession))
     #expect(preferences.loadServerURL() == "http://mac:9119")

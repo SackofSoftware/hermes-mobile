@@ -23,6 +23,13 @@ public struct KeychainClient: Sendable {
   /// cookies rehydrated into `HTTPCookieStorage.shared` (used by the REST/WS transports) so
   /// no stale cookie outlives logout — call this, not `deleteToken`, on logout.
   public var deleteSession: @Sendable () throws -> Void
+  /// Activate a freshly-captured `.cookie` session by rehydrating its cookies into
+  /// `HTTPCookieStorage.shared` — the jar the live REST/WS transports read. Call this right
+  /// after `passwordLogin` (BEFORE the first authenticated REST call): the login cookies are
+  /// otherwise captured only in an isolated jar, so `.shared` stays empty and authenticated
+  /// REST calls 401 until the next launch (when `loadSession` rehydrates). Flushes any prior
+  /// shared cookies first so a user-switch / re-auth can't mix old and new jars.
+  public var activateCookieSession: @Sendable (_ session: CookieSession) -> Void = { _ in }
 
   // Token-mode shims — retained as dependency endpoints for byte-identical token behaviour.
   public var loadToken: @Sendable () -> String? = { nil }
@@ -90,6 +97,7 @@ public extension KeychainClient {
       loadSession: { load($0) },
       saveSession: { try save($0) },
       deleteSession: { try delete() },
+      activateCookieSession: { activateSharedCookieSession($0) },
       loadToken: { load(.shared)?.token },
       saveToken: { try save(.token($0)) },
       deleteToken: { try delete() }
@@ -107,12 +115,24 @@ public extension KeychainClient {
     return KeychainClient(
       loadSession: { load($0) },
       saveSession: { box.set($0) },
-      deleteSession: { box.set(nil); clearSharedCookies() },
+      deleteSession: { box.set(nil) },
+      // No-op for the in-memory variant: feature tests don't drive the live `.shared` jar, and
+      // mutating the process-global jar here would race across parallel suites. Tests that
+      // need to assert activation override this endpoint with a spy.
+      activateCookieSession: { _ in },
       loadToken: { box.get()?.token },
       saveToken: { box.set(.token($0)) },
       deleteToken: { box.set(nil) }
     )
   }
+}
+
+/// Rehydrate a freshly-captured `.cookie` session into `HTTPCookieStorage.shared` (flushing
+/// any prior cookies first) so the live REST/WS transports authenticate immediately after an
+/// in-app login — not just on the next launch.
+func activateSharedCookieSession(_ session: CookieSession) {
+  clearSharedCookies()
+  rehydrate(.cookie(session), into: .shared)
 }
 
 /// Remove every cookie from `HTTPCookieStorage.shared` — the jar the live REST/WS transports

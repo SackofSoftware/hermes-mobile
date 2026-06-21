@@ -172,12 +172,12 @@ byte-identical throughout.
 - Create: `HermesKit/Tests/HermesKitTests/PasswordLoginClientTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/KeychainClientTests.swift`
 
-- [ ] add `rest.passwordLogin(url, provider, username, password)` → `POST /auth/password-login`, using a dedicated `URLSession` with its own `HTTPCookieStorage`; return the captured `CookieSession`
-- [ ] map errors → `RESTError` so the UI can show copy: 401 invalid creds, 429 rate-limited, 503 unreachable, 404 unsupported
-- [ ] extend `KeychainClient` to persist/load the full `AuthSession` (cookie payload + username), replacing bare-token storage; rehydrate cookies into the client's storage on load
-- [ ] write client tests (injected URLSession): 200 + Set-Cookie captured into the jar; each error code maps correctly
-- [ ] write Keychain tests: `.cookie` session serialize → store → load → cookies rehydrated; token session still works
-- [ ] run tests — must pass before next task
+- [x] add `rest.passwordLogin(url, provider, username, password)` → `POST /auth/password-login`, using a dedicated `URLSession` with its own `HTTPCookieStorage`; return the captured `CookieSession`
+- [x] map errors → `RESTError` so the UI can show copy: 401 invalid creds, 429 rate-limited, 503 unreachable, 404 unsupported
+- [x] extend `KeychainClient` to persist/load the full `AuthSession` (cookie payload + username), replacing bare-token storage; rehydrate cookies into the client's storage on load
+- [x] write client tests (injected URLSession): 200 + Set-Cookie captured into the jar; each error code maps correctly
+- [x] write Keychain tests: `.cookie` session serialize → store → load → cookies rehydrated; token session still works
+- [x] run tests — must pass before next task
 
 ### Task 4: Auth screen — segmented toggle, password fields, capability gating
 

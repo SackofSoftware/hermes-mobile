@@ -10,13 +10,16 @@ final class MockURLProtocol: URLProtocol {
     var statusCode = 200
     var body = Data()
     var failWithError = false
+    var headers: [String: String] = [:]
   }
 
   nonisolated(unsafe) static var stub = Stub()
   nonisolated(unsafe) static var lastRequest: URLRequest?
 
-  static func set(status: Int = 200, json: String = "", fail: Bool = false) {
-    stub = Stub(statusCode: status, body: Data(json.utf8), failWithError: fail)
+  static func set(
+    status: Int = 200, json: String = "", fail: Bool = false, headers: [String: String] = [:]
+  ) {
+    stub = Stub(statusCode: status, body: Data(json.utf8), failWithError: fail, headers: headers)
     lastRequest = nil
   }
 
@@ -32,7 +35,7 @@ final class MockURLProtocol: URLProtocol {
     }
     let http = HTTPURLResponse(
       url: request.url!, statusCode: MockURLProtocol.stub.statusCode,
-      httpVersion: nil, headerFields: nil
+      httpVersion: nil, headerFields: MockURLProtocol.stub.headers
     )!
     client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
     client?.urlProtocol(self, didLoad: MockURLProtocol.stub.body)
@@ -439,16 +442,3 @@ struct HermesRESTClientTests {
   }
 }
 } // extension RESTTransportSuite
-
-@Suite struct KeychainClientTests {
-  @Test func inMemoryRoundTrip() throws {
-    let kc = KeychainClient.inMemory()
-    #expect(kc.loadToken() == nil)
-    try kc.saveToken("abc")
-    #expect(kc.loadToken() == "abc")
-    try kc.saveToken("def") // overwrite
-    #expect(kc.loadToken() == "def")
-    try kc.deleteToken()
-    #expect(kc.loadToken() == nil)
-  }
-}

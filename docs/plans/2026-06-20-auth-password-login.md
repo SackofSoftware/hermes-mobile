@@ -201,12 +201,12 @@ byte-identical throughout.
 - Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift` (or reconnect tests)
 
-- [ ] `connect` branches on `AuthSession`: `.token` → `?token=` (byte-identical); `.cookie` → `POST /api/auth/ws-ticket` then `?ticket=`, minted fresh per connect (never cached)
-- [ ] classify ws-ticket `401` (session fully dead) as a non-retryable auth failure → `delegate(.sessionExpired)`; transient failures → existing backoff
-- [ ] ensure reconnect/backoff stays in the reducer and just re-calls `connect` (re-mints ticket)
-- [ ] write client tests: token-mode WS URL byte-identical (regression); cookie-mode mints ticket then connects `?ticket=`
-- [ ] write reducer tests (TestClock): ws-ticket 401 → sessionExpired (no backoff); transient → backoff continues
-- [ ] run tests — must pass before next task
+- [x] `connect` branches on `AuthSession`: `.token` → `?token=` (byte-identical); `.cookie` → `POST /api/auth/ws-ticket` then `?ticket=`, minted fresh per connect (never cached)
+- [x] classify ws-ticket `401` (session fully dead) as a non-retryable auth failure → `delegate(.sessionExpired)`; transient failures → existing backoff
+- [x] ensure reconnect/backoff stays in the reducer and just re-calls `connect` (re-mints ticket)
+- [x] write client tests: token-mode WS URL byte-identical (regression); cookie-mode mints ticket then connects `?ticket=`
+- [x] write reducer tests (TestClock): ws-ticket 401 → sessionExpired (no backoff); transient → backoff continues
+- [x] run tests — must pass before next task
 
 ### Task 6: `ReauthFeature` modal + AppFeature routing
 

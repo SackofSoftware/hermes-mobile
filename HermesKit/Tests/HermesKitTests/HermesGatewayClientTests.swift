@@ -50,8 +50,8 @@ private func requestID(_ frame: String) -> Int? {
         inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"streaming"}}"#)
       }
     }
-    let client = HermesGatewayClient.make { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
     defer { withExtendedLifetime(stream) {} } // the connection lives as long as the stream
 
     let result = try await client.send("prompt.submit", .object(["text": .string("hi")]))
@@ -66,8 +66,8 @@ private func requestID(_ frame: String) -> Int? {
 
   @Test func eventsAreYieldedOnStream() async throws {
     let transport = FakeTransport()
-    let client = HermesGatewayClient.make { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
 
     transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s","payload":{"text":"hi"}}}"#)
 
@@ -77,8 +77,8 @@ private func requestID(_ frame: String) -> Int? {
 
   @Test func multipleNewlineDelimitedFramesInOneMessage() async throws {
     let transport = FakeTransport()
-    let client = HermesGatewayClient.make { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
 
     transport.inject(
       #"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","payload":{"text":"a"}}}"#
@@ -97,8 +97,8 @@ private func requestID(_ frame: String) -> Int? {
         inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"error":{"message":"bad session"}}"#)
       }
     }
-    let client = HermesGatewayClient.make { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
     defer { withExtendedLifetime(stream) {} }
 
     await #expect(throws: GatewayError.server("bad session")) {
@@ -114,8 +114,8 @@ private func requestID(_ frame: String) -> Int? {
         inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"echo":\#(id)}}"#)
       }
     }
-    let client = HermesGatewayClient.make { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
     defer { withExtendedLifetime(stream) {} }
 
     async let first = client.send("m", .object(["k": .string("a")]))
@@ -128,7 +128,7 @@ private func requestID(_ frame: String) -> Int? {
   }
 
   @Test func sendBeforeConnectThrowsNotConnected() async {
-    let client = HermesGatewayClient.make { _, _ in FakeTransport() }
+    let client = HermesGatewayClient.make { _ in FakeTransport() }
     await #expect(throws: GatewayError.notConnected) {
       _ = try await client.send("session.create", .object([:]))
     }
@@ -140,8 +140,8 @@ private func requestID(_ frame: String) -> Int? {
     // Deterministic: no wall-clock racing — the timeout fires only when WE advance.
     let clock = TestClock()
     let transport = FakeTransport() // no onSend → no inbound frame ever
-    let client = HermesGatewayClient.make(requestTimeout: .seconds(30), clock: clock) { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make(requestTimeout: .seconds(30), clock: clock) { _ in transport }
+    let stream = client.connect(url, .token("t"))
     defer { withExtendedLifetime(stream) {} }
 
     // Run `send` in a detached task so we can advance the clock while it's suspended on
@@ -169,8 +169,8 @@ private func requestID(_ frame: String) -> Int? {
         inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"streaming"}}"#)
       }
     }
-    let client = HermesGatewayClient.make(requestTimeout: .seconds(30), clock: clock) { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make(requestTimeout: .seconds(30), clock: clock) { _ in transport }
+    let stream = client.connect(url, .token("t"))
     defer { withExtendedLifetime(stream) {} }
 
     let result = try await client.send("prompt.submit", .object(["text": .string("hi")]))
@@ -186,13 +186,85 @@ private func requestID(_ frame: String) -> Int? {
     // Close the socket the moment the first request is transmitted (pending is
     // already registered by then, so this is deterministic).
     let transport = FakeTransport { _, inbound in inbound.finish() }
-    let client = HermesGatewayClient.make { _, _ in transport }
-    let stream = client.connect(url, nil)
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
 
     await #expect(throws: GatewayError.disconnected) {
       _ = try await client.send("session.create", .object([:]))
     }
     var iterator = stream.makeAsyncIterator()
     #expect(await iterator.next() == nil) // stream finished
+  }
+
+  // MARK: - Auth-regime URL branching
+
+  /// Regression guard (hard requirement): a `.token` session must build the *exact* legacy
+  /// WS URL `…/api/ws?token=<token>` — byte-identical, never minting a ticket.
+  @Test func tokenModeBuildsByteIdenticalWSURL() async throws {
+    let captured = LockIsolated<URL?>(nil)
+    let minted = LockIsolated(false)
+    let client = HermesGatewayClient.make(
+      mintTicket: { _, _ in minted.setValue(true); return "should-not-mint" },
+      makeTransport: { wsURL in captured.setValue(wsURL); return FakeTransport() }
+    )
+    let stream = client.connect(url, .token("sekret"))
+    defer { withExtendedLifetime(stream) {} }
+
+    // The transport is built asynchronously inside `connect`'s setup Task; spin until set.
+    for _ in 0..<50 where captured.value == nil { await Task.yield() }
+
+    #expect(captured.value?.absoluteString == "ws://test.local:9119/api/ws?token=sekret")
+    #expect(minted.value == false) // token mode never mints a ticket
+  }
+
+  /// A `.cookie` session mints a fresh ws-ticket then connects with `…/api/ws?ticket=<t>`.
+  @Test func cookieModeMintsTicketThenConnectsWithTicket() async throws {
+    let captured = LockIsolated<URL?>(nil)
+    let mintArgs = LockIsolated<(URL, CookieSession)?>(nil)
+    let cookieSession = CookieSession(
+      cookies: [SerializedCookie(name: "hermes_session_at", value: "abc", domain: "test.local", path: "/")],
+      username: "alice", provider: "basic"
+    )
+    let client = HermesGatewayClient.make(
+      mintTicket: { base, cs in mintArgs.setValue((base, cs)); return "T1CKET" },
+      makeTransport: { wsURL in captured.setValue(wsURL); return FakeTransport() }
+    )
+    let stream = client.connect(url, .cookie(cookieSession))
+    defer { withExtendedLifetime(stream) {} }
+
+    for _ in 0..<50 where captured.value == nil { await Task.yield() }
+
+    #expect(captured.value?.absoluteString == "ws://test.local:9119/api/ws?ticket=T1CKET")
+    #expect(mintArgs.value?.0 == url)            // minted against the base URL
+    #expect(mintArgs.value?.1 == cookieSession)  // with the persisted cookie session
+  }
+
+  /// A `401` from the ticket mint (`authExpired`) yields `.authExpired` on the stream and
+  /// finishes — never building a transport (non-retryable; the reducer routes to re-auth).
+  @Test func cookieModeMintAuthExpiredYieldsAuthExpiredAndFinishes() async throws {
+    let built = LockIsolated(false)
+    let client = HermesGatewayClient.make(
+      mintTicket: { _, _ in throw GatewayError.authExpired },
+      makeTransport: { _ in built.setValue(true); return FakeTransport() }
+    )
+    let stream = client.connect(url, .cookie(CookieSession(cookies: [], username: "u", provider: "basic")))
+
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == .authExpired)
+    #expect(await iterator.next() == nil) // then finished
+    #expect(built.value == false)         // no socket was opened
+  }
+
+  /// A transient mint failure finishes the stream like a dropped socket (no `.authExpired`)
+  /// so the reducer's existing backoff re-calls `connect` and re-mints.
+  @Test func cookieModeTransientMintFinishesStreamWithoutAuthExpired() async throws {
+    let client = HermesGatewayClient.make(
+      mintTicket: { _, _ in throw GatewayError.ticketUnavailable },
+      makeTransport: { _ in FakeTransport() }
+    )
+    let stream = client.connect(url, .cookie(CookieSession(cookies: [], username: "u", provider: "basic")))
+
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == nil) // finished, no .authExpired emitted
   }
 }

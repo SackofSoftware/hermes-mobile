@@ -22,6 +22,10 @@ public enum GatewayEvent: Equatable, Sendable {
   case sudoRequest(SecretPrompt)
   case secretRequest(SecretPrompt)
   case error(message: String)
+  /// Synthetic (client-side, never on the wire): the gated `ws-ticket` mint returned `401`,
+  /// meaning the cookie session is fully dead. The reducer routes this to re-auth instead of
+  /// reconnect backoff. Distinct from `.error` (recoverable) and a socket drop (transient).
+  case authExpired
   /// Any event type we don't model (incl. ones ignored for MVP like `tool.progress`,
   /// `tool.generating`, `background.complete`, `skin.changed`). Never throws.
   case unknown(type: String, raw: JSONValue)

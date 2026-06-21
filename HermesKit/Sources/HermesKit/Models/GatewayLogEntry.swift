@@ -40,6 +40,7 @@ public extension GatewayEvent {
     case .sudoRequest: return "sudo.request"
     case .secretRequest: return "secret.request"
     case .error: return "error"
+    case .authExpired: return "auth.expired"
     case let .unknown(type, _): return type
     }
   }
@@ -64,6 +65,7 @@ public extension GatewayEvent {
     case let .sudoRequest(p): return p.prompt ?? p.requestID
     case let .secretRequest(p): return p.prompt ?? p.requestID
     case let .error(message): return message
+    case .authExpired: return ""
     case .unknown: return ""
     }
   }

@@ -182,12 +182,12 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Modify: `HermesKit/Sources/HermesKit/Models/GatewayEvent.swift` (StoredMessage fields if missing: reasoning variants, tool_calls, tool_call_id/name)
 - Create: `HermesKit/Tests/HermesKitTests/TranscriptReconstructionTests.swift`
 
-- [ ] implement the pure reconstruction mirroring desktop `toChatMessages()` (reasoning → text → tool-call rows; backward tool-result matching by id then name)
-- [ ] STOP dropping empty-content/tool-only turns; emit reasoning rows (collapsed/complete)
-- [ ] key tool rows by `tool_call_id` (fallback name), identical to the live fold's `toolRowIDs`
-- [ ] write tests: reasoning rows present, tool-only turns kept, backward result matching (id and name), ordering reasoning→text→tools
-- [ ] write a **keying-parity** test: a turn reconstructed from history equals the same turn folded live (shared fixture)
-- [ ] run tests — must pass before next task
+- [x] implement the pure reconstruction mirroring desktop `toChatMessages()` (reasoning → text → tool-call rows; backward tool-result matching by id then name)
+- [x] STOP dropping empty-content/tool-only turns; emit reasoning rows (collapsed/complete)
+- [x] key tool rows by `tool_call_id` (fallback name), identical to the live fold's `toolRowIDs`
+- [x] write tests: reasoning rows present, tool-only turns kept, backward result matching (id and name), ordering reasoning→text→tools
+- [x] write a **keying-parity** test: a turn reconstructed from history equals the same turn folded live (shared fixture)
+- [x] run tests — must pass before next task
 
 ### Task 3: Pure `reconcileTimer` + `applyRuntimeInfo`
 

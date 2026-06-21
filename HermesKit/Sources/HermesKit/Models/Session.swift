@@ -107,17 +107,34 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   /// On an assistant message: the tool calls it made (name + arguments) — used to
   /// recover the *command* shown in a tool's detail sheet on resume.
   public var toolCalls: [ToolCallRef]?
+  /// Reasoning/thinking text recorded on an assistant message. The server may send it
+  /// under any of `reasoning` / `reasoning_content` / `reasoning_details` (string form);
+  /// `reasoningText` collapses them, mirroring the desktop's `toChatMessages()`.
+  public var reasoning: String?
+  public var reasoningContent: String?
+  /// `reasoning_details` is provider-shaped (often an array). We only surface it when it
+  /// arrives as a plain string, matching the desktop fallback.
+  public var reasoningDetails: String?
+
+  /// The single reasoning string for this message, first-non-empty of the three variants
+  /// (`reasoning ?? reasoning_content ?? reasoning_details`), or `nil`.
+  public var reasoningText: String? {
+    reasoning?.nonEmpty ?? reasoningContent?.nonEmpty ?? reasoningDetails?.nonEmpty
+  }
 
   enum CodingKeys: String, CodingKey {
-    case id, role, content, timestamp
+    case id, role, content, timestamp, reasoning
     case toolName = "tool_name"
     case toolCallID = "tool_call_id"
     case toolCalls = "tool_calls"
+    case reasoningContent = "reasoning_content"
+    case reasoningDetails = "reasoning_details"
   }
 
   public init(
     id: Int, role: String, content: String? = nil, timestamp: Double? = nil,
-    toolName: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCallRef]? = nil
+    toolName: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCallRef]? = nil,
+    reasoning: String? = nil, reasoningContent: String? = nil, reasoningDetails: String? = nil
   ) {
     self.id = id
     self.role = role
@@ -126,6 +143,9 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     self.toolName = toolName
     self.toolCallID = toolCallID
     self.toolCalls = toolCalls
+    self.reasoning = reasoning
+    self.reasoningContent = reasoningContent
+    self.reasoningDetails = reasoningDetails
   }
 
   public init(from decoder: Decoder) throws {
@@ -138,6 +158,10 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     toolCallID = try? c.decodeIfPresent(String.self, forKey: .toolCallID)
     // tool_calls is OpenAI-shaped; tolerate absence / odd shapes.
     toolCalls = try? c.decodeIfPresent([ToolCallRef].self, forKey: .toolCalls)
+    reasoning = try? c.decodeIfPresent(String.self, forKey: .reasoning)
+    reasoningContent = try? c.decodeIfPresent(String.self, forKey: .reasoningContent)
+    // `reasoning_details` is usually an array of provider blocks; surface only string form.
+    reasoningDetails = try? c.decodeIfPresent(String.self, forKey: .reasoningDetails)
   }
 }
 

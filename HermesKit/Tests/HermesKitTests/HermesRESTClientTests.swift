@@ -65,6 +65,34 @@ struct HermesRESTClientTests {
     #expect(status.activeSessions == 2)
   }
 
+  @Test func authProvidersDecodesList() async throws {
+    MockURLProtocol.set(json: #"""
+    [{"name":"basic","display_name":"Username & password","supports_password":true},{"name":"google","display_name":"Google","supports_password":false}]
+    """#)
+    let providers = try await makeClient().authProviders(baseURL)
+    #expect(providers == [
+      AuthProvider(name: "basic", displayName: "Username & password", supportsPassword: true),
+      AuthProvider(name: "google", displayName: "Google", supportsPassword: false),
+    ])
+    #expect(MockURLProtocol.lastRequest?.url?.path == "/api/auth/providers")
+    // Public probe — no auth header.
+    #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-Hermes-Session-Token") == nil)
+  }
+
+  @Test func authProvidersReturnsNilOnNotFound() async throws {
+    // Older servers 404 this endpoint → nil (capability falls back to token-only).
+    MockURLProtocol.set(status: 404)
+    let providers = try await makeClient().authProviders(baseURL)
+    #expect(providers == nil)
+  }
+
+  @Test func authProvidersTransportFailureStillThrows() async throws {
+    MockURLProtocol.set(fail: true)
+    await #expect(throws: RESTError.unreachable) {
+      _ = try await makeClient().authProviders(baseURL)
+    }
+  }
+
   @Test func statusProbeSendsNoToken() async throws {
     MockURLProtocol.set(json: #"{"version":"0.16.0"}"#)
     _ = try await makeClient().status(baseURL)

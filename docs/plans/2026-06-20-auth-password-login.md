@@ -157,12 +157,12 @@ byte-identical throughout.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift` (add `authProviders(url)` endpoint)
 - Create: `HermesKit/Tests/HermesKitTests/ServerAuthCapabilityTests.swift`
 
-- [ ] add `AuthProvider` model `{name, displayName, supportsPassword}` + `rest.authProviders(url)` (`GET /api/auth/providers`)
-- [ ] implement pure `ServerAuthCapability(from status:providers:)` → tokenOnly / passwordAvailable(provider,display) / oauthOnly
-- [ ] handle providers 404 / older servers gracefully (treat as token-only)
-- [ ] write table-driven tests for the mapper (auth_required false; gated+basic; gated+oauth-only; mixed → password)
-- [ ] write a client test for `authProviders` decoding (injected URLSession)
-- [ ] run tests — must pass before next task
+- [x] add `AuthProvider` model `{name, displayName, supportsPassword}` + `rest.authProviders(url)` (`GET /api/auth/providers`)
+- [x] implement pure `ServerAuthCapability(from status:providers:)` → tokenOnly / passwordAvailable(provider,display) / oauthOnly
+- [x] handle providers 404 / older servers gracefully (treat as token-only)
+- [x] write table-driven tests for the mapper (auth_required false; gated+basic; gated+oauth-only; mixed → password)
+- [x] write a client test for `authProviders` decoding (injected URLSession)
+- [x] run tests — must pass before next task
 
 ### Task 3: `passwordLogin` client + cookie capture + persistence round-trip
 

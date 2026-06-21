@@ -89,6 +89,10 @@ public enum RESTError: Error, Equatable, Sendable {
 public struct HermesRESTClient: Sendable {
   /// Unauthenticated reachability/health probe.
   public var status: @Sendable (_ baseURL: URL) async throws -> ServerStatus
+  /// Public capability probe — `GET /api/auth/providers` → `[{name, display_name,
+  /// supports_password}]`. Returns `nil` on older servers that 404 this endpoint (treat as
+  /// token-only); other transport/HTTP errors still throw.
+  public var authProviders: @Sendable (_ baseURL: URL) async throws -> [AuthProvider]?
   public var sessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int, _ order: SessionOrder) async throws -> [Session]
   /// Just the archived (soft-hidden) sessions — `GET /api/sessions?archived=only`.
   public var archivedSessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int) async throws -> [Session]
@@ -117,6 +121,17 @@ public extension HermesRESTClient {
     HermesRESTClient(
       status: { baseURL in
         try await get(makeURL(baseURL, "/api/status"), token: nil, session: session)
+      },
+      authProviders: { baseURL in
+        do {
+          let providers: [AuthProvider] = try await get(
+            makeURL(baseURL, "/api/auth/providers"), token: nil, session: session
+          )
+          return providers
+        } catch RESTError.notFound {
+          // Older servers don't expose this endpoint — capability falls back to token-only.
+          return nil
+        }
       },
       sessions: { conn, limit, offset, order in
         let url = try makeURL(conn.baseURL, "/api/sessions", query: [

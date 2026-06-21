@@ -43,6 +43,9 @@ public struct AuthProvider: Equatable, Sendable, Decodable {
 public enum ServerAuthCapability: Equatable, Sendable {
   case tokenOnly
   case passwordAvailable(provider: String, displayName: String)
+  /// Gated server whose providers are all OAuth. The associated `providers` list isn't read
+  /// by today's UI (which only disables password) — it's retained for the parked OAuth work
+  /// (#19), where the picker will render these providers.
   case oauthOnly(providers: [AuthProvider])
 
   /// Pure mapper. `providers` is the decoded `/api/auth/providers` payload, or `nil` when

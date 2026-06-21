@@ -1,11 +1,18 @@
 import ComposableArchitecture
 import Foundation
 
-/// Onboarding: a staged connection flow.
+/// Onboarding: a staged, capability-aware connection flow.
 /// 1. Check the server URL is reachable (`GET /api/status`, unauthenticated) —
-///    distinguishing unreachable from "reachable but not Hermes".
-/// 2. Validate the pasted token with one authenticated call (`GET /api/sessions?limit=1`).
-/// 3. Persist the token in the Keychain and signal `.delegate(.connected)`.
+///    distinguishing unreachable from "reachable but not Hermes" — and probe its auth
+///    capability (`/api/auth/providers` on a gated server) to preselect the segment.
+/// 2. Authenticate in the chosen regime:
+///    - **token** — validate the pasted token with one authenticated call
+///      (`GET /api/sessions?limit=1`).
+///    - **password** — `POST /auth/password-login` for a cookie session, then validate the
+///      cookies with the same authenticated call.
+/// 3. Persist the resulting `AuthSession` (token or cookie) in the Keychain and signal
+///    `.delegate(.connected)`.
+
 /// Which auth regime the user is entering credentials for. Driven by the server's
 /// capability probe (see `ServerAuthCapability`) but ultimately the user's segment choice.
 public enum AuthMethod: String, Equatable, Sendable {
@@ -166,10 +173,8 @@ public struct ConnectionFeature {
               providers = (try? await rest.authProviders(url)) ?? nil
             }
             await send(.serverStatusResponse(.success(status), providers: providers))
-          } catch let error as RESTError {
-            await send(.serverStatusResponse(.failure(error), providers: nil))
           } catch {
-            await send(.serverStatusResponse(.failure(.unreachable), providers: nil))
+            await send(.serverStatusResponse(.failure(asRESTError(error)), providers: nil))
           }
         }
         .cancellable(id: CancelID.statusCheck, cancelInFlight: true)
@@ -209,14 +214,11 @@ public struct ConnectionFeature {
           return .run { [rest, keychain, preferences] send in
             do {
               _ = try await rest.sessions(connection, 1, 0, .recent)
-            } catch let error as RESTError {
-              await send(.tokenValidationResponse(.failure(error)))
-              return
             } catch {
-              await send(.tokenValidationResponse(.failure(.unreachable)))
+              await send(.tokenValidationResponse(.failure(asRESTError(error))))
               return
             }
-            try? keychain.saveToken(connection.token ?? "")
+            try? keychain.saveSession(.token(connection.token ?? ""))
             preferences.saveServerURL(connection.baseURL.absoluteString)
             await send(.tokenValidationResponse(.success(connection)))
           }
@@ -231,11 +233,8 @@ public struct ConnectionFeature {
             let cookieSession: CookieSession
             do {
               cookieSession = try await rest.passwordLogin(url, provider, username, password)
-            } catch let error as RESTError {
-              await send(.passwordLoginResponse(.failure(error)))
-              return
             } catch {
-              await send(.passwordLoginResponse(.failure(.unreachable)))
+              await send(.passwordLoginResponse(.failure(asRESTError(error))))
               return
             }
             // Activate the captured cookies into the shared jar BEFORE the validating call —
@@ -244,11 +243,8 @@ public struct ConnectionFeature {
             let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
             do {
               _ = try await rest.sessions(connection, 1, 0, .recent)
-            } catch let error as RESTError {
-              await send(.passwordLoginResponse(.failure(error)))
-              return
             } catch {
-              await send(.passwordLoginResponse(.failure(.unreachable)))
+              await send(.passwordLoginResponse(.failure(asRESTError(error))))
               return
             }
             try? keychain.saveSession(.cookie(cookieSession))
@@ -285,6 +281,13 @@ public struct ConnectionFeature {
       }
     }
   }
+}
+
+/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel both auth
+/// reducers (`ConnectionFeature`, `ReauthFeature`) use after every `rest.*` call: a typed
+/// `RESTError` passes through verbatim; a raw transport failure maps to `.unreachable`.
+func asRESTError(_ error: any Error) -> RESTError {
+  error as? RESTError ?? .unreachable
 }
 
 /// Lenient URL parsing: accept `host:port` by defaulting to `http://`.

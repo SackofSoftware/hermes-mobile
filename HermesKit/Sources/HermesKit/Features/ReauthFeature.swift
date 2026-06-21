@@ -117,11 +117,8 @@ public struct ReauthFeature {
           return .run { [rest, keychain] send in
             do {
               _ = try await rest.sessions(connection, 1, 0, .recent)
-            } catch let error as RESTError {
-              await send(.reauthResponse(.failure(error)))
-              return
             } catch {
-              await send(.reauthResponse(.failure(.unreachable)))
+              await send(.reauthResponse(.failure(asRESTError(error))))
               return
             }
             try? keychain.saveSession(.token(connection.token ?? ""))
@@ -139,11 +136,8 @@ public struct ReauthFeature {
             let cookieSession: CookieSession
             do {
               cookieSession = try await rest.passwordLogin(url, provider, username, password)
-            } catch let error as RESTError {
-              await send(.reauthResponse(.failure(error)))
-              return
             } catch {
-              await send(.reauthResponse(.failure(.unreachable)))
+              await send(.reauthResponse(.failure(asRESTError(error))))
               return
             }
             // Swap the new rotated cookies into the shared jar BEFORE validating — otherwise
@@ -152,11 +146,8 @@ public struct ReauthFeature {
             let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
             do {
               _ = try await rest.sessions(connection, 1, 0, .recent)
-            } catch let error as RESTError {
-              await send(.reauthResponse(.failure(error)))
-              return
             } catch {
-              await send(.reauthResponse(.failure(.unreachable)))
+              await send(.reauthResponse(.failure(asRESTError(error))))
               return
             }
             try? keychain.saveSession(.cookie(cookieSession))

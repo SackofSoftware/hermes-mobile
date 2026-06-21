@@ -197,11 +197,11 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Create: `HermesKit/Tests/HermesKitTests/TimerReconcileTests.swift`
 - Create: `HermesKit/Tests/HermesKitTests/RuntimeInfoApplyTests.swift`
 
-- [ ] implement `reconcileTimer(running, anchor, now) -> TimerState` (all 4 branches incl. stale-anchor→freeze)
-- [ ] implement `applyRuntimeInfo(info, into:)` — partial info only overwrites present fields
-- [ ] write tests for `reconcileTimer` (running+anchor → elapsed; running+no-anchor → 0@now; !running+anchor → frozen/discard; !running+no-anchor → none)
-- [ ] write tests for `applyRuntimeInfo` (full info, partial info preserves existing model/usage)
-- [ ] run tests — must pass before next task
+- [x] implement `reconcileTimer(running, anchor, now) -> TimerState` (all 4 branches incl. stale-anchor→freeze)
+- [x] implement `applyRuntimeInfo(info, into:)` — partial info only overwrites present fields
+- [x] write tests for `reconcileTimer` (running+anchor → elapsed; running+no-anchor → 0@now; !running+anchor → frozen/discard; !running+no-anchor → none)
+- [x] write tests for `applyRuntimeInfo` (full info, partial info preserves existing model/usage)
+- [x] run tests — must pass before next task
 
 ### Task 4: Switch bootstrap to `session.activate` + hydrate-on-open
 

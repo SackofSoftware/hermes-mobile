@@ -143,12 +143,12 @@ byte-identical throughout.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift` (ServerConnection, ServerStatus)
 - Create: `HermesKit/Tests/HermesKitTests/AuthSessionTests.swift`
 
-- [ ] add `AuthSession` enum (`.token` | `.cookie(CookieSession)`) + `CookieSession`/`SerializedCookie` (Codable)
-- [ ] change `ServerConnection.token: String?` → `auth: AuthSession`; keep a convenience for the unauth probe
-- [ ] add `authRequired`/`authProviders` to `ServerStatus` (coding keys `auth_required`/`auth_providers`)
-- [ ] update all current construction sites to `.token(...)` so token mode compiles unchanged
-- [ ] write tests: `AuthSession`/`CookieSession` Codable round-trip; `ServerStatus` decodes new fields (present + absent)
-- [ ] run tests — must pass before next task
+- [x] add `AuthSession` enum (`.token` | `.cookie(CookieSession)`) + `CookieSession`/`SerializedCookie` (Codable)
+- [x] change `ServerConnection.token: String?` → `auth: AuthSession`; keep a convenience for the unauth probe
+- [x] add `authRequired`/`authProviders` to `ServerStatus` (coding keys `auth_required`/`auth_providers`)
+- [x] update all current construction sites to `.token(...)` so token mode compiles unchanged
+- [x] write tests: `AuthSession`/`CookieSession` Codable round-trip; `ServerStatus` decodes new fields (present + absent)
+- [x] run tests — must pass before next task
 
 ### Task 2: Capability probe + `ServerAuthCapability` mapper
 

@@ -4,15 +4,30 @@ import Foundation
 
 // MARK: - Connection & status
 
-/// Where and how to reach a Hermes server. `token` is nil for the unauthenticated
-/// reachability probe (`/api/status`).
+/// Where and how to reach a Hermes server. `auth` carries the regime (token vs cookie);
+/// the unauthenticated reachability probe (`/api/status`) goes through `status(baseURL:)`
+/// without a `ServerConnection`.
 public struct ServerConnection: Equatable, Sendable {
   public var baseURL: URL
-  public var token: String?
+  public var auth: AuthSession
 
-  public init(baseURL: URL, token: String? = nil) {
+  public init(baseURL: URL, auth: AuthSession) {
     self.baseURL = baseURL
-    self.token = token
+    self.auth = auth
+  }
+
+  /// Convenience for the common token-mode case so existing call sites stay byte-identical.
+  public init(baseURL: URL, token: String) {
+    self.init(baseURL: baseURL, auth: .token(token))
+  }
+
+  /// The bearer token when authenticating in `.token` mode; `nil` in `.cookie` mode (which
+  /// uses the cookie jar). Drives the existing `X-Hermes-Session-Token` REST/WS paths.
+  /// Setting a value switches the connection into `.token` mode (token-mode editing in
+  /// Settings); setting `nil` is ignored (the cookie jar is the source of truth then).
+  public var token: String? {
+    get { auth.token }
+    set { if let newValue { auth = .token(newValue) } }
   }
 }
 
@@ -27,12 +42,19 @@ public struct ServerStatus: Equatable, Sendable, Decodable {
   public var gatewayRunning: Bool?
   public var gatewayState: String?
   public var activeSessions: Int?
+  /// `true` when the server is in the gated (password/OAuth) regime; absent on older
+  /// servers (treat absent/`false` as token-only).
+  public var authRequired: Bool?
+  /// Provider names advertised by the server (e.g. `["basic"]`); absent on older servers.
+  public var authProviders: [String]?
 
   enum CodingKeys: String, CodingKey {
     case version
     case gatewayRunning = "gateway_running"
     case gatewayState = "gateway_state"
     case activeSessions = "active_sessions"
+    case authRequired = "auth_required"
+    case authProviders = "auth_providers"
   }
 }
 

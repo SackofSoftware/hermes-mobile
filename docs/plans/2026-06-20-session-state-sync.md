@@ -287,11 +287,11 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 **Files:**
 - Modify: `HermesMobileTests/*` (snapshot host + baselines)
 
-- [ ] add snapshot: re-hydrated chat (history with tool calls + thinking) renders identically to a live-streamed turn
-- [ ] add snapshot: instant-paint state (cache shown before hydrate)
-- [ ] add snapshot: session-list glow on vs off
-- [ ] record baselines with `make snapshot-record`; keep row timestamps pinned
-- [ ] run `make snapshot` — must pass before next task
+- [x] add snapshot: re-hydrated chat (history with tool calls + thinking) renders identically to a live-streamed turn — `HydrationSnapshotTests.testRehydrated_matchesLiveStreamedTurn` asserts the reconstructed-from-history view and the live-folded view against ONE shared baseline (`rehydratedVsLive`) + an `XCTAssertEqual` on row kinds; `testRehydrated_toolCallsAndThinking` captures the full rehydration layout (reasoning + answer + completed tool row)
+- [x] add snapshot: instant-paint state (cache shown before hydrate) — `HydrationSnapshotTests.testInstantPaint_fromCache` (painted from a `ChatSnapshotClient.loadSnapshot` override, with the subtle "reconnecting" status + model chip + context ring)
+- [x] add snapshot: session-list glow on vs off — `SessionSnapshotTests.testSessionRow_glowOff` / `testSessionRow_glowOn` (identical fixtures, only `isActive` differs)
+- [x] record baselines with `make snapshot-record`; keep row timestamps pinned — recorded the 5 new baselines via assert-mode auto-record (avoids wiping existing baselines); pinned dark traits + immediate clock from `SnapshotTestCase` keep them deterministic (ChatView rows show no timestamps)
+- [x] run `make snapshot` — must pass before next task — PASSED: 59 tests, 0 failures on iPhone 17 Pro / iOS 26.2
 
 ### Task 11: Verify acceptance criteria
 

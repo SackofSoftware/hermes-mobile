@@ -297,6 +297,7 @@ struct ChatInteractionTests {
     initial.composerText = "hello"
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       // A stuck server: prompt.submit times out (Task 6's per-request timeout).
       $0.hermesGateway.send = { @Sendable _, _ in
         throw GatewayError.timedOut(method: "prompt.submit")
@@ -324,6 +325,7 @@ struct ChatInteractionTests {
     initial.composerText = "hello"
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable _, _ in throw PlainError() }
     }
 

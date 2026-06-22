@@ -424,7 +424,9 @@ public struct ChatFeature {
           state.errorBanner = nil
           state.isSending = true
           for index in state.attachments.indices { state.attachments[index].uploadState = .uploading }
-          return .run { [gateway, uuid] send in
+          // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
+          let anchor = setTurnAnchor(state)
+          return .merge(anchor, .run { [gateway, uuid] send in
             do {
               var refs: [String] = []
               for attachment in attachments {
@@ -454,17 +456,19 @@ public struct ChatFeature {
             } catch {
               await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
             }
-          }
+          })
         }
 
         state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
         state.composerText = ""
         state.errorBanner = nil
         state.isSending = true
+        // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
+        let anchor = setTurnAnchor(state)
         // prompt.submit acks fast (`{status:"streaming"}`); the turn streams via events,
         // so success does nothing here — only a thrown error (timeout / server / drop)
         // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung).
-        return .run { [gateway] send in
+        return .merge(anchor, .run { [gateway] send in
           do {
             _ = try await gateway.send("prompt.submit", .object([
               "session_id": .string(sessionID), "text": .string(text),
@@ -474,7 +478,7 @@ public struct ChatFeature {
           } catch {
             await send(.promptSubmitFailed(message: GatewayError.disconnected.message))
           }
-        }
+        })
 
       case let .promptSubmitFailed(message):
         state.errorBanner = "Prompt failed: \(message)"
@@ -489,6 +493,8 @@ public struct ChatFeature {
         freezeThinking(into: &state)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
+          // Interrupt ends the turn — drop the anchor so it can't resurrect on hydrate.
+          clearTurnAnchor(state),
           .run { [gateway] _ in
             _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
           }
@@ -881,7 +887,10 @@ public struct ChatFeature {
       ))
       state.thinkingRowID = thinkingID
       state.thinkingSeconds = 0
-      return startThinkingTimer()
+      // Reaffirm the turn-start anchor at the authoritative turn start (the submit anchor is
+      // optimistic; `message.start` is the agent's first beat). A hydrate mid-turn reconciles
+      // the live elapsed timer against this instant.
+      return .merge(setTurnAnchor(state), startThinkingTimer())
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
@@ -903,7 +912,8 @@ public struct ChatFeature {
       keepThinkingLast(into: &state)
       freezeThinking(into: &state)
       state.isSending = false
-      return .cancel(id: CancelID.thinkingTimer)
+      // Turn ended — drop the anchor so a later hydrate doesn't resurrect a phantom timer.
+      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state))
 
     case let .thinkingDelta(text):
       appendToThinking(text, into: &state)
@@ -961,7 +971,8 @@ public struct ChatFeature {
       state.errorBanner = message
       state.isSending = false
       freezeThinking(into: &state)
-      return .cancel(id: CancelID.thinkingTimer)
+      // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate).
+      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state))
 
     case .authExpired:
       // The gated session is fully dead (ws-ticket 401). Pause reconnect — do NOT back off —
@@ -1232,6 +1243,13 @@ public struct ChatFeature {
       }
     }
 
+    // Reconcile the live "Thinking" elapsed timer from the client-persisted turn-start anchor
+    // against the authoritative `running` flag. `running` decides *whether* the timer runs;
+    // the anchor only supplies the *start instant*. A `!running` + stale anchor must DISCARD
+    // the anchor (no phantom timer); a `running` turn resumes the tick seeded at the elapsed
+    // offset rather than restarting at 0.
+    let timerEffect = reconcileTurnTimer(running: running, into: &state)
+
     // Persist the freshly-hydrated, server-authoritative state back to the cache so the next
     // cold open paints from it (debounced — coalesces with any immediately-following deltas).
     let persist = debouncedPersist()
@@ -1239,9 +1257,49 @@ public struct ChatFeature {
     // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors
     // the prior resume behavior so the gauge isn't blank until the next turn.
     if state.usage == nil {
-      return .merge(fetchUsage(sessionID: response.sessionID), persist)
+      return .merge(fetchUsage(sessionID: response.sessionID), persist, timerEffect)
     }
-    return persist
+    return .merge(persist, timerEffect)
+  }
+
+  /// Reconcile the live "Thinking" elapsed timer on hydrate from the persisted turn-start
+  /// anchor and the authoritative `running` flag (`reconcileTimer`):
+  ///   - `.running(elapsed:)` → seed `thinkingSeconds` to the elapsed offset, recreate the
+  ///     live thinking row eagerly (so a "Thinking <n>s" indicator appears immediately even
+  ///     before more reasoning arrives), and resume the `continuousClock` tick from there;
+  ///   - `.frozen` → no live tick; **discard** the stale anchor so it can't resurrect a
+  ///     phantom timer; the reconstructed (complete) reasoning row stands as a static
+  ///     `Thought · <elapsed>` disclosure;
+  ///   - `.none` → no in-flight turn; nothing to do.
+  private func reconcileTurnTimer(running: Bool, into state: inout State) -> Effect<Action> {
+    // Read the anchor under the same key the submit path wrote it (`storedSessionID ??
+    // liveSessionID`), NOT `response.sessionID` (the live id) — they differ for a resumed
+    // session keyed by its stored id.
+    let anchor = anchorKey(state).flatMap { chatSnapshot.turnAnchor($0) }
+    switch reconcileTimer(running: running, anchor: anchor, now: now) {
+    case let .running(elapsed):
+      let seconds = Int(elapsed)
+      state.thinkingSeconds = seconds
+      // Recreate the live thinking row (the in-flight one was dropped by the wholesale
+      // transcript rebuild). Created eagerly with the seeded elapsed so it renders as a live
+      // shimmering "Thinking <n>s" while the tick continues.
+      let thinkingID = uuid()
+      state.transcript.append(ChatRow(
+        id: thinkingID,
+        kind: .thinking(reasoning: "", status: nil, elapsedSeconds: seconds, isComplete: false)
+      ))
+      state.thinkingRowID = thinkingID
+      keepThinkingLast(into: &state)
+      // Resume the tick (seeded `thinkingSeconds` continues incrementing from `elapsed`).
+      return startThinkingTimer()
+    case .frozen:
+      // Stale anchor on a stopped turn — discard it so it never starts a phantom timer.
+      state.thinkingSeconds = 0
+      return clearTurnAnchor(state)
+    case .none:
+      state.thinkingSeconds = 0
+      return .none
+    }
   }
 
   /// Pull current context-window usage right after a session resolves. `session.info` /
@@ -1305,6 +1363,35 @@ public struct ChatFeature {
     )
     return .run { [chatSnapshot] _ in
       chatSnapshot.saveSnapshot(sessionID, snapshot)
+    }
+  }
+
+  // MARK: - Turn-start anchor (timer continuity)
+
+  /// The key the turn-start anchor is stored under. Mirrors the snapshot key
+  /// (`storedSessionID ?? liveSessionID`) so the anchor written on submit is read back by
+  /// `hydrate` (which keys on the stored id) on the next open.
+  private func anchorKey(_ state: State) -> String? {
+    state.storedSessionID ?? state.liveSessionID
+  }
+
+  /// Persist the turn-start anchor (`@Dependency(\.date.now)`) so a later hydrate can
+  /// reconcile the elapsed timer against the authoritative `running` flag. The anchor is
+  /// **non-authoritative** — it only supplies the *start instant*; `running` decides whether
+  /// the timer runs at all. Written on `prompt.submit`, reaffirmed on `message.start`.
+  private func setTurnAnchor(_ state: State) -> Effect<Action> {
+    guard let key = anchorKey(state) else { return .none }
+    return .run { [chatSnapshot, now] _ in
+      chatSnapshot.setTurnAnchor(key, now)
+    }
+  }
+
+  /// Drop the turn-start anchor at turn end (completion / error / interrupt) so a stopped
+  /// turn never leaves a stale anchor that a later hydrate could mistake for a live timer.
+  private func clearTurnAnchor(_ state: State) -> Effect<Action> {
+    guard let key = anchorKey(state) else { return .none }
+    return .run { [chatSnapshot] _ in
+      chatSnapshot.clearTurnAnchor(key)
     }
   }
 

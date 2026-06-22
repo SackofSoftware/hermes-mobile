@@ -253,4 +253,161 @@ struct HydrateTests {
 
     await store.send(.onDisappear)
   }
+
+  // MARK: Task 6 — turn-start anchor + timer continuity
+
+  /// Build an activate-shaped response with the given `running` flag, empty messages and no
+  /// inflight, so the only row applyActivate adds is the reconciled live thinking row.
+  nonisolated private static func activateResponse(running: Bool) -> JSONValue {
+    .object([
+      "session_id": .string("live123"),
+      "stored_session_id": .string("stored123"),
+      "messages": .array([]),
+      "running": .bool(running),
+      "info": .object([
+        "model": .string("claude-opus-4-8"),
+        "usage": .object(["context_used": .number(1), "context_max": .number(200_000), "context_percent": .number(0)]),
+      ]),
+    ])
+  }
+
+  @Test func hydrateResumesTimerSeededAtElapsedAndTicksOn() async {
+    // running == true with a persisted anchor at `now − 7s` → the live thinking row resumes
+    // seeded at 7s and keeps ticking (8s, 9s, …) rather than restarting at 0.
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let clock = TestClock()
+    let nowDate = Date(timeIntervalSince1970: 1_000)
+    snapshotClient.setTurnAnchor("stored123", nowDate.addingTimeInterval(-7))
+
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(nowDate)
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in Self.activateResponse(running: true) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.success) {
+      $0.isSending = true
+      // Live thinking row recreated, seeded at 7s elapsed, still in flight.
+      $0.thinkingSeconds = 7
+      $0.thinkingRowID = self.uuid(0)
+      $0.transcript = [ChatRow(
+        id: self.uuid(0),
+        kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 7, isComplete: false)
+      )]
+    }
+    // The resumed tick continues from 7 (not 0): two more seconds → 8, 9.
+    await clock.advance(by: .seconds(2))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 8 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 9 }
+
+    await store.send(.onDisappear)
+  }
+
+  @Test func hydrateRunningWithNoAnchorTicksFromZero() async {
+    // running == true but no persisted anchor → the timer anchors at `now`, seeding the row
+    // at 0s and ticking 1, 2 from there.
+    let snapshotClient = ChatSnapshotClient.inMemory() // no anchor seeded
+    let clock = TestClock()
+
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(Date(timeIntervalSince1970: 1_000))
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in Self.activateResponse(running: true) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.success) {
+      $0.isSending = true
+      $0.thinkingSeconds = 0
+      $0.thinkingRowID = self.uuid(0)
+      $0.transcript = [ChatRow(
+        id: self.uuid(0),
+        kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)
+      )]
+    }
+    await clock.advance(by: .seconds(2))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
+
+    await store.send(.onDisappear)
+  }
+
+  @Test func hydrateNotRunningWithStaleAnchorFreezesAndDiscardsAnchor() async {
+    // The phantom-timer bug: running == false but a stale anchor lingers. The timer must NOT
+    // resume (no live thinking row, no tick); the stale anchor is discarded from the cache so
+    // a later hydrate can't resurrect it.
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let clock = TestClock()
+    let nowDate = Date(timeIntervalSince1970: 1_000)
+    snapshotClient.setTurnAnchor("stored123", nowDate.addingTimeInterval(-30)) // stale
+
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(nowDate)
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in Self.activateResponse(running: false) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.success) {
+      $0.isSending = false
+      $0.thinkingSeconds = 0
+    }
+    // No live thinking row was created and no tick fires (a leaked tick loop would fail here).
+    #expect(store.state.thinkingRowID == nil)
+    #expect(store.state.transcript.isEmpty)
+    await clock.advance(by: .seconds(5))
+    // The stale anchor was discarded from the cache.
+    #expect(snapshotClient.turnAnchor("stored123") == nil)
+
+    await store.send(.onDisappear)
+  }
+
+  @Test func submitWritesAnchorAndCompleteClearsIt() async {
+    // The anchor is persisted on prompt.submit (so a hydrate mid-turn resumes the timer) and
+    // dropped on message.complete (so a stopped turn leaves no stale anchor).
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let clock = TestClock()
+    let nowDate = Date(timeIntervalSince1970: 5_000)
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    initial.storedSessionID = "stored123"
+    initial.composerText = "hello"
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(nowDate)
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in .object(["status": .string("streaming")]) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    // Anchor written at `now`.
+    #expect(snapshotClient.turnAnchor("stored123") == nowDate)
+
+    // The turn ends → the anchor is cleared.
+    await store.send(.gatewayEvent(.messageComplete(text: "done", usage: nil)))
+    #expect(snapshotClient.turnAnchor("stored123") == nil)
+
+    await store.send(.onDisappear)
+  }
 }

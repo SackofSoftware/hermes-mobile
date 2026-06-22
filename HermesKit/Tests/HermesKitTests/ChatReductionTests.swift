@@ -468,6 +468,7 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable _, _ in .object(["status": .string("streaming")]) }
     }
 
@@ -596,6 +597,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
         if method == "session.activate" { activateParams.setValue(params) }
         return .object([
@@ -640,6 +642,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, _ in
         methods.withValue { $0.append(method) }
         return .object([
@@ -688,6 +691,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
         methods.withValue { $0.append(method) }
         if method == "session.usage" {
@@ -733,6 +737,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, _ in
         methods.withValue { $0.append(method) }
         if method == "session.activate" {
@@ -784,6 +789,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable _, _ in
         .object([
           "session_id": .string("live123"),
@@ -815,18 +821,26 @@ struct ChatReductionTests {
       $0.usage = Usage(contextUsed: 5, contextMax: 200_000, contextPercent: 0)
       // running == true → working indicator on.
       $0.isSending = true
-      // Inflight user row + seeded streaming assistant row (uuid 0, uuid 1).
+      // Inflight user row + seeded streaming assistant row (uuid 0, uuid 1) + a live thinking
+      // row (uuid 2) recreated by the timer reconcile (running with no anchor → ticks from 0).
       $0.transcript = [
         ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "explain this", isComplete: true)),
         ChatRow(id: self.uuid(1), kind: .message(role: .assistant, text: "Sure, ", isComplete: false)),
+        ChatRow(
+          id: self.uuid(2),
+          kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)
+        ),
       ]
       $0.streamingRowID = self.uuid(1)
+      $0.thinkingRowID = self.uuid(2)
     }
-    // The next delta appends to the seeded row — a SINGLE assistant row, no duplicate.
+    // The next delta appends to the seeded row — a SINGLE assistant row, no duplicate; the
+    // live thinking row is moved to last (keepThinkingLast) but stays the same row.
     await store.send(.gatewayEvent(.messageDelta(text: "here goes."))) {
       $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Sure, here goes.", isComplete: false)
     }
-    #expect(store.state.transcript.count == 2)
+    // user + assistant + thinking = 3 rows (no duplicate assistant from the delta).
+    #expect(store.state.transcript.count == 3)
     await store.send(.onDisappear)
   }
 
@@ -1277,6 +1291,7 @@ struct ChatReductionTests {
     initial.attachments = attachments
     return TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
         methods.withValue { $0.append(method) }
         if method == "prompt.submit" { promptText.setValue(params["text"]?.stringValue ?? "") }

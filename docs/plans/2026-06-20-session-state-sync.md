@@ -236,11 +236,11 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (write/clear anchor; reconcile on hydrate)
 - Modify: `HermesKit/Tests/HermesKitTests/*` (timer tests)
 
-- [ ] write the anchor on `prompt.submit` (reaffirm on `message.start`); clear on `message.complete`/`error`/interrupt
-- [ ] on hydrate, call `reconcileTimer(running, anchor, now)` and start/resume/freeze the `continuousClock` tick accordingly
-- [ ] ensure `running == false` + stale anchor → discard anchor + frozen disclosure (kills phantom timer)
-- [ ] write reducer tests (TestClock): resume at `now − anchor`; running+no-anchor → ticks from 0; !running+anchor → frozen; anchor cleared on completion
-- [ ] run tests — must pass before next task
+- [x] write the anchor on `prompt.submit` (reaffirm on `message.start`); clear on `message.complete`/`error`/interrupt
+- [x] on hydrate, call `reconcileTimer(running, anchor, now)` and start/resume/freeze the `continuousClock` tick accordingly
+- [x] ensure `running == false` + stale anchor → discard anchor + frozen disclosure (kills phantom timer)
+- [x] write reducer tests (TestClock): resume at `now − anchor`; running+no-anchor → ticks from 0; !running+anchor → frozen; anchor cleared on completion
+- [x] run tests — must pass before next task
 
 ### Task 7: Session-list working glow — event-driven clear + poll backstop
 

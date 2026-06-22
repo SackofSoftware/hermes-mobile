@@ -94,8 +94,8 @@ public struct SessionHandle: Equatable, Sendable, Decodable {
   }
 }
 
-/// The in-flight turn snapshot returned by `session.activate` / `session.resume` for a
-/// live session: the user's prompt, any assistant text streamed so far, and whether the
+/// The in-flight turn snapshot returned by `session.resume` for a live session: the
+/// user's prompt, any assistant text streamed so far, and whether the
 /// turn is still streaming. Lost when the agent process restarts (acceptable — no replay
 /// buffer). Lenient: every field optional. Mirrors the desktop `SessionInflightTurn`.
 public struct SessionInflight: Equatable, Sendable, Decodable {
@@ -110,7 +110,9 @@ public struct SessionInflight: Equatable, Sendable, Decodable {
   }
 }
 
-/// Result of `session.activate` (live session) / `session.resume` (stored, same shape).
+/// Result of the `session.resume` hydration call (which serves both stored and live
+/// sessions). The type keeps the `Activate` name for continuity; the gateway RPC used is
+/// `session.resume` — `session.activate` is live-only and unused by the mobile client.
 /// Server-authoritative re-hydration payload: the full transcript `messages`, the runtime
 /// `info` (model/reasoning/usage), the authoritative `running` flag, and the `inflight`
 /// turn snapshot. The iOS client previously called only `session.resume` and ignored
@@ -127,6 +129,9 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
   enum CodingKeys: String, CodingKey {
     case sessionID = "session_id"
     case storedSessionID = "stored_session_id"
+    // `session.resume` returns the stored/persisted id under `resumed` (the live `session_id`
+    // it returns is the freshly-reattached in-memory id, used for subsequent RPCs).
+    case resumed
     case messages, info, running, inflight
   }
 
@@ -145,7 +150,11 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
   public init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     sessionID = (try? c.decode(String.self, forKey: .sessionID)) ?? ""
-    storedSessionID = try? c.decodeIfPresent(String.self, forKey: .storedSessionID)
+    // Flatten the `try? decodeIfPresent` double-optional so an absent `stored_session_id`
+    // key actually falls through to `resumed` (`session.resume`'s stored-id key).
+    let storedKey = (try? c.decodeIfPresent(String.self, forKey: .storedSessionID)) ?? nil
+    let resumedKey = (try? c.decodeIfPresent(String.self, forKey: .resumed)) ?? nil
+    storedSessionID = storedKey ?? resumedKey
     messages = (try? c.decodeIfPresent([SessionMessage].self, forKey: .messages)) ?? []
     info = try? c.decodeIfPresent(SessionInfo.self, forKey: .info)
     running = try? c.decodeIfPresent(Bool.self, forKey: .running)

@@ -154,7 +154,7 @@ public struct ChatFeature {
       self.attachmentsUnsupported = false
 
       // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
-      // its cached tail + model/usage immediately, before `session.activate` lands. The
+      // its cached tail + model/usage immediately, before `session.resume` lands. The
       // server always wins on hydrate (these rows are replaced wholesale in `applyActivate`).
       // Only paint when the caller didn't already supply a transcript and we have a stored
       // session id to look up.
@@ -218,8 +218,9 @@ public struct ChatFeature {
     /// running/inflight/usage) via the same unified path used by open/cold-launch.
     case foreground
     case sessionResult(Result<SessionHandle, GatewayError>)
-    /// Result of `session.activate` (or the `session.resume` fallback) — the
-    /// server-authoritative re-hydration payload (messages + info + running + inflight).
+    /// Result of the `session.resume` hydration call — the server-authoritative
+    /// re-hydration payload (messages + info + running + inflight). (The associated
+    /// `ActivateResponse` type keeps its name; the RPC used is `session.resume`.)
     case activateResult(Result<ActivateResponse, GatewayError>)
     case usageResponse(Usage)
     case composerSubmitted
@@ -272,7 +273,7 @@ public struct ChatFeature {
       case sessionExpired
       /// The agent's authoritative working state for this session changed — emitted on
       /// `message.start` (running), `message.complete`/`error` (stopped), and from the
-      /// `session.activate` `running` flag on hydrate. The parent routes this to the
+      /// `session.resume` `running` flag on hydrate. The parent routes this to the
       /// session list so the row's working glow clears/sets INSTANTLY (event-driven),
       /// rather than waiting for the next poll. Always server-confirmed — never a cached
       /// guess (the SQLite `running-guess` must never start a glow on its own).
@@ -310,8 +311,8 @@ public struct ChatFeature {
         return .none
 
       case .task:
-        // History is now hydrated server-authoritatively from the `session.activate`
-        // (or `session.resume` fallback) response on `.ready` — see `hydrate`. No separate
+        // History is now hydrated server-authoritatively from the `session.resume`
+        // response on `.ready` — see `hydrate`. No separate
         // REST `loadHistory` call: the activate response carries `messages` + `info` +
         // `running` + `inflight`, and rebuilding the transcript wholesale from it is what
         // keeps model/usage/status correct on every re-open (the core state-sync fix).
@@ -1201,10 +1202,13 @@ public struct ChatFeature {
   }
 
   /// The single, idempotent server-authoritative re-hydration path, shared by open,
-  /// foreground, and cold launch. Calls `session.activate` (live session → authoritative
-  /// `messages`/`info`/`running`/`inflight`); old agents that lack it answer JSON-RPC
-  /// `-32601`, so we fall back to `session.resume` (identical response shape). The decoded
-  /// `ActivateResponse` is applied wholesale in `applyActivate` — server wins.
+  /// foreground, and cold launch. Calls `session.resume`, which works for BOTH a stored
+  /// session (the agent is rebuilt from the DB) and an already-live one (the transport is
+  /// reattached) and returns the same authoritative payload: `messages` + `info` + `running`
+  /// + `inflight`. We deliberately do NOT use `session.activate` — that is live-only and
+  /// answers "session not found" for any stored session opened from the list (the common
+  /// case). The decoded `ActivateResponse` is applied wholesale in `applyActivate` — server
+  /// wins.
   private func hydrate(sessionID: String, profile: String?) -> Effect<Action> {
     .run { [gateway] send in
       var fields: [String: JSONValue] = ["session_id": .string(sessionID)]
@@ -1212,17 +1216,11 @@ public struct ChatFeature {
       if let profile { fields["profile"] = .string(profile) }
       let params: JSONValue = .object(fields)
       do {
-        let result: JSONValue
-        do {
-          result = try await gateway.send("session.activate", params)
-        } catch let error as GatewayError where error.isUnknownMethod {
-          // Old agent without `session.activate` — fall back to `session.resume`.
-          result = try await gateway.send("session.resume", params)
-        }
+        let result = try await gateway.send("session.resume", params)
         if let response = result.decoded(ActivateResponse.self), !response.sessionID.isEmpty {
           await send(.activateResult(.success(response)))
         } else {
-          await send(.activateResult(.failure(.server("Malformed session.activate result"))))
+          await send(.activateResult(.failure(.server("Malformed session.resume result"))))
         }
       } catch let error as GatewayError {
         await send(.activateResult(.failure(error)))
@@ -1295,7 +1293,7 @@ public struct ChatFeature {
 
     // Tell the list this session's authoritative working state so its row glow reconciles
     // immediately (event-driven), without waiting for the next poll. Server-confirmed: the
-    // `running` flag is straight from `session.activate`.
+    // `running` flag is straight from `session.resume`.
     let runningEffect = runningChanged(running, state)
 
     // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors

@@ -257,7 +257,7 @@ public struct SessionListFeature {
     /// `ChatFeature.Delegate.runningChanged`): set the row's `isActive` INSTANTLY so the glow
     /// clears/lights the moment the agent stops/starts, rather than waiting for the next poll.
     /// Always server-confirmed (the delegate only fires from `message.start`/`complete`/`error`
-    /// and the `session.activate` `running` flag) — a cached `running-guess` never reaches here,
+    /// and the `session.resume` `running` flag) — a cached `running-guess` never reaches here,
     /// so it can never start a glow on its own. The poll remains the backstop for not-open
     /// sessions. A no-op for an unknown id (the session isn't in the current list).
     case setSessionRunning(id: Session.ID, running: Bool)

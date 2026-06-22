@@ -143,7 +143,7 @@ not assumed):
   **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
   intentionally omitted.
 
-## Session re-hydration (`session.activate`)
+## Session re-hydration (`session.resume`)
 
 In-flight turn state (model, context usage, running status, tool/thinking history, the
 elapsed "Thinking" timer) is **server-authoritative** and is reconstructed every time a chat
@@ -154,13 +154,16 @@ context gauge, dropping tool/thinking rows, or stranding a phantom "working" glo
 **One unified `hydrate(sessionID)` effect** serves open, foreground, and cold launch. Opening a
 session with a stored id, foregrounding it (`.foreground`), and a cold-launch socket connect all
 funnel through the same `.ready` → `hydrate` path (`ChatFeature`), so there is one code path to
-reason about. `hydrate` calls the gateway's **`session.activate`** RPC (live session →
-`{messages, session_id, info, running, inflight}`), falling back to **`session.resume`** when the
-agent is too old (`GatewayError.isUnknownMethod`). On the response (`applyActivate`), in order:
+reason about. `hydrate` calls the gateway's **`session.resume`** RPC, which returns
+`{messages, session_id, resumed, info, running, inflight}` and serves **both** a stored session
+(rebuilt from the DB) and an already-live one (the transport is reattached, in-flight turn
+included). We deliberately do **not** use `session.activate` — that is live-only and answers
+"session not found" for any stored session opened from the list (every common case). On the
+response (`applyActivate`), in order:
 
 1. **Instant paint first.** `ChatFeature.init` reads `ChatSnapshotClient.loadSnapshot`
    synchronously and paints the cached transcript tail + model + usage, so the screen is never
-   blank while the socket connects. On an offline `activate` failure the cached paint is kept
+   blank while the socket connects. On an offline `resume` failure the cached paint is kept
    with a subtle "reconnecting" status (never blanked).
 2. **`applyRuntimeInfo(info)`** overwrites model / reasoning effort / usage directly from the
    response (partial info only overwrites present fields) — fixing the blank-model and
@@ -185,12 +188,12 @@ agent is too old (`GatewayError.isUnknownMethod`). On the response (`applyActiva
 
 App lifecycle (`scenePhase`, observed in the SwiftUI shell and dispatched as
 `AppFeature.scenePhaseChanged`) routes `.active` into the open chat's `.foreground` (reconnect +
-re-activate) plus a session-list refresh, and `.background`/`.inactive` into an immediate
+re-hydrate via `session.resume`) plus a session-list refresh, and `.background`/`.inactive` into an immediate
 snapshot/anchor flush. The nav stack is **not** auto-restored on cold launch — opening a session
 is enough.
 
 The session-list **working glow** is driven event-driven by `ChatFeature.Delegate.runningChanged`
-(emitted on `message.start`/`complete`/`error` and from the `session.activate` `running` flag),
+(emitted on `message.start`/`complete`/`error` and from the `session.resume` `running` flag),
 routed by `AppFeature` to `SessionListFeature` so the row's glow clears/lights instantly. The
 existing poll stays the backstop for not-open sessions; a cached `running-guess` **never** starts
 a glow on its own — only one the server confirms.

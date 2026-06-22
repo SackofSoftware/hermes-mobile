@@ -57,8 +57,9 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   reload + clear identity-scoped prefs; Quit → full logout → onboarding. Foreground reconnect
   shares the same `connect` (re-mints the ticket) — see #18 (state-sync).
 - **Session re-hydration is server-authoritative** via one unified `hydrate(sessionID)`
-  (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.activate`
-  (fall back to `session.resume` on `GatewayError.isUnknownMethod`) and read `info` / `running` /
+  (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.resume`
+  (NOT `session.activate` — that is live-only and 404s any stored session opened from the list;
+  `session.resume` serves both stored and live sessions) and read `info` / `running` /
   `inflight` **directly from the response** — `applyRuntimeInfo` for model/reasoning/usage,
   `reconstructTranscript` to rebuild tool/thinking rows wholesale (server wins; never merge),
   seed the streaming row from `inflight` so the next delta reuses it. Don't re-init in-flight
@@ -69,7 +70,7 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   whether the timer runs; the anchor only supplies the start instant** — a stopped turn with a
   stale anchor **discards** the anchor (no phantom timer).
 - **Session-list working glow is event-driven** via `ChatFeature.Delegate.runningChanged`
-  (emitted on `message.start`/`complete`/`error` and the `session.activate` `running` flag),
+  (emitted on `message.start`/`complete`/`error` and the `session.resume` `running` flag),
   routed by `AppFeature` to `SessionListFeature` for an instant row-glow patch; the poll is only
   a backstop for not-open sessions, and a cached `running-guess` must **never** start a glow on
   its own (only one the server confirms).

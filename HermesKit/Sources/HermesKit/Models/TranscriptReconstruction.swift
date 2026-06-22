@@ -1,8 +1,7 @@
 import Foundation
 
 /// Pure, server-authoritative re-hydration of a chat transcript from stored history
-/// messages (`session.activate` / `session.resume` `messages`, also REST
-/// `GET /api/sessions/{id}/messages`). Mirrors the desktop `toChatMessages()`
+/// messages (the `session.resume` `messages` array). Mirrors the desktop `toChatMessages()`
 /// (`apps/desktop/src/lib/chat-messages.ts`):
 ///
 /// For each message, in order:

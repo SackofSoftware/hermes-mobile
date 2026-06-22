@@ -588,7 +588,7 @@ struct ChatReductionTests {
   }
 
   @Test func resumeUnderCustomProfileThreadsProfileParam() async {
-    // A ready frame with a stored id hydrates via `session.activate`, threading the profile.
+    // A ready frame with a stored id hydrates via `session.resume`, threading the profile.
     let activateParams = LockIsolated<JSONValue?>(nil)
     let store = TestStore(
       initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123", profileName: "work")
@@ -599,7 +599,7 @@ struct ChatReductionTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
-        if method == "session.activate" { activateParams.setValue(params) }
+        if method == "session.resume" { activateParams.setValue(params) }
         return .object([
           "session_id": .string("live123"),
           "stored_session_id": .string("stored123"),
@@ -635,9 +635,9 @@ struct ChatReductionTests {
     await store.send(.onDisappear)
   }
 
-  @Test func readyWithStoredIDHydratesViaActivate() async {
-    // A ready frame *with* a stored id must hydrate via `session.activate` (not create).
-    // The activate response carries model + usage directly — no separate usage fetch.
+  @Test func readyWithStoredIDHydratesViaResume() async {
+    // A ready frame *with* a stored id must hydrate via `session.resume` (not create).
+    // The resume response carries model + usage directly — no separate usage fetch.
     let methods = LockIsolated<[String]>([])
     let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
       ChatFeature()
@@ -677,15 +677,15 @@ struct ChatReductionTests {
         contextUsed: 150_000, contextMax: 200_000, contextPercent: 75
       )
     }
-    #expect(methods.value == ["session.activate"])
+    #expect(methods.value == ["session.resume"])
     // Usage came from `info` — no fallback `session.usage` fetch.
     #expect(!methods.value.contains("session.usage"))
     await store.receive(\.delegate.runningChanged)
     await store.send(.onDisappear)
   }
 
-  @Test func activateWithNoUsageInResponseFallsBackToUsageFetch() async {
-    // An older agent's activate/resume response may omit usage; we then fetch it on-demand
+  @Test func resumeWithNoUsageInResponseFallsBackToUsageFetch() async {
+    // An older agent's resume response may omit usage; we then fetch it on-demand
     // so the gauge isn't blank until the next turn (preserves prior resume behavior).
     let methods = LockIsolated<[String]>([])
     let usageParams = LockIsolated<JSONValue?>(nil)
@@ -703,7 +703,7 @@ struct ChatReductionTests {
             "context_used": .number(150_000), "context_max": .number(200_000), "context_percent": .number(75),
           ])
         }
-        // No `info`/`usage` in the activate response.
+        // No `info`/`usage` in the resume response.
         return .object([
           "session_id": .string("live123"),
           "stored_session_id": .string("stored123"),
@@ -727,15 +727,16 @@ struct ChatReductionTests {
     await store.receive(\.usageResponse) {
       $0.usage = Usage(contextUsed: 150_000, contextMax: 200_000, contextPercent: 75)
     }
-    #expect(methods.value.first == "session.activate")
+    #expect(methods.value.first == "session.resume")
     #expect(methods.value.contains("session.usage"))
     #expect(usageParams.value?["session_id"]?.stringValue == "live123")
     await store.send(.onDisappear)
   }
 
-  @Test func activateUnknownMethodFallsBackToResume() async {
-    // Old agents lacking `session.activate` answer -32601 → fall back to `session.resume`
-    // (identical response shape); hydration must still apply model/usage/messages.
+  @Test func resumeHydratesStoredTranscriptModelAndUsage() async {
+    // `session.resume` is the single hydrate call (it serves both stored and live sessions);
+    // it must rebuild the transcript from `messages` and apply model/usage. Regression guard
+    // for the blocker where `session.activate` (live-only) 404'd every stored session.
     let methods = LockIsolated<[String]>([])
     let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
       ChatFeature()
@@ -745,13 +746,11 @@ struct ChatReductionTests {
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, _ in
         methods.withValue { $0.append(method) }
-        if method == "session.activate" {
-          throw GatewayError.server("unknown method: session.activate")
-        }
-        // session.resume returns the same shape.
+        // `session.resume` returns the live id under `session_id` and the stored id under
+        // `resumed` (no `stored_session_id`) — exercises the `resumed` decode fallback.
         return .object([
           "session_id": .string("live123"),
-          "stored_session_id": .string("stored123"),
+          "resumed": .string("stored123"),
           "messages": .array([
             .object(["id": .number(1), "role": .string("user"), "content": .string("hi")]),
             .object(["id": .number(2), "role": .string("assistant"), "content": .string("hello")]),
@@ -780,8 +779,8 @@ struct ChatReductionTests {
         ChatRow(id: self.uuid(1), kind: .message(role: .assistant, text: "hello", isComplete: true)),
       ]
     }
-    // Tried activate first, then resume.
-    #expect(methods.value == ["session.activate", "session.resume"])
+    // Single resume call — no activate, no fallback dance.
+    #expect(methods.value == ["session.resume"])
     await store.receive(\.delegate.runningChanged)
     await store.send(.onDisappear)
   }

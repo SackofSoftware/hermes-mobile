@@ -17,7 +17,7 @@ import XCTest
 /// - **Re-hydrated chat with tool calls + thinking** — the full rehydration layout
 ///   (reasoning row + assistant text + completed tool row with its recovered command/result).
 /// - **Instant-paint** — the cached snapshot painted from `ChatSnapshotClient` *before*
-///   `session.activate` lands (shown with the subtle "reconnecting" status).
+///   `session.resume` lands (shown with the subtle "reconnecting" status).
 ///
 /// Row timestamps aren't shown in `ChatView` rows, so determinism only requires the pinned
 /// dark traits + immediate clock from `SnapshotTestCase`.
@@ -149,7 +149,7 @@ final class HydrationSnapshotTests: SnapshotTestCase {
   // MARK: Instant-paint from the snapshot cache
 
   /// What the user sees the instant a session opens, painted from the `ChatSnapshotClient`
-  /// cache before `session.activate` lands — the cached tail + model/usage with a subtle
+  /// cache before `session.resume` lands — the cached tail + model/usage with a subtle
   /// "reconnecting" status (never blank).
   func testInstantPaint_fromCache() {
     let cached = ChatSnapshot(

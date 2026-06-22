@@ -2,7 +2,7 @@ import Foundation
 import GRDB
 
 /// The plain-data snapshot for one session — what the cache hands back to `ChatFeature`
-/// for an *instant paint* before the authoritative `session.activate` lands. This is a
+/// for an *instant paint* before the authoritative `session.resume` lands. This is a
 /// **non-authoritative** cache: it can only make the UI appear faster, never differ from
 /// the server, so every field is optional and the server replaces it wholesale on hydrate.
 public struct ChatSnapshot: Equatable, Sendable {

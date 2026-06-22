@@ -410,7 +410,7 @@ struct AppFeatureTests {
   // list only ever lights a glow from a server-confirmed source (the delegate above, or a poll).
   // Painting a chat from its cache (`ChatFeature.State.init` reading the snapshot) does NOT push
   // any `runningChanged` delegate, so no glow appears until the server confirms via
-  // `session.activate`.
+  // `session.resume`.
   @Test func cachedPaintAloneDoesNotGlow() async {
     let snapshotClient = ChatSnapshotClient.inMemory()
     // A persisted snapshot for the session (cache never carries a running hint).

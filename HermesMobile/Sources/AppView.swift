@@ -15,7 +15,7 @@ struct AppView: View {
         ReauthView(store: reauthStore)
       }
       // Observe lifecycle here (view stays thin) and dispatch into the reducer, which fans
-      // foreground out to reconnect/re-activate + list refresh and background out to an
+      // foreground out to reconnect/re-hydrate + list refresh and background out to an
       // immediate snapshot/anchor flush. Behaviour is unit-tested via `scenePhaseChanged`.
       .onChange(of: scenePhase) { _, newPhase in
         store.send(.scenePhaseChanged(newPhase.appPhase))

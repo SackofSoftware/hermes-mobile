@@ -18,7 +18,7 @@ struct HydrateTests {
 
   @Test func initPaintsTranscriptModelUsageFromCache() async {
     // A snapshot persisted for the stored session id must paint into the initial state so the
-    // chat renders instantly — before any `session.activate` lands.
+    // chat renders instantly — before any `session.resume` lands.
     let snapshotClient = ChatSnapshotClient.inMemory()
     let cachedRows = [
       ChatRow(id: uuid(10), kind: .message(role: .user, text: "earlier question", isComplete: true)),
@@ -131,7 +131,7 @@ struct HydrateTests {
   // MARK: Offline keeps the cache + reconnecting status
 
   @Test func offlineKeepsCachedPaintAndShowsReconnecting() async {
-    // When `session.activate` fails (offline / connection error) we must NOT blank the
+    // When `session.resume` fails (offline / connection error) we must NOT blank the
     // screen: keep the cached instant-paint rows + model/usage and show a reconnecting status.
     let snapshotClient = ChatSnapshotClient.inMemory()
     let cachedRows = [

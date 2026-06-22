@@ -45,7 +45,7 @@ public struct AppFeature {
     case autoConnectSucceeded(ServerConnection)
     case autoConnectFailed(ServerConnection)
     /// The app's scene phase changed (foreground/background) — observed at the app shell and
-    /// fanned out: `.active` reconnects + re-activates the open chat and refreshes the list;
+    /// fanned out: `.active` reconnects + re-hydrates the open chat and refreshes the list;
     /// `.background`/`.inactive` flushes the open chat's snapshot + anchor immediately.
     case scenePhaseChanged(ScenePhase)
     case onboarding(ConnectionFeature.Action)
@@ -113,7 +113,7 @@ public struct AppFeature {
         let topChatID = state.path.ids.last
         switch phase {
         case .active:
-          // Foreground: reconnect + re-`session.activate` the open chat (re-reads
+          // Foreground: reconnect + re-hydrate (via `session.resume`) the open chat (re-reads
           // running/inflight/usage) and refresh the list immediately (don't wait for the poll).
           return .merge(
             topChatID.map { .send(.path(.element(id: $0, action: .foreground))) } ?? .none,

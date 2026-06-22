@@ -47,7 +47,7 @@ All side effects go through `@DependencyClient` structs (each with a `liveValue`
 a `testValue`/`.inMemory()` variant):
 
 - **`HermesRESTClient`** — status, sessions, archived sessions (`?archived=only`), search,
-  messages, archive/rename (`PATCH /api/sessions/{id}`). Session-scoped reads/mutations take
+  archive/rename (`PATCH /api/sessions/{id}`). Session-scoped reads/mutations take
   an optional `profile` (omitted for default).
 - **`HermesProfileClient`** — profile CRUD + SOUL.md (`PUT /api/profiles/{name}/soul`) +
   profile-scoped session lists (`GET /api/profiles/sessions?profile=`). Capability-gated: a
@@ -66,8 +66,8 @@ a `testValue`/`.inMemory()` variant):
   provider. `saveSession`/`loadSession` round-trip the whole session (cookies rehydrate into
   `HTTPCookieStorage` on launch); the legacy `…Token` helpers remain for token-mode.
 - **`ChatSnapshotClient`** — a **non-authoritative** instant-paint cache + turn-start anchor,
-  backed by the `SQLiteData` package (the store uses a private GRDB `DatabaseQueue` directly,
-  not the app's shared `defaultDatabase`) and kept entirely behind the client boundary (read
+  backed by GRDB (the store uses a private `DatabaseQueue` directly,
+  not a shared `defaultDatabase`) and kept entirely behind the client boundary (read
   once, no reactive `@FetchAll`). It persists each session's latest transcript tail, model, reasoning,
   usage, and a per-session turn-start timestamp so a cold open can paint immediately before the
   server responds. The cache can only make the UI appear *faster*, never *differ* from the
@@ -138,7 +138,7 @@ not assumed):
 - **Profiles are device-local with per-call scoping** — the selected profile *name* lives
   in `PreferencesClient`; we never call `POST /api/profiles/active`. Instead the scoped list
   comes from `GET /api/profiles/sessions?profile=`, and an optional `profile` param threads
-  into `session.create`/`session.resume` (gateway) and session-scoped messages/archive/rename
+  into `session.create`/`session.resume` (gateway) and session-scoped archive/rename
   (REST) — omitted for `"default"` so single-profile agents are byte-identical to today.
   **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
   intentionally omitted.

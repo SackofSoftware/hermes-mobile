@@ -226,12 +226,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `hermes-push/tests/test_api.py`
 - Create: `hermes-push/tests/test_store.py`
 
-- [ ] implement `POST /register` `{device_token, apns_env, app_version}` and `/unregister`
-- [ ] ⚠️ CONFIRM `X-Hermes-Session-Token` auth middleware covers `/api/plugins/*`; if not, enforce auth in the router
-- [ ] implement JSON-file token store (upsert by token, list, remove, prune-invalid)
-- [ ] mint + return a per-device HMAC secret on register (store alongside token)
-- [ ] write tests for register/unregister + store upsert/remove/prune
-- [ ] run tests — must pass before next task
+- [x] implement `POST /register` `{device_token, apns_env, app_version}` and `/unregister`
+- [x] ⚠️ CONFIRM `X-Hermes-Session-Token` auth middleware covers `/api/plugins/*`; if not, enforce auth in the router — **CONFIRMED YES**: `auth_middleware` (hermes_cli/web_server.py:327) gates all `/api/` routes except the small read-only allowlist in `dashboard_auth/public_paths.py` (`/api/status`, `/api/dashboard/plugins`, …); `/api/plugins/hermes-push/register` + `/unregister` are NOT in it, so the dashboard session-token (or OAuth cookie) is required. No redundant in-router auth added.
+- [x] implement JSON-file token store (upsert by token, list, remove, prune-invalid)
+- [x] mint + return a per-device HMAC secret on register (store alongside token) — reused (not rotated) on re-register so the app's stored secret stays valid
+- [x] write tests for register/unregister + store upsert/remove/prune
+- [x] run tests — must pass before next task
 
 ### Task B3: Trigger hooks → event mapping
 

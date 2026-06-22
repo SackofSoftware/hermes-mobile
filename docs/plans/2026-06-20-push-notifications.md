@@ -322,12 +322,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift` (or AppFeature — wherever connect/logout lives)
 - Modify: corresponding `*FeatureTests.swift`
 
-- [ ] on connect/launch, if authorized: get token, call `registerPush` with compile-time `apns_env` (`#if DEBUG` sandbox else production)
-- [ ] re-register on device-token change (observe `PushClient.register()` stream)
-- [ ] on logout call `unregisterPush` and clear any push prefs (fits "logout clears everything")
-- [ ] store `pushAvailable` capability flag from the 404 result
-- [ ] write reducer tests: registration-on-connect, token-change re-register, unregister-on-logout, 404→capability-hidden (`TestStore` + `@Dependency` + `TestClock`)
-- [ ] run tests — must pass before next task
+- [x] on connect/launch, if authorized: get token, call `registerPush` with compile-time `apns_env` (`#if DEBUG` sandbox else production) — per the product decision the permission prompt + observation fire from `SessionListFeature.task` → `.setupPush` (sessions list, right after login), NOT first launch. `pushTokenReceived` calls `rest.registerPush(connection, token, PushClient.apnsEnv, push.appVersion())`. App version is read behind the client (`PushClient.appVersion`, live = `CFBundleShortVersionString`) so reducers stay free of `Bundle`.
+- [x] re-register on device-token change (observe `PushClient.register()` stream) — `.setupPush` runs a long-running cancellable effect (`CancelID.pushTokens`) iterating `push.register()`; each emission → `pushTokenReceived` → re-register. Cancelled on `.onDisappear`.
+- [x] on logout call `unregisterPush` and clear any push prefs (fits "logout clears everything") — `AppFeature.unregisterPushOnLogout` (called from both the Settings-disconnect and reauth-Quit paths) best-effort `rest.unregisterPush` with the last-known token (persisted in `PreferencesClient.pushDeviceToken`), then clears the token pref + the Keychain HMAC secret.
+- [x] store `pushAvailable` capability flag from the 404 result — `SessionListFeature.State.pushAvailable` (default true/optimistic): `pushRegistered.success` → true; a definitive `RESTError.notFound` → false (other transient failures leave it unchanged). Threaded into `SettingsFeature.State(connection:pushAvailable:)` on present (C6 consumes it).
+- [x] write reducer tests: registration-on-connect, token-change re-register, unregister-on-logout, 404→capability-hidden (`TestStore` + `@Dependency` + `TestClock`) — `SessionListFeatureTests`: `setupPushRegistersOnAppearanceWhenAuthorized` (token/env/version asserted + secret persisted + flag flips on), `setupPushDoesNothingWhenNotAuthorized`, `tokenRotationReRegisters`, `registerPush404DisablesPushCapability`, `settingsPresentationThreadsPushAvailability`; `AppFeatureTests.disconnectUnregistersPushAndClearsPushState`. The 9 existing `.task` tests gained a `receive(\.setupPush)`.
+- [x] run tests — must pass before next task — `script -q /dev/null swift test --package-path HermesKit`: 478 tests passing.
 
 ### Task C5: Deep-link on tap + foreground suppression + badge
 

@@ -333,6 +333,33 @@ struct AppFeatureTests {
     #expect(urlCleared.value)
   }
 
+  // MARK: Push cleanup on logout (Task C4)
+
+  @Test func disconnectUnregistersPushAndClearsPushState() async {
+    let unregistered = LockIsolated<String?>(nil)
+    let secretDeleted = LockIsolated(false)
+    let tokenCleared = LockIsolated(false)
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences.loadPushDeviceToken = { "cafef00d" }
+      $0.preferences.clearPushDeviceToken = { @Sendable in tokenCleared.setValue(true) }
+      $0.keychain.deletePushSecret = { @Sendable in secretDeleted.setValue(true) }
+      $0.hermesREST.unregisterPush = { @Sendable _, token in unregistered.setValue(token) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.delegate(.disconnect))) {
+      $0.home = nil
+    }
+    await store.finish()
+    #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
+    #expect(secretDeleted.value) // HMAC secret wiped from the Keychain
+    #expect(tokenCleared.value) // device-token pref wiped
+  }
+
   @Test func tokenSessionExpiredSeedsTokenReauthModal() async {
     var path = StackState<ChatFeature.State>()
     path.append(ChatFeature.State(connection: connection)) // `.token` connection

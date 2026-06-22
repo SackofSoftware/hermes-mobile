@@ -39,6 +39,10 @@ public struct PushClient: Sendable {
   public var register: @Sendable () -> AsyncStream<String> = { AsyncStream { $0.finish() } }
   /// A stream of incoming notification taps (carrying the `session_id`) for deep-linking.
   public var incomingTaps: @Sendable () -> AsyncStream<PushTap> = { AsyncStream { $0.finish() } }
+  /// The app's short version string (`CFBundleShortVersionString`), sent with the device-token
+  /// registration so the plugin/gateway can record which build registered. Behind the client so
+  /// reducers stay free of `Bundle` access and tests can inject a fixed value.
+  public var appVersion: @Sendable () -> String = { "0.0" }
 
   // MARK: - Pure logic (unit-tested on macOS, outside the iOS guard)
 
@@ -76,7 +80,8 @@ extension PushClient: DependencyKey {
       requestAuthorization: { false },
       authorizationStatus: { .notDetermined },
       register: { AsyncStream { $0.finish() } },
-      incomingTaps: { AsyncStream { $0.finish() } }
+      incomingTaps: { AsyncStream { $0.finish() } },
+      appVersion: { "0.0" }
     )
   }
 }
@@ -160,7 +165,8 @@ public extension PushClient {
         },
         authorizationStatus: { box.status },
         register: { box.tokenStream() },
-        incomingTaps: { box.tapStream() }
+        incomingTaps: { box.tapStream() },
+        appVersion: { "1.2.3" }
       )
     }
 
@@ -264,7 +270,10 @@ public extension PushClient {
           Task { @MainActor in UIApplication.shared.registerForRemoteNotifications() }
           return PushBridge.shared.tokenStream()
         },
-        incomingTaps: { PushBridge.shared.tapStream() }
+        incomingTaps: { PushBridge.shared.tapStream() },
+        appVersion: {
+          (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0"
+        }
       )
     }
   }

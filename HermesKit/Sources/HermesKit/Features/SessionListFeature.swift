@@ -52,6 +52,11 @@ public struct SessionListFeature {
     public var renamingProfileName: String?
     /// The editable text bound to the profile-rename alert's `TextField`.
     public var profileRenameDraft: String
+    /// Whether the connected agent exposes the `hermes-push` plugin (push registration
+    /// endpoint present). `true` once a `registerPush` succeeds; `false` on a definitive 404
+    /// (plugin not installed). Threaded into Settings so the notifications UI is capability-gated.
+    /// Defaults to `true` (optimistic) so we attempt registration before the first probe.
+    public var pushAvailable: Bool
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
     @Presents public var addProfile: AddProfileFeature.State?
@@ -83,6 +88,7 @@ public struct SessionListFeature {
       profilesSupported: Bool = false,
       renamingProfileName: String? = nil,
       profileRenameDraft: String = "",
+      pushAvailable: Bool = true,
       settings: SettingsFeature.State? = nil,
       addProfile: AddProfileFeature.State? = nil
     ) {
@@ -105,6 +111,7 @@ public struct SessionListFeature {
       self.profilesSupported = profilesSupported
       self.renamingProfileName = renamingProfileName
       self.profileRenameDraft = profileRenameDraft
+      self.pushAvailable = pushAvailable
       self.settings = settings
       self.addProfile = addProfile
     }
@@ -261,6 +268,16 @@ public struct SessionListFeature {
     /// so it can never start a glow on its own. The poll remains the backstop for not-open
     /// sessions. A no-op for an unknown id (the session isn't in the current list).
     case setSessionRunning(id: Session.ID, running: Bool)
+    // MARK: Push notifications
+    /// Kicks off contextual push setup once the list appears (right after login): prompt for
+    /// authorization, and if granted, start observing the device-token stream. Fired from `.task`.
+    case setupPush
+    /// A device token arrived from `PushClient.register()` (initial registration OR an OS
+    /// rotation) — (re-)register it with the agent. Carries the lowercase-hex token.
+    case pushTokenReceived(String)
+    /// Result of `rest.registerPush`: success carries the minted per-device HMAC secret to
+    /// persist; a `.notFound` failure flips `pushAvailable` off (plugin not installed).
+    case pushRegistered(Result<PushRegistration, RESTError>)
     case delegate(Delegate)
 
     @CasePathable
@@ -280,7 +297,7 @@ public struct SessionListFeature {
   // One id for BOTH the list fetch and the search fetch: any new fetch (list refresh, poll,
   // or search) cancels the previous in-flight one, so a late list response can't overwrite
   // active search results (and vice versa). `poll` is the separate timer loop.
-  private enum CancelID { case fetch, poll }
+  private enum CancelID { case fetch, poll, pushTokens }
 
   /// How often the list auto-refreshes while visible, to keep `isActive` (working glow) fresh.
   private static let pollInterval: Duration = .seconds(10)
@@ -290,6 +307,8 @@ public struct SessionListFeature {
   @Dependency(\.continuousClock) var clock
   @Dependency(\.date.now) var now
   @Dependency(\.preferences) var preferences
+  @Dependency(\.push) var push
+  @Dependency(\.keychain) var keychain
 
   public init() {}
 
@@ -322,14 +341,19 @@ public struct SessionListFeature {
               await send(.pollTick)
             }
           }
-          .cancellable(id: CancelID.poll, cancelInFlight: true)
+          .cancellable(id: CancelID.poll, cancelInFlight: true),
+          // Contextual push setup: prompt for permission now that we're past login, and (if
+          // granted) start observing device tokens. Per the product decision the permission
+          // prompt fires here on the sessions list — never at first launch.
+          .send(.setupPush)
         )
 
       case .onDisappear:
         // Stop the poll (and any in-flight fetch / search debounce) when the list goes away.
         return .merge(
           .cancel(id: CancelID.poll),
-          .cancel(id: CancelID.fetch)
+          .cancel(id: CancelID.fetch),
+          .cancel(id: CancelID.pushTokens)
         )
 
       case .pollTick:
@@ -350,6 +374,53 @@ public struct SessionListFeature {
         // isn't in the current list (e.g. archived/filtered) — the poll handles those.
         guard state.sessions[id: id]?.isActive != running else { return .none }
         state.sessions[id: id]?.isActive = running
+        return .none
+
+      case .setupPush:
+        // Contextual permission request (after login, on the list). If granted, observe the
+        // device-token stream as a long-running cancellable effect — each emitted token (the
+        // first registration and any OS rotation) drives a (re-)register. If denied we do
+        // nothing further; the toggle in Settings can re-prompt later.
+        return .run { [push] send in
+          guard await push.requestAuthorization() else { return }
+          for await token in push.register() {
+            await send(.pushTokenReceived(token))
+          }
+        }
+        .cancellable(id: CancelID.pushTokens, cancelInFlight: true)
+
+      case let .pushTokenReceived(token):
+        // (Re-)register this device token with the agent's push plugin, threading the
+        // compile-time APNs env + app version. Persist the token (non-secret) so logout can
+        // unregister with it even when the live stream isn't producing.
+        preferences.savePushDeviceToken(token)
+        return .run { [rest, push, connection = state.connection] send in
+          let env = PushClient.apnsEnv
+          let version = push.appVersion()
+          do {
+            let registration = try await rest.registerPush(connection, token, env, version)
+            await send(.pushRegistered(.success(registration)))
+          } catch let error as RESTError {
+            await send(.pushRegistered(.failure(error)))
+          } catch {
+            await send(.pushRegistered(.failure(.unreachable)))
+          }
+        }
+
+      case let .pushRegistered(.success(registration)):
+        // Plugin present → push is available; persist the minted per-device HMAC secret
+        // securely (Keychain) for later use (C6 test-send).
+        state.pushAvailable = true
+        return .run { [keychain] _ in
+          try? keychain.savePushSecret(registration.hmacSecret)
+        }
+
+      case let .pushRegistered(.failure(error)):
+        // A definitive 404 means the plugin isn't installed — capability-gate the push UI off.
+        // Other (transient) failures leave `pushAvailable` as-is so we retry on the next token.
+        if error == .notFound {
+          state.pushAvailable = false
+        }
         return .none
 
       case .binding(\.searchQuery):
@@ -579,7 +650,9 @@ public struct SessionListFeature {
         return .send(.delegate(.createSession))
 
       case .settingsButtonTapped:
-        state.settings = SettingsFeature.State(connection: state.connection)
+        state.settings = SettingsFeature.State(
+          connection: state.connection, pushAvailable: state.pushAvailable
+        )
         return .none
 
       case .archivedButtonTapped:

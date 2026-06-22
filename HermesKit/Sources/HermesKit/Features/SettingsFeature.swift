@@ -18,13 +18,18 @@ public struct SettingsFeature {
     public var log: [GatewayLogEntry]
     /// The selected chat transcript rendering engine (device-local A/B preference).
     public var chatRenderer: ChatRendererKind
+    /// Whether the connected agent exposes the `hermes-push` plugin (passed down from the
+    /// session list's capability probe). When false the notifications UI (C6) shows a
+    /// "not available on this server" note instead of the toggle.
+    public var pushAvailable: Bool
 
-    public init(connection: ServerConnection) {
+    public init(connection: ServerConnection, pushAvailable: Bool = true) {
       self.connection = connection
       self.token = connection.token ?? ""
       self.savedConfirmation = false
       self.log = []
       self.chatRenderer = .default
+      self.pushAvailable = pushAvailable
     }
 
     public var serverURLString: String { connection.baseURL.absoluteString }

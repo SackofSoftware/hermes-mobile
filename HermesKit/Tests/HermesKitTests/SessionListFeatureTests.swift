@@ -27,6 +27,7 @@ struct SessionListFeatureTests {
       $0.now = now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied → no-op with default client)
     await store.receive(\.profilesResponse.failure) // capability probe → not supported
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -50,6 +51,7 @@ struct SessionListFeatureTests {
       $0.now = now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.failure) {
       $0.isLoading = false
@@ -80,6 +82,7 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -393,6 +396,7 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.pinnedIDs = ["s1"]
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -863,6 +867,119 @@ struct SessionListFeatureTests {
     }
   }
 
+  @Test func settingsPresentationThreadsPushAvailability() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.pushAvailable = false // a 404 earlier flipped push off
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.settingsButtonTapped) {
+      $0.settings = SettingsFeature.State(connection: self.connection, pushAvailable: false)
+    }
+  }
+
+  // MARK: Push registration (Task C4)
+
+  @Test func setupPushRegistersOnAppearanceWhenAuthorized() async {
+    let push = PushClient.inMemory(granted: true)
+    let savedSecret = LockIsolated<String?>(nil)
+    let registered = LockIsolated<(token: String, env: String, version: String)?>(nil)
+    // Start with push "unavailable" so a successful registration visibly flips the flag on.
+    var initial = SessionListFeature.State(connection: connection)
+    initial.pushAvailable = false
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.keychain.savePushSecret = { @Sendable secret in savedSecret.setValue(secret) }
+      $0.preferences = .inMemory()
+      $0.hermesREST.registerPush = { @Sendable _, token, env, version in
+        registered.setValue((token, env, version))
+        return PushRegistration(hmacSecret: "sekret")
+      }
+    }
+
+    // Appearance kicks off the contextual permission request; granted → observe tokens.
+    await store.send(.setupPush)
+    // APNs delivers a device token.
+    push.emit(token: "deadbeef")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered.success) {
+      $0.pushAvailable = true
+    }
+    #expect(registered.value?.token == "deadbeef")
+    #expect(registered.value?.env == PushClient.apnsEnv)
+    #expect(registered.value?.version == "1.2.3") // the in-memory client's app version
+    #expect(savedSecret.value == "sekret") // minted HMAC secret persisted securely
+    await store.send(.onDisappear) // cancels the token-observe effect
+  }
+
+  @Test func setupPushDoesNothingWhenNotAuthorized() async {
+    let push = PushClient.inMemory(granted: false)
+    let registered = LockIsolated(false)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in
+        registered.setValue(true)
+        return PushRegistration(hmacSecret: "nope")
+      }
+    }
+
+    // Denied → the token stream is never observed, so no registration happens.
+    await store.send(.setupPush)
+    push.emit(token: "deadbeef") // ignored — no consumer
+    await store.finish()
+    #expect(registered.value == false)
+    #expect(store.state.pushAvailable == true) // unchanged (no definitive 404)
+  }
+
+  @Test func tokenRotationReRegisters() async {
+    let push = PushClient.inMemory(granted: true)
+    let tokens = LockIsolated<[String]>([])
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.keychain.savePushSecret = { @Sendable _ in }
+      $0.preferences = .inMemory()
+      $0.hermesREST.registerPush = { @Sendable _, token, _, _ in
+        tokens.withValue { $0.append(token) }
+        return PushRegistration(hmacSecret: "s")
+      }
+    }
+
+    await store.send(.setupPush)
+    push.emit(token: "tok1")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered.success)
+    // The OS rotates the token — a second emission re-registers.
+    push.emit(token: "tok2")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered.success)
+    #expect(tokens.value == ["tok1", "tok2"])
+    await store.send(.onDisappear)
+  }
+
+  @Test func registerPush404DisablesPushCapability() async {
+    let push = PushClient.inMemory(granted: true)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory()
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in throw RESTError.notFound }
+    }
+
+    await store.send(.setupPush)
+    push.emit(token: "deadbeef")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered.failure) {
+      $0.pushAvailable = false // plugin absent → capability-gated off
+    }
+    await store.send(.onDisappear)
+  }
+
   @Test func settingsDisconnectDismissesAndBubblesUp() async {
     var initial = SessionListFeature.State(connection: connection)
     initial.settings = SettingsFeature.State(connection: connection)
@@ -944,6 +1061,7 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.groupingMode = .chronological // seeded from prefs on load
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
     await store.send(.onDisappear)
@@ -1014,6 +1132,7 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.selectedProfileName = "work" // loaded from the persisted pref
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.success) {
       $0.profilesSupported = true
       $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work")]
@@ -1045,6 +1164,7 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.failure) // old agent → selector stays hidden
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -1269,6 +1389,7 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.selectedProfileName = "gone" // loaded from the (now-stale) persisted pref
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.success) {
       $0.profilesSupported = true
       $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work")]
@@ -1543,6 +1664,7 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush) // contextual push prompt (denied default client)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false

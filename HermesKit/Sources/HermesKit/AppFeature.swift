@@ -154,10 +154,11 @@ public struct AppFeature {
 
       case .home(.delegate(.disconnect)):
         // Token cleared in Settings → tear down and return to onboarding.
+        let connection = state.home?.connection
         state.path = .init()
         state.home = nil
         state.onboarding = .init()
-        return .none
+        return unregisterPushOnLogout(connection: connection)
 
       case .path(.element(id: _, action: .delegate(.sessionExpired))):
         // A live (gated) session died. The chat already paused its own reconnect; raise the
@@ -182,6 +183,7 @@ public struct AppFeature {
 
       case .reauth(.presented(.delegate(.quit))):
         // "Quit to start" → full logout (Keychain session + every pref) → onboarding.
+        let connection = state.home?.connection ?? state.path.last?.connection
         try? keychain.deleteSession()
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
@@ -190,7 +192,7 @@ public struct AppFeature {
         state.path = .init()
         state.home = nil
         state.onboarding = .init()
-        return .none
+        return unregisterPushOnLogout(connection: connection)
 
       case let .path(.element(id: _, action: .delegate(.runningChanged(sessionID, running)))):
         // Route the open chat's authoritative working-state change to the session list so its
@@ -211,6 +213,22 @@ public struct AppFeature {
     }
     .forEach(\.path, action: \.path) {
       ChatFeature()
+    }
+  }
+
+  /// Best-effort push cleanup on logout: unregister the last-known device token with the
+  /// agent's push plugin (failures ignored — the server prunes dead tokens on a 410 anyway),
+  /// then clear the persisted push secret (Keychain) + token (prefs). Part of
+  /// "logout clears everything". Uses the persisted token so it works even when the live
+  /// `register()` stream isn't producing; a `nil` connection (nothing to talk to) still clears
+  /// local push state.
+  private func unregisterPushOnLogout(connection: ServerConnection?) -> Effect<AppFeature.Action> {
+    let token = preferences.loadPushDeviceToken()
+    preferences.clearPushDeviceToken()
+    try? keychain.deletePushSecret()
+    guard let connection, let token else { return .none }
+    return .run { [rest] _ in
+      try? await rest.unregisterPush(connection, token)
     }
   }
 

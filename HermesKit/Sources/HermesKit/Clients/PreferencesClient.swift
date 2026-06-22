@@ -29,6 +29,12 @@ public struct PreferencesClient: Sendable {
   /// **not** identity-scoped, so it survives logout.
   public var loadChatRenderer: @Sendable () -> ChatRendererKind = { .default }
   public var saveChatRenderer: @Sendable (_ kind: ChatRendererKind) -> Void
+  /// Last APNs device token we registered with the agent (lowercase hex). Non-secret — it's
+  /// just the routing address. Persisted so logout can `unregisterPush` with the right token
+  /// even if the live `register()` stream isn't currently producing one. Cleared on logout.
+  public var loadPushDeviceToken: @Sendable () -> String? = { nil }
+  public var savePushDeviceToken: @Sendable (_ token: String) -> Void
+  public var clearPushDeviceToken: @Sendable () -> Void
 }
 
 public extension PreferencesClient {
@@ -52,6 +58,7 @@ public extension PreferencesClient {
     let groupingKey = "hermes.session-grouping-mode"
     let selectedProfileKey = "hermes.selected-profile-id"
     let chatRendererKey = "hermes.chat-renderer"
+    let pushTokenKey = "hermes.push-device-token"
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
     return PreferencesClient(
@@ -72,7 +79,10 @@ public extension PreferencesClient {
       loadChatRenderer: {
         store.string(forKey: chatRendererKey).flatMap(ChatRendererKind.init(rawValue:)) ?? .default
       },
-      saveChatRenderer: { store.set($0.rawValue, forKey: chatRendererKey) }
+      saveChatRenderer: { store.set($0.rawValue, forKey: chatRendererKey) },
+      loadPushDeviceToken: { store.string(forKey: pushTokenKey) },
+      savePushDeviceToken: { store.set($0, forKey: pushTokenKey) },
+      clearPushDeviceToken: { store.removeObject(forKey: pushTokenKey) }
     )
   }
 
@@ -84,6 +94,7 @@ public extension PreferencesClient {
     let grouping = LockIsolated<SessionGroupingMode>(.default)
     let selectedProfile = LockIsolated<String?>(nil)
     let chatRenderer = LockIsolated<ChatRendererKind>(.default)
+    let pushToken = LockIsolated<String?>(nil)
     return PreferencesClient(
       loadServerURL: { box.value },
       saveServerURL: { url in box.setValue(url) },
@@ -98,7 +109,10 @@ public extension PreferencesClient {
       saveSelectedProfileID: { selectedProfile.setValue($0) },
       clearSelectedProfileID: { selectedProfile.setValue(nil) },
       loadChatRenderer: { chatRenderer.value },
-      saveChatRenderer: { chatRenderer.setValue($0) }
+      saveChatRenderer: { chatRenderer.setValue($0) },
+      loadPushDeviceToken: { pushToken.value },
+      savePushDeviceToken: { pushToken.setValue($0) },
+      clearPushDeviceToken: { pushToken.setValue(nil) }
     )
   }
 }

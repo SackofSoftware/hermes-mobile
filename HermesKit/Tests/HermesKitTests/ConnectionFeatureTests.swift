@@ -25,7 +25,8 @@ struct ConnectionFeatureTests {
     // Submit/focus-loss checks immediately, pre-empting the typing debounce.
     await store.send(.serverFieldCommitted)
     await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse.success) {
+    await store.receive(\.serverStatusResponse) {
+      $0.capability = .tokenOnly
       $0.status = .reachable(version: "0.16.0")
     }
 
@@ -47,7 +48,7 @@ struct ConnectionFeatureTests {
 
     await store.send(.serverFieldCommitted)
     await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse.failure) { $0.status = .unreachable }
+    await store.receive(\.serverStatusResponse) { $0.status = .unreachable }
   }
 
   @Test func reachableButNotHermes() async {
@@ -59,7 +60,7 @@ struct ConnectionFeatureTests {
 
     await store.send(.serverFieldCommitted)
     await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse.failure) { $0.status = .notHermes }
+    await store.receive(\.serverStatusResponse) { $0.status = .notHermes }
   }
 
   @Test func invalidTokenDoesNotStore() async {
@@ -112,7 +113,8 @@ struct ConnectionFeatureTests {
     // …then auto-checks once typing pauses (debounced).
     await clock.advance(by: .milliseconds(600))
     await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse.success) {
+    await store.receive(\.serverStatusResponse) {
+      $0.capability = .tokenOnly
       $0.status = .reachable(version: "0.16.0")
     }
   }
@@ -130,6 +132,172 @@ struct ConnectionFeatureTests {
     await store.send(\.binding.serverURL, "") {
       $0.serverURL = ""
       $0.status = .idle
+    }
+  }
+
+  // MARK: Capability gating (Task 4)
+
+  @Test func tokenOnlyServerDisablesPasswordAndPreselectsToken() async {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "mac:9119")) {
+      ConnectionFeature()
+    } withDependencies: {
+      // No `auth_required` → token-only; providers should not even be probed.
+      $0.hermesREST.status = { @Sendable _ in okStatus() }
+    }
+
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .checking }
+    await store.receive(\.serverStatusResponse) {
+      $0.capability = .tokenOnly
+      $0.status = .reachable(version: "0.16.0")
+    }
+
+    #expect(store.state.method == .token)
+    #expect(store.state.isPasswordEnabled == false)
+    #expect(store.state.isTokenEnabled == true)
+    #expect(store.state.isTokenDeemphasized == false)
+  }
+
+  @Test func gatedServerEnablesAndPreselectsPassword() async {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "mac:9119")) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.status = { @Sendable _ in
+        ServerStatus(version: "0.16.0", authRequired: true, authProviders: ["basic"])
+      }
+      $0.hermesREST.authProviders = { @Sendable _ in
+        [AuthProvider(name: "basic", displayName: "Username & Password", supportsPassword: true)]
+      }
+    }
+
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .checking }
+    await store.receive(\.serverStatusResponse) {
+      $0.capability = .passwordAvailable(provider: "basic", displayName: "Username & Password")
+      $0.method = .password
+      $0.status = .reachable(version: "0.16.0")
+    }
+
+    #expect(store.state.isPasswordEnabled == true)
+    #expect(store.state.isTokenDeemphasized == true)
+  }
+
+  @Test func passwordLoginSuccessConnectsWithCookieSession() async {
+    let keychain = KeychainClient.inMemory()
+    let preferences = PreferencesClient.inMemory()
+    let activated = LockIsolated(false)
+    let cookieSession = CookieSession(
+      cookies: [SerializedCookie(name: "hermes_session_at", value: "abc", domain: "mac", path: "/")],
+      username: "alice",
+      provider: "basic"
+    )
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac:9119",
+        username: "alice",
+        password: "pw",
+        method: .password,
+        capability: .passwordAvailable(provider: "basic", displayName: "Password"),
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.passwordLogin = { @Sendable _, provider, username, _ in
+        #expect(provider == "basic")
+        #expect(username == "alice")
+        return cookieSession
+      }
+      // The captured cookies must be activated into the shared jar BEFORE the validating
+      // `sessions` call — otherwise the live REST transport reads an empty `.shared` and 401s.
+      $0.keychain.activateCookieSession = { @Sendable session in
+        #expect(session == cookieSession)
+        activated.setValue(true)
+      }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        #expect(activated.value, "cookies must be activated before the validating call")
+        return []
+      }
+      $0.keychain.saveSession = { @Sendable in try keychain.saveSession($0) }
+      $0.keychain.loadSession = { @Sendable in keychain.loadSession($0) }
+      $0.preferences = preferences
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.receive(\.passwordLoginResponse.success)
+    await store.receive(\.delegate.connected)
+
+    #expect(activated.value) // cookies activated into the shared jar
+    // Persisted as a cookie session, not a bare token.
+    #expect(keychain.loadSession(.shared) == .cookie(cookieSession))
+    #expect(preferences.loadServerURL() == "http://mac:9119")
+  }
+
+  @Test func passwordLoginInvalidCredentials() async {
+    let keychain = KeychainClient.inMemory()
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac:9119",
+        username: "alice",
+        password: "wrong",
+        method: .password,
+        capability: .passwordAvailable(provider: "basic", displayName: "Password"),
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.keychain = keychain
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.receive(\.passwordLoginResponse.failure) { $0.status = .invalidCredentials }
+
+    #expect(keychain.loadSession(.shared) == nil)
+  }
+
+  @Test func passwordLoginRateLimitedSurfacesServerCopy() async {
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac:9119",
+        username: "alice",
+        password: "pw",
+        method: .password,
+        capability: .passwordAvailable(provider: "basic", displayName: "Password"),
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in throw RESTError.rateLimited }
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.receive(\.passwordLoginResponse.failure) {
+      $0.status = .failed(RESTError.rateLimited.message)
+    }
+  }
+
+  @Test func passwordLoginServiceUnavailableSurfacesServerCopy() async {
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac:9119",
+        username: "alice",
+        password: "pw",
+        method: .password,
+        capability: .passwordAvailable(provider: "basic", displayName: "Password"),
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in throw RESTError.serviceUnavailable }
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.receive(\.passwordLoginResponse.failure) {
+      $0.status = .failed(RESTError.serviceUnavailable.message)
     }
   }
 }

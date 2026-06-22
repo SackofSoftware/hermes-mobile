@@ -94,6 +94,9 @@ public struct ChatFeature {
     var toolRowIDs: [String: ChatRow.ID]
     var reconnectAttempt: Int
     var hasRequestedSession: Bool
+    /// Set when the gated session died (`.authExpired`): reconnect backoff is paused and the
+    /// trailing `.gatewayClosed` (the finished stream) is ignored until re-auth resumes us.
+    var awaitingReauth: Bool
 
     public enum Status: Equatable, Sendable {
       case connecting
@@ -134,6 +137,7 @@ public struct ChatFeature {
       self.toolRowIDs = [:]
       self.reconnectAttempt = 0
       self.hasRequestedSession = false
+      self.awaitingReauth = false
       self.pendingInteraction = nil
       self.presentedTool = nil
       self.model = nil
@@ -175,12 +179,16 @@ public struct ChatFeature {
 
   public enum Action: BindableAction {
     case binding(BindingAction<State>)
+    case delegate(Delegate)
     case task
     case onDisappear
     case thinkingTick
     case gatewayEvent(GatewayEvent)
     case gatewayClosed
     case reconnectTick
+    /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
+    /// and reconnect the (previously paused) socket so the chat resumes in place.
+    case resumeAfterReauth(ServerConnection)
     case sessionResult(Result<SessionHandle, GatewayError>)
     case usageResponse(Usage)
     case historyResponse([SessionMessage])
@@ -223,6 +231,15 @@ public struct ChatFeature {
     case attachmentsSubmitted(displayText: String, images: [Data], rowID: UUID)
     case attachmentUploadFailed(message: String)
     case attachmentsUnsupportedDetected
+
+    /// Signals the parent (`AppFeature`) routes. Currently just the dead-session signal that
+    /// raises the re-auth modal (Task 6 consumes it); reconnect backoff is paused for it.
+    @CasePathable
+    public enum Delegate: Equatable, Sendable {
+      /// The gated session is fully dead (ws-ticket `401`). Re-auth is required — do **not**
+      /// keep retrying the socket.
+      case sessionExpired
+    }
   }
 
   private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer, thinkingTimer }
@@ -243,6 +260,9 @@ public struct ChatFeature {
     Reduce { state, action in
       switch action {
       case .binding:
+        return .none
+
+      case .delegate:
         return .none
 
       case .task:
@@ -275,11 +295,14 @@ public struct ChatFeature {
         return reduce(event: event, into: &state)
 
       case .gatewayClosed:
-        state.status = .reconnecting
         state.hasRequestedSession = false
         // Finalize anything mid-stream so a dropped socket doesn't leave a row
         // spinning forever; the transcript itself persists across the reconnect.
         finalizeInFlight(into: &state)
+        // A dead session already paused us (see `.authExpired`): the stream finishing is just
+        // the tail of that — don't schedule a backoff reconnect, wait for re-auth.
+        guard !state.awaitingReauth else { return .cancel(id: CancelID.thinkingTimer) }
+        state.status = .reconnecting
         state.reconnectAttempt += 1
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .merge(
@@ -293,6 +316,19 @@ public struct ChatFeature {
 
       case .reconnectTick:
         return connect(state.connection)
+
+      case let .resumeAfterReauth(connection):
+        // The re-auth modal minted a fresh session for the same user. Swap in the new auth
+        // regime (fresh cookies), lift the pause, and reconnect — the socket re-mints a
+        // ws-ticket from the new cookies and the transcript resumes in place.
+        state.connection = connection
+        state.awaitingReauth = false
+        state.status = .reconnecting
+        state.reconnectAttempt = 0
+        return .merge(
+          .cancel(id: CancelID.reconnect),
+          connect(connection)
+        )
 
       case let .sessionResult(.success(handle)):
         // A non-nil stored id before we overwrite it means this was a *resume* (vs. a fresh
@@ -874,6 +910,19 @@ public struct ChatFeature {
       freezeThinking(into: &state)
       return .cancel(id: CancelID.thinkingTimer)
 
+    case .authExpired:
+      // The gated session is fully dead (ws-ticket 401). Pause reconnect — do NOT back off —
+      // and bubble up so the app raises the re-auth modal. The trailing `.gatewayClosed`
+      // (the finished stream) is suppressed via `awaitingReauth`.
+      state.awaitingReauth = true
+      state.status = .reconnecting
+      finalizeInFlight(into: &state)
+      return .merge(
+        .cancel(id: CancelID.reconnect),
+        .cancel(id: CancelID.thinkingTimer),
+        .send(.delegate(.sessionExpired))
+      )
+
     case let .approvalRequest(request):
       // Nice-to-have skipped: the thinking timer keeps running while a blocking card is the
       // focus rather than pausing — simpler reducer, and wall-clock still reflects the turn.
@@ -1014,7 +1063,9 @@ public struct ChatFeature {
 
   private func connect(_ connection: ServerConnection) -> Effect<Action> {
     .run { [gateway, debugLog] send in
-      for await event in gateway.connect(connection.baseURL, connection.token) {
+      // Pass the full auth regime: `.token` → `?token=` (byte-identical); `.cookie` mints a
+      // fresh single-use ws-ticket per connect. A dead session surfaces as `.authExpired`.
+      for await event in gateway.connect(connection.baseURL, connection.auth) {
         debugLog.append(event) // mirror into the app-wide debug buffer (Task 12)
         await send(.gatewayEvent(event))
       }

@@ -40,6 +40,9 @@ public extension GatewayEvent {
     case .sudoRequest: return "sudo.request"
     case .secretRequest: return "secret.request"
     case .error: return "error"
+    // Client-synthesized, not a server frame (the gateway client yields it on a ws-ticket
+    // 401) — labeled distinctly so it never reads as a real `auth.*` wire event in the log.
+    case .authExpired: return "(client) session expired"
     case let .unknown(type, _): return type
     }
   }
@@ -64,6 +67,7 @@ public extension GatewayEvent {
     case let .sudoRequest(p): return p.prompt ?? p.requestID
     case let .secretRequest(p): return p.prompt ?? p.requestID
     case let .error(message): return message
+    case .authExpired: return ""
     case .unknown: return ""
     }
   }

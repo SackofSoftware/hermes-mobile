@@ -19,7 +19,8 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
-      $0.keychain.deleteToken = { @Sendable in deleted.setValue(true) }
+      // Logout deletes the full session (token + any gated cookies), not just the token.
+      $0.keychain.deleteSession = { @Sendable in deleted.setValue(true) }
       $0.preferences = preferences
       $0.dismiss = DismissEffect {}
     }

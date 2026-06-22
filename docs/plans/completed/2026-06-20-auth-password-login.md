@@ -143,12 +143,12 @@ byte-identical throughout.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift` (ServerConnection, ServerStatus)
 - Create: `HermesKit/Tests/HermesKitTests/AuthSessionTests.swift`
 
-- [ ] add `AuthSession` enum (`.token` | `.cookie(CookieSession)`) + `CookieSession`/`SerializedCookie` (Codable)
-- [ ] change `ServerConnection.token: String?` → `auth: AuthSession`; keep a convenience for the unauth probe
-- [ ] add `authRequired`/`authProviders` to `ServerStatus` (coding keys `auth_required`/`auth_providers`)
-- [ ] update all current construction sites to `.token(...)` so token mode compiles unchanged
-- [ ] write tests: `AuthSession`/`CookieSession` Codable round-trip; `ServerStatus` decodes new fields (present + absent)
-- [ ] run tests — must pass before next task
+- [x] add `AuthSession` enum (`.token` | `.cookie(CookieSession)`) + `CookieSession`/`SerializedCookie` (Codable)
+- [x] change `ServerConnection.token: String?` → `auth: AuthSession`; keep a convenience for the unauth probe
+- [x] add `authRequired`/`authProviders` to `ServerStatus` (coding keys `auth_required`/`auth_providers`)
+- [x] update all current construction sites to `.token(...)` so token mode compiles unchanged
+- [x] write tests: `AuthSession`/`CookieSession` Codable round-trip; `ServerStatus` decodes new fields (present + absent)
+- [x] run tests — must pass before next task
 
 ### Task 2: Capability probe + `ServerAuthCapability` mapper
 
@@ -157,12 +157,12 @@ byte-identical throughout.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift` (add `authProviders(url)` endpoint)
 - Create: `HermesKit/Tests/HermesKitTests/ServerAuthCapabilityTests.swift`
 
-- [ ] add `AuthProvider` model `{name, displayName, supportsPassword}` + `rest.authProviders(url)` (`GET /api/auth/providers`)
-- [ ] implement pure `ServerAuthCapability(from status:providers:)` → tokenOnly / passwordAvailable(provider,display) / oauthOnly
-- [ ] handle providers 404 / older servers gracefully (treat as token-only)
-- [ ] write table-driven tests for the mapper (auth_required false; gated+basic; gated+oauth-only; mixed → password)
-- [ ] write a client test for `authProviders` decoding (injected URLSession)
-- [ ] run tests — must pass before next task
+- [x] add `AuthProvider` model `{name, displayName, supportsPassword}` + `rest.authProviders(url)` (`GET /api/auth/providers`)
+- [x] implement pure `ServerAuthCapability(from status:providers:)` → tokenOnly / passwordAvailable(provider,display) / oauthOnly
+- [x] handle providers 404 / older servers gracefully (treat as token-only)
+- [x] write table-driven tests for the mapper (auth_required false; gated+basic; gated+oauth-only; mixed → password)
+- [x] write a client test for `authProviders` decoding (injected URLSession)
+- [x] run tests — must pass before next task
 
 ### Task 3: `passwordLogin` client + cookie capture + persistence round-trip
 
@@ -172,12 +172,12 @@ byte-identical throughout.
 - Create: `HermesKit/Tests/HermesKitTests/PasswordLoginClientTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/KeychainClientTests.swift`
 
-- [ ] add `rest.passwordLogin(url, provider, username, password)` → `POST /auth/password-login`, using a dedicated `URLSession` with its own `HTTPCookieStorage`; return the captured `CookieSession`
-- [ ] map errors → `RESTError` so the UI can show copy: 401 invalid creds, 429 rate-limited, 503 unreachable, 404 unsupported
-- [ ] extend `KeychainClient` to persist/load the full `AuthSession` (cookie payload + username), replacing bare-token storage; rehydrate cookies into the client's storage on load
-- [ ] write client tests (injected URLSession): 200 + Set-Cookie captured into the jar; each error code maps correctly
-- [ ] write Keychain tests: `.cookie` session serialize → store → load → cookies rehydrated; token session still works
-- [ ] run tests — must pass before next task
+- [x] add `rest.passwordLogin(url, provider, username, password)` → `POST /auth/password-login`, using a dedicated `URLSession` with its own `HTTPCookieStorage`; return the captured `CookieSession`
+- [x] map errors → `RESTError` so the UI can show copy: 401 invalid creds, 429 rate-limited, 503 unreachable, 404 unsupported
+- [x] extend `KeychainClient` to persist/load the full `AuthSession` (cookie payload + username), replacing bare-token storage; rehydrate cookies into the client's storage on load
+- [x] write client tests (injected URLSession): 200 + Set-Cookie captured into the jar; each error code maps correctly
+- [x] write Keychain tests: `.cookie` session serialize → store → load → cookies rehydrated; token session still works
+- [x] run tests — must pass before next task
 
 ### Task 4: Auth screen — segmented toggle, password fields, capability gating
 
@@ -186,12 +186,12 @@ byte-identical throughout.
 - Modify: `HermesMobile/Sources/Features/*` (ConnectionView/auth screen)
 - Modify: `HermesKit/Tests/HermesKitTests/ConnectionFeatureTests.swift`
 
-- [ ] add `method: AuthMethod (.password/.token)` + `username`/`password` to state; fold the capability into `serverStatusResponse` (probe providers when gated)
-- [ ] capability-aware toggle: both segments by default; token-only → preselect+disable Password (hint); gated → de-emphasize Token
-- [ ] `connectTapped` branches: password → `rest.passwordLogin` → validate (`sessions?limit=1`) → persist `.cookie` AuthSession → `delegate(.connected)`; token → today's path unchanged
-- [ ] surface error copy from Task 3's `RESTError` mapping in `State.Status`
-- [ ] write reducer tests: capability drives enable/preselect; password success → connected with `.cookie`; each error → status copy; token path regression (unchanged)
-- [ ] run `tuist generate` (new view files) and the suite — must pass before next task
+- [x] add `method: AuthMethod (.password/.token)` + `username`/`password` to state; fold the capability into `serverStatusResponse` (probe providers when gated)
+- [x] capability-aware toggle: both segments by default; token-only → preselect+disable Password (hint); gated → de-emphasize Token
+- [x] `connectTapped` branches: password → `rest.passwordLogin` → validate (`sessions?limit=1`) → persist `.cookie` AuthSession → `delegate(.connected)`; token → today's path unchanged
+- [x] surface error copy from Task 3's `RESTError` mapping in `State.Status`
+- [x] write reducer tests: capability drives enable/preselect; password success → connected with `.cookie`; each error → status copy; token path regression (unchanged)
+- [x] run `tuist generate` (new view files) and the suite — must pass before next task
 
 ### Task 5: Gateway `ws-ticket` handshake + auth-failure vs transient
 
@@ -201,12 +201,12 @@ byte-identical throughout.
 - Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift` (or reconnect tests)
 
-- [ ] `connect` branches on `AuthSession`: `.token` → `?token=` (byte-identical); `.cookie` → `POST /api/auth/ws-ticket` then `?ticket=`, minted fresh per connect (never cached)
-- [ ] classify ws-ticket `401` (session fully dead) as a non-retryable auth failure → `delegate(.sessionExpired)`; transient failures → existing backoff
-- [ ] ensure reconnect/backoff stays in the reducer and just re-calls `connect` (re-mints ticket)
-- [ ] write client tests: token-mode WS URL byte-identical (regression); cookie-mode mints ticket then connects `?ticket=`
-- [ ] write reducer tests (TestClock): ws-ticket 401 → sessionExpired (no backoff); transient → backoff continues
-- [ ] run tests — must pass before next task
+- [x] `connect` branches on `AuthSession`: `.token` → `?token=` (byte-identical); `.cookie` → `POST /api/auth/ws-ticket` then `?ticket=`, minted fresh per connect (never cached)
+- [x] classify ws-ticket `401` (session fully dead) as a non-retryable auth failure → `delegate(.sessionExpired)`; transient failures → existing backoff
+- [x] ensure reconnect/backoff stays in the reducer and just re-calls `connect` (re-mints ticket)
+- [x] write client tests: token-mode WS URL byte-identical (regression); cookie-mode mints ticket then connects `?ticket=`
+- [x] write reducer tests (TestClock): ws-ticket 401 → sessionExpired (no backoff); transient → backoff continues
+- [x] run tests — must pass before next task
 
 ### Task 6: `ReauthFeature` modal + AppFeature routing
 
@@ -218,13 +218,13 @@ byte-identical throughout.
 - Create: `HermesKit/Tests/HermesKitTests/ReauthFeatureTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] `ReauthFeature`: fixed server URL, prefilled username, password (or token) field, Sign in + "Quit to start"; reuse the Task 3 login effect
-- [ ] AppFeature presents it on `delegate(.sessionExpired)` and **pauses** reconnect while shown
-- [ ] outcome routing via identity-compare: same user → dismiss + reconnect (stay put); different user → pop to session list + force reload + clear identity-scoped prefs
-- [ ] Quit → full logout (clear Keychain session + all prefs) → onboarding
-- [ ] token-mode parity: same modal with a token field (identity-compare skipped)
-- [ ] write tests: sessionExpired presents + pauses reconnect; same-user dismiss+reconnect; different-user pop+reload+clear; Quit → logout→onboarding; pure identity-compare helper
-- [ ] run tests — must pass before next task
+- [x] `ReauthFeature`: fixed server URL, prefilled username, password (or token) field, Sign in + "Quit to start"; reuse the Task 3 login effect
+- [x] AppFeature presents it on `delegate(.sessionExpired)` and **pauses** reconnect while shown
+- [x] outcome routing via identity-compare: same user → dismiss + reconnect (stay put); different user → pop to session list + force reload + clear identity-scoped prefs
+- [x] Quit → full logout (clear Keychain session + all prefs) → onboarding
+- [x] token-mode parity: same modal with a token field (identity-compare skipped)
+- [x] write tests: sessionExpired presents + pauses reconnect; same-user dismiss+reconnect; different-user pop+reload+clear; Quit → logout→onboarding; pure identity-compare helper
+- [x] run tests — must pass before next task
 
 ### Task 7: Token-mode disclaimer + "How to connect securely" screen
 
@@ -233,42 +233,42 @@ byte-identical throughout.
 - Create: `HermesMobile/Sources/Features/SecureConnectionInfoView.swift`
 - Modify: `HermesKit/Sources/HermesKit/Features/ConnectionFeature.swift` (only if a nav/route flag is needed)
 
-- [ ] add the always-visible inline disclaimer under the token field (never expires / private network only / full access / "Learn how to connect securely →")
-- [ ] build the pushed details screen: WHY, HOW (Model-A snippet `--host 0.0.0.0 --insecure` + `HERMES_DASHBOARD_SESSION_TOKEN`, trust boundary = tailnet), real Tailscale link (`https://tailscale.com`, open in Safari), nudge back to Password when supported
-- [ ] capability tie-in: gated → token segment disabled hint ("This server uses password login"); token-only → disclaimer primary
-- [ ] SCOPE GUARD: static copy + one external link only (no Tailscale SDK / network detection)
-- [ ] write any reducer test for the disclaimer/route flag if logic was added (else covered by snapshots in Task 8)
-- [ ] run `tuist generate` + suite — must pass before next task
+- [x] add the always-visible inline disclaimer under the token field (never expires / private network only / full access / "Learn how to connect securely →")
+- [x] build the pushed details screen: WHY, HOW (Model-A snippet `--host 0.0.0.0 --insecure` + `HERMES_DASHBOARD_SESSION_TOKEN`, trust boundary = tailnet), real Tailscale link (`https://tailscale.com`, open in Safari), nudge back to Password when supported
+- [x] capability tie-in: gated → token segment disabled hint ("This server uses password login"); token-only → disclaimer primary — existing `methodHint` (gated/token-only hints) + always-on token disclaimer; `passwordAvailable` flag nudges back to Password on the details screen
+- [x] SCOPE GUARD: static copy + one external link only (no Tailscale SDK / network detection)
+- [x] write any reducer test for the disclaimer/route flag if logic was added (else covered by snapshots in Task 8) — NO reducer logic added: navigation is pure SwiftUI view state via `NavigationLink`, capability state already present from Task 4. Covered by Task 8 snapshots.
+- [x] run `tuist generate` + suite — must pass before next task (382 tests pass; `tuist generate` succeeded)
 
 ### Task 8: Snapshot tests
 
 **Files:**
 - Modify: `HermesMobileTests/*` (snapshot host + baselines)
 
-- [ ] auth screen — Password segment and Token segment
-- [ ] token disclaimer + the "How to connect securely" details screen
-- [ ] capability-disabled segment state (gated → token disabled; token-only → password disabled)
-- [ ] re-auth sheet — password variant and token variant
-- [ ] record baselines with `make snapshot-record` (pinned timestamps); run `make snapshot` — must pass before next task
+- [x] auth screen — Password segment and Token segment (`AuthSnapshotTests.testAuthScreen_passwordSegment` / `testAuthScreen_tokenSegment`)
+- [x] token disclaimer + the "How to connect securely" details screen (`testAuthScreen_tokenDisclaimer_tokenOnly`; `testSecureConnectionInfo_passwordAvailable` / `_passwordUnavailable` — tall fixed render so the full form incl. the bottom password-nudge section is captured)
+- [x] capability-disabled segment state (gated → token disabled; token-only → password disabled) (`testAuthScreen_gated_tokenDeemphasized` / `testAuthScreen_tokenOnly_passwordDisabled`)
+- [x] re-auth sheet — password variant and token variant (`testReauthSheet_password` / `testReauthSheet_token`)
+- [x] record baselines with `make snapshot-record` (pinned timestamps); run `make snapshot` — must pass before next task (9 baselines recorded under `HermesMobileTests/__Snapshots__/AuthSnapshotTests/`; the AuthSnapshotTests suite asserts green on iPhone 17 Pro / iOS 26)
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] token-only server: behavior byte-identical to today (header + `?token=`), disclaimer shown
-- [ ] gated server: password login → cookies persisted → REST + ws-ticket work end-to-end; survives app restart
-- [ ] expired session mid-chat: re-auth modal appears, same-user returns to the exact chat, different-user pops to list + reload, Quit → onboarding
-- [ ] capability gating hides/disables the unsupported segment correctly
-- [ ] run full HermesKit suite: `make test`
-- [ ] run snapshots: `make snapshot`
+- [x] token-only server: behavior byte-identical to today (header + `?token=`), disclaimer shown — verified via automated tests: WS URL byte-identical regression (`HermesGatewayClientTests.tokenModeBuildsByteIdenticalWSURL`); token REST header path unchanged (`ConnectionFeatureTests.reachableThenValidTokenConnectsAndStoresToken`, `HermesRESTClientTests`); token-mode probe/connect regression (`ConnectionFeatureTests.tokenOnlyServerDisablesPasswordAndPreselectsToken`); disclaimer/details rendered via snapshots (`AuthSnapshotTests.testAuthScreen_tokenDisclaimer_tokenOnly` / `testSecureConnectionInfo_passwordUnavailable`). On-device confirmation against a real loopback/`--insecure` server tracked in Post-Completion.
+- [x] gated server: password login → cookies persisted → REST + ws-ticket work end-to-end; survives app restart — verified via automated tests: cookie capture (`PasswordLoginClientTests.captures200SetCookieIntoSession`), `.cookie` AuthSession persistence + rehydration round-trip (`KeychainClientTests.cookieSessionSerializeStoreLoad` / `loadRehydratesCookiesIntoStorage` / `AuthSessionTests.cookieSessionRoundTrips`), connect success (`ConnectionFeatureTests.passwordLoginSuccessConnectsWithCookieSession`), ws-ticket mint-then-connect (`HermesGatewayClientTests.cookieModeMintsTicketThenConnectsWithTicket`), restart rehydration (`AppFeatureTests.autoLoginWithStoredCredsOpensSessionList`). End-to-end against a real gated BasicAuth server (incl. ~12h transparent refresh capture) tracked in Post-Completion.
+- [x] expired session mid-chat: re-auth modal appears, same-user returns to the exact chat, different-user pops to list + reload, Quit → onboarding — verified via automated tests: mid-chat ws-ticket 401 → sessionExpired with reconnect paused (`HermesGatewayClientTests.cookieModeMintAuthExpiredYieldsAuthExpiredAndFinishes`, `ChatReductionTests.authExpiredSignalsSessionExpiredAndPausesReconnect`, transient stays in backoff via `transientGatedCloseContinuesBackoff` / `cookieModeTransientMintFinishesStreamWithoutAuthExpired`); modal routing (`AppFeatureTests.sessionExpiredPresentsReauthModalSeededFromChat` / `sameUserReauthResumesChatInPlace` / `differentUserReauthPopsToListAndClearsIdentityPrefs` / `quitFromReauthFullyLogsOutToOnboarding` / `tokenSessionExpiredSeedsTokenReauthModal`); identity-compare + login outcomes (`ReauthFeatureTests.*`). Live on-device mid-chat expiry/routing tracked in Post-Completion.
+- [x] capability gating hides/disables the unsupported segment correctly — verified via automated tests: pure mapper (`ServerAuthCapabilityTests.*` — token-only/gated+basic/oauth-only/mixed/no-providers/404), reducer gating (`ConnectionFeatureTests.tokenOnlyServerDisablesPasswordAndPreselectsToken` / `gatedServerEnablesAndPreselectsPassword`), and rendered segment states (`AuthSnapshotTests.testAuthScreen_gated_tokenDeemphasized` / `testAuthScreen_tokenOnly_passwordDisabled`).
+- [x] run full HermesKit suite: `make test` — 382 tests in 32 suites passed.
+- [x] run snapshots: `make snapshot` — 63 tests, 0 failures (TEST SUCCEEDED). The 9 new `AuthSnapshotTests` are green; the 3 pre-existing `ConnectionSnapshotTests` baselines were re-recorded (the Task 4 segmented-toggle UI change made them stale) and now assert green.
 
 ### Task 10: [Final] Update documentation
 
 **Files:**
 - Modify: `docs/architecture.md`, `CLAUDE.md`, `README.md` (if user-facing)
 
-- [ ] document the two auth regimes + `AuthSession`/ws-ticket in `docs/architecture.md` (update the wire-protocol section)
-- [ ] note new conventions in `CLAUDE.md` (capability-aware toggle; cookie session in Keychain; ws-ticket per connect; sessionExpired→re-auth routing; token-mode byte-identical)
-- [ ] cross-reference backlog #19 (OAuth) and #18 (state-sync foreground reconnect shares `connect`)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] document the two auth regimes + `AuthSession`/ws-ticket in `docs/architecture.md` (update the wire-protocol section)
+- [x] note new conventions in `CLAUDE.md` (capability-aware toggle; cookie session in Keychain; ws-ticket per connect; sessionExpired→re-auth routing; token-mode byte-identical)
+- [x] cross-reference backlog #19 (OAuth) and #18 (state-sync foreground reconnect shares `connect`)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

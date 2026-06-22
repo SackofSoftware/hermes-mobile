@@ -813,6 +813,63 @@ struct ChatReductionTests {
     await store.send(.onDisappear)
   }
 
+  // MARK: ws-ticket auth failure vs transient (gated reconnect)
+
+  /// A dead gated session (ws-ticket 401 → `.authExpired`) pauses reconnect: it emits the
+  /// `sessionExpired` delegate and the trailing `.gatewayClosed` (finished stream) does NOT
+  /// schedule a backoff reconnect.
+  @Test func authExpiredSignalsSessionExpiredAndPausesReconnect() async {
+    let clock = TestClock()
+    let cookieConn = ServerConnection(
+      baseURL: URL(string: "http://mac.tailnet:9119")!,
+      auth: .cookie(CookieSession(cookies: [], username: "alice", provider: "basic"))
+    )
+    let store = TestStore(initialState: ChatFeature.State(connection: cookieConn, status: .ready)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.uuid = .incrementing
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+    }
+
+    await store.send(.gatewayEvent(.authExpired)) {
+      $0.awaitingReauth = true
+      $0.status = .reconnecting
+    }
+    await store.receive(\.delegate.sessionExpired)
+
+    // The stream finishing afterwards is suppressed — no reconnectAttempt bump, no backoff.
+    await store.send(.gatewayClosed)
+    // No `.reconnectTick` is ever scheduled even after a long advance.
+    await clock.advance(by: .seconds(60))
+    await store.send(.onDisappear)
+  }
+
+  /// A transient gated failure (the ticket mint failed → the stream just finishes, like a
+  /// dropped socket) continues the existing backoff/reconnect loop.
+  @Test func transientGatedCloseContinuesBackoff() async {
+    let clock = TestClock()
+    let cookieConn = ServerConnection(
+      baseURL: URL(string: "http://mac.tailnet:9119")!,
+      auth: .cookie(CookieSession(cookies: [], username: "alice", provider: "basic"))
+    )
+    let store = TestStore(initialState: ChatFeature.State(connection: cookieConn, status: .ready)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.uuid = .incrementing
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+    }
+
+    await store.send(.gatewayClosed) {
+      $0.status = .reconnecting
+      $0.reconnectAttempt = 1
+    }
+    await clock.advance(by: .seconds(1)) // first backoff = 2^0 = 1s
+    await store.receive(\.reconnectTick)
+    await store.send(.onDisappear)
+  }
+
   // MARK: Reconnect resilience — finalize a row that was mid-stream when the socket dropped
 
   @Test func closeFinalizesInFlightStreamingRow() async {

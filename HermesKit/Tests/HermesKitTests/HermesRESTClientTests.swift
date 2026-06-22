@@ -10,13 +10,16 @@ final class MockURLProtocol: URLProtocol {
     var statusCode = 200
     var body = Data()
     var failWithError = false
+    var headers: [String: String] = [:]
   }
 
   nonisolated(unsafe) static var stub = Stub()
   nonisolated(unsafe) static var lastRequest: URLRequest?
 
-  static func set(status: Int = 200, json: String = "", fail: Bool = false) {
-    stub = Stub(statusCode: status, body: Data(json.utf8), failWithError: fail)
+  static func set(
+    status: Int = 200, json: String = "", fail: Bool = false, headers: [String: String] = [:]
+  ) {
+    stub = Stub(statusCode: status, body: Data(json.utf8), failWithError: fail, headers: headers)
     lastRequest = nil
   }
 
@@ -32,7 +35,7 @@ final class MockURLProtocol: URLProtocol {
     }
     let http = HTTPURLResponse(
       url: request.url!, statusCode: MockURLProtocol.stub.statusCode,
-      httpVersion: nil, headerFields: nil
+      httpVersion: nil, headerFields: MockURLProtocol.stub.headers
     )!
     client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
     client?.urlProtocol(self, didLoad: MockURLProtocol.stub.body)
@@ -63,6 +66,34 @@ struct HermesRESTClientTests {
     #expect(status.version == "0.16.0")
     #expect(status.gatewayRunning == true)
     #expect(status.activeSessions == 2)
+  }
+
+  @Test func authProvidersDecodesList() async throws {
+    MockURLProtocol.set(json: #"""
+    [{"name":"basic","display_name":"Username & password","supports_password":true},{"name":"google","display_name":"Google","supports_password":false}]
+    """#)
+    let providers = try await makeClient().authProviders(baseURL)
+    #expect(providers == [
+      AuthProvider(name: "basic", displayName: "Username & password", supportsPassword: true),
+      AuthProvider(name: "google", displayName: "Google", supportsPassword: false),
+    ])
+    #expect(MockURLProtocol.lastRequest?.url?.path == "/api/auth/providers")
+    // Public probe — no auth header.
+    #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-Hermes-Session-Token") == nil)
+  }
+
+  @Test func authProvidersReturnsNilOnNotFound() async throws {
+    // Older servers 404 this endpoint → nil (capability falls back to token-only).
+    MockURLProtocol.set(status: 404)
+    let providers = try await makeClient().authProviders(baseURL)
+    #expect(providers == nil)
+  }
+
+  @Test func authProvidersTransportFailureStillThrows() async throws {
+    MockURLProtocol.set(fail: true)
+    await #expect(throws: RESTError.unreachable) {
+      _ = try await makeClient().authProviders(baseURL)
+    }
   }
 
   @Test func statusProbeSendsNoToken() async throws {
@@ -288,6 +319,23 @@ struct HermesRESTClientTests {
     }
   }
 
+  /// Regression (review finding #5): a transient 429/503 on a non-login call must NOT surface
+  /// the login-specific `.rateLimited`/`.serviceUnavailable` copy — it stays a generic
+  /// `.server(status:)`. The login-specific mapping is scoped to `passwordLogin` only.
+  @Test func nonLoginRateLimitedMapsToGenericServerError() async throws {
+    MockURLProtocol.set(status: 429, json: #"{"detail":"slow down"}"#)
+    await #expect(throws: RESTError.server(status: 429, detail: "slow down")) {
+      _ = try await makeClient().sessions(connection, 20, 0, .recent)
+    }
+  }
+
+  @Test func nonLoginServiceUnavailableMapsToGenericServerError() async throws {
+    MockURLProtocol.set(status: 503, json: #"{"detail":"down"}"#)
+    await #expect(throws: RESTError.server(status: 503, detail: "down")) {
+      try await makeClient().archive(connection, "sid", true, nil)
+    }
+  }
+
   @Test func transportFailureMapsToUnreachable() async throws {
     MockURLProtocol.set(fail: true)
     await #expect(throws: RESTError.unreachable) {
@@ -411,16 +459,3 @@ struct HermesRESTClientTests {
   }
 }
 } // extension RESTTransportSuite
-
-@Suite struct KeychainClientTests {
-  @Test func inMemoryRoundTrip() throws {
-    let kc = KeychainClient.inMemory()
-    #expect(kc.loadToken() == nil)
-    try kc.saveToken("abc")
-    #expect(kc.loadToken() == "abc")
-    try kc.saveToken("def") // overwrite
-    #expect(kc.loadToken() == "def")
-    try kc.deleteToken()
-    #expect(kc.loadToken() == nil)
-  }
-}

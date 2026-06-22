@@ -23,8 +23,12 @@ Hermes Mobile is a thin remote client for a self-hosted
 keeps running on your machine; the phone is a window into it — so you can step away
 from your desk and still keep your agent moving.
 
-- **Connect once.** Enter your server URL and token; the token lives in the iOS
-  Keychain and the app auto-logs-in on launch.
+- **Connect once.** Enter your server URL and sign in the way your agent is configured:
+  a static token (loopback/`--insecure`), or a username and password when the server
+  runs gated auth. The app detects which methods the server offers and shows the right
+  fields. Credentials live in the iOS Keychain and the app auto-logs-in on launch; if a
+  gated session expires while you're using it, a quick re-auth prompt gets you back in
+  without losing your place.
 - **Find any session.** Browse sessions grouped by workspace, search across all of
   them, pin the ones you care about, rename or archive them, and resume or start a
   new one.
@@ -71,8 +75,10 @@ export HERMES_DASHBOARD_SESSION_TOKEN=<your-stable-secret>
 make run        # builds and launches on a simulator — no signing needed
 ```
 
-**3. Connect.** Open the app, enter your server URL (e.g.
-`http://<tailnet-host>:9119`) and the token from step 1. That's it — you're in.
+**3. Connect.** Open the app and enter your server URL (e.g.
+`http://<tailnet-host>:9119`). If your agent runs with `--insecure` (above), pick
+**Token** and paste the secret from step 1. If it runs gated auth, pick **Password** and
+enter your username and password. That's it — you're in.
 
 To run on a physical device, see [`docs/development.md`](docs/development.md).
 

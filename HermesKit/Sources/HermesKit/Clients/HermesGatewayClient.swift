@@ -9,9 +9,16 @@ import Foundation
 /// issues a request and awaits its `{id,result}` via an internal pending-request map.
 @DependencyClient
 public struct HermesGatewayClient: Sendable {
-  /// Open a connection to the server (base URL + token) and stream decoded events.
+  /// Open a connection to the server (base URL + auth regime) and stream decoded events.
   /// The stream finishes when the socket closes or the consumer stops iterating.
-  public var connect: @Sendable (_ baseURL: URL, _ token: String?) -> AsyncStream<GatewayEvent> = { _, _ in
+  ///
+  /// The transport branches on `AuthSession`:
+  /// - `.token` → `…/api/ws?token=<token>` (byte-identical to the legacy path).
+  /// - `.cookie` → mint a fresh single-use `?ticket=` via `POST /api/auth/ws-ticket`
+  ///   (cookie-authed) per connect, then `…/api/ws?ticket=<ticket>`. A `401` from the
+  ///   ticket mint means the session is fully dead → the stream yields `.authExpired` and
+  ///   finishes (a non-retryable signal the reducer turns into re-auth, not backoff).
+  public var connect: @Sendable (_ baseURL: URL, _ auth: AuthSession) -> AsyncStream<GatewayEvent> = { _, _ in
     AsyncStream { $0.finish() }
   }
   /// Send a JSON-RPC request on the current connection and await its result.
@@ -25,6 +32,12 @@ public enum GatewayError: Error, Equatable, Sendable {
   case disconnected
   case server(String)
   case timedOut(method: String)
+  /// The gated `ws-ticket` mint returned `401` — the cookie session is fully dead and
+  /// reconnecting won't help. Surfaced as `GatewayEvent.authExpired` on the stream.
+  case authExpired
+  /// The `ws-ticket` mint failed transiently (network/5xx/non-401): the consumer should
+  /// fall back to the existing reconnect backoff, exactly as for a dropped socket.
+  case ticketUnavailable
 
   public var message: String {
     switch self {
@@ -32,6 +45,8 @@ public enum GatewayError: Error, Equatable, Sendable {
     case .disconnected: "Connection lost."
     case let .server(message): message
     case let .timedOut(method): "request timed out: \(method)"
+    case .authExpired: "Your session expired. Sign in again."
+    case .ticketUnavailable: "Couldn’t obtain a connection ticket."
     }
   }
 
@@ -53,35 +68,99 @@ public extension HermesGatewayClient {
     session: URLSession = URLSession(configuration: .default),
     requestTimeout: Duration = .seconds(30)
   ) -> HermesGatewayClient {
-    .make(requestTimeout: requestTimeout) { baseURL, token in
-      URLSessionWebSocketTransport(url: webSocketURL(base: baseURL, token: token), session: session)
-    }
+    .make(
+      requestTimeout: requestTimeout,
+      mintTicket: { baseURL, cookieSession in
+        try await wsTicket(baseURL: baseURL, cookieSession: cookieSession, session: session)
+      },
+      makeTransport: { wsURL in
+        URLSessionWebSocketTransport(url: wsURL, session: session)
+      }
+    )
   }
 
-  /// Core factory parameterized by a transport-maker so tests can inject a fake
-  /// socket. The connection state (id counter, pending map) lives in a per-connect
-  /// `GatewayConnection` actor; `store` holds the current one for `send`/`disconnect`.
+  /// Core factory parameterized by a transport-maker (keyed on the **resolved** WS URL) and
+  /// a ticket-minter so tests can inject both a fake socket and a fake ticket endpoint. The
+  /// connection state (id counter, pending map) lives in a per-connect `GatewayConnection`
+  /// actor; `store` holds the current one for `send`/`disconnect`.
   ///
   /// `clock` drives the per-request timeout — injectable so tests can use a `TestClock`
   /// and fire/hold the timeout deterministically instead of racing real wall-clock time.
+  ///
+  /// For `.cookie` auth, `connect` mints a fresh ws-ticket **per connect** (never cached) and
+  /// connects with `?ticket=`. `.token` auth skips the mint entirely and uses `?token=`,
+  /// byte-identical to the legacy path. A `401` from the mint (`GatewayError.authExpired`)
+  /// yields `.authExpired` and finishes the stream; any other mint failure finishes the
+  /// stream like a dropped socket so the reducer's existing backoff retries.
   static func make(
     requestTimeout: Duration = .seconds(30),
     clock: any Clock<Duration> = ContinuousClock(),
-    makeTransport: @escaping @Sendable (_ baseURL: URL, _ token: String?) -> any WebSocketTransport
+    mintTicket: @escaping @Sendable (_ baseURL: URL, _ cookieSession: CookieSession) async throws -> String = { _, _ in
+      throw GatewayError.ticketUnavailable
+    },
+    makeTransport: @escaping @Sendable (_ wsURL: URL) -> any WebSocketTransport
   ) -> HermesGatewayClient {
     let store = ConnectionStore()
     return HermesGatewayClient(
-      connect: { baseURL, token in
+      connect: { baseURL, auth in
         let (stream, continuation) = AsyncStream<GatewayEvent>.makeStream()
-        let connection = GatewayConnection(
-          transport: makeTransport(baseURL, token),
-          events: continuation,
-          requestTimeout: requestTimeout,
-          clock: clock
-        )
-        store.set(connection)
-        continuation.onTermination = { _ in Task { await connection.shutdown() } }
-        Task { await connection.start() }
+        // The connection opened by this `connect` (set once the transport is built). Held in
+        // a box so the single `onTermination` handler can shut it down — `onTermination` is
+        // last-writer-wins, so we must NOT overwrite it per-open (that clobbers cleanup).
+        let opened = LockIsolated<GatewayConnection?>(nil)
+        // Open a connection over the resolved WS URL: build the transport + connection
+        // actor, register it for `send`/`disconnect`, and start the receive loop.
+        @Sendable func open(_ wsURL: URL) {
+          let connection = GatewayConnection(
+            transport: makeTransport(wsURL),
+            events: continuation,
+            requestTimeout: requestTimeout,
+            clock: clock
+          )
+          store.set(connection)
+          opened.setValue(connection)
+          Task { await connection.start() }
+        }
+        switch auth {
+        case let .token(token):
+          // Token mode: no async work — open synchronously so an immediate `send` finds the
+          // connection (byte-identical to the legacy path). No setup task to cancel.
+          open(webSocketURL(base: baseURL, token: token))
+          // Single termination handler: shut down the opened connection on consumer cancel.
+          continuation.onTermination = { _ in
+            if let connection = opened.value { Task { await connection.shutdown() } }
+          }
+        case let .cookie(cookieSession):
+          // Cookie mode: mint a fresh single-use ticket first. Done in a Task because
+          // `connect` returns the stream synchronously; mint failures surface on the stream.
+          let setupTask = Task {
+            do {
+              let ticket = try await mintTicket(baseURL, cookieSession)
+              // The mint awaited above; if the consumer cancelled meanwhile, the termination
+              // handler already ran (and saw no `opened` connection). Bail before `open()` so
+              // we don't spawn an orphan connection nothing will ever shut down.
+              try Task.checkCancellation()
+              open(webSocketURL(base: baseURL, ticket: ticket))
+            } catch is CancellationError {
+              continuation.finish()
+            } catch GatewayError.authExpired {
+              // Session fully dead → non-retryable. Signal re-auth and finish.
+              continuation.yield(.authExpired)
+              continuation.finish()
+            } catch {
+              // Transient mint failure → finish like a dropped socket; the reducer's
+              // backoff re-calls `connect` (which re-mints the ticket).
+              continuation.finish()
+            }
+          }
+          // Single termination handler composing BOTH cleanups (last-writer-wins, so we can
+          // only register one): cancel the in-flight mint AND shut down a connection that has
+          // already opened. Either may be the live one depending on the cancel timing.
+          continuation.onTermination = { _ in
+            setupTask.cancel()
+            if let connection = opened.value { Task { await connection.shutdown() } }
+          }
+        }
         return stream
       },
       send: { method, params in
@@ -281,10 +360,59 @@ final class URLSessionWebSocketTransport: WebSocketTransport, @unchecked Sendabl
   }
 }
 
-private func webSocketURL(base: URL, token: String?) -> URL {
+/// Token-mode WS URL — **byte-identical to the legacy path** (`…/api/ws?token=<token>`).
+/// A `nil` token omits the query entirely (the unauthenticated probe case).
+func webSocketURL(base: URL, token: String?) -> URL {
+  webSocketURL(base: base, query: token.map { [URLQueryItem(name: "token", value: $0)] })
+}
+
+/// Gated-mode WS URL — `…/api/ws?ticket=<ticket>` from a freshly minted single-use ticket.
+func webSocketURL(base: URL, ticket: String) -> URL {
+  webSocketURL(base: base, query: [URLQueryItem(name: "ticket", value: ticket)])
+}
+
+private func webSocketURL(base: URL, query: [URLQueryItem]?) -> URL {
   var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) ?? URLComponents()
   comps.scheme = (comps.scheme == "https" || comps.scheme == "wss") ? "wss" : "ws"
   comps.path = "/api/ws"
-  comps.queryItems = token.map { [URLQueryItem(name: "token", value: $0)] }
+  comps.queryItems = query
   return comps.url ?? base
+}
+
+// MARK: - ws-ticket mint
+
+/// Decoded `POST /api/auth/ws-ticket` response — the gateway returns the single-use ticket
+/// under `ticket` (verified against the Hermes web server). Lenient: nothing else is read.
+private struct WSTicketResponse: Decodable { let ticket: String }
+
+/// Mint a single-use WS ticket for a gated (cookie) session via `POST /api/auth/ws-ticket`.
+/// The cookie jar authenticates the request; we rehydrate the persisted `CookieSession`
+/// into the live session's storage first so a fresh launch authenticates. A `401` (session
+/// fully dead) maps to `GatewayError.authExpired` (non-retryable); any other failure maps
+/// to `GatewayError.ticketUnavailable` (transient → reducer backoff retries).
+func wsTicket(baseURL: URL, cookieSession: CookieSession, session: URLSession) async throws -> String {
+  // Rehydrate cookies so a relaunched app (empty jar) still authenticates the mint.
+  if let storage = session.configuration.httpCookieStorage {
+    for cookie in cookieSession.cookies.compactMap(\.httpCookie) { storage.setCookie(cookie) }
+  }
+  var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) ?? URLComponents()
+  comps.path = "/api/auth/ws-ticket"
+  guard let url = comps.url else { throw GatewayError.ticketUnavailable }
+  var request = URLRequest(url: url)
+  request.httpMethod = "POST"
+
+  let data: Data
+  let response: URLResponse
+  do {
+    (data, response) = try await session.data(for: request)
+  } catch {
+    throw GatewayError.ticketUnavailable
+  }
+  guard let http = response as? HTTPURLResponse else { throw GatewayError.ticketUnavailable }
+  if http.statusCode == 401 { throw GatewayError.authExpired }
+  guard (200..<300).contains(http.statusCode) else { throw GatewayError.ticketUnavailable }
+  guard let decoded = try? JSONDecoder().decode(WSTicketResponse.self, from: data) else {
+    throw GatewayError.ticketUnavailable
+  }
+  return decoded.ticket
 }

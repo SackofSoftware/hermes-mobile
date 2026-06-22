@@ -4,15 +4,30 @@ import Foundation
 
 // MARK: - Connection & status
 
-/// Where and how to reach a Hermes server. `token` is nil for the unauthenticated
-/// reachability probe (`/api/status`).
+/// Where and how to reach a Hermes server. `auth` carries the regime (token vs cookie);
+/// the unauthenticated reachability probe (`/api/status`) goes through `status(baseURL:)`
+/// without a `ServerConnection`.
 public struct ServerConnection: Equatable, Sendable {
   public var baseURL: URL
-  public var token: String?
+  public var auth: AuthSession
 
-  public init(baseURL: URL, token: String? = nil) {
+  public init(baseURL: URL, auth: AuthSession) {
     self.baseURL = baseURL
-    self.token = token
+    self.auth = auth
+  }
+
+  /// Convenience for the common token-mode case so existing call sites stay byte-identical.
+  public init(baseURL: URL, token: String) {
+    self.init(baseURL: baseURL, auth: .token(token))
+  }
+
+  /// The bearer token when authenticating in `.token` mode; `nil` in `.cookie` mode (which
+  /// uses the cookie jar). Drives the existing `X-Hermes-Session-Token` REST/WS paths.
+  /// Setting a value switches the connection into `.token` mode (token-mode editing in
+  /// Settings); setting `nil` is ignored (the cookie jar is the source of truth then).
+  public var token: String? {
+    get { auth.token }
+    set { if let newValue { auth = .token(newValue) } }
   }
 }
 
@@ -27,18 +42,27 @@ public struct ServerStatus: Equatable, Sendable, Decodable {
   public var gatewayRunning: Bool?
   public var gatewayState: String?
   public var activeSessions: Int?
+  /// `true` when the server is in the gated (password/OAuth) regime; absent on older
+  /// servers (treat absent/`false` as token-only).
+  public var authRequired: Bool?
+  /// Provider names advertised by the server (e.g. `["basic"]`); absent on older servers.
+  public var authProviders: [String]?
 
   enum CodingKeys: String, CodingKey {
     case version
     case gatewayRunning = "gateway_running"
     case gatewayState = "gateway_state"
     case activeSessions = "active_sessions"
+    case authRequired = "auth_required"
+    case authProviders = "auth_providers"
   }
 }
 
 public enum RESTError: Error, Equatable, Sendable {
-  case unauthorized          // 401 — token missing/invalid
-  case notFound              // 404
+  case unauthorized          // 401 — token missing/invalid, or bad password-login creds
+  case notFound              // 404 — also an unknown/unsupported password provider
+  case rateLimited           // 429 — too many login attempts (10/min/IP)
+  case serviceUnavailable    // 503 — auth provider unreachable
   /// Other non-2xx. `detail` carries the server's body verbatim when present (JSON
   /// `{"detail": …}`, else trimmed plain-text body) so callers can surface it.
   case server(status: Int, detail: String? = nil)
@@ -50,6 +74,8 @@ public enum RESTError: Error, Equatable, Sendable {
     switch self {
     case .unauthorized: "Invalid or missing token."
     case .notFound: "Not found."
+    case .rateLimited: "Too many login attempts. Try again shortly."
+    case .serviceUnavailable: "The auth provider is unreachable. Try again later."
     // Prefer the server's detail verbatim (e.g. an Add-profile 400 reason); fall back
     // to the generic status message when the body was empty/unparseable.
     case let .server(status, detail):
@@ -67,6 +93,15 @@ public enum RESTError: Error, Equatable, Sendable {
 public struct HermesRESTClient: Sendable {
   /// Unauthenticated reachability/health probe.
   public var status: @Sendable (_ baseURL: URL) async throws -> ServerStatus
+  /// Public capability probe — `GET /api/auth/providers` → `[{name, display_name,
+  /// supports_password}]`. Returns `nil` on older servers that 404 this endpoint (treat as
+  /// token-only); other transport/HTTP errors still throw.
+  public var authProviders: @Sendable (_ baseURL: URL) async throws -> [AuthProvider]?
+  /// Username/password login — `POST /auth/password-login` JSON `{provider, username,
+  /// password}`. On `200` captures the `Set-Cookie` jar into a `CookieSession` (cookies +
+  /// username + provider) and returns it. Errors map to `RESTError`: `401` invalid creds,
+  /// `429` rate-limited, `503` provider unreachable, `404` unknown/unsupported provider.
+  public var passwordLogin: @Sendable (_ baseURL: URL, _ provider: String, _ username: String, _ password: String) async throws -> CookieSession
   public var sessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int, _ order: SessionOrder) async throws -> [Session]
   /// Just the archived (soft-hidden) sessions — `GET /api/sessions?archived=only`.
   public var archivedSessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int) async throws -> [Session]
@@ -92,9 +127,30 @@ public extension HermesRESTClient {
   /// Live implementation over `URLSession`. The session is injectable so tests can
   /// supply a `URLProtocol` mock.
   static func live(session: URLSession = .shared) -> HermesRESTClient {
-    HermesRESTClient(
+    // A dedicated session for password login so captured cookies live in their own jar,
+    // isolated from `.shared`. Inherits the injected session's `protocolClasses` so test
+    // mocks still intercept; gets a fresh `HTTPCookieStorage` and accepts all cookies.
+    let cookieSession = makeCookieSession(from: session)
+    return HermesRESTClient(
       status: { baseURL in
         try await get(makeURL(baseURL, "/api/status"), token: nil, session: session)
+      },
+      authProviders: { baseURL in
+        do {
+          let providers: [AuthProvider] = try await get(
+            makeURL(baseURL, "/api/auth/providers"), token: nil, session: session
+          )
+          return providers
+        } catch RESTError.notFound {
+          // Older servers don't expose this endpoint — capability falls back to token-only.
+          return nil
+        }
+      },
+      passwordLogin: { baseURL, provider, username, password in
+        try await login(
+          baseURL: baseURL, provider: provider, username: username, password: password,
+          session: cookieSession
+        )
       },
       sessions: { conn, limit, offset, order in
         let url = try makeURL(conn.baseURL, "/api/sessions", query: [
@@ -187,6 +243,54 @@ public extension DependencyValues {
 // (e.g. `HermesProfileClient`) can reuse the exact same request/decoding/validation
 // path rather than duplicating it.
 
+/// Build a dedicated `URLSession` for password login with its own cookie jar so captured
+/// cookies never bleed into `.shared`. Inherits the source session's `protocolClasses`
+/// (so test mocks still intercept) and accepts all cookies.
+func makeCookieSession(from source: URLSession) -> URLSession {
+  let config = URLSessionConfiguration.ephemeral
+  config.protocolClasses = source.configuration.protocolClasses
+  config.httpCookieStorage = HTTPCookieStorage()
+  config.httpCookieAcceptPolicy = .always
+  config.httpShouldSetCookies = true
+  return URLSession(configuration: config)
+}
+
+/// POST `/auth/password-login` and capture the `Set-Cookie` jar into a `CookieSession`.
+/// Cookies are parsed directly from the response headers (independent of the session's
+/// cookie storage) so the capture is deterministic and fully testable. Maps non-2xx
+/// statuses to `RESTError` (401/404/429/503 carry login-specific copy).
+func login(
+  baseURL: URL, provider: String, username: String, password: String, session: URLSession
+) async throws -> CookieSession {
+  let url = try makeURL(baseURL, "/auth/password-login")
+  var request = URLRequest(url: url)
+  request.httpMethod = "POST"
+  request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+  let payload: [String: Any] = ["provider": provider, "username": username, "password": password]
+  request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+  let data: Data
+  let response: URLResponse
+  do {
+    (data, response) = try await session.data(for: request)
+  } catch {
+    throw RESTError.unreachable
+  }
+
+  // Login-specific 429/503 copy is scoped here only (see `validate`'s `loginSpecific`).
+  try validate(response, data: data, loginSpecific: true)
+
+  guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
+  // Parse Set-Cookie straight from the response headers — `allHeaderFields` is
+  // `[AnyHashable: Any]`; map to `[String: String]` for `HTTPCookie`.
+  let headers = http.allHeaderFields.reduce(into: [String: String]()) { acc, pair in
+    if let key = pair.key as? String, let value = pair.value as? String { acc[key] = value }
+  }
+  let cookies = HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
+    .map(SerializedCookie.init)
+  return CookieSession(cookies: cookies, username: username, provider: provider)
+}
+
 func makeURL(_ base: URL, _ path: String, query: [URLQueryItem] = []) throws -> URL {
   guard var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
     throw RESTError.unreachable
@@ -221,12 +325,20 @@ func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async th
 /// Validate an HTTP response status, mapping non-success codes to `RESTError`. The
 /// response `data` is read on failure so the server's error `detail` is surfaced
 /// verbatim (see `serverDetail`).
-func validate(_ response: URLResponse, data: Data) throws {
+///
+/// `loginSpecific` opts into the password-login copy for 429/503 (`.rateLimited` /
+/// `.serviceUnavailable`). It is **only** set on the `POST /auth/password-login` path —
+/// for every other (authenticated) REST call a transient 429/503 stays a generic
+/// `.server(status:)`, so it never surfaces misleading "too many login attempts" /
+/// "auth provider unreachable" copy mid-session.
+func validate(_ response: URLResponse, data: Data, loginSpecific: Bool = false) throws {
   guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
   switch http.statusCode {
   case 200..<300: break
   case 401: throw RESTError.unauthorized
   case 404: throw RESTError.notFound
+  case 429 where loginSpecific: throw RESTError.rateLimited
+  case 503 where loginSpecific: throw RESTError.serviceUnavailable
   default: throw RESTError.server(status: http.statusCode, detail: serverDetail(from: data))
   }
 }

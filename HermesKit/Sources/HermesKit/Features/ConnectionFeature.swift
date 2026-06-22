@@ -1,22 +1,56 @@
 import ComposableArchitecture
 import Foundation
 
-/// Onboarding: a staged connection flow.
+/// Onboarding: a staged, capability-aware connection flow.
 /// 1. Check the server URL is reachable (`GET /api/status`, unauthenticated) —
-///    distinguishing unreachable from "reachable but not Hermes".
-/// 2. Validate the pasted token with one authenticated call (`GET /api/sessions?limit=1`).
-/// 3. Persist the token in the Keychain and signal `.delegate(.connected)`.
+///    distinguishing unreachable from "reachable but not Hermes" — and probe its auth
+///    capability (`/api/auth/providers` on a gated server) to preselect the segment.
+/// 2. Authenticate in the chosen regime:
+///    - **token** — validate the pasted token with one authenticated call
+///      (`GET /api/sessions?limit=1`).
+///    - **password** — `POST /auth/password-login` for a cookie session, then validate the
+///      cookies with the same authenticated call.
+/// 3. Persist the resulting `AuthSession` (token or cookie) in the Keychain and signal
+///    `.delegate(.connected)`.
+
+/// Which auth regime the user is entering credentials for. Driven by the server's
+/// capability probe (see `ServerAuthCapability`) but ultimately the user's segment choice.
+public enum AuthMethod: String, Equatable, Sendable {
+  case password
+  case token
+}
+
 @Reducer
 public struct ConnectionFeature {
   @ObservableState
   public struct State: Equatable {
     public var serverURL: String
     public var token: String
+    public var username: String
+    public var password: String
+    /// The user's selected auth segment. Preselected from the capability probe; the user
+    /// may still switch to whichever segment is enabled.
+    public var method: AuthMethod
+    /// The server's advertised auth capability (probed alongside `/api/status`). `nil` until
+    /// the reachability check completes. Drives segment enable/preselect.
+    public var capability: ServerAuthCapability?
     public var status: Status
 
-    public init(serverURL: String = "", token: String = "", status: Status = .idle) {
+    public init(
+      serverURL: String = "",
+      token: String = "",
+      username: String = "",
+      password: String = "",
+      method: AuthMethod = .token,
+      capability: ServerAuthCapability? = nil,
+      status: Status = .idle
+    ) {
       self.serverURL = serverURL
       self.token = token
+      self.username = username
+      self.password = password
+      self.method = method
+      self.capability = capability
       self.status = status
     }
 
@@ -29,14 +63,42 @@ public struct ConnectionFeature {
       case reachable(version: String?)
       case validating
       case invalidToken
+      case invalidCredentials
       case failed(String)
     }
 
+    /// Whether the Password segment may be selected. The probe says password is available;
+    /// before the probe completes we optimistically allow it (`?? true` — capability gating
+    /// must not be stricter than reality on unknowns).
+    public var isPasswordEnabled: Bool {
+      switch capability {
+      case .passwordAvailable: return true
+      case .tokenOnly, .oauthOnly: return false
+      case nil: return true
+      }
+    }
+
+    /// Whether the Token segment may be selected. Always available — token mode is the
+    /// universal fallback — but de-emphasized when the server is gated (password preferred).
+    public var isTokenEnabled: Bool { true }
+
+    /// True on a gated server where the token path is a poor fit (UI may de-emphasize it).
+    public var isTokenDeemphasized: Bool {
+      switch capability {
+      case .passwordAvailable, .oauthOnly: return true
+      case .tokenOnly, nil: return false
+      }
+    }
+
     public var canConnect: Bool {
-      guard !token.isEmpty, status != .validating else { return false }
+      guard status != .validating else { return false }
       switch status {
-      case .reachable, .invalidToken: return true // .invalidToken allows a retry
+      case .reachable, .invalidToken, .invalidCredentials: break // allow a retry
       default: return false
+      }
+      switch method {
+      case .password: return !username.isEmpty && !password.isEmpty
+      case .token: return !token.isEmpty
       }
     }
   }
@@ -48,8 +110,12 @@ public struct ConnectionFeature {
     /// The URL field was submitted or lost focus — check immediately.
     case serverFieldCommitted
     case connectTapped
-    case serverStatusResponse(Result<ServerStatus, RESTError>)
+    /// `/api/status` result plus the (optional) `/api/auth/providers` probe, folded so the
+    /// capability is computed in one place.
+    case serverStatusResponse(Result<ServerStatus, RESTError>, providers: [AuthProvider]?)
     case tokenValidationResponse(Result<ServerConnection, RESTError>)
+    /// Password login → cookie session validated → ready to persist + connect.
+    case passwordLoginResponse(Result<ServerConnection, RESTError>)
     case delegate(Delegate)
 
     @CasePathable
@@ -99,20 +165,34 @@ public struct ConnectionFeature {
         return .run { [rest] send in
           do {
             let status = try await rest.status(url)
-            await send(.serverStatusResponse(.success(status)))
-          } catch let error as RESTError {
-            await send(.serverStatusResponse(.failure(error)))
+            // Only a gated server has providers worth probing; token-only servers (and
+            // older builds) skip the extra round-trip and keep today's exact behaviour.
+            // A providers failure (404/transport) is swallowed → treated as no providers.
+            var providers: [AuthProvider]?
+            if status.authRequired == true {
+              providers = (try? await rest.authProviders(url)) ?? nil
+            }
+            await send(.serverStatusResponse(.success(status), providers: providers))
           } catch {
-            await send(.serverStatusResponse(.failure(.unreachable)))
+            await send(.serverStatusResponse(.failure(asRESTError(error)), providers: nil))
           }
         }
         .cancellable(id: CancelID.statusCheck, cancelInFlight: true)
 
-      case let .serverStatusResponse(.success(status)):
+      case let .serverStatusResponse(.success(status), providers):
+        let capability = ServerAuthCapability(from: status, providers: providers)
+        state.capability = capability
         state.status = .reachable(version: status.version)
+        // Preselect the segment the server actually supports: password when available,
+        // token otherwise. Don't override a token-only server's disabled Password.
+        switch capability {
+        case .passwordAvailable: state.method = .password
+        case .tokenOnly, .oauthOnly: state.method = .token
+        }
         return .none
 
-      case let .serverStatusResponse(.failure(error)):
+      case let .serverStatusResponse(.failure(error), _):
+        state.capability = nil
         switch error {
         case .decoding: state.status = .notHermes
         case .unreachable: state.status = .unreachable
@@ -125,23 +205,52 @@ public struct ConnectionFeature {
           state.status = .invalidURL
           return .none
         }
-        let connection = ServerConnection(baseURL: url, token: state.token)
         state.status = .validating
-        return .run { [rest, keychain, preferences] send in
-          do {
-            _ = try await rest.sessions(connection, 1, 0, .recent)
-          } catch let error as RESTError {
-            await send(.tokenValidationResponse(.failure(error)))
-            return
-          } catch {
-            await send(.tokenValidationResponse(.failure(.unreachable)))
-            return
+        switch state.method {
+        case .token:
+          // Token path — byte-identical to today: validate with one authenticated call,
+          // then persist the token + server URL and signal the parent.
+          let connection = ServerConnection(baseURL: url, token: state.token)
+          return .run { [rest, keychain, preferences] send in
+            do {
+              _ = try await rest.sessions(connection, 1, 0, .recent)
+            } catch {
+              await send(.tokenValidationResponse(.failure(asRESTError(error))))
+              return
+            }
+            try? keychain.saveSession(.token(connection.token ?? ""))
+            preferences.saveServerURL(connection.baseURL.absoluteString)
+            await send(.tokenValidationResponse(.success(connection)))
           }
-          // Validated: persist the token + server URL (for launch auto-connect),
-          // then signal the parent.
-          try? keychain.saveToken(connection.token ?? "")
-          preferences.saveServerURL(connection.baseURL.absoluteString)
-          await send(.tokenValidationResponse(.success(connection)))
+
+        case .password:
+          // Password path: log in for cookies, validate them with one authenticated call,
+          // then persist the cookie session + server URL and signal the parent.
+          let provider = state.capability?.passwordProvider ?? "basic"
+          let username = state.username
+          let password = state.password
+          return .run { [rest, keychain, preferences] send in
+            let cookieSession: CookieSession
+            do {
+              cookieSession = try await rest.passwordLogin(url, provider, username, password)
+            } catch {
+              await send(.passwordLoginResponse(.failure(asRESTError(error))))
+              return
+            }
+            // Activate the captured cookies into the shared jar BEFORE the validating call —
+            // otherwise the live REST transport reads an empty `.shared` and 401s.
+            keychain.activateCookieSession(cookieSession)
+            let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
+            do {
+              _ = try await rest.sessions(connection, 1, 0, .recent)
+            } catch {
+              await send(.passwordLoginResponse(.failure(asRESTError(error))))
+              return
+            }
+            try? keychain.saveSession(.cookie(cookieSession))
+            preferences.saveServerURL(connection.baseURL.absoluteString)
+            await send(.passwordLoginResponse(.success(connection)))
+          }
         }
 
       case let .tokenValidationResponse(.success(connection)):
@@ -154,11 +263,31 @@ public struct ConnectionFeature {
         }
         return .none
 
+      case let .passwordLoginResponse(.success(connection)):
+        return .send(.delegate(.connected(connection)))
+
+      case let .passwordLoginResponse(.failure(error)):
+        switch error {
+        // 401 from login (bad creds) or from the validating call (cookies rejected).
+        case .unauthorized: state.status = .invalidCredentials
+        // Surface server copy verbatim for the rest (429 rate-limit, 503 unreachable,
+        // 404 unsupported provider, other) via `RESTError.message`.
+        default: state.status = .failed(error.message)
+        }
+        return .none
+
       case .delegate:
         return .none
       }
     }
   }
+}
+
+/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel both auth
+/// reducers (`ConnectionFeature`, `ReauthFeature`) use after every `rest.*` call: a typed
+/// `RESTError` passes through verbatim; a raw transport failure maps to `.unreachable`.
+func asRESTError(_ error: any Error) -> RESTError {
+  error as? RESTError ?? .unreachable
 }
 
 /// Lenient URL parsing: accept `host:port` by defaulting to `http://`.

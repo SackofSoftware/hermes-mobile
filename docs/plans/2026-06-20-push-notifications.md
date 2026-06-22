@@ -192,12 +192,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `gateway/src/apnsSend.ts`
 - Create: `gateway/src/apnsSend.test.ts`
 
-- [ ] select host from `apns_env` (`api.push.apple.com` vs `api.sandbox.push.apple.com`)
-- [ ] build APNs request (topic, push-type, priority, collapse-id, thread-id, interruption-level)
-- [ ] forward and relay APNs status; on 410 return a prune signal to caller
-- [ ] ensure no message content is logged (metadata-only or no logging)
-- [ ] write tests (mock APNs): env→host, header/payload assembly, 200 + 410 paths
-- [ ] run tests — must pass before next task
+- [x] select host from `apns_env` (`api.push.apple.com` vs `api.sandbox.push.apple.com`)
+- [x] build APNs request (topic, push-type, priority, collapse-id, thread-id, interruption-level)
+- [x] forward and relay APNs status; on 410 return a prune signal to caller
+- [x] ensure no message content is logged (metadata-only or no logging)
+- [x] write tests (mock APNs): env→host, header/payload assembly, 200 + 410 paths
+- [x] run tests — must pass before next task
 
 ### Part B — `hermes-push` Hermes plugin (sibling repo)
 

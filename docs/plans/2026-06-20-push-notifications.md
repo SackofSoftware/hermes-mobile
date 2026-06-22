@@ -266,11 +266,13 @@ a short window (collapse-id reinforces on the APNs side).
 - Modify: `hermes-push/hermes_push/__init__.py` (wire triggers→policy→sender)
 - Create: `hermes-push/tests/test_sender.py`
 
-- [ ] POST `{device_token, apns_env, type, session_id, title, body, thread_id, hmac}` to gateway URL (baked-in const)
-- [ ] best-effort: short timeout + few retries, off the hook thread; **never block the turn**
-- [ ] on gateway prune signal (APNs 410) → remove token from store
-- [ ] write tests (mock gateway): payload shape, HMAC included, timeout/retry, prune→remove
-- [ ] run tests — must pass before next task
+- [x] POST `{device_token, apns_env, type, session_id, title, body, thread_id, hmac}` to gateway URL (baked-in const) — `sender.py::GatewaySender`; baked-in `GATEWAY_URL` const (`https://hermes-push.example.workers.dev/push`, publisher replaces post-deploy) with `HERMES_PUSH_GATEWAY_URL` env override; per-device `hmac` = lowercase-hex HMAC-SHA256 over the canonical string, byte-identical to `gateway/src/validate.ts::canonicalSignedString` (verified `json.dumps(signed, separators=(",",":"), ensure_ascii=False)` == JS `JSON.stringify`; fixed key order, `thread_id` omitted when absent, `hmac` excluded from signed material)
+- [x] best-effort: short timeout + few retries, off the hook thread; **never block the turn** — 5s timeout, 3 bounded attempts with exponential backoff, fan-out runs on a daemon `ThreadPoolExecutor`; `send()` returns immediately (tested: dispatched to executor, not run inline; slow gateway doesn't block the caller)
+- [x] on gateway prune signal (APNs 410) → remove token from store — `_is_prune` accepts HTTP 410 OR a `{"prune":true,…}` body → `store.prune_invalid(device_token)`; no retry after a prune
+- [x] write tests (mock gateway): payload shape, HMAC included, timeout/retry, prune→remove — `tests/test_sender.py` (canonical-string key-order/compact-separators/non-ASCII, HMAC recompute, payload shape, multi-device fan-out with per-device secrets, transient-then-success retry, give-up after N, 5xx-retry/4xx-give-up, 410+prune-body prune, off-thread non-blocking) + `tests/test_wiring.py` (pipeline policy→sender, register stands up store/policy/sender + survives pipeline failure, loopback WS connector maps complete/turn-lifecycle/ignores-noise/degrades-without-websockets/swallows-connection-error, `build_ws_url`)
+- [x] run tests — must pass before next task — `103 passed` (72 prior + 31 new)
+
+> **WS loopback (deferred from B3, wired here):** built `wsclient.py::LoopbackWsConnector` — guarded, off-thread (daemon thread + own asyncio loop), optional (`websockets` extra), never blocks/raises into `register()`, degrades to a logged no-op when `websockets` is missing or the WS is unreachable. Connects to `ws://{host}:{port}/api/ws?token=<HERMES_DASHBOARD_SESSION_TOKEN>` (loopback/`--insecure` auth path per `hermes_cli/web_server.py::_ws_auth_reason`), URL from `HERMES_PUSH_WS_URL` / `HERMES_DASHBOARD_URL` / `HERMES_DASHBOARD_HOST`+`PORT` (default `127.0.0.1:8080`). **Architectural limitation (documented in `wsclient.py`):** complete/error/clarify are `_emit`-ed via `write_json` → `current_transport()` (transport-scoped, no global broadcast, no hook), so a separate loopback connection does NOT observe other sessions' events with hermes-agent as it stands. Approval pushes work via the hook; complete/error/clarify need hermes-agent to grow a global `_emit` fan-out (e.g. `/api/events`-style broadcast). The connector is built/wired so it lights up the moment such a channel exists; `client_present` falls back to a conservative always-notify default since the live session map isn't exposed on `PluginContext` (duration/dedup/no-devices gates remain fully active).
 
 ### Part C — iOS app (this repo)
 

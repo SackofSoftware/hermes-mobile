@@ -167,11 +167,11 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `gateway/src/apnsJwt.ts`
 - Create: `gateway/src/apnsJwt.test.ts`
 
-- [ ] implement ES256 JWT: header `{alg:"ES256", kid:KEY_ID}`, claims `{iss:TEAM_ID, iat}`
-- [ ] cache the minted token ~50 min and reuse; re-mint when stale
-- [ ] write tests for header/claims correctness and cache reuse/expiry (inject clock)
-- [ ] write tests for malformed/missing key handling
-- [ ] run tests — must pass before next task
+- [x] implement ES256 JWT: header `{alg:"ES256", kid:KEY_ID}`, claims `{iss:TEAM_ID, iat}`
+- [x] cache the minted token ~50 min and reuse; re-mint when stale
+- [x] write tests for header/claims correctness and cache reuse/expiry (inject clock)
+- [x] write tests for malformed/missing key handling
+- [x] run tests — must pass before next task
 
 ### Task A3: Request validation, HMAC verify, rate-limiting
 

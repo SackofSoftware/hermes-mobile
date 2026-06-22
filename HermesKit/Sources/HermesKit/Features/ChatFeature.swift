@@ -158,6 +158,12 @@ public struct ChatFeature {
       // server always wins on hydrate (these rows are replaced wholesale in `applyActivate`).
       // Only paint when the caller didn't already supply a transcript and we have a stored
       // session id to look up.
+      //
+      // NOTE: this is the *only* init-time dependency read in HermesKit — a deliberate,
+      // one-of-its-kind exception. It relies on TCA propagating the dependency context into
+      // `State.init` (the store/preview supplies `\.chatSnapshot`), which only holds for this
+      // synchronous instant-paint path. Do NOT copy this pattern into other feature inits;
+      // everywhere else, read dependencies from the reducer (`@Dependency`), not from `init`.
       if transcript.isEmpty, let storedID = resumeStoredID,
          let snapshot = Dependency(\.chatSnapshot).wrappedValue.loadSnapshot(storedID) {
         self.transcript = IdentifiedArrayOf(uniqueElements: snapshot.rows)
@@ -770,7 +776,10 @@ public struct ChatFeature {
         state.errorBanner = "Attachment failed: \(message)"
         state.isSending = false
         for index in state.attachments.indices { state.attachments[index].uploadState = .failed(message) }
-        return .none
+        // The attachment-submit path wrote the turn anchor; a failed upload never starts a
+        // turn, so clear it — keeping every `setTurnAnchor` paired with a clear (mirrors
+        // `.promptSubmitFailed`).
+        return clearTurnAnchor(state)
 
       case .attachmentsUnsupportedDetected:
         // The agent is too old to accept uploads: hide the affordance for the session and
@@ -1387,22 +1396,17 @@ public struct ChatFeature {
   /// Persist the current chat as a non-authoritative snapshot (model / reasoning / usage +
   /// transcript rows). A no-op until we know the stored session id to key on. The store owns
   /// the single row-tail cap (`maxRowsPerSession`), so we pass the full transcript. Attachment
-  /// image bytes are stripped before persisting — they can't be re-hydrated from the server
-  /// (`reconstructTranscript` never sets them) and base64 blobs would bloat the cache.
+  /// image bytes never reach the cache: `ChatRow`'s `Codable` omits `attachmentImages` (so the
+  /// store can't persist them even if we passed them through) — they can't be re-hydrated from
+  /// the server and base64 blobs would bloat the cache.
   private func persistSnapshotNow(_ state: State) -> Effect<Action> {
     guard let sessionID = state.storedSessionID ?? state.liveSessionID else { return .none }
-    let rows: [ChatRow] = state.transcript.map { row in
-      guard !row.attachmentImages.isEmpty else { return row }
-      var stripped = row
-      stripped.attachmentImages = []
-      return stripped
-    }
     let snapshot = ChatSnapshot(
       model: state.model,
       reasoningEffort: state.reasoningEffort,
       usage: state.usage,
       updatedAt: now,
-      rows: rows
+      rows: Array(state.transcript)
     )
     return .run { [chatSnapshot] _ in
       chatSnapshot.saveSnapshot(sessionID, snapshot)

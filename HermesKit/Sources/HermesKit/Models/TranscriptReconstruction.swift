@@ -135,10 +135,10 @@ private func fillToolResult(at idx: Int, resultText: String?, in rows: inout [Ch
 }
 
 /// Parse a tool-call `arguments` JSON string into a structured value — only when it's an
-/// object (a bare scalar stays raw text). Shared by `reconstructTranscript` (re-hydration)
-/// and the live `tool.complete` fold in `ChatFeature`, so the args rendering is identical
-/// on both the streamed and re-hydrated paths.
-func parseToolArgs(_ string: String) -> JSONValue? {
+/// object (a bare scalar stays raw text). Used by `reconstructTranscript` on the re-hydration
+/// path, where args arrive as a raw string; the live `tool.complete` fold receives args
+/// already parsed as `JSONValue` from the gateway event, so it never calls this.
+private func parseToolArgs(_ string: String) -> JSONValue? {
   guard let data = string.data(using: .utf8),
         let value = try? JSONDecoder().decode(JSONValue.self, from: data),
         case .object = value

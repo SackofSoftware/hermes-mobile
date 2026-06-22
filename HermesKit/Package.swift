@@ -13,9 +13,10 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/pointfreeco/swift-composable-architecture", from: "1.15.0"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies", from: "1.4.0"),
-    // GRDB-backed SQLite persistence for the non-authoritative chat snapshot cache. Kept
-    // strictly behind `ChatSnapshotClient` (no reactive `@FetchAll`) — see the plan.
-    .package(url: "https://github.com/pointfreeco/sqlite-data", from: "1.0.0"),
+    // GRDB-backed SQLite persistence for the non-authoritative chat snapshot cache. We use
+    // GRDB directly (a private `DatabaseQueue` behind `ChatSnapshotClient`) — no SQLiteData
+    // / reactive `@FetchAll`, so depend on the actual API surface. See the plan.
+    .package(url: "https://github.com/groue/GRDB.swift", from: "7.6.0"),
   ],
   targets: [
     .target(
@@ -24,8 +25,8 @@ let package = Package(
         .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
         // DependenciesMacros provides @DependencyClient for the REST/WS/Keychain clients.
         .product(name: "DependenciesMacros", package: "swift-dependencies"),
-        // SQLiteData re-exports GRDB; the snapshot store uses a private DatabaseQueue.
-        .product(name: "SQLiteData", package: "sqlite-data"),
+        // GRDB: the snapshot store uses a private `DatabaseQueue` (no SQLiteData layer).
+        .product(name: "GRDB", package: "GRDB.swift"),
       ]
     ),
     .testTarget(

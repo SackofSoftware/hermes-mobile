@@ -197,30 +197,6 @@ struct HermesRESTClientTests {
     #expect(s.updatedAt == Date(timeIntervalSince1970: 1749550000.0))
   }
 
-  @Test func messagesDecodes() async throws {
-    MockURLProtocol.set(json: #"""
-    {"session_id":"sid","messages":[{"id":1,"role":"user","content":"hi","timestamp":1749550000.0},{"id":2,"role":"assistant","content":"hello","timestamp":1749550001.0,"tool_name":null}]}
-    """#)
-    let messages = try await makeClient().messages(connection, "sid", nil)
-    #expect(messages.count == 2)
-    #expect(messages.first == SessionMessage(id: 1, role: "user", content: "hi", timestamp: 1749550000.0))
-  }
-
-  @Test func messagesDecodeToolCallsAndCallID() async throws {
-    MockURLProtocol.set(json: #"""
-    {"session_id":"sid","messages":[
-      {"id":1,"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"terminal","arguments":"{\"command\":\"git status\"}"}}]},
-      {"id":2,"role":"tool","content":"clean","tool_name":"terminal","tool_call_id":"call_1"}
-    ]}
-    """#)
-    let messages = try await makeClient().messages(connection, "sid", nil)
-    let call = try #require(messages.first?.toolCalls?.first)
-    #expect(call.id == "call_1")
-    #expect(call.name == "terminal")
-    #expect(call.arguments == #"{"command":"git status"}"#)
-    #expect(messages.last?.toolCallID == "call_1")
-  }
-
   @Test func archiveSendsPatchWithBodyAndAuthHeader() async throws {
     MockURLProtocol.set(status: 200)
     try await makeClient().archive(connection, "20260610_120231_afcca6", true, nil)
@@ -368,24 +344,6 @@ struct HermesRESTClientTests {
       }
       return data
     } ?? Data()
-  }
-
-  @Test func messagesWithNilProfileSendsNoProfileQuery() async throws {
-    // Regression guard: nil profile → byte-identical to today (no `profile` param).
-    MockURLProtocol.set(json: #"{"session_id":"sid","messages":[]}"#)
-    _ = try await makeClient().messages(connection, "sid", nil)
-    let req = try #require(MockURLProtocol.lastRequest)
-    #expect(req.url?.path == "/api/sessions/sid/messages")
-    #expect(req.url?.query == nil)
-  }
-
-  @Test func messagesWithProfileAddsProfileQuery() async throws {
-    MockURLProtocol.set(json: #"{"session_id":"sid","messages":[]}"#)
-    _ = try await makeClient().messages(connection, "sid", "work")
-    let req = try #require(MockURLProtocol.lastRequest)
-    #expect(req.url?.path == "/api/sessions/sid/messages")
-    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-    #expect(query == [URLQueryItem(name: "profile", value: "work")])
   }
 
   @Test func archiveWithNilProfileIsUnchanged() async throws {

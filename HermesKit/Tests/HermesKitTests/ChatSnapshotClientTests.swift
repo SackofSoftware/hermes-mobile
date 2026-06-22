@@ -67,6 +67,29 @@ struct ChatSnapshotClientTests {
     #expect(client.loadSnapshot("s1")?.rows == [toolRow])
   }
 
+  @Test func attachmentImagesDoNotRoundTrip() throws {
+    // Attachment BYTES are stripped by `ChatRow`'s `Codable` (omitted from `CodingKeys`),
+    // so they never reach — or come back from — the cache, regardless of the reducer.
+    let withBytes = ChatRow(
+      id: UUID(),
+      kind: .message(role: .user, text: "hi", isComplete: true),
+      attachmentImages: [Data([0x01, 0x02, 0x03])]
+    )
+
+    // Direct Codable round-trip: bytes drop out.
+    let encoded = try JSONEncoder().encode(withBytes)
+    let decoded = try JSONDecoder().decode(ChatRow.self, from: encoded)
+    #expect(decoded.attachmentImages.isEmpty)
+    #expect(decoded == ChatRow(id: withBytes.id, kind: withBytes.kind))
+
+    // And through the store: the loaded row equals the byte-free original.
+    let client = ChatSnapshotClient.inMemory()
+    client.saveSnapshot("s1", ChatSnapshot(rows: [withBytes]))
+    let loaded = try #require(client.loadSnapshot("s1")?.rows.first)
+    #expect(loaded.attachmentImages.isEmpty)
+    #expect(loaded == ChatRow(id: withBytes.id, kind: withBytes.kind))
+  }
+
   // MARK: - Turn anchor
 
   @Test func turnAnchorSetGetClear() {

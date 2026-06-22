@@ -106,9 +106,6 @@ public struct HermesRESTClient: Sendable {
   /// Just the archived (soft-hidden) sessions — `GET /api/sessions?archived=only`.
   public var archivedSessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int) async throws -> [Session]
   public var search: @Sendable (_ connection: ServerConnection, _ query: String) async throws -> [Session]
-  /// Fetch a session's message history. Pass `profile` (non-default) to scope the read to
-  /// that profile's `state.db`; `nil` → today's exact request (no `profile` param).
-  public var messages: @Sendable (_ connection: ServerConnection, _ sessionID: String, _ profile: String?) async throws -> [SessionMessage]
   /// Soft-hide (archive) or restore a session — `PATCH /api/sessions/{id}` `{"archived":…}`.
   /// Pass `profile` (non-default) to scope to that profile (added to both query and body);
   /// `nil` → today's exact request.
@@ -176,16 +173,9 @@ public extension HermesRESTClient {
         let response: SearchResponse = try await get(url, token: conn.token, session: session)
         return response.results.map(\.asSession)
       },
-      messages: { conn, sessionID, profile in
-        // `nil` profile → no query item, byte-identical to today's request.
-        let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
-        let url = try makeURL(conn.baseURL, "/api/sessions/\(sessionID)/messages", query: query)
-        let response: MessagesResponse = try await get(url, token: conn.token, session: session)
-        return response.messages
-      },
       archive: { conn, id, archived, profile in
-        // `makeURL` percent-encodes `comps.path`, so interpolate the RAW id (matching
-        // the `messages` endpoint) — pre-encoding here would double-encode reserved chars.
+        // `makeURL` percent-encodes `comps.path`, so interpolate the RAW id — pre-encoding
+        // here would double-encode reserved chars.
         // A non-nil profile is mirrored into both the query and the body (matches desktop);
         // `nil` → no `profile` anywhere, byte-identical to today's request.
         let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
@@ -472,10 +462,6 @@ private struct SearchResultDTO: Decodable {
       preview: snippet?.nonEmpty
     )
   }
-}
-
-private struct MessagesResponse: Decodable {
-  let messages: [SessionMessage]
 }
 
 /// `/api/audio/transcribe` response — `{ok, transcript, provider?}`; `error` on failure.

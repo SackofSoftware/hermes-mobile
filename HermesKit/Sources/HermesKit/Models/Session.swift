@@ -153,8 +153,9 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
   }
 }
 
-/// A stored message from `GET /api/sessions/{id}/messages`. Columns verified against
-/// the `messages` table schema. Mapped to `ChatRow` during resume hydration (Task 8).
+/// A stored message from the session-history payload (the `messages` array on
+/// `ActivateResponse`). Columns verified against the `messages` table schema. Mapped to
+/// `ChatRow` during resume hydration by `reconstructTranscript`.
 public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   public var id: Int
   public var role: String

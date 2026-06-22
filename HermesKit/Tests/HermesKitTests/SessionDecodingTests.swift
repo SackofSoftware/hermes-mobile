@@ -76,4 +76,29 @@ struct SessionDecodingTests {
     let message = try decode(SessionMessage.self, json)
     #expect(message.reasoningText == "plain string detail")
   }
+
+  @Test func toolCallsAndCallIDDecode() throws {
+    // The assistant `tool_calls` entry (raw `arguments` string) and the linked `tool`
+    // result's `tool_call_id` — both feed `reconstructTranscript` on resume hydration.
+    let assistant = """
+    {
+      "id": 1, "role": "assistant", "content": "",
+      "tool_calls": [
+        { "id": "call_1", "type": "function",
+          "function": { "name": "terminal", "arguments": "{\\"command\\":\\"git status\\"}" } }
+      ]
+    }
+    """
+    let assistantMessage = try decode(SessionMessage.self, assistant)
+    let call = try #require(assistantMessage.toolCalls?.first)
+    #expect(call.id == "call_1")
+    #expect(call.name == "terminal")
+    #expect(call.arguments == #"{"command":"git status"}"#)
+
+    let result = """
+    { "id": 2, "role": "tool", "content": "clean", "tool_name": "terminal", "tool_call_id": "call_1" }
+    """
+    let resultMessage = try decode(SessionMessage.self, result)
+    #expect(resultMessage.toolCallID == "call_1")
+  }
 }

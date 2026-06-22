@@ -17,6 +17,22 @@ public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
     self.attachmentImages = attachmentImages
   }
 
+  /// `attachmentImages` is intentionally omitted from `CodingKeys`, so attachment BYTES
+  /// never round-trip through the snapshot cache — base64 blobs would bloat it and they
+  /// can't be re-hydrated from the server anyway (`reconstructTranscript` never sets them).
+  /// The rule lives in the type: decode defaults it to `[]`. (See `ChatSnapshotStore`.)
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case kind
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.id = try c.decode(UUID.self, forKey: .id)
+    self.kind = try c.decode(Kind.self, forKey: .kind)
+    self.attachmentImages = []
+  }
+
   public enum Kind: Equatable, Sendable, Codable {
     /// A user or assistant message. `isComplete` is false while it streams.
     case message(role: Role, text: String, isComplete: Bool)

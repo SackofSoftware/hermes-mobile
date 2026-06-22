@@ -140,6 +140,10 @@ struct ChatView: View {
           }
           .padding()
         }
+        // Open already anchored at the latest message: a long chat appears at the bottom
+        // instantly instead of rendering from the top and animating a long scroll down. While
+        // pinned at the bottom this also keeps new/streaming rows in view as content grows.
+        .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         // Tap on empty transcript space dismisses the keyboard without stealing taps
         // from row buttons, context menus, or markdown links.
@@ -147,10 +151,14 @@ struct ChatView: View {
         .onPreferenceChange(BottomDistanceKey.self) { distance in
           isAtBottom = distance < 60 // within ~60pt of the bottom counts as "at bottom"
         }
-        // Scroll on row count changes, not just the last row's id: the thinking row is
-        // pinned last, so appending a tool/answer row reorders without changing `last?.id`.
+        // Follow new messages only while the user is already at the bottom — appending a row
+        // shouldn't yank someone who scrolled up to read history back down (the
+        // scroll-to-bottom button covers that case). The initial open is handled by
+        // `.defaultScrollAnchor(.bottom)`, so no animated catch-up scroll on appear.
+        // Count (not `last?.id`): the thinking row is pinned last, so appending a tool/answer
+        // row reorders without changing the last id.
         .onChange(of: store.transcript.count) { _, count in
-          guard count > 0 else { return }
+          guard count > 0, isAtBottom else { return }
           withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
         }
         .overlay(alignment: .bottomTrailing) {

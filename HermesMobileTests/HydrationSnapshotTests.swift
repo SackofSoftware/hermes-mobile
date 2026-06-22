@@ -37,21 +37,15 @@ final class HydrationSnapshotTests: SnapshotTestCase {
 
   // MARK: Fixtures
 
-  /// Stored history for a turn: a user prompt, then an assistant message that both answered
-  /// and called one tool, followed by the tool's result message. No reasoning — so the
-  /// reconstruction's row order (user → assistant text → tool) matches the live fold's final
-  /// order exactly, enabling a pixel-identical parity assertion.
-  private func storedHistory_noThinking() -> [SessionMessage] {
+  /// Stored history for a turn, in the **cooked `session.resume` shape** the gateway actually
+  /// returns (`_history_to_messages`): a user prompt, a pre-flattened `role:"tool"` row
+  /// (display `name` + `context` preview — the server already matched call → result), then the
+  /// assistant's answer. (No `tool_calls` arrays / `tool_call_id` — those are server-internal.)
+  private func storedHistory() -> [SessionMessage] {
     [
-      SessionMessage(id: 1, role: "user", content: "What's in server.py?"),
-      SessionMessage(
-        id: 2, role: "assistant",
-        content: "It defines the WebSocket gateway.",
-        toolCalls: [ToolCallRef(id: "call_1", name: "read_file",
-                                arguments: #"{"path":"server.py"}"#)]
-      ),
-      SessionMessage(id: 3, role: "tool", content: "def app(): ...",
-                     toolName: "read_file", toolCallID: "call_1"),
+      SessionMessage(id: 1, role: "user", text: "What's in server.py?"),
+      SessionMessage(id: 2, role: "tool", name: "read_file", context: "server.py"),
+      SessionMessage(id: 3, role: "assistant", text: "It defines the WebSocket gateway."),
     ]
   }
 
@@ -77,70 +71,38 @@ final class HydrationSnapshotTests: SnapshotTestCase {
     }
   }
 
-  /// The transcript a live turn yields after folding the equivalent gateway-event stream
-  /// for `storedHistory_noThinking`. Mirrors `ChatFeature`'s fold exactly:
-  ///   - the prompt's user row,
-  ///   - `message.start` creates an eager (empty) thinking row + starts the timer,
-  ///   - `message.delta` lazily creates the assistant row,
-  ///   - `tool.start` → running tool row, `tool.complete` merges its structured args +
-  ///     result into that row,
-  ///   - `message.complete` finalizes the assistant row and, since the thinking row carried
-  ///     no reasoning/status, *removes* it.
-  /// Final rows: `[user][assistant complete][tool complete]` — byte-identical (by `kind`)
-  /// to the reconstruction of the same stored history. Built directly (no live `TestStore`)
-  /// so the never-terminating thinking-timer loop can't hang the snapshot test.
-  private func liveFoldedRows_noThinking() -> [ChatRow] {
-    [
-      ChatRow(id: id(0), kind: .message(role: .user, text: "What's in server.py?", isComplete: true)),
-      ChatRow(id: id(1), kind: .message(role: .assistant, text: "It defines the WebSocket gateway.", isComplete: true)),
-      ChatRow(id: id(2), kind: .tool(
-        name: "read_file", title: "read_file", state: .complete,
-        detail: ToolDetail(args: .object(["path": .string("server.py")]), resultText: "def app(): ..."),
-        durationS: nil
-      )),
-    ]
-  }
+  // MARK: Re-hydration renders the stored history
 
-  // MARK: Re-hydration parity (history == live)
+  /// A re-hydrated transcript rebuilt from the cooked `session.resume` history renders the
+  /// expected rows: user prompt, a completed tool row (name + `context` preview), and the
+  /// assistant's answer, in the server's stream order (tool before the final answer).
+  func testRehydrated_rendersStoredHistory() {
+    let rows = reconstructTranscript(storedHistory(), makeID: incrementingIDs())
 
-  /// A re-hydrated transcript (rebuilt from stored history) renders identically to the same
-  /// turn folded live from gateway events. Both views are asserted against the SAME baseline
-  /// image: record once from the reconstruction, then assert the live fold matches it.
-  func testRehydrated_matchesLiveStreamedTurn() {
-    let reconstructed = reconstructTranscript(storedHistory_noThinking(), makeID: incrementingIDs())
-    let live = liveFoldedRows_noThinking()
+    XCTAssertEqual(rows.map { $0.kind }, [
+      .message(role: .user, text: "What's in server.py?", isComplete: true),
+      .tool(name: "read_file", title: "read_file", state: .complete,
+            detail: ToolDetail(argsText: "server.py"), durationS: nil),
+      .message(role: .assistant, text: "It defines the WebSocket gateway.", isComplete: true),
+    ])
 
-    // Sanity: the rendered content (row kinds) is identical regardless of generated ids.
-    XCTAssertEqual(
-      reconstructed.map { $0.kind }, live.map { $0.kind },
-      "Re-hydrated rows must equal the live-folded rows for a no-thinking turn"
-    )
-
-    // The reconstruction records/asserts the shared baseline...
-    assertSnapshot(of: chatView(rows: reconstructed), as: deviceImage(),
-                   named: "rehydratedVsLive")
-    // ...and the live fold must match the very same image.
-    assertSnapshot(of: chatView(rows: live), as: deviceImage(),
-                   named: "rehydratedVsLive")
+    assertSnapshot(of: chatView(rows: rows), as: deviceImage(), named: "rehydrated")
   }
 
   // MARK: Re-hydrated chat with tool calls + thinking
 
-  /// The full rehydration layout: a reasoning row, the assistant's answer, and a completed
-  /// tool row with the command/result recovered from stored `tool_calls` + the `role:"tool"`
-  /// result message.
+  /// The full rehydration layout from cooked history: the user prompt, a completed tool row
+  /// (name + preview), the assistant's reasoning disclosure (no "· 0s" — duration is unknown
+  /// on re-hydration), and the assistant's answer.
   func testRehydrated_toolCallsAndThinking() {
     let history: [SessionMessage] = [
-      SessionMessage(id: 1, role: "user", content: "Summarize the streaming protocol."),
+      SessionMessage(id: 1, role: "user", text: "Summarize the streaming protocol."),
+      SessionMessage(id: 2, role: "tool", name: "read_file", context: "tui_gateway/server.py"),
       SessionMessage(
-        id: 2, role: "assistant",
-        content: "Here's the gist: it's a WebSocket JSON-RPC stream.",
-        toolCalls: [ToolCallRef(id: "call_a", name: "read_file",
-                                arguments: #"{"path":"tui_gateway/server.py"}"#)],
+        id: 3, role: "assistant",
+        text: "Here's the gist: it's a WebSocket JSON-RPC stream.",
         reasoning: "Let me look at the gateway server first, then the event types."
       ),
-      SessionMessage(id: 3, role: "tool", content: "tui_gateway/server.py",
-                     toolName: "read_file", toolCallID: "call_a"),
     ]
     let rows = reconstructTranscript(history, makeID: incrementingIDs())
     assertSnapshot(of: chatView(rows: rows), as: deviceImage())

@@ -169,6 +169,16 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   public var id: Int
   public var role: String
   public var content: String?
+  /// `session.resume` carries the message body under `text` (the cooked gateway shape from
+  /// the server's `_history_to_messages`); the raw DB/REST schema used `content`. We read
+  /// both so reconstruction works regardless of source — `displayText` prefers `text`.
+  public var text: String?
+  /// Cooked `role:"tool"` row fields (`{role:"tool", name, context}`): the tool's display
+  /// `name` and the short args/preview string the server already built (`_tool_ctx`). The
+  /// gateway flattens each tool call+result into one such row — there are no `tool_calls`
+  /// arrays or `tool_call_id` back-matching in the resume payload.
+  public var name: String?
+  public var context: String?
   public var timestamp: Double?
   public var toolName: String?
   /// Links a `tool` result message to the assistant `tool_calls` entry that requested it.
@@ -191,8 +201,15 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     reasoning?.nonEmpty ?? reasoningContent?.nonEmpty ?? reasoningDetails?.nonEmpty
   }
 
+  /// The message body, preferring the cooked `text` field over the raw `content`.
+  public var displayText: String? { text?.nonEmpty ?? content?.nonEmpty }
+
+  /// The tool display name for a cooked `role:"tool"` row (`name`), falling back to the raw
+  /// `tool_name` from the DB/REST shape.
+  public var toolDisplayName: String? { name?.nonEmpty ?? toolName?.nonEmpty }
+
   enum CodingKeys: String, CodingKey {
-    case id, role, content, timestamp, reasoning
+    case id, role, content, text, name, context, timestamp, reasoning
     case toolName = "tool_name"
     case toolCallID = "tool_call_id"
     case toolCalls = "tool_calls"
@@ -201,13 +218,18 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   }
 
   public init(
-    id: Int, role: String, content: String? = nil, timestamp: Double? = nil,
+    id: Int, role: String, content: String? = nil,
+    text: String? = nil, name: String? = nil, context: String? = nil,
+    timestamp: Double? = nil,
     toolName: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCallRef]? = nil,
     reasoning: String? = nil, reasoningContent: String? = nil, reasoningDetails: String? = nil
   ) {
     self.id = id
     self.role = role
     self.content = content
+    self.text = text
+    self.name = name
+    self.context = context
     self.timestamp = timestamp
     self.toolName = toolName
     self.toolCallID = toolCallID
@@ -222,6 +244,9 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     id = (try? c.decode(Int.self, forKey: .id)) ?? 0
     role = (try? c.decode(String.self, forKey: .role)) ?? ""
     content = try? c.decodeIfPresent(String.self, forKey: .content)
+    text = try? c.decodeIfPresent(String.self, forKey: .text)
+    name = try? c.decodeIfPresent(String.self, forKey: .name)
+    context = try? c.decodeIfPresent(String.self, forKey: .context)
     timestamp = try? c.decodeIfPresent(Double.self, forKey: .timestamp)
     toolName = try? c.decodeIfPresent(String.self, forKey: .toolName)
     toolCallID = try? c.decodeIfPresent(String.self, forKey: .toolCallID)

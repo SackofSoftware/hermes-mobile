@@ -370,11 +370,11 @@ a short window (collapse-id reinforces on the APNs side).
 
 ### Task C8: Verify acceptance criteria
 
-- [ ] verify all four trigger types deliver (mock plugin/gateway where needed)
-- [ ] verify suppression (no buzz while viewing session; >10s gate) and dedup
-- [ ] verify capability-gating hides the toggle on an agent without the plugin
-- [ ] run full HermesKit suite: `make test`
-- [ ] run snapshots: `make snapshot`
+- [x] verify all four trigger types deliver (mock plugin/gateway where needed) — covered across the local suites: **approval** via the `pre_approval_request` hook path, **complete/error/clarify** via the loopback-WS event mapper (`triggers.map_ws_event`). Added focused end-to-end-ish tests in `hermes-push/tests/test_wiring.py` (`test_approval_trigger_delivers_through_pipeline`, parametrized `test_ws_triggers_deliver_through_pipeline`) driving each type trigger→dispatcher→`_pipeline`→policy(allow)→`GatewaySender`→gateway-request and asserting the correct top-level `type` + generic (no-content) body. **Gateway gap fixed**: `gateway/src/apnsSend.ts::buildApnsBody` now echoes the top-level `type` into the APNs JSON (required for the app's approval badge); `apnsSend.test.ts` asserts it for all four types. **Documented limitation (B5, expected — not a failure)**: complete/error/clarify only fire *live* once hermes-agent grows a global `_emit` fan-out for the loopback WS to observe; approval works today via the hook.
+- [x] verify suppression (no buzz while viewing session; >10s gate) and dedup — policy tests (B4, `hermes-push/tests/test_policy.py`, 15 cases) cover client-present suppression, the >10s duration gate for complete/error (approval/clarify never gated), the dedup window, and the no-devices fast path; the app-side foreground suppression helper is covered by `PushClientTests.suppressesForegroundOnlyForTheSessionBeingViewed` (C5). All covered — no new test needed.
+- [x] verify capability-gating hides the toggle on an agent without the plugin — `SessionListFeatureTests.registerPush404DisablesPushCapability` (404 → `pushAvailable=false`) + `settingsPresentationThreadsPushAvailability`, and `SettingsFeature` view gates controls on `pushAvailable == false` (C4/C6). Covered.
+- [x] run full HermesKit suite: `make test` — `swift test --package-path HermesKit`: **498 tests passed** in 39 suites.
+- [x] run snapshots: `make snapshot` — **TEST SUCCEEDED**. (Also certified the local suites: `gateway` **63** vitest passed + typecheck clean; `hermes-push` **110** pytest passed.)
 
 ### Task C9: [Final] Update documentation + close out
 

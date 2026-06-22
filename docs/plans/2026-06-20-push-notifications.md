@@ -284,12 +284,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `HermesKit/Sources/HermesKit/Clients/PushClient.swift`
 - Create: `HermesKit/Tests/HermesKitTests/PushClientTests.swift`
 
-- [ ] define `@DependencyClient` with: `requestAuthorization`, `authorizationStatus`, `register()` (device token via `AsyncStream`), `incomingTaps()` stream
-- [ ] `liveValue` guarded `#if canImport(UIKit)` (UNUserNotificationCenter + `registerForRemoteNotifications`); non-iOS fallback `liveValue = testValue`
-- [ ] provide `testValue` / `.inMemory()` variants (mirror `AudioRecorderClient`)
-- [ ] keep pure logic (token hex-encoding, env constant) outside the iOS guard
-- [ ] write tests for in-memory register/authorize flows + token encoding
-- [ ] run tests — must pass before next task
+- [x] define `@DependencyClient` with: `requestAuthorization`, `authorizationStatus`, `register()` (device token via `AsyncStream`), `incomingTaps()` stream — `PushClient` exposes all four; tokens surfaced as lowercase-hex `String`, taps as a `PushTap` value type carrying `session_id`
+- [x] `liveValue` guarded `#if canImport(UIKit)` (UNUserNotificationCenter + `registerForRemoteNotifications`); non-iOS fallback `liveValue = testValue` — live value wires `UNUserNotificationCenter.requestAuthorization`/`notificationSettings` + `UIApplication.registerForRemoteNotifications`, fed by a process-wide `PushBridge` (the C2 app-delegate bridge calls `tokenReceived`/`tapReceived`); `#else` falls back to `testValue`
+- [x] provide `testValue` / `.inMemory()` variants (mirror `AudioRecorderClient`) — explicit no-op `testValue` (avoids macro-unimplemented leak) + `.inMemory(granted:status:)` returning a controllable `InMemory` handle (inject token/tap, set authorized) backed by a thread-safe `PushBox`
+- [x] keep pure logic (token hex-encoding, env constant) outside the iOS guard — `hexToken(from:)`, compile-time `apnsEnv` (`#if DEBUG` → "sandbox" else "production"), `sessionID(fromPayload:)` are plain statics outside the guard
+- [x] write tests for in-memory register/authorize flows + token encoding — `PushClientTests`: hex encoding (known bytes + empty), apns_env constant, payload→session_id (present/missing/empty/wrong-type), testValue no-op streams, in-memory authorize result, register stream yields injected token (retained), incomingTaps delivers injected tap
+- [x] run tests — must pass before next task — `script -q /dev/null swift test --package-path HermesKit`: 467 tests, all passing
 
 ### Task C2: App-delegate bridge (token + tap forwarding)
 

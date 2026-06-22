@@ -155,11 +155,11 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `gateway/src/config.test.ts`
 - Create: `gateway/README.md`, `gateway/package.json`, deploy config (e.g. `wrangler.toml`)
 
-- [ ] scaffold the chosen platform (Cloudflare Workers / Deno Deploy / Lambda) with a single `POST /push` route
-- [ ] implement config loader pulling APNs creds + HMAC secret from platform secrets
-- [ ] reject startup/handler if required secrets are missing (clear error)
-- [ ] write tests for config loading (present / missing-secret cases)
-- [ ] run tests — must pass before next task
+- [x] scaffold the chosen platform (Cloudflare Workers / Deno Deploy / Lambda) with a single `POST /push` route
+- [x] implement config loader pulling APNs creds + HMAC secret from platform secrets
+- [x] reject startup/handler if required secrets are missing (clear error)
+- [x] write tests for config loading (present / missing-secret cases)
+- [x] run tests — must pass before next task
 
 ### Task A2: ES256 JWT minting (with cache)
 

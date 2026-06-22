@@ -212,11 +212,11 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `hermes-push/dashboard/manifest.json` (declares `api` router path)
 - Create: `hermes-push/tests/test_register.py`
 
-- [ ] scaffold pip package with `register(ctx)` and `plugin.yaml`
-- [ ] declare `dashboard/manifest.json` with `api` field pointing to the REST router module
-- [ ] confirm plugin loads (entry-point discovery) and `register` runs without error
-- [ ] write tests for `register` wiring (hooks + route registered)
-- [ ] run tests — must pass before next task
+- [x] scaffold pip package with `register(ctx)` and `plugin.yaml`
+- [x] declare `dashboard/manifest.json` with `api` field pointing to the REST router module
+- [x] confirm plugin loads (entry-point discovery) and `register` runs without error
+- [x] write tests for `register` wiring (hooks + route registered)
+- [x] run tests — must pass before next task
 
 ### Task B2: Device-token registration REST route + storage
 

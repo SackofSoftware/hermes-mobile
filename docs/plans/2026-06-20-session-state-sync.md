@@ -210,12 +210,12 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift` (if an `activate` helper is warranted)
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift` (or a new HydrateTests)
 
-- [ ] replace `session.resume` in `bootstrapSession` with `session.activate`; fall back to `resume` on `GatewayError.isUnknownMethod`
-- [ ] on the response: `applyRuntimeInfo(info)` (model/reasoningEffort/usage), set working indicator from `running`, seed `inflight.user`/`inflight.assistant` rows (streaming → expect deltas), rebuild transcript via `reconstructTranscript(messages)` replacing rows wholesale
-- [ ] introduce a single `hydrate(sessionID)` effect used by open/foreground/cold-launch; ensure subsequent `message.delta` appends to the seeded streaming row without duplication
-- [ ] write reducer tests: activate response seeds model/usage/running/inflight directly (explicit blank-model & context-0 regressions); inflight.assistant + later delta → single row
-- [ ] write a fallback test: `activate` unknown-method → `resume` path still hydrates
-- [ ] run tests — must pass before next task
+- [x] replace `session.resume` in `bootstrapSession` with `session.activate`; fall back to `resume` on `GatewayError.isUnknownMethod`
+- [x] on the response: `applyRuntimeInfo(info)` (model/reasoningEffort/usage), set working indicator from `running`, seed `inflight.user`/`inflight.assistant` rows (streaming → expect deltas), rebuild transcript via `reconstructTranscript(messages)` replacing rows wholesale
+- [x] introduce a single `hydrate(sessionID)` effect used by open/foreground/cold-launch; ensure subsequent `message.delta` appends to the seeded streaming row without duplication
+- [x] write reducer tests: activate response seeds model/usage/running/inflight directly (explicit blank-model & context-0 regressions); inflight.assistant + later delta → single row
+- [x] write a fallback test: `activate` unknown-method → `resume` path still hydrates
+- [x] run tests — must pass before next task
 
 ### Task 5: Instant-paint from snapshot on init + write-back
 

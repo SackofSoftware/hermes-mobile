@@ -190,6 +190,9 @@ public struct ChatFeature {
     /// and reconnect the (previously paused) socket so the chat resumes in place.
     case resumeAfterReauth(ServerConnection)
     case sessionResult(Result<SessionHandle, GatewayError>)
+    /// Result of `session.activate` (or the `session.resume` fallback) — the
+    /// server-authoritative re-hydration payload (messages + info + running + inflight).
+    case activateResult(Result<ActivateResponse, GatewayError>)
     case usageResponse(Usage)
     case historyResponse([SessionMessage])
     case composerSubmitted
@@ -266,11 +269,12 @@ public struct ChatFeature {
         return .none
 
       case .task:
-        var effects: [Effect<Action>] = [connect(state.connection)]
-        if let stored = state.storedSessionID {
-          effects.append(loadHistory(stored, connection: state.connection, profile: state.scopedProfile))
-        }
-        return .merge(effects)
+        // History is now hydrated server-authoritatively from the `session.activate`
+        // (or `session.resume` fallback) response on `.ready` — see `hydrate`. No separate
+        // REST `loadHistory` call: the activate response carries `messages` + `info` +
+        // `running` + `inflight`, and rebuilding the transcript wholesale from it is what
+        // keeps model/usage/status correct on every re-open (the core state-sync fix).
+        return connect(state.connection)
 
       case .onDisappear:
         let wasRecording = state.recording.isBusy
@@ -331,20 +335,25 @@ public struct ChatFeature {
         )
 
       case let .sessionResult(.success(handle)):
-        // A non-nil stored id before we overwrite it means this was a *resume* (vs. a fresh
-        // create) — pull the current context usage so the gauge shows immediately instead of
-        // staying blank until the next turn. New sessions have no context yet, so skip.
-        let wasResume = state.storedSessionID != nil
+        // `session.create` only — a fresh session has no context yet, so no usage fetch.
+        // (Re-hydration of a stored session goes through `.activateResult` instead.)
         state.liveSessionID = handle.sessionID
         state.storedSessionID = handle.storedSessionID ?? state.storedSessionID
         state.status = .ready
-        return wasResume ? fetchUsage(sessionID: handle.sessionID) : .none
+        return .none
 
       case let .usageResponse(usage):
         state.usage = usage
         return .none
 
       case let .sessionResult(.failure(error)):
+        state.errorBanner = error.message
+        return .none
+
+      case let .activateResult(.success(response)):
+        return applyActivate(response, into: &state)
+
+      case let .activateResult(.failure(error)):
         state.errorBanner = error.message
         return .none
 
@@ -806,7 +815,12 @@ public struct ChatFeature {
       state.reconnectAttempt = 0
       guard !state.hasRequestedSession else { return .none }
       state.hasRequestedSession = true
-      return bootstrapSession(stored: state.storedSessionID, profile: state.scopedProfile)
+      // No stored id → a fresh session: `session.create` (handle only). A stored id →
+      // re-hydrate server-authoritatively via the unified `hydrate` path.
+      if let stored = state.storedSessionID {
+        return hydrate(sessionID: stored, profile: state.scopedProfile)
+      }
+      return createSession(profile: state.scopedProfile)
 
     case .messageStart:
       // Defer creating the assistant row until the first delta — a tool-only turn emits
@@ -1074,22 +1088,20 @@ public struct ChatFeature {
     .cancellable(id: CancelID.socket, cancelInFlight: true)
   }
 
-  private func bootstrapSession(stored: String?, profile: String?) -> Effect<Action> {
+  /// Create a brand-new session (`session.create`). New sessions send no title so the
+  /// server auto-names from the first message (passing any title disables Hermes'
+  /// auto-title generation). The default/nil profile is omitted → byte-identical to the
+  /// single-profile request.
+  private func createSession(profile: String?) -> Effect<Action> {
     .run { [gateway] send in
-      let method = stored == nil ? "session.create" : "session.resume"
-      // New sessions send no title so the server auto-names from the first message
-      // (passing any title disables Hermes' auto-title generation).
-      var fields: [String: JSONValue] = stored.map { ["session_id": .string($0)] } ?? [:]
-      // Scope the turn to the active profile (binds that profile's HERMES_HOME +
-      // state.db). Default/nil → omit, byte-identical to the single-profile request.
+      var fields: [String: JSONValue] = [:]
       if let profile { fields["profile"] = .string(profile) }
-      let params: JSONValue = .object(fields)
       do {
-        let result = try await gateway.send(method, params)
+        let result = try await gateway.send("session.create", .object(fields))
         if let handle = result.decoded(SessionHandle.self) {
           await send(.sessionResult(.success(handle)))
         } else {
-          await send(.sessionResult(.failure(.server("Malformed \(method) result"))))
+          await send(.sessionResult(.failure(.server("Malformed session.create result"))))
         }
       } catch let error as GatewayError {
         await send(.sessionResult(.failure(error)))
@@ -1097,6 +1109,96 @@ public struct ChatFeature {
         await send(.sessionResult(.failure(.disconnected)))
       }
     }
+  }
+
+  /// The single, idempotent server-authoritative re-hydration path, shared by open,
+  /// foreground, and cold launch. Calls `session.activate` (live session → authoritative
+  /// `messages`/`info`/`running`/`inflight`); old agents that lack it answer JSON-RPC
+  /// `-32601`, so we fall back to `session.resume` (identical response shape). The decoded
+  /// `ActivateResponse` is applied wholesale in `applyActivate` — server wins.
+  private func hydrate(sessionID: String, profile: String?) -> Effect<Action> {
+    .run { [gateway] send in
+      var fields: [String: JSONValue] = ["session_id": .string(sessionID)]
+      // Scope to the active profile (binds that profile's HERMES_HOME + state.db).
+      if let profile { fields["profile"] = .string(profile) }
+      let params: JSONValue = .object(fields)
+      do {
+        let result: JSONValue
+        do {
+          result = try await gateway.send("session.activate", params)
+        } catch let error as GatewayError where error.isUnknownMethod {
+          // Old agent without `session.activate` — fall back to `session.resume`.
+          result = try await gateway.send("session.resume", params)
+        }
+        if let response = result.decoded(ActivateResponse.self), !response.sessionID.isEmpty {
+          await send(.activateResult(.success(response)))
+        } else {
+          await send(.activateResult(.failure(.server("Malformed session.activate result"))))
+        }
+      } catch let error as GatewayError {
+        await send(.activateResult(.failure(error)))
+      } catch {
+        await send(.activateResult(.failure(.disconnected)))
+      }
+    }
+  }
+
+  /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,
+  /// `applyRuntimeInfo` (model/reasoning/usage), drive the working indicator from the
+  /// authoritative `running` flag, rebuild the transcript wholesale from `messages`
+  /// (server wins — no merge/dedup), then seed the in-flight turn. When `inflight.streaming`
+  /// is set we seed an assistant streaming row eagerly and point `streamingRowID` at it so
+  /// the next `message.delta` appends to it instead of lazily creating a duplicate.
+  private func applyActivate(_ response: ActivateResponse, into state: inout State) -> Effect<Action> {
+    state.liveSessionID = response.sessionID
+    state.storedSessionID = response.storedSessionID ?? state.storedSessionID
+    state.status = .ready
+
+    // Runtime info: model / reasoning / usage straight from the response (fixes the blank
+    // model + context-0 bugs on re-open).
+    if let info = response.info {
+      var target = RuntimeInfoTarget(
+        model: state.model, reasoningEffort: state.reasoningEffort, usage: state.usage
+      )
+      applyRuntimeInfo(info, into: &target)
+      state.model = target.model
+      state.reasoningEffort = target.reasoningEffort
+      state.usage = target.usage
+    }
+
+    // Rebuild the transcript wholesale from the authoritative history (server wins).
+    state.transcript = IdentifiedArrayOf(uniqueElements: reconstructTranscript(response.messages, makeID: { uuid() }))
+    state.streamingRowID = nil
+    state.thinkingRowID = nil
+    state.toolRowIDs = [:]
+
+    // Working indicator from the authoritative `running` flag.
+    let running = response.running ?? false
+    state.isSending = running
+
+    // Seed the in-flight turn snapshot (lost when the agent process restarts — acceptable).
+    if let inflight = response.inflight {
+      if let user = inflight.user?.nonEmpty {
+        state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: user, isComplete: true)))
+      }
+      // Seed the streaming row eagerly when the turn is still streaming so the next
+      // `message.delta` reuses it (avoids a duplicate from the lazy first-delta path).
+      let assistant = inflight.assistant ?? ""
+      if inflight.streaming == true || !assistant.isEmpty {
+        let id = uuid()
+        state.transcript.append(ChatRow(
+          id: id, kind: .message(role: .assistant, text: assistant, isComplete: false)
+        ))
+        state.streamingRowID = id
+      }
+    }
+
+    // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors
+    // the prior resume behavior so the gauge isn't blank until the next turn.
+    if state.usage == nil {
+      return fetchUsage(sessionID: response.sessionID)
+    }
+    return .none
   }
 
   /// Pull current context-window usage right after a session resolves. `session.info` /
@@ -1116,14 +1218,6 @@ public struct ChatFeature {
         // Agent too old to support session.usage — leave the gauge hidden.
       } catch {
         // Transient failure; usage will still arrive on the next message.complete.
-      }
-    }
-  }
-
-  private func loadHistory(_ storedID: String, connection: ServerConnection, profile: String?) -> Effect<Action> {
-    .run { [rest] send in
-      if let messages = try? await rest.messages(connection, storedID, profile) {
-        await send(.historyResponse(messages))
       }
     }
   }

@@ -94,6 +94,65 @@ public struct SessionHandle: Equatable, Sendable, Decodable {
   }
 }
 
+/// The in-flight turn snapshot returned by `session.activate` / `session.resume` for a
+/// live session: the user's prompt, any assistant text streamed so far, and whether the
+/// turn is still streaming. Lost when the agent process restarts (acceptable — no replay
+/// buffer). Lenient: every field optional. Mirrors the desktop `SessionInflightTurn`.
+public struct SessionInflight: Equatable, Sendable, Decodable {
+  public var user: String?
+  public var assistant: String?
+  public var streaming: Bool?
+
+  public init(user: String? = nil, assistant: String? = nil, streaming: Bool? = nil) {
+    self.user = user
+    self.assistant = assistant
+    self.streaming = streaming
+  }
+}
+
+/// Result of `session.activate` (live session) / `session.resume` (stored, same shape).
+/// Server-authoritative re-hydration payload: the full transcript `messages`, the runtime
+/// `info` (model/reasoning/usage), the authoritative `running` flag, and the `inflight`
+/// turn snapshot. The iOS client previously called only `session.resume` and ignored
+/// `info`/`running`/`inflight` — the core state-sync bug. Decoded leniently (every field
+/// but `sessionID` optional) so an old/odd response never crashes hydration.
+public struct ActivateResponse: Equatable, Sendable, Decodable {
+  public var sessionID: String
+  public var storedSessionID: String?
+  public var messages: [SessionMessage]
+  public var info: SessionInfo?
+  public var running: Bool?
+  public var inflight: SessionInflight?
+
+  enum CodingKeys: String, CodingKey {
+    case sessionID = "session_id"
+    case storedSessionID = "stored_session_id"
+    case messages, info, running, inflight
+  }
+
+  public init(
+    sessionID: String, storedSessionID: String? = nil, messages: [SessionMessage] = [],
+    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil
+  ) {
+    self.sessionID = sessionID
+    self.storedSessionID = storedSessionID
+    self.messages = messages
+    self.info = info
+    self.running = running
+    self.inflight = inflight
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    sessionID = (try? c.decode(String.self, forKey: .sessionID)) ?? ""
+    storedSessionID = try? c.decodeIfPresent(String.self, forKey: .storedSessionID)
+    messages = (try? c.decodeIfPresent([SessionMessage].self, forKey: .messages)) ?? []
+    info = try? c.decodeIfPresent(SessionInfo.self, forKey: .info)
+    running = try? c.decodeIfPresent(Bool.self, forKey: .running)
+    inflight = try? c.decodeIfPresent(SessionInflight.self, forKey: .inflight)
+  }
+}
+
 /// A stored message from `GET /api/sessions/{id}/messages`. Columns verified against
 /// the `messages` table schema. Mapped to `ChatRow` during resume hydration (Task 8).
 public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {

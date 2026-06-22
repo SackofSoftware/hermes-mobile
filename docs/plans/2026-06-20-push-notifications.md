@@ -252,12 +252,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `hermes-push/hermes_push/policy.py`
 - Create: `hermes-push/tests/test_policy.py`
 
-- [ ] suppress unless **no live client** is bound to the session (read transport state)
-- [ ] additionally gate turn-complete/error on turn duration > ~10s
-- [ ] dedup rapid repeats per session within a short window
-- [ ] no-devices fast path (skip all work cheaply)
-- [ ] write tests for each gate (client-present, short-turn, dedup window, no-devices)
-- [ ] run tests — must pass before next task
+- [x] suppress unless **no live client** is bound to the session (read transport state) — injectable `client_present(session_id)` gate; real source (wired B5): `_sessions[sid]["transport"] is not _stdio_transport` (tui_gateway/server.py; detached → stdio on disconnect, re-bound on prompt.submit)
+- [x] additionally gate turn-complete/error on turn duration > ~10s — `note_turn_start`/`clear_turn_start` + injected clock; complete/error only (approval/clarify never gated); fail-open on unknown turn start; threshold configurable (default 10s)
+- [x] dedup rapid repeats per session within a short window — per `(session_id, type)` last-sent map + injected clock; default 5s; only *sent* payloads recorded (suppressed ones don't poison the window)
+- [x] no-devices fast path (skip all work cheaply) — `device_count()` checked first, short-circuits before the client-present check (asserted via spy)
+- [x] write tests for each gate (client-present, short-turn, dedup window, no-devices) — `tests/test_policy.py`, 18 tests incl. spy proving fast-path short-circuit
+- [x] run tests — must pass before next task — `72 passed` (54 prior + 18 B4)
 
 ### Task B5: Outbound POST to gateway (fire-and-forget)
 

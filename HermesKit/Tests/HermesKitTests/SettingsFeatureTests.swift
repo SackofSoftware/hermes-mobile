@@ -152,8 +152,125 @@ struct SettingsFeatureTests {
     }
 
     await store.send(.task)
+    // `.task` also reads the OS authorization status (default testValue → .notDetermined,
+    // which leaves the toggle off — no state change).
+    await store.receive(\.authorizationStatusLoaded)
     await store.receive(\.logUpdated) {
       $0.log = entries
+    }
+  }
+
+  // MARK: Notifications (C6)
+
+  @Test func taskLoadsAuthorizationStatusIntoToggle() async {
+    let push = PushClient.inMemory(granted: true, status: .authorized)
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.debugLog.stream = { @Sendable in AsyncStream { $0.finish() } }
+      $0.push = push.client
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.task)
+    await store.receive(\.authorizationStatusLoaded) {
+      $0.notificationsEnabled = true
+      $0.notificationsDenied = false
+    }
+    await store.send(.doneTapped)
+  }
+
+  @Test func toggleOnWhenGrantedEnablesAndRegisters() async {
+    let registered = LockIsolated<[String]>([])
+    let push = PushClient.inMemory(granted: true, status: .notDetermined)
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory()
+      $0.keychain.savePushSecret = { @Sendable _ in }
+      $0.hermesREST.registerPush = { @Sendable _, token, _, _ in
+        registered.withValue { $0.append(token) }
+        return PushRegistration(hmacSecret: "secret")
+      }
+    }
+
+    await store.send(.notificationsToggled(true))
+    // The register effect subscribes to the token stream; drive a token in.
+    push.emit(token: "tok-1")
+    await store.receive(\.authorizationResult) {
+      $0.notificationsEnabled = true
+      $0.notificationsDenied = false
+    }
+    #expect(registered.value == ["tok-1"])
+  }
+
+  @Test func toggleOnWhenDeniedShowsGuidance() async {
+    let push = PushClient.inMemory(granted: false, status: .notDetermined)
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+
+    await store.send(.notificationsToggled(true))
+    await store.receive(\.authorizationResult) {
+      $0.notificationsEnabled = false
+      $0.notificationsDenied = true
+    }
+  }
+
+  @Test func toggleOffJustReflectsIntent() async {
+    let store = TestStore(
+      initialState: SettingsFeature.State(connection: connection, notificationsEnabled: true)
+    ) { SettingsFeature() }
+    await store.send(.notificationsToggled(false)) {
+      $0.notificationsEnabled = false
+    }
+  }
+
+  @Test func sendTestPushTransitionsToSent() async {
+    let sent = LockIsolated(false)
+    let push = PushClient.inMemory(granted: true, status: .authorized)
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory()
+      $0.keychain.savePushSecret = { @Sendable _ in }
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in PushRegistration(hmacSecret: "s") }
+      $0.hermesREST.sendTestPush = { @Sendable _ in sent.setValue(true) }
+    }
+
+    await store.send(.sendTestPushTapped) {
+      $0.testPushStatus = .sending
+    }
+    // The register step subscribes to the token stream first.
+    push.emit(token: "tok-1")
+    await store.receive(\.testPushResult) {
+      $0.testPushStatus = .sent
+    }
+    #expect(sent.value)
+  }
+
+  @Test func sendTestPushFailureTransitionsToFailed() async {
+    let push = PushClient.inMemory(granted: true, status: .authorized)
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory()
+      $0.keychain.savePushSecret = { @Sendable _ in }
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in PushRegistration(hmacSecret: "s") }
+      $0.hermesREST.sendTestPush = { @Sendable _ in throw RESTError.notFound }
+    }
+
+    await store.send(.sendTestPushTapped) {
+      $0.testPushStatus = .sending
+    }
+    push.emit(token: "tok-1")
+    await store.receive(\.testPushResult) {
+      $0.testPushStatus = .failed
     }
   }
 }

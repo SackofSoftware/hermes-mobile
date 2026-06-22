@@ -349,12 +349,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Modify: `HermesKit/Tests/HermesKitTests/SettingsFeatureTests.swift`
 - Modify: `HermesMobileTests/*` (snapshot)
 
-- [ ] add "Notify me about approvals" toggle that triggers the **contextual** permission prompt (not first-launch)
-- [ ] hide toggle + show "not available on this server" when `pushAvailable == false`
-- [ ] add "Send test notification" button (registers if needed, asks gateway to deliver a test push)
-- [ ] write reducer tests for toggle→authorize, unavailable state, test-send action
-- [ ] add/record snapshot tests for the three toggle states (enabled / unavailable / test-sent)
-- [ ] run tests — must pass before next task
+- [x] add "Notify me about approvals" toggle that triggers the **contextual** permission prompt (not first-launch) — `SettingsFeature.State.notificationsEnabled` reflects `push.authorizationStatus()` (read on `.task`); `.notificationsToggled(true)` fires `push.requestAuthorization()` (the contextual prompt); granted → `notificationsEnabled` + reuse the C4 register path (`ensurePushRegistered`: stream token → `registerPush` → persist secret); denied → `notificationsDenied` flag (view shows "enable in iOS Settings" via `openSettingsURLString`). All decisions in the reducer; view declarative.
+- [x] hide toggle + show "not available on this server" when `pushAvailable == false` — view gates on `store.pushAvailable`: false → a single "Notifications aren't available on this server" `Label` (no toggle/button), mirroring attach/profiles capability-gating.
+- [x] add "Send test notification" button (registers if needed, asks gateway to deliver a test push) — `.sendTestPushTapped` → `testPushStatus = .sending`, `ensurePushRegistered` (best-effort) then `rest.sendTestPush(connection)` → `.sent`/`.failed`. New `HermesRESTClient.sendTestPush(connection:)` POSTs `/api/plugins/hermes-push/test` (404→`.notFound`). Plugin: new `POST /test` route fans a generic `complete`-type sample payload (no content) to registered devices via the shared `GatewaySender` (bypasses suppression — explicit user action); 404 when pipeline unwired.
+- [x] write reducer tests for toggle→authorize, unavailable state, test-send action — `SettingsFeatureTests`: `taskLoadsAuthorizationStatusIntoToggle`, `toggleOnWhenGrantedEnablesAndRegisters`, `toggleOnWhenDeniedShowsGuidance`, `toggleOffJustReflectsIntent`, `sendTestPushTransitionsToSent`, `sendTestPushFailureTransitionsToFailed` (TestStore + in-memory PushClient + stubbed REST). REST: `sendTestPushPostsToTestRoute`/`…NotFound…`/`…ServerError…`. Plugin: `test_test_route_404_when_pipeline_not_wired`, `…sends_generic_payload_to_registered_devices` (content-leak guard), `…works_with_no_devices`.
+- [x] add/record snapshot tests for the three toggle states (enabled / unavailable / test-sent) — `SettingsSnapshotTests`: `testSettingsNotificationsEnabled`, `testSettingsNotificationsUnavailable`, `testSettingsNotificationsTestSent` recorded; `testSettingsView` baseline re-recorded for the new Notifications section.
+- [x] run tests — must pass before next task — `swift test --package-path HermesKit`: 498 passing; `make snapshot`: 71 passing; plugin `pytest`: 106 passing; app `xcodebuild build`: BUILD SUCCEEDED.
 
 ### Task C7: Entitlements + Info.plist (Tuist)
 

@@ -144,6 +144,11 @@ public struct HermesRESTClient: Sendable {
   /// Unregister this device's APNs token — `POST /api/plugins/hermes-push/unregister`
   /// `{device_token}`. A missing plugin surfaces as `RESTError.notFound` (404).
   public var unregisterPush: @Sendable (_ connection: ServerConnection, _ deviceToken: String) async throws -> Void
+  /// Ask the plugin to deliver a sample push to this caller's registered device(s) —
+  /// `POST /api/plugins/hermes-push/test`. Used by the Settings "Send test notification"
+  /// button to verify the end-to-end pipeline. A missing plugin surfaces as
+  /// `RESTError.notFound` (404).
+  public var sendTestPush: @Sendable (_ connection: ServerConnection) async throws -> Void
 }
 
 public extension HermesRESTClient {
@@ -251,6 +256,12 @@ public extension HermesRESTClient {
         let body = try JSONSerialization.data(withJSONObject: ["device_token": deviceToken])
         // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
         try await send(url, method: "POST", body: body, token: conn.token, session: session)
+      },
+      sendTestPush: { conn in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-push/test")
+        // No body needed — the plugin looks up the caller's registered device(s).
+        // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
+        try await send(url, method: "POST", body: Data("{}".utf8), token: conn.token, session: session)
       }
     )
   }

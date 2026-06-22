@@ -469,5 +469,29 @@ struct HermesRESTClientTests {
       try await makeClient().unregisterPush(connection, "abc123")
     }
   }
+
+  @Test func sendTestPushPostsToTestRoute() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().sendTestPush(connection)
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "POST")
+    #expect(req.url?.path == "/api/plugins/hermes-push/test")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+  }
+
+  @Test func sendTestPushNotFoundSurfacesCapabilityGate() async throws {
+    MockURLProtocol.set(status: 404)
+    await #expect(throws: RESTError.notFound) {
+      try await makeClient().sendTestPush(connection)
+    }
+  }
+
+  @Test func sendTestPushServerErrorMapsToTypedError() async throws {
+    MockURLProtocol.set(status: 500, json: #"{"detail":"boom"}"#)
+    await #expect(throws: RESTError.server(status: 500, detail: "boom")) {
+      try await makeClient().sendTestPush(connection)
+    }
+  }
 }
 } // extension RESTTransportSuite

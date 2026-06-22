@@ -250,13 +250,21 @@ public struct ChatFeature {
     case attachmentUploadFailed(message: String)
     case attachmentsUnsupportedDetected
 
-    /// Signals the parent (`AppFeature`) routes. Currently just the dead-session signal that
-    /// raises the re-auth modal (Task 6 consumes it); reconnect backoff is paused for it.
+    /// Signals the parent (`AppFeature`) routes: the dead-session signal that raises the
+    /// re-auth modal (reconnect backoff is paused for it), and the authoritative
+    /// working-state change that drives the session-list glow.
     @CasePathable
     public enum Delegate: Equatable, Sendable {
       /// The gated session is fully dead (ws-ticket `401`). Re-auth is required — do **not**
       /// keep retrying the socket.
       case sessionExpired
+      /// The agent's authoritative working state for this session changed — emitted on
+      /// `message.start` (running), `message.complete`/`error` (stopped), and from the
+      /// `session.activate` `running` flag on hydrate. The parent routes this to the
+      /// session list so the row's working glow clears/sets INSTANTLY (event-driven),
+      /// rather than waiting for the next poll. Always server-confirmed — never a cached
+      /// guess (the SQLite `running-guess` must never start a glow on its own).
+      case runningChanged(sessionID: String, running: Bool)
     }
   }
 
@@ -288,6 +296,7 @@ public struct ChatFeature {
         return .none
 
       case .delegate:
+        // Bubbled to the parent (AppFeature) — no local state change.
         return .none
 
       case .task:
@@ -889,8 +898,9 @@ public struct ChatFeature {
       state.thinkingSeconds = 0
       // Reaffirm the turn-start anchor at the authoritative turn start (the submit anchor is
       // optimistic; `message.start` is the agent's first beat). A hydrate mid-turn reconciles
-      // the live elapsed timer against this instant.
-      return .merge(setTurnAnchor(state), startThinkingTimer())
+      // the live elapsed timer against this instant. Tell the list this session is now
+      // working so its row glow lights up immediately (server-confirmed).
+      return .merge(setTurnAnchor(state), startThinkingTimer(), runningChanged(true, state))
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
@@ -912,8 +922,9 @@ public struct ChatFeature {
       keepThinkingLast(into: &state)
       freezeThinking(into: &state)
       state.isSending = false
-      // Turn ended — drop the anchor so a later hydrate doesn't resurrect a phantom timer.
-      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state))
+      // Turn ended — drop the anchor so a later hydrate doesn't resurrect a phantom timer,
+      // and tell the list to clear this session's working glow immediately.
+      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
 
     case let .thinkingDelta(text):
       appendToThinking(text, into: &state)
@@ -971,8 +982,9 @@ public struct ChatFeature {
       state.errorBanner = message
       state.isSending = false
       freezeThinking(into: &state)
-      // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate).
-      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state))
+      // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
+      // and clear the list's working glow for this session immediately.
+      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
 
     case .authExpired:
       // The gated session is fully dead (ws-ticket 401). Pause reconnect — do NOT back off —
@@ -1254,12 +1266,17 @@ public struct ChatFeature {
     // cold open paints from it (debounced — coalesces with any immediately-following deltas).
     let persist = debouncedPersist()
 
+    // Tell the list this session's authoritative working state so its row glow reconciles
+    // immediately (event-driven), without waiting for the next poll. Server-confirmed: the
+    // `running` flag is straight from `session.activate`.
+    let runningEffect = runningChanged(running, state)
+
     // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors
     // the prior resume behavior so the gauge isn't blank until the next turn.
     if state.usage == nil {
-      return .merge(fetchUsage(sessionID: response.sessionID), persist, timerEffect)
+      return .merge(fetchUsage(sessionID: response.sessionID), persist, timerEffect, runningEffect)
     }
-    return .merge(persist, timerEffect)
+    return .merge(persist, timerEffect, runningEffect)
   }
 
   /// Reconcile the live "Thinking" elapsed timer on hydrate from the persisted turn-start
@@ -1373,6 +1390,17 @@ public struct ChatFeature {
   /// `hydrate` (which keys on the stored id) on the next open.
   private func anchorKey(_ state: State) -> String? {
     state.storedSessionID ?? state.liveSessionID
+  }
+
+  /// Emit `delegate(.runningChanged)` for the session list so the row's working glow
+  /// clears/sets INSTANTLY (event-driven) rather than waiting for the next poll. Keyed by the
+  /// **stored** session id (`storedSessionID ?? liveSessionID`) since the list keys rows by
+  /// the persisted id. A no-op until the session resolves (nothing to key on). Always
+  /// server-confirmed (`message.start`/`complete`/`error` and the activate `running` flag) —
+  /// never a cached guess.
+  private func runningChanged(_ running: Bool, _ state: State) -> Effect<Action> {
+    guard let key = anchorKey(state) else { return .none }
+    return .send(.delegate(.runningChanged(sessionID: key, running: running)))
   }
 
   /// Persist the turn-start anchor (`@Dependency(\.date.now)`) so a later hydrate can

@@ -123,6 +123,8 @@ struct HydrateTests {
     }
     // The stale cached row id is gone entirely.
     #expect(store.state.transcript[id: self.uuid(10)] == nil)
+    // Activate's authoritative `running:false` clears the list glow for this session.
+    await store.receive(\.delegate.runningChanged)
     await store.send(.onDisappear)
   }
 
@@ -202,6 +204,8 @@ struct HydrateTests {
       $0.isSending = false
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .message(role: .assistant, text: "hello there", isComplete: true))]
     }
+    // message.complete clears this session's list glow (running:false).
+    await store.receive(\.delegate.runningChanged)
 
     // Nothing persisted yet (still inside the debounce window).
     #expect(snapshotClient.loadSnapshot("stored123") == nil)

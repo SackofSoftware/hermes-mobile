@@ -1467,4 +1467,99 @@ struct SessionListFeatureTests {
     }
     #expect(store.state.profiles.map(\.name) == ["default", "work"])
   }
+
+  // MARK: Event-driven working glow (Task 7)
+
+  // The open chat's `runningChanged(false)` clears the row's working flag (glow) INSTANTLY —
+  // no poll required.
+  @Test func setSessionRunningFalseClearsGlowImmediately() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "s1", isActive: true)]
+      )
+    ) {
+      SessionListFeature()
+    }
+
+    await store.send(.setSessionRunning(id: "s1", running: false)) {
+      $0.sessions[id: "s1"]?.isActive = false
+    }
+  }
+
+  // The open chat's `runningChanged(true)` lights the row's working flag (glow) instantly.
+  @Test func setSessionRunningTrueSetsGlowImmediately() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "s1", isActive: false)]
+      )
+    ) {
+      SessionListFeature()
+    }
+
+    await store.send(.setSessionRunning(id: "s1", running: true)) {
+      $0.sessions[id: "s1"]?.isActive = true
+    }
+  }
+
+  // No-op when the patched id isn't in the current list (archived/filtered) — the poll handles
+  // not-open sessions. And a no-op when the flag already matches (no spurious state change).
+  @Test func setSessionRunningIgnoresUnknownIdAndNoChange() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "s1", isActive: true)]
+      )
+    ) {
+      SessionListFeature()
+    }
+
+    // Unknown id → no state change.
+    await store.send(.setSessionRunning(id: "ghost", running: true))
+    // Same value → no state change.
+    await store.send(.setSessionRunning(id: "s1", running: true))
+  }
+
+  // Poll backstop: a session that started working ELSEWHERE (no open chat, so no delegate)
+  // is reconciled by the next REST poll flipping `isActive` true.
+  @Test func pollReconcilesSessionStartedElsewhere() async {
+    let clock = TestClock()
+    let active = LockIsolated(false)
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection)
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = clock
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        [Session(id: "s1", isActive: active.value)]
+      }
+    }
+
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.profilesResponse.failure)
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1", isActive: false)]
+      $0.seenCounts = ["s1": 0]
+    }
+
+    // The agent starts working this session elsewhere; the next poll observes it.
+    active.setValue(true)
+    await clock.advance(by: .seconds(10))
+    await store.receive(\.pollTick)
+    await store.receive(\.pulledToRefresh) { $0.isLoading = true }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1", isActive: true)] // glow lit by the poll backstop
+    }
+
+    await store.send(.onDisappear)
+  }
 }

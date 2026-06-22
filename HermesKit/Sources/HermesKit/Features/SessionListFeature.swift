@@ -253,6 +253,14 @@ public struct SessionListFeature {
     case deleteProfileSucceeded(name: String)
     /// Delete failed — surface the error (no local state was changed yet).
     case deleteProfileFailed
+    /// Event-driven working-glow patch from the open chat (routed by `AppFeature` from
+    /// `ChatFeature.Delegate.runningChanged`): set the row's `isActive` INSTANTLY so the glow
+    /// clears/lights the moment the agent stops/starts, rather than waiting for the next poll.
+    /// Always server-confirmed (the delegate only fires from `message.start`/`complete`/`error`
+    /// and the `session.activate` `running` flag) — a cached `running-guess` never reaches here,
+    /// so it can never start a glow on its own. The poll remains the backstop for not-open
+    /// sessions. A no-op for an unknown id (the session isn't in the current list).
+    case setSessionRunning(id: Session.ID, running: Bool)
     case delegate(Delegate)
 
     @CasePathable
@@ -335,6 +343,14 @@ public struct SessionListFeature {
       case .pulledToRefresh:
         // A plain reload — does NOT (re)start the poll loop.
         return load(&state)
+
+      case let .setSessionRunning(id, running):
+        // Patch the in-memory row's working flag (drives the glow) the instant the open chat
+        // tells us this session's authoritative running state changed. No-op if the session
+        // isn't in the current list (e.g. archived/filtered) — the poll handles those.
+        guard state.sessions[id: id]?.isActive != running else { return .none }
+        state.sessions[id: id]?.isActive = running
+        return .none
 
       case .binding(\.searchQuery):
         // Only the searchQuery binding drives the debounced fetch; other bound fields

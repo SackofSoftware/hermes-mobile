@@ -160,6 +160,13 @@ public struct AppFeature {
         state.onboarding = .init()
         return .none
 
+      case let .path(.element(id: _, action: .delegate(.runningChanged(sessionID, running)))):
+        // Route the open chat's authoritative working-state change to the session list so its
+        // row glow clears/lights INSTANTLY (event-driven), without waiting for the next poll.
+        // The poll stays the backstop for not-open sessions. No `home` → nothing to patch.
+        guard state.home != nil else { return .none }
+        return .send(.home(.setSessionRunning(id: sessionID, running: running)))
+
       case .onboarding, .home, .path, .reauth:
         return .none
       }

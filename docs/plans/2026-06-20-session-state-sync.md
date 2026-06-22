@@ -250,11 +250,11 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift` (patch row working flag)
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] add `ChatFeature.Delegate.runningChanged(sessionID, running)`, emitted on `message.start`/`complete`/`error`
-- [ ] route it (AppFeature) to `SessionListFeature`, which patches that row's working flag instantly
-- [ ] keep the existing poll as backstop for not-open sessions; cached `running-guess` must never START a glow on its own (only show one the server confirms)
-- [ ] write tests: delegate clears the glow immediately; poll reconciles a session started elsewhere; cache-guess alone does not glow
-- [ ] run tests — must pass before next task
+- [x] add `ChatFeature.Delegate.runningChanged(sessionID, running)`, emitted on `message.start`/`complete`/`error` (and from the `session.activate` `running` flag on hydrate)
+- [x] route it (AppFeature) to `SessionListFeature`, which patches that row's working flag instantly
+- [x] keep the existing poll as backstop for not-open sessions; cached `running-guess` must never START a glow on its own (only show one the server confirms)
+- [x] write tests: delegate clears the glow immediately; poll reconciles a session started elsewhere; cache-guess alone does not glow
+- [x] run tests — must pass before next task
 
 ### Task 8: App lifecycle — scenePhase → reconnect/re-activate + persist
 

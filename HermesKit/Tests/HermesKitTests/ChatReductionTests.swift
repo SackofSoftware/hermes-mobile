@@ -630,6 +630,8 @@ struct ChatReductionTests {
       "session_id": .string("stored123"),
       "profile": .string("work"),
     ]))
+    // Activate's authoritative `running:false` clears the list glow for this session.
+    await store.receive(\.delegate.runningChanged)
     await store.send(.onDisappear)
   }
 
@@ -678,6 +680,7 @@ struct ChatReductionTests {
     #expect(methods.value == ["session.activate"])
     // Usage came from `info` — no fallback `session.usage` fetch.
     #expect(!methods.value.contains("session.usage"))
+    await store.receive(\.delegate.runningChanged)
     await store.send(.onDisappear)
   }
 
@@ -719,6 +722,8 @@ struct ChatReductionTests {
       $0.storedSessionID = "stored123"
       $0.status = .ready
     }
+    // The synchronous delegate send lands before the async usage fetch resolves.
+    await store.receive(\.delegate.runningChanged)
     await store.receive(\.usageResponse) {
       $0.usage = Usage(contextUsed: 150_000, contextMax: 200_000, contextPercent: 75)
     }
@@ -777,6 +782,7 @@ struct ChatReductionTests {
     }
     // Tried activate first, then resume.
     #expect(methods.value == ["session.activate", "session.resume"])
+    await store.receive(\.delegate.runningChanged)
     await store.send(.onDisappear)
   }
 
@@ -834,6 +840,8 @@ struct ChatReductionTests {
       $0.streamingRowID = self.uuid(1)
       $0.thinkingRowID = self.uuid(2)
     }
+    // Activate's authoritative `running:true` lights the list glow for this session.
+    await store.receive(\.delegate.runningChanged)
     // The next delta appends to the seeded row — a SINGLE assistant row, no duplicate; the
     // live thinking row is moved to last (keepThinkingLast) but stays the same row.
     await store.send(.gatewayEvent(.messageDelta(text: "here goes."))) {

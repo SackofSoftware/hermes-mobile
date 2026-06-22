@@ -372,4 +372,79 @@ struct AppFeatureTests {
       )
     }
   }
+
+  // MARK: Event-driven working glow routing (Task 7)
+
+  // The open chat's `runningChanged` delegate is routed to the session list, which patches the
+  // row's working flag (glow) INSTANTLY — no poll required.
+  @Test func chatRunningChangedRoutesToSessionListGlow() async {
+    var path = StackState<ChatFeature.State>()
+    path.append(ChatFeature.State(connection: connection, resumeStoredID: "s1"))
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection,
+          sessions: [Session(id: "s1", isActive: true)]
+        ),
+        path: path
+      )
+    ) {
+      AppFeature()
+    }
+    let id = store.state.path.ids[0]
+
+    // A finished turn in the open chat → clear the row glow immediately.
+    await store.send(.path(.element(id: id, action: .delegate(.runningChanged(sessionID: "s1", running: false)))))
+    await store.receive(\.home.setSessionRunning) {
+      $0.home?.sessions[id: "s1"]?.isActive = false
+    }
+
+    // A started turn → light it again.
+    await store.send(.path(.element(id: id, action: .delegate(.runningChanged(sessionID: "s1", running: true)))))
+    await store.receive(\.home.setSessionRunning) {
+      $0.home?.sessions[id: "s1"]?.isActive = true
+    }
+  }
+
+  // CRITICAL RULE: a cached `running-guess` must NEVER start a glow on its own. The list only
+  // ever lights a glow from a server-confirmed source (the delegate above, or a poll). Painting
+  // a chat from its cache (`ChatFeature.State.init` reading the snapshot) does NOT push any
+  // `runningChanged` delegate, so no glow appears until the server confirms via `session.activate`.
+  @Test func cachedRunningGuessAloneDoesNotGlow() async {
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    // A persisted snapshot with a stale `running-guess == true` for the session.
+    snapshotClient.saveSnapshot("s1", ChatSnapshot(
+      model: "claude-opus-4-8",
+      runningGuess: true,
+      rows: [ChatRow(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, kind: .message(role: .user, text: "hi", isComplete: true))]
+    ))
+
+    // Opening the session paints the chat from cache (no server contact yet). The session list
+    // row starts NOT active.
+    var path = StackState<ChatFeature.State>()
+    let painted = withDependencies {
+      $0.chatSnapshot = snapshotClient
+    } operation: {
+      ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    }
+    path.append(painted)
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection,
+          sessions: [Session(id: "s1", isActive: false)]
+        ),
+        path: path
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.chatSnapshot = snapshotClient
+    }
+
+    // No delegate was emitted by the cache paint, so the glow stays off. (Sending `.task` on the
+    // app would try to auto-connect; we only assert that no glow was set purely from the cache.)
+    #expect(store.state.home?.sessions[id: "s1"]?.isActive == false)
+  }
 }

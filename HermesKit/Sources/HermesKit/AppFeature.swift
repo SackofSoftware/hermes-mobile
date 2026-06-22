@@ -284,7 +284,7 @@ public struct AppFeature {
 
   /// Best-effort push cleanup on logout: unregister the last-known device token with the
   /// agent's push plugin (failures ignored — the server prunes dead tokens on a 410 anyway),
-  /// then clear the persisted push secret (Keychain) + token (prefs). Part of
+  /// then clear the persisted device token (prefs). Part of
   /// "logout clears everything". Uses the persisted token so it works even when the live
   /// `register()` stream isn't producing; a `nil` connection (nothing to talk to) still clears
   /// local push state.

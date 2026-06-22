@@ -468,6 +468,7 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable _, _ in .object(["status": .string("streaming")]) }
     }
 
@@ -587,22 +588,30 @@ struct ChatReductionTests {
   }
 
   @Test func resumeUnderCustomProfileThreadsProfileParam() async {
-    let resumeParams = LockIsolated<JSONValue?>(nil)
+    // A ready frame with a stored id hydrates via `session.resume`, threading the profile.
+    let activateParams = LockIsolated<JSONValue?>(nil)
     let store = TestStore(
       initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123", profileName: "work")
     ) {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
-        if method == "session.resume" { resumeParams.setValue(params) }
-        if method == "session.usage" {
-          return .object([
-            "input": .number(0), "output": .number(0), "total": .number(0),
-            "context_used": .number(0), "context_max": .number(200_000), "context_percent": .number(0),
-          ])
-        }
-        return .object(["session_id": .string("live123"), "stored_session_id": .string("stored123")])
+        if method == "session.resume" { activateParams.setValue(params) }
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(false),
+          "info": .object([
+            "model": .string("claude-opus-4-8"),
+            "usage": .object([
+              "context_used": .number(0), "context_max": .number(200_000), "context_percent": .number(0),
+            ]),
+          ]),
+        ])
       }
     }
 
@@ -610,78 +619,148 @@ struct ChatReductionTests {
       $0.status = .ready
       $0.hasRequestedSession = true
     }
-    await store.receive(\.sessionResult.success) {
+    await store.receive(\.activateResult.success) {
       $0.liveSessionID = "live123"
       $0.storedSessionID = "stored123"
       $0.status = .ready
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
     }
-    await store.receive(\.usageResponse) {
-      $0.usage = Usage(
-        input: 0, output: 0, total: 0,
-        contextUsed: 0, contextMax: 200_000, contextPercent: 0
-      )
-    }
-    #expect(resumeParams.value == .object([
+    #expect(activateParams.value == .object([
       "session_id": .string("stored123"),
       "profile": .string("work"),
     ]))
+    // Activate's authoritative `running:false` clears the list glow for this session.
+    await store.receive(\.delegate.runningChanged)
+    await store.send(.onDisappear)
   }
 
-  @Test func resumeReadyBootstrapsViaSessionResume() async {
+  @Test func readyWithStoredIDHydratesViaResume() async {
+    // A ready frame *with* a stored id must hydrate via `session.resume` (not create).
+    // The resume response carries model + usage directly — no separate usage fetch.
+    let methods = LockIsolated<[String]>([])
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, _ in
+        methods.withValue { $0.append(method) }
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(false),
+          "info": .object([
+            "model": .string("claude-opus-4-8"),
+            "usage": .object([
+              "input": .number(120_000), "output": .number(30_000), "total": .number(150_000),
+              "context_used": .number(150_000), "context_max": .number(200_000), "context_percent": .number(75),
+            ]),
+          ]),
+        ])
+      }
+    }
+
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.success) {
+      $0.liveSessionID = "live123"
+      $0.storedSessionID = "stored123"
+      $0.status = .ready
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(
+        input: 120_000, output: 30_000, total: 150_000,
+        contextUsed: 150_000, contextMax: 200_000, contextPercent: 75
+      )
+    }
+    #expect(methods.value == ["session.resume"])
+    // Usage came from `info` — no fallback `session.usage` fetch.
+    #expect(!methods.value.contains("session.usage"))
+    await store.receive(\.delegate.runningChanged)
+    await store.send(.onDisappear)
+  }
+
+  @Test func resumeWithNoUsageInResponseFallsBackToUsageFetch() async {
+    // An older agent's resume response may omit usage; we then fetch it on-demand
+    // so the gauge isn't blank until the next turn (preserves prior resume behavior).
     let methods = LockIsolated<[String]>([])
     let usageParams = LockIsolated<JSONValue?>(nil)
     let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
         methods.withValue { $0.append(method) }
         if method == "session.usage" {
           usageParams.setValue(params)
-          // Resuming an existing session reports its accumulated context immediately.
           return .object([
-            "input": .number(120_000), "output": .number(30_000), "total": .number(150_000),
             "context_used": .number(150_000), "context_max": .number(200_000), "context_percent": .number(75),
           ])
         }
-        return .object(["session_id": .string("live123"), "stored_session_id": .string("stored123")])
+        // No `info`/`usage` in the resume response.
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(false),
+        ])
       }
     }
 
-    // A ready frame *with* a stored id must resume (not create).
     await store.send(.gatewayEvent(.ready)) {
       $0.status = .ready
       $0.hasRequestedSession = true
     }
-    await store.receive(\.sessionResult.success) {
+    await store.receive(\.activateResult.success) {
       $0.liveSessionID = "live123"
       $0.storedSessionID = "stored123"
       $0.status = .ready
     }
-    // Resume immediately pulls usage so the gauge isn't blank until the next turn.
+    // The synchronous delegate send lands before the async usage fetch resolves.
+    await store.receive(\.delegate.runningChanged)
     await store.receive(\.usageResponse) {
-      $0.usage = Usage(
-        input: 120_000, output: 30_000, total: 150_000,
-        contextUsed: 150_000, contextMax: 200_000, contextPercent: 75
-      )
+      $0.usage = Usage(contextUsed: 150_000, contextMax: 200_000, contextPercent: 75)
     }
     #expect(methods.value.first == "session.resume")
     #expect(methods.value.contains("session.usage"))
     #expect(usageParams.value?["session_id"]?.stringValue == "live123")
+    await store.send(.onDisappear)
   }
 
-  @Test func resumeWithUnknownUsageMethodLeavesGaugeHidden() async {
-    // Old agents that don't implement session.usage answer -32601 ("unknown method"); the
-    // fetch must swallow it and leave `usage` nil (gauge stays hidden), no crash.
+  @Test func resumeHydratesStoredTranscriptModelAndUsage() async {
+    // `session.resume` is the single hydrate call (it serves both stored and live sessions);
+    // it must rebuild the transcript from `messages` and apply model/usage. Regression guard
+    // for the blocker where `session.activate` (live-only) 404'd every stored session.
+    let methods = LockIsolated<[String]>([])
     let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, _ in
-        if method == "session.usage" {
-          throw GatewayError.server("unknown method: session.usage")
-        }
-        return .object(["session_id": .string("live123"), "stored_session_id": .string("stored123")])
+        methods.withValue { $0.append(method) }
+        // `session.resume` returns the live id under `session_id` and the stored id under
+        // `resumed` (no `stored_session_id`) — exercises the `resumed` decode fallback.
+        return .object([
+          "session_id": .string("live123"),
+          "resumed": .string("stored123"),
+          "messages": .array([
+            .object(["id": .number(1), "role": .string("user"), "content": .string("hi")]),
+            .object(["id": .number(2), "role": .string("assistant"), "content": .string("hello")]),
+          ]),
+          "running": .bool(false),
+          "info": .object([
+            "model": .string("claude-opus-4-8"),
+            "usage": .object(["context_used": .number(10), "context_max": .number(200_000), "context_percent": .number(0)]),
+          ]),
+        ])
       }
     }
 
@@ -689,42 +768,87 @@ struct ChatReductionTests {
       $0.status = .ready
       $0.hasRequestedSession = true
     }
-    await store.receive(\.sessionResult.success) {
+    await store.receive(\.activateResult.success) {
       $0.liveSessionID = "live123"
       $0.storedSessionID = "stored123"
       $0.status = .ready
-    }
-    // No usageResponse arrives; usage stays nil.
-    #expect(store.state.usage == nil)
-  }
-
-  @Test func historyReconstructsToolRowsAndDropsEmptyTurns() async {
-    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
-      ChatFeature()
-    } withDependencies: { $0.uuid = .incrementing }
-
-    let messages = [
-      SessionMessage(id: 1, role: "user", content: "Read the file"),
-      // An assistant tool-call turn with no text — must NOT become an empty bubble. Its
-      // tool_calls carry the command for the matching tool result row.
-      SessionMessage(id: 2, role: "assistant", content: "", toolCalls: [
-        ToolCallRef(id: "call_1", name: "read_file", arguments: #"{"path":"/x"}"#),
-      ]),
-      SessionMessage(id: 3, role: "tool", content: "file contents…", toolName: "read_file", toolCallID: "call_1"),
-      SessionMessage(id: 4, role: "assistant", content: "Here's the gist."),
-    ]
-    await store.send(.historyResponse(messages)) {
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(contextUsed: 10, contextMax: 200_000, contextPercent: 0)
       $0.transcript = [
-        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "Read the file", isComplete: true)),
-        ChatRow(id: self.uuid(1), kind: .tool(
-          name: "read_file", title: "read_file", state: .complete,
-          // Command (args) recovered from the assistant tool_calls + result joined.
-          detail: ToolDetail(args: .object(["path": .string("/x")]), resultText: "file contents…"),
-          durationS: nil
-        )),
-        ChatRow(id: self.uuid(2), kind: .message(role: .assistant, text: "Here's the gist.", isComplete: true)),
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "hi", isComplete: true)),
+        ChatRow(id: self.uuid(1), kind: .message(role: .assistant, text: "hello", isComplete: true)),
       ]
     }
+    // Single resume call — no activate, no fallback dance.
+    #expect(methods.value == ["session.resume"])
+    await store.receive(\.delegate.runningChanged)
+    await store.send(.onDisappear)
+  }
+
+  @Test func activateSeedsRunningInflightAndDeltaReusesSeededRow() async {
+    // Regression: re-opening a session mid-turn must set the working indicator from
+    // `running`, seed the inflight user + streaming assistant rows, and a subsequent
+    // `message.delta` must append to the SEEDED streaming row (not create a duplicate).
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(true),
+          "info": .object([
+            "model": .string("claude-opus-4-8"),
+            "usage": .object(["context_used": .number(5), "context_max": .number(200_000), "context_percent": .number(0)]),
+          ]),
+          "inflight": .object([
+            "user": .string("explain this"),
+            "assistant": .string("Sure, "),
+            "streaming": .bool(true),
+          ]),
+        ])
+      }
+    }
+
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.success) {
+      $0.liveSessionID = "live123"
+      $0.storedSessionID = "stored123"
+      $0.status = .ready
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(contextUsed: 5, contextMax: 200_000, contextPercent: 0)
+      // running == true → working indicator on.
+      $0.isSending = true
+      // Inflight user row + seeded streaming assistant row (uuid 0, uuid 1) + a live thinking
+      // row (uuid 2) recreated by the timer reconcile (running with no anchor → ticks from 0).
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "explain this", isComplete: true)),
+        ChatRow(id: self.uuid(1), kind: .message(role: .assistant, text: "Sure, ", isComplete: false)),
+        ChatRow(
+          id: self.uuid(2),
+          kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)
+        ),
+      ]
+      $0.streamingRowID = self.uuid(1)
+      $0.thinkingRowID = self.uuid(2)
+    }
+    // Activate's authoritative `running:true` lights the list glow for this session.
+    await store.receive(\.delegate.runningChanged)
+    // The next delta appends to the seeded row — a SINGLE assistant row, no duplicate; the
+    // live thinking row is moved to last (keepThinkingLast) but stays the same row.
+    await store.send(.gatewayEvent(.messageDelta(text: "here goes."))) {
+      $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Sure, here goes.", isComplete: false)
+    }
+    // user + assistant + thinking = 3 rows (no duplicate assistant from the delta).
+    #expect(store.state.transcript.count == 3)
+    await store.send(.onDisappear)
   }
 
   @Test func unknownEventIsInertInTheFold() async {
@@ -1145,6 +1269,7 @@ struct ChatReductionTests {
     initial.attachments = attachments
     return TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
         methods.withValue { $0.append(method) }
         if method == "prompt.submit" { promptText.setValue(params["text"]?.stringValue ?? "") }

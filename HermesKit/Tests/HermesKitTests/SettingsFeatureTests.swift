@@ -35,6 +35,33 @@ struct SettingsFeatureTests {
     #expect(preferences.loadSelectedProfileID() == nil) // selected profile cleared on logout
   }
 
+  @Test func clearTokenWipesChatSnapshotStore() async {
+    // Logout must clear the non-authoritative chat cache (snapshots + turn anchors) too —
+    // they are per-server, like the prefs cleared above.
+    let chatSnapshot = ChatSnapshotClient.inMemory()
+    let now = Date(timeIntervalSince1970: 1_000)
+    chatSnapshot.saveSnapshot("s1", ChatSnapshot(model: "claude-opus-4-8", updatedAt: now))
+    chatSnapshot.setTurnAnchor("s1", now)
+    // Seeded state is present before logout.
+    #expect(chatSnapshot.loadSnapshot("s1") != nil)
+    #expect(chatSnapshot.turnAnchor("s1") == now)
+
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.keychain.deleteToken = { @Sendable in }
+      $0.preferences = PreferencesClient.inMemory()
+      $0.chatSnapshot = chatSnapshot
+      $0.dismiss = DismissEffect {}
+    }
+
+    await store.send(.clearTokenTapped)
+    await store.receive(\.delegate.disconnect)
+    // The snapshot store is empty after logout.
+    #expect(chatSnapshot.loadSnapshot("s1") == nil)
+    #expect(chatSnapshot.turnAnchor("s1") == nil)
+  }
+
   @Test func reconnectEmitsReconnectDelegate() async {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()

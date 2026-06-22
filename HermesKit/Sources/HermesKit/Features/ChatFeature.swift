@@ -152,6 +152,25 @@ public struct ChatFeature {
       self.thinkingSeconds = 0
       self.attachments = []
       self.attachmentsUnsupported = false
+
+      // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
+      // its cached tail + model/usage immediately, before `session.resume` lands. The
+      // server always wins on hydrate (these rows are replaced wholesale in `applyActivate`).
+      // Only paint when the caller didn't already supply a transcript and we have a stored
+      // session id to look up.
+      //
+      // NOTE: this is the *only* init-time dependency read in HermesKit — a deliberate,
+      // one-of-its-kind exception. It relies on TCA propagating the dependency context into
+      // `State.init` (the store/preview supplies `\.chatSnapshot`), which only holds for this
+      // synchronous instant-paint path. Do NOT copy this pattern into other feature inits;
+      // everywhere else, read dependencies from the reducer (`@Dependency`), not from `init`.
+      if transcript.isEmpty, let storedID = resumeStoredID,
+         let snapshot = Dependency(\.chatSnapshot).wrappedValue.loadSnapshot(storedID) {
+        self.transcript = IdentifiedArrayOf(uniqueElements: snapshot.rows)
+        self.model = snapshot.model
+        self.reasoningEffort = snapshot.reasoningEffort
+        self.usage = snapshot.usage
+      }
     }
 
     public var canSend: Bool {
@@ -189,9 +208,21 @@ public struct ChatFeature {
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
     /// and reconnect the (previously paused) socket so the chat resumes in place.
     case resumeAfterReauth(ServerConnection)
+    /// Fires after the persist debounce window — writes a fresh snapshot to the cache.
+    case persistSnapshotTick
+    /// App is backgrounding/inactivating — flush the snapshot to the cache IMMEDIATELY
+    /// (cancel the pending debounce, write now) and reaffirm the turn-start anchor while a
+    /// turn is in flight, so a process kill doesn't lose the latest paint or timer anchor.
+    case persistNow
+    /// App returned to the foreground — reconnect the socket and re-`hydrate` (re-read
+    /// running/inflight/usage) via the same unified path used by open/cold-launch.
+    case foreground
     case sessionResult(Result<SessionHandle, GatewayError>)
+    /// Result of the `session.resume` hydration call — the server-authoritative
+    /// re-hydration payload (messages + info + running + inflight). (The associated
+    /// `ActivateResponse` type keeps its name; the RPC used is `session.resume`.)
+    case activateResult(Result<ActivateResponse, GatewayError>)
     case usageResponse(Usage)
-    case historyResponse([SessionMessage])
     case composerSubmitted
     case promptSubmitFailed(message: String)
     case interruptTapped
@@ -232,20 +263,33 @@ public struct ChatFeature {
     case attachmentUploadFailed(message: String)
     case attachmentsUnsupportedDetected
 
-    /// Signals the parent (`AppFeature`) routes. Currently just the dead-session signal that
-    /// raises the re-auth modal (Task 6 consumes it); reconnect backoff is paused for it.
+    /// Signals the parent (`AppFeature`) routes: the dead-session signal that raises the
+    /// re-auth modal (reconnect backoff is paused for it), and the authoritative
+    /// working-state change that drives the session-list glow.
     @CasePathable
     public enum Delegate: Equatable, Sendable {
       /// The gated session is fully dead (ws-ticket `401`). Re-auth is required — do **not**
       /// keep retrying the socket.
       case sessionExpired
+      /// The agent's authoritative working state for this session changed — emitted on
+      /// `message.start` (running), `message.complete`/`error` (stopped), and from the
+      /// `session.resume` `running` flag on hydrate. The parent routes this to the
+      /// session list so the row's working glow clears/sets INSTANTLY (event-driven),
+      /// rather than waiting for the next poll. Always server-confirmed — never a cached
+      /// guess (the SQLite `running-guess` must never start a glow on its own).
+      case runningChanged(sessionID: String, running: Bool)
     }
   }
 
-  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer, thinkingTimer }
+  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer, thinkingTimer, persist }
+
+  /// Debounce window for write-back so heavy streaming doesn't thrash SQLite.
+  private static let persistDebounce: Duration = .seconds(1)
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
+  @Dependency(\.chatSnapshot) var chatSnapshot
+  @Dependency(\.date.now) var now
   @Dependency(\.continuousClock) var clock
   @Dependency(\.uuid) var uuid
   @Dependency(\.pasteboard) var pasteboard
@@ -263,14 +307,16 @@ public struct ChatFeature {
         return .none
 
       case .delegate:
+        // Bubbled to the parent (AppFeature) — no local state change.
         return .none
 
       case .task:
-        var effects: [Effect<Action>] = [connect(state.connection)]
-        if let stored = state.storedSessionID {
-          effects.append(loadHistory(stored, connection: state.connection, profile: state.scopedProfile))
-        }
-        return .merge(effects)
+        // History is now hydrated server-authoritatively from the `session.resume`
+        // response on `.ready` — see `hydrate`. No separate
+        // REST `loadHistory` call: the activate response carries `messages` + `info` +
+        // `running` + `inflight`, and rebuilding the transcript wholesale from it is what
+        // keeps model/usage/status correct on every re-open (the core state-sync fix).
+        return connect(state.connection)
 
       case .onDisappear:
         let wasRecording = state.recording.isBusy
@@ -283,6 +329,7 @@ public struct ChatFeature {
           .cancel(id: CancelID.voiceLevels),
           .cancel(id: CancelID.voiceTimer),
           .cancel(id: CancelID.thinkingTimer),
+          .cancel(id: CancelID.persist),
           // Release the mic/session if we leave mid-recording.
           wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
         )
@@ -292,7 +339,15 @@ public struct ChatFeature {
         return .none
 
       case let .gatewayEvent(event):
-        return reduce(event: event, into: &state)
+        let effect = reduce(event: event, into: &state)
+        // Write-back: any event that mutates the transcript / model / usage schedules a
+        // debounced snapshot persist so the next open paints instantly. Debounced (and
+        // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
+        // known session id — nothing to key the snapshot on (and nothing to persist) until
+        // the session resolves.
+        guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
+        else { return effect }
+        return .merge(effect, debouncedPersist())
 
       case .gatewayClosed:
         state.hasRequestedSession = false
@@ -331,38 +386,70 @@ public struct ChatFeature {
         )
 
       case let .sessionResult(.success(handle)):
-        // A non-nil stored id before we overwrite it means this was a *resume* (vs. a fresh
-        // create) — pull the current context usage so the gauge shows immediately instead of
-        // staying blank until the next turn. New sessions have no context yet, so skip.
-        let wasResume = state.storedSessionID != nil
+        // `session.create` only — a fresh session has no context yet, so no usage fetch.
+        // (Re-hydration of a stored session goes through `.activateResult` instead.)
         state.liveSessionID = handle.sessionID
         state.storedSessionID = handle.storedSessionID ?? state.storedSessionID
         state.status = .ready
-        return wasResume ? fetchUsage(sessionID: handle.sessionID) : .none
+        return .none
 
       case let .usageResponse(usage):
         state.usage = usage
         return .none
 
       case let .sessionResult(.failure(error)):
-        state.errorBanner = error.message
+        // A dropped socket (e.g. lock/unlock) reconnects on its own — the `.reconnecting`
+        // status conveys it; don't raise a banner that would linger past reconnect. Surface
+        // only real protocol/server failures.
+        if error.isDisconnected {
+          state.status = .reconnecting
+        } else {
+          state.errorBanner = error.message
+        }
         return .none
 
-      case let .historyResponse(messages):
-        // Seed the transcript from REST history. user/assistant text → message rows;
-        // `tool` rows → reconstructed tool rows (so resumed sessions show tool/skill
-        // activity). Empty-content turns (an assistant tool-call turn with no text) are
-        // dropped so they don't render as blank bubbles.
-        // Index tool-call args by id so a `tool` result row can show the command it ran.
-        var argsByCallID: [String: String] = [:]
-        for message in messages {
-          for call in message.toolCalls ?? [] {
-            if let id = call.id, let args = call.arguments?.nonEmpty { argsByCallID[id] = args }
-          }
-        }
-        let rows = messages.compactMap { historyRow(from: $0, argsByCallID: argsByCallID) }
-        state.transcript.insert(contentsOf: rows, at: 0)
+      case let .activateResult(.success(response)):
+        return applyActivate(response, into: &state)
+
+      case let .activateResult(.failure(error)):
+        // Offline / connection error: keep the cached instant-paint on screen (never blank
+        // it) and show a subtle reconnecting status. The cached rows stay until a successful
+        // resume replaces them wholesale. A plain `.disconnected` (the socket dropped — e.g.
+        // lock/unlock) is already conveyed by the `.reconnecting` status, so we do NOT raise a
+        // banner for it (it would otherwise linger after reconnect); only a real protocol/server
+        // error gets a banner.
+        state.status = .reconnecting
+        if !error.isDisconnected { state.errorBanner = error.message }
         return .none
+
+      case .persistSnapshotTick:
+        // Debounced write-back landed: persist a fresh non-authoritative snapshot.
+        return persistSnapshotNow(state)
+
+      case .persistNow:
+        // App backgrounding: don't wait for the 1s debounce — cancel it and write the
+        // snapshot synchronously now. Reaffirm the turn-start anchor while a turn is in
+        // flight so a kill mid-turn doesn't lose the elapsed-timer start instant.
+        let anchor = state.isSending ? setTurnAnchor(state) : .none
+        return .merge(
+          .cancel(id: CancelID.persist),
+          persistSnapshotNow(state),
+          anchor
+        )
+
+      case .foreground:
+        // App returned to the foreground: reconnect + re-`hydrate` via the same socket path
+        // used on open. A live socket is torn down on `.onDisappear`/background, so reconnect
+        // re-fires `.ready` → `hydrate`, re-reading the authoritative running/inflight/usage.
+        //
+        // Reset `hasRequestedSession` so the fresh `.ready` actually re-hydrates. On a fast
+        // background→foreground the prior socket may still be alive; `connect`'s
+        // `cancelInFlight` then cancels it mid-`for await`, and TCA drops the cancelled
+        // task's trailing `await send(.gatewayClosed)` — the only place that resets the flag.
+        // Without this reset the flag stays `true` and the new `.ready` short-circuits at the
+        // `guard !state.hasRequestedSession` below, so foreground would never re-hydrate.
+        state.hasRequestedSession = false
+        return connect(state.connection)
 
       case .composerSubmitted:
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }
@@ -376,7 +463,9 @@ public struct ChatFeature {
           state.errorBanner = nil
           state.isSending = true
           for index in state.attachments.indices { state.attachments[index].uploadState = .uploading }
-          return .run { [gateway, uuid] send in
+          // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
+          let anchor = setTurnAnchor(state)
+          return .merge(anchor, .run { [gateway, uuid] send in
             do {
               var refs: [String] = []
               for attachment in attachments {
@@ -406,17 +495,19 @@ public struct ChatFeature {
             } catch {
               await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
             }
-          }
+          })
         }
 
         state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
         state.composerText = ""
         state.errorBanner = nil
         state.isSending = true
+        // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
+        let anchor = setTurnAnchor(state)
         // prompt.submit acks fast (`{status:"streaming"}`); the turn streams via events,
         // so success does nothing here — only a thrown error (timeout / server / drop)
         // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung).
-        return .run { [gateway] send in
+        return .merge(anchor, .run { [gateway] send in
           do {
             _ = try await gateway.send("prompt.submit", .object([
               "session_id": .string(sessionID), "text": .string(text),
@@ -426,12 +517,17 @@ public struct ChatFeature {
           } catch {
             await send(.promptSubmitFailed(message: GatewayError.disconnected.message))
           }
-        }
+        })
 
       case let .promptSubmitFailed(message):
         state.errorBanner = "Prompt failed: \(message)"
         state.isSending = false
-        return .none
+        // The anchor was written on submit; a failed submit never starts a turn (no
+        // `message.start`/`complete` to clear it), so clear it here. This keeps every
+        // `setTurnAnchor` paired with a clear, so anchors can't accumulate for sessions that
+        // never produce a snapshot row (those aren't counted by the LRU sweep, which only
+        // evicts `sessions` rows).
+        return clearTurnAnchor(state)
 
       case .interruptTapped:
         guard let sessionID = state.liveSessionID else { return .none }
@@ -441,6 +537,8 @@ public struct ChatFeature {
         freezeThinking(into: &state)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
+          // Interrupt ends the turn — drop the anchor so it can't resurrect on hydrate.
+          clearTurnAnchor(state),
           .run { [gateway] _ in
             _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
           }
@@ -689,7 +787,10 @@ public struct ChatFeature {
         state.errorBanner = "Attachment failed: \(message)"
         state.isSending = false
         for index in state.attachments.indices { state.attachments[index].uploadState = .failed(message) }
-        return .none
+        // The attachment-submit path wrote the turn anchor; a failed upload never starts a
+        // turn, so clear it — keeping every `setTurnAnchor` paired with a clear (mirrors
+        // `.promptSubmitFailed`).
+        return clearTurnAnchor(state)
 
       case .attachmentsUnsupportedDetected:
         // The agent is too old to accept uploads: hide the affordance for the session and
@@ -804,9 +905,17 @@ public struct ChatFeature {
     case .ready:
       state.status = .ready
       state.reconnectAttempt = 0
+      // The socket is (re)connected — clear any stale connection banner (e.g. a "Connection
+      // lost." left over from a lock/unlock drop) so it doesn't linger after we reconnect.
+      state.errorBanner = nil
       guard !state.hasRequestedSession else { return .none }
       state.hasRequestedSession = true
-      return bootstrapSession(stored: state.storedSessionID, profile: state.scopedProfile)
+      // No stored id → a fresh session: `session.create` (handle only). A stored id →
+      // re-hydrate server-authoritatively via the unified `hydrate` path.
+      if let stored = state.storedSessionID {
+        return hydrate(sessionID: stored, profile: state.scopedProfile)
+      }
+      return createSession(profile: state.scopedProfile)
 
     case .messageStart:
       // Defer creating the assistant row until the first delta — a tool-only turn emits
@@ -828,7 +937,11 @@ public struct ChatFeature {
       ))
       state.thinkingRowID = thinkingID
       state.thinkingSeconds = 0
-      return startThinkingTimer()
+      // Reaffirm the turn-start anchor at the authoritative turn start (the submit anchor is
+      // optimistic; `message.start` is the agent's first beat). A hydrate mid-turn reconciles
+      // the live elapsed timer against this instant. Tell the list this session is now
+      // working so its row glow lights up immediately (server-confirmed).
+      return .merge(setTurnAnchor(state), startThinkingTimer(), runningChanged(true, state))
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
@@ -850,7 +963,9 @@ public struct ChatFeature {
       keepThinkingLast(into: &state)
       freezeThinking(into: &state)
       state.isSending = false
-      return .cancel(id: CancelID.thinkingTimer)
+      // Turn ended — drop the anchor so a later hydrate doesn't resurrect a phantom timer,
+      // and tell the list to clear this session's working glow immediately.
+      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
 
     case let .thinkingDelta(text):
       appendToThinking(text, into: &state)
@@ -908,7 +1023,9 @@ public struct ChatFeature {
       state.errorBanner = message
       state.isSending = false
       freezeThinking(into: &state)
-      return .cancel(id: CancelID.thinkingTimer)
+      // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
+      // and clear the list's working glow for this session immediately.
+      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
 
     case .authExpired:
       // The gated session is fully dead (ws-ticket 401). Pause reconnect — do NOT back off —
@@ -1074,28 +1191,171 @@ public struct ChatFeature {
     .cancellable(id: CancelID.socket, cancelInFlight: true)
   }
 
-  private func bootstrapSession(stored: String?, profile: String?) -> Effect<Action> {
+  /// Create a brand-new session (`session.create`). New sessions send no title so the
+  /// server auto-names from the first message (passing any title disables Hermes'
+  /// auto-title generation). The default/nil profile is omitted → byte-identical to the
+  /// single-profile request.
+  private func createSession(profile: String?) -> Effect<Action> {
     .run { [gateway] send in
-      let method = stored == nil ? "session.create" : "session.resume"
-      // New sessions send no title so the server auto-names from the first message
-      // (passing any title disables Hermes' auto-title generation).
-      var fields: [String: JSONValue] = stored.map { ["session_id": .string($0)] } ?? [:]
-      // Scope the turn to the active profile (binds that profile's HERMES_HOME +
-      // state.db). Default/nil → omit, byte-identical to the single-profile request.
+      var fields: [String: JSONValue] = [:]
       if let profile { fields["profile"] = .string(profile) }
-      let params: JSONValue = .object(fields)
       do {
-        let result = try await gateway.send(method, params)
+        let result = try await gateway.send("session.create", .object(fields))
         if let handle = result.decoded(SessionHandle.self) {
           await send(.sessionResult(.success(handle)))
         } else {
-          await send(.sessionResult(.failure(.server("Malformed \(method) result"))))
+          await send(.sessionResult(.failure(.server("Malformed session.create result"))))
         }
       } catch let error as GatewayError {
         await send(.sessionResult(.failure(error)))
       } catch {
         await send(.sessionResult(.failure(.disconnected)))
       }
+    }
+  }
+
+  /// The single, idempotent server-authoritative re-hydration path, shared by open,
+  /// foreground, and cold launch. Calls `session.resume`, which works for BOTH a stored
+  /// session (the agent is rebuilt from the DB) and an already-live one (the transport is
+  /// reattached) and returns the same authoritative payload: `messages` + `info` + `running`
+  /// + `inflight`. We deliberately do NOT use `session.activate` — that is live-only and
+  /// answers "session not found" for any stored session opened from the list (the common
+  /// case). The decoded `ActivateResponse` is applied wholesale in `applyActivate` — server
+  /// wins.
+  private func hydrate(sessionID: String, profile: String?) -> Effect<Action> {
+    .run { [gateway] send in
+      var fields: [String: JSONValue] = ["session_id": .string(sessionID)]
+      // Scope to the active profile (binds that profile's HERMES_HOME + state.db).
+      if let profile { fields["profile"] = .string(profile) }
+      let params: JSONValue = .object(fields)
+      do {
+        let result = try await gateway.send("session.resume", params)
+        if let response = result.decoded(ActivateResponse.self), !response.sessionID.isEmpty {
+          await send(.activateResult(.success(response)))
+        } else {
+          await send(.activateResult(.failure(.server("Malformed session.resume result"))))
+        }
+      } catch let error as GatewayError {
+        await send(.activateResult(.failure(error)))
+      } catch {
+        await send(.activateResult(.failure(.disconnected)))
+      }
+    }
+  }
+
+  /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,
+  /// `applyRuntimeInfo` (model/reasoning/usage), drive the working indicator from the
+  /// authoritative `running` flag, rebuild the transcript wholesale from `messages`
+  /// (server wins — no merge/dedup), then seed the in-flight turn. When `inflight.streaming`
+  /// is set we seed an assistant streaming row eagerly and point `streamingRowID` at it so
+  /// the next `message.delta` appends to it instead of lazily creating a duplicate.
+  private func applyActivate(_ response: ActivateResponse, into state: inout State) -> Effect<Action> {
+    state.liveSessionID = response.sessionID
+    state.storedSessionID = response.storedSessionID ?? state.storedSessionID
+    state.status = .ready
+    // A successful hydrate means we're connected — clear any stale connection banner.
+    state.errorBanner = nil
+
+    // Runtime info: model / reasoning / usage straight from the response (fixes the blank
+    // model + context-0 bugs on re-open).
+    if let info = response.info {
+      var target = RuntimeInfoTarget(
+        model: state.model, reasoningEffort: state.reasoningEffort, usage: state.usage
+      )
+      applyRuntimeInfo(info, into: &target)
+      state.model = target.model
+      state.reasoningEffort = target.reasoningEffort
+      state.usage = target.usage
+    }
+
+    // Rebuild the transcript wholesale from the authoritative history (server wins).
+    state.transcript = IdentifiedArrayOf(uniqueElements: reconstructTranscript(response.messages, makeID: { uuid() }))
+    state.streamingRowID = nil
+    state.thinkingRowID = nil
+    state.toolRowIDs = [:]
+
+    // Working indicator from the authoritative `running` flag.
+    let running = response.running ?? false
+    state.isSending = running
+
+    // Seed the in-flight turn snapshot (lost when the agent process restarts — acceptable).
+    if let inflight = response.inflight {
+      if let user = inflight.user?.nonEmpty {
+        state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: user, isComplete: true)))
+      }
+      // Seed the streaming row eagerly when the turn is still streaming so the next
+      // `message.delta` reuses it (avoids a duplicate from the lazy first-delta path).
+      let assistant = inflight.assistant ?? ""
+      if inflight.streaming == true || !assistant.isEmpty {
+        let id = uuid()
+        state.transcript.append(ChatRow(
+          id: id, kind: .message(role: .assistant, text: assistant, isComplete: false)
+        ))
+        state.streamingRowID = id
+      }
+    }
+
+    // Reconcile the live "Thinking" elapsed timer from the client-persisted turn-start anchor
+    // against the authoritative `running` flag. `running` decides *whether* the timer runs;
+    // the anchor only supplies the *start instant*. A `!running` + stale anchor must DISCARD
+    // the anchor (no phantom timer); a `running` turn resumes the tick seeded at the elapsed
+    // offset rather than restarting at 0.
+    let timerEffect = reconcileTurnTimer(running: running, into: &state)
+
+    // Persist the freshly-hydrated, server-authoritative state back to the cache so the next
+    // cold open paints from it (debounced — coalesces with any immediately-following deltas).
+    let persist = debouncedPersist()
+
+    // Tell the list this session's authoritative working state so its row glow reconciles
+    // immediately (event-driven), without waiting for the next poll. Server-confirmed: the
+    // `running` flag is straight from `session.resume`.
+    let runningEffect = runningChanged(running, state)
+
+    // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors
+    // the prior resume behavior so the gauge isn't blank until the next turn.
+    if state.usage == nil {
+      return .merge(fetchUsage(sessionID: response.sessionID), persist, timerEffect, runningEffect)
+    }
+    return .merge(persist, timerEffect, runningEffect)
+  }
+
+  /// Reconcile the live "Thinking" elapsed timer on hydrate from the persisted turn-start
+  /// anchor and the authoritative `running` flag (`reconcileTimer`):
+  ///   - `.running(elapsed:)` → seed `thinkingSeconds` to the elapsed offset, recreate the
+  ///     live thinking row eagerly (so a "Thinking <n>s" indicator appears immediately even
+  ///     before more reasoning arrives), and resume the `continuousClock` tick from there;
+  ///   - `.frozen` → no live tick; **discard** the stale anchor so it can't resurrect a
+  ///     phantom timer; the reconstructed (complete) reasoning row stands as a static
+  ///     `Thought · <elapsed>` disclosure;
+  ///   - `.none` → no in-flight turn; nothing to do.
+  private func reconcileTurnTimer(running: Bool, into state: inout State) -> Effect<Action> {
+    // Read the anchor under the same key the submit path wrote it (`storedSessionID ??
+    // liveSessionID`), NOT `response.sessionID` (the live id) — they differ for a resumed
+    // session keyed by its stored id.
+    let anchor = anchorKey(state).flatMap { chatSnapshot.turnAnchor($0) }
+    switch reconcileTimer(running: running, anchor: anchor, now: now) {
+    case let .running(elapsed):
+      let seconds = Int(elapsed)
+      state.thinkingSeconds = seconds
+      // Recreate the live thinking row (the in-flight one was dropped by the wholesale
+      // transcript rebuild). Created eagerly with the seeded elapsed so it renders as a live
+      // shimmering "Thinking <n>s" while the tick continues.
+      let thinkingID = uuid()
+      state.transcript.append(ChatRow(
+        id: thinkingID,
+        kind: .thinking(reasoning: "", status: nil, elapsedSeconds: seconds, isComplete: false)
+      ))
+      state.thinkingRowID = thinkingID
+      keepThinkingLast(into: &state)
+      // Resume the tick (seeded `thinkingSeconds` continues incrementing from `elapsed`).
+      return startThinkingTimer()
+    case .frozen:
+      // Stale anchor on a stopped turn — discard it so it never starts a phantom timer.
+      state.thinkingSeconds = 0
+      return clearTurnAnchor(state)
+    case .none:
+      state.thinkingSeconds = 0
+      return .none
     }
   }
 
@@ -1120,11 +1380,89 @@ public struct ChatFeature {
     }
   }
 
-  private func loadHistory(_ storedID: String, connection: ServerConnection, profile: String?) -> Effect<Action> {
-    .run { [rest] send in
-      if let messages = try? await rest.messages(connection, storedID, profile) {
-        await send(.historyResponse(messages))
-      }
+  // MARK: - Snapshot write-back
+
+  /// Whether a gateway event changes the transcript / model / usage enough to warrant a
+  /// snapshot refresh. (`.unknown`, blocking-request prompts, and bare status lines don't.)
+  private func persistRelevant(_ event: GatewayEvent) -> Bool {
+    switch event {
+    case .messageStart, .messageDelta, .messageComplete,
+         .thinkingDelta, .reasoningAvailable, .statusUpdate,
+         .toolStart, .toolComplete, .sessionInfo:
+      return true
+    case .ready, .error, .authExpired, .approvalRequest, .clarifyRequest,
+         .sudoRequest, .secretRequest, .unknown:
+      return false
+    }
+  }
+
+  /// Debounced write-back trigger: coalesces a burst of streaming deltas into a single
+  /// SQLite write `persistDebounce` after the last change (cancel-in-flight resets the timer).
+  private func debouncedPersist() -> Effect<Action> {
+    .run { [clock] send in
+      try await clock.sleep(for: Self.persistDebounce)
+      await send(.persistSnapshotTick)
+    }
+    .cancellable(id: CancelID.persist, cancelInFlight: true)
+  }
+
+  /// Persist the current chat as a non-authoritative snapshot (model / reasoning / usage +
+  /// transcript rows). A no-op until we know the stored session id to key on. The store owns
+  /// the single row-tail cap (`maxRowsPerSession`), so we pass the full transcript. Attachment
+  /// image bytes never reach the cache: `ChatRow`'s `Codable` omits `attachmentImages` (so the
+  /// store can't persist them even if we passed them through) — they can't be re-hydrated from
+  /// the server and base64 blobs would bloat the cache.
+  private func persistSnapshotNow(_ state: State) -> Effect<Action> {
+    guard let sessionID = state.storedSessionID ?? state.liveSessionID else { return .none }
+    let snapshot = ChatSnapshot(
+      model: state.model,
+      reasoningEffort: state.reasoningEffort,
+      usage: state.usage,
+      updatedAt: now,
+      rows: Array(state.transcript)
+    )
+    return .run { [chatSnapshot] _ in
+      chatSnapshot.saveSnapshot(sessionID, snapshot)
+    }
+  }
+
+  // MARK: - Turn-start anchor (timer continuity)
+
+  /// The key the turn-start anchor is stored under. Mirrors the snapshot key
+  /// (`storedSessionID ?? liveSessionID`) so the anchor written on submit is read back by
+  /// `hydrate` (which keys on the stored id) on the next open.
+  private func anchorKey(_ state: State) -> String? {
+    state.storedSessionID ?? state.liveSessionID
+  }
+
+  /// Emit `delegate(.runningChanged)` for the session list so the row's working glow
+  /// clears/sets INSTANTLY (event-driven) rather than waiting for the next poll. Keyed by the
+  /// **stored** session id (`storedSessionID ?? liveSessionID`) since the list keys rows by
+  /// the persisted id. A no-op until the session resolves (nothing to key on). Always
+  /// server-confirmed (`message.start`/`complete`/`error` and the activate `running` flag) —
+  /// never a cached guess.
+  private func runningChanged(_ running: Bool, _ state: State) -> Effect<Action> {
+    guard let key = anchorKey(state) else { return .none }
+    return .send(.delegate(.runningChanged(sessionID: key, running: running)))
+  }
+
+  /// Persist the turn-start anchor (`@Dependency(\.date.now)`) so a later hydrate can
+  /// reconcile the elapsed timer against the authoritative `running` flag. The anchor is
+  /// **non-authoritative** — it only supplies the *start instant*; `running` decides whether
+  /// the timer runs at all. Written on `prompt.submit`, reaffirmed on `message.start`.
+  private func setTurnAnchor(_ state: State) -> Effect<Action> {
+    guard let key = anchorKey(state) else { return .none }
+    return .run { [chatSnapshot, now] _ in
+      chatSnapshot.setTurnAnchor(key, now)
+    }
+  }
+
+  /// Drop the turn-start anchor at turn end (completion / error / interrupt) so a stopped
+  /// turn never leaves a stale anchor that a later hydrate could mistake for a live timer.
+  private func clearTurnAnchor(_ state: State) -> Effect<Action> {
+    guard let key = anchorKey(state) else { return .none }
+    return .run { [chatSnapshot] _ in
+      chatSnapshot.clearTurnAnchor(key)
     }
   }
 
@@ -1140,43 +1478,6 @@ public struct ChatFeature {
     }
   }
 
-  /// Map a stored history message to a transcript row. `user`/`assistant` text → message
-  /// rows (empty turns dropped — an assistant tool-call turn has no text); `tool` rows →
-  /// reconstructed tool rows with the command (args, looked up by `tool_call_id`) and
-  /// result. Other roles are skipped.
-  private func historyRow(from message: SessionMessage, argsByCallID: [String: String]) -> ChatRow? {
-    switch message.role {
-    case "user", "assistant":
-      guard let text = message.content?.nonEmpty else { return nil }
-      let role: ChatRow.Role = message.role == "user" ? .user : .assistant
-      return ChatRow(id: uuid(), kind: .message(role: role, text: text, isComplete: true))
-    case "tool":
-      let name = message.toolName?.nonEmpty ?? "tool"
-      let argsString = message.toolCallID.flatMap { argsByCallID[$0] }
-      let parsedArgs = argsString.flatMap(Self.parseArgs)
-      let detail = ToolDetail(
-        argsText: parsedArgs == nil ? argsString : nil,
-        args: parsedArgs,
-        resultText: message.content?.nonEmpty
-      )
-      return ChatRow(id: uuid(), kind: .tool(
-        name: name, title: name, state: .complete,
-        detail: detail.isEmpty ? nil : detail, durationS: nil
-      ))
-    default:
-      return nil
-    }
-  }
-
-  /// Parse a tool-call `arguments` JSON string into a structured value for the detail
-  /// sheet — only when it's an object (a bare scalar stays raw text).
-  private static func parseArgs(_ string: String) -> JSONValue? {
-    guard let data = string.data(using: .utf8),
-          let value = try? JSONDecoder().decode(JSONValue.self, from: data),
-          case .object = value
-    else { return nil }
-    return value
-  }
 }
 
 private func backoffDelay(attempt: Int) -> Duration {

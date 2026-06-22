@@ -72,7 +72,10 @@ struct ThinkingIndicatorView: View {
   @ViewBuilder
   private var label: some View {
     if isComplete {
-      Text("Thought · \(formatElapsed(elapsedSeconds))")
+      // Show the elapsed time only when we actually know it. A turn re-hydrated from
+      // history has no client-measured duration (elapsedSeconds == 0) — show a bare
+      // "Thought" rather than a misleading "Thought · 0s".
+      Text(elapsedSeconds > 0 ? "Thought · \(formatElapsed(elapsedSeconds))" : "Thought")
         .font(.caption)
         .foregroundStyle(.primary)
     } else {

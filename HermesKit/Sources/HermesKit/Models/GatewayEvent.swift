@@ -93,8 +93,9 @@ public enum GatewayEvent: Equatable, Sendable {
 // MARK: - Payload helper types
 
 /// Token / context / cost accounting attached to `message.complete` and `session.info`.
-/// Lenient: every field is optional. Verified shape from the M0 probe.
-public struct Usage: Equatable, Sendable, Decodable {
+/// Lenient: every field is optional. Verified shape from the M0 probe. `Encodable` too so
+/// the non-authoritative snapshot cache (`ChatSnapshotClient`) can round-trip it as JSON.
+public struct Usage: Equatable, Sendable, Codable {
   public var model: String?
   public var input: Int?
   public var output: Int?
@@ -159,6 +160,14 @@ public enum ContextSeverity: String, Equatable, Sendable, CaseIterable {
 }
 
 extension Usage {
+  /// Whether this usage carries an actual consumption signal (tokens used / context used).
+  /// A freshly **resumed** agent reports an all-zero usage until its first turn re-counts the
+  /// loaded history, so `session.resume` can hand back a placeholder zero even for a session
+  /// with real prior usage. Used to avoid clobbering a real (cached) usage with that zero.
+  public var hasUsageSignal: Bool {
+    (contextUsed ?? 0) > 0 || (total ?? 0) > 0 || (input ?? 0) > 0 || (output ?? 0) > 0
+  }
+
   /// Compact `k`/`M` token formatting mirroring the TUI's compact display.
   /// Examples: `999 → "999"`, `1_250 → "1k"`, `125_000 → "125k"`, `1_500_000 → "1.5M"`.
   /// The `k` range rounds to a whole thousand; the `M` range keeps one decimal. A value that

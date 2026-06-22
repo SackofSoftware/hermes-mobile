@@ -51,7 +51,9 @@ from your desk and still keep your agent moving.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
   and `sudo`/`secret` prompts the moment they arrive.
 - **Stays connected.** Automatic reconnect with backoff and a clear connection banner
-  when the link drops.
+  when the link drops. Reopening a session — after navigating away, backgrounding the app,
+  or a cold relaunch — restores its live state: the right model, context usage, full
+  tool/thinking history, and an in-progress turn that keeps streaming with its timer ticking.
 
 ## Quick start
 

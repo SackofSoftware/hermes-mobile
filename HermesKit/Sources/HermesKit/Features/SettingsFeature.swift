@@ -53,6 +53,7 @@ public struct SettingsFeature {
 
   @Dependency(\.keychain) var keychain
   @Dependency(\.preferences) var preferences
+  @Dependency(\.chatSnapshot) var chatSnapshot
   @Dependency(\.debugLog) var debugLog
   @Dependency(\.dismiss) var dismiss
 
@@ -98,6 +99,7 @@ public struct SettingsFeature {
         preferences.saveSeenCounts([:]) // unread state is per-server; drop it too
         preferences.saveGroupingMode(.default) // reset the list grouping pref on logout
         preferences.clearSelectedProfileID() // selected profile is per-server — clear on logout
+        chatSnapshot.wipeAll() // snapshots + turn anchors are per-server — wipe on logout
         return .merge(
           .send(.delegate(.disconnect)),
           .run { [dismiss] _ in await dismiss() }

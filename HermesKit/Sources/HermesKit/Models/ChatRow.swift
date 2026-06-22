@@ -3,7 +3,7 @@ import Foundation
 /// One row in the chat transcript. Built by `ChatFeature`'s reducer by folding
 /// `GatewayEvent`s (Task 8) — not decoded directly from the wire. Identified by a
 /// generated UUID (there is no message id in the stream; see "M0 findings").
-public struct ChatRow: Equatable, Sendable, Identifiable {
+public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
   public let id: UUID
   public var kind: Kind
   /// Raw bytes of any images the user attached to this message (#8), rendered as
@@ -17,7 +17,23 @@ public struct ChatRow: Equatable, Sendable, Identifiable {
     self.attachmentImages = attachmentImages
   }
 
-  public enum Kind: Equatable, Sendable {
+  /// `attachmentImages` is intentionally omitted from `CodingKeys`, so attachment BYTES
+  /// never round-trip through the snapshot cache — base64 blobs would bloat it and they
+  /// can't be re-hydrated from the server anyway (`reconstructTranscript` never sets them).
+  /// The rule lives in the type: decode defaults it to `[]`. (See `ChatSnapshotStore`.)
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case kind
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.id = try c.decode(UUID.self, forKey: .id)
+    self.kind = try c.decode(Kind.self, forKey: .kind)
+    self.attachmentImages = []
+  }
+
+  public enum Kind: Equatable, Sendable, Codable {
     /// A user or assistant message. `isComplete` is false while it streams.
     case message(role: Role, text: String, isComplete: Bool)
     /// A tool/skill invocation. `title` is the human label (server summary/context →
@@ -48,12 +64,12 @@ public struct ChatRow: Equatable, Sendable, Identifiable {
     }
   }
 
-  public enum Role: Equatable, Sendable {
+  public enum Role: Equatable, Sendable, Codable {
     case user
     case assistant
   }
 
-  public enum ToolState: Equatable, Sendable {
+  public enum ToolState: Equatable, Sendable, Codable {
     case running
     case complete
   }
@@ -61,7 +77,7 @@ public struct ChatRow: Equatable, Sendable, Identifiable {
 
 /// Expanded detail for a tool/skill row, shown in the detail sheet. Populated from the
 /// richer `tool.start`/`tool.complete` payloads (args, result, edit diff).
-public struct ToolDetail: Equatable, Sendable {
+public struct ToolDetail: Equatable, Sendable, Codable {
   /// Human-readable args (from `tool.start` `args_text`, verbose runs).
   public var argsText: String?
   /// Structured call args (from `tool.complete`), rendered as pretty JSON.

@@ -56,6 +56,30 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   normalized-username compare: same user → dismiss + reconnect; different user → pop to list +
   reload + clear identity-scoped prefs; Quit → full logout → onboarding. Foreground reconnect
   shares the same `connect` (re-mints the ticket) — see #18 (state-sync).
+- **Session re-hydration is server-authoritative** via one unified `hydrate(sessionID)`
+  (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.resume`
+  (NOT `session.activate` — that is live-only and 404s any stored session opened from the list;
+  `session.resume` serves both stored and live sessions) and read `info` / `running` /
+  `inflight` **directly from the response** — `applyRuntimeInfo` for model/reasoning/usage,
+  `reconstructTranscript` to rebuild tool/thinking rows wholesale (server wins; never merge),
+  seed the streaming row from `inflight` so the next delta reuses it. Don't re-init in-flight
+  state to zeros and don't `loadHistory` separately.
+- **Elapsed-timer continuity uses a client turn-start anchor** (`reconcileTimer`): the server
+  has no turn-start timestamp, so persist one in `ChatSnapshotClient` on `prompt.submit` /
+  `message.start` and clear it on complete/error/interrupt. On hydrate, **`running` decides
+  whether the timer runs; the anchor only supplies the start instant** — a stopped turn with a
+  stale anchor **discards** the anchor (no phantom timer).
+- **Session-list working glow is event-driven** via `ChatFeature.Delegate.runningChanged`
+  (emitted on `message.start`/`complete`/`error` and the `session.resume` `running` flag),
+  routed by `AppFeature` to `SessionListFeature` for an instant row-glow patch; the poll is only
+  a backstop for not-open sessions, and a cached `running-guess` must **never** start a glow on
+  its own (only one the server confirms).
+- **`ChatSnapshotClient` (GRDB behind a `@DependencyClient`) is a NON-AUTHORITATIVE cache**
+  — instant-paint snapshot + turn anchor. It can only make the UI appear faster, never differ
+  from the server: server wins on hydrate, cached rows are replaced wholesale, persistence is
+  debounced (flushed immediately on `.background`), and the whole store is **wiped on logout**.
+  Keep it behind the client boundary (read once on init; no reactive `@FetchAll`); `.inMemory()`
+  test variant.
 - **Persistence**: secrets (token) → `KeychainClient`; non-secret prefs (server URL,
   per-session seen counts, client-side pinned session ids) → `PreferencesClient`
   (UserDefaults-backed `@DependencyClient`). Both have `.inMemory()` test variants. (We
@@ -113,7 +137,7 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky
   default for all clients); instead the mobile client lists via `GET /api/profiles/sessions?profile=`
   and threads an optional `profile` param into `session.create`/`session.resume` (gateway) and
-  session-scoped messages/archive/rename (REST) — **omitted for `"default"`** so single-profile
+  session-scoped archive/rename (REST) — **omitted for `"default"`** so single-profile
   agents get byte-identical requests. **Search is intentionally NOT profile-scoped** (mirrors the
   desktop). Add-profile is **create-then-PUT-soul** (`POST /api/profiles` then
   `PUT /api/profiles/{name}/soul {content}`). The selector is **capability-gated** — hidden when

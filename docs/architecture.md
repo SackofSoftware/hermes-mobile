@@ -47,7 +47,7 @@ All side effects go through `@DependencyClient` structs (each with a `liveValue`
 a `testValue`/`.inMemory()` variant):
 
 - **`HermesRESTClient`** — status, sessions, archived sessions (`?archived=only`), search,
-  messages, archive/rename (`PATCH /api/sessions/{id}`). Session-scoped reads/mutations take
+  archive/rename (`PATCH /api/sessions/{id}`). Session-scoped reads/mutations take
   an optional `profile` (omitted for default).
 - **`HermesProfileClient`** — profile CRUD + SOUL.md (`PUT /api/profiles/{name}/soul`) +
   profile-scoped session lists (`GET /api/profiles/sessions?profile=`). Capability-gated: a
@@ -65,6 +65,14 @@ a `testValue`/`.inMemory()` variant):
   `.token`, or a `.cookie(CookieSession)` carrying the rotating session cookies + username +
   provider. `saveSession`/`loadSession` round-trip the whole session (cookies rehydrate into
   `HTTPCookieStorage` on launch); the legacy `…Token` helpers remain for token-mode.
+- **`ChatSnapshotClient`** — a **non-authoritative** instant-paint cache + turn-start anchor,
+  backed by GRDB (the store uses a private `DatabaseQueue` directly,
+  not a shared `defaultDatabase`) and kept entirely behind the client boundary (read
+  once, no reactive `@FetchAll`). It persists each session's latest transcript tail, model, reasoning,
+  usage, and a per-session turn-start timestamp so a cold open can paint immediately before the
+  server responds. The cache can only make the UI appear *faster*, never *differ* from the
+  server: on hydrate the server wins, cached rows are replaced wholesale (no merge/dedup), and
+  the whole store is wiped on logout. `.inMemory()` test variant.
 - **`PreferencesClient`** — non-secret prefs: server URL (for auto-login), per-session
   seen counts, client-side pinned session ids, the session-list grouping mode
   (`SessionGroupingMode`), and the selected profile name (`hermes.selected-profile-id`). All
@@ -130,7 +138,62 @@ not assumed):
 - **Profiles are device-local with per-call scoping** — the selected profile *name* lives
   in `PreferencesClient`; we never call `POST /api/profiles/active`. Instead the scoped list
   comes from `GET /api/profiles/sessions?profile=`, and an optional `profile` param threads
-  into `session.create`/`session.resume` (gateway) and session-scoped messages/archive/rename
+  into `session.create`/`session.resume` (gateway) and session-scoped archive/rename
   (REST) — omitted for `"default"` so single-profile agents are byte-identical to today.
   **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
   intentionally omitted.
+
+## Session re-hydration (`session.resume`)
+
+In-flight turn state (model, context usage, running status, tool/thinking history, the
+elapsed "Thinking" timer) is **server-authoritative** and is reconstructed every time a chat
+appears — there is no durable client-side mirror of it. This is what keeps navigating
+**chat → list → chat**, backgrounding, or a cold restart from blanking the model, zeroing the
+context gauge, dropping tool/thinking rows, or stranding a phantom "working" glow.
+
+**One unified `hydrate(sessionID)` effect** serves open, foreground, and cold launch. Opening a
+session with a stored id, foregrounding it (`.foreground`), and a cold-launch socket connect all
+funnel through the same `.ready` → `hydrate` path (`ChatFeature`), so there is one code path to
+reason about. `hydrate` calls the gateway's **`session.resume`** RPC, which returns
+`{messages, session_id, resumed, info, running, inflight}` and serves **both** a stored session
+(rebuilt from the DB) and an already-live one (the transport is reattached, in-flight turn
+included). We deliberately do **not** use `session.activate` — that is live-only and answers
+"session not found" for any stored session opened from the list (every common case). On the
+response (`applyActivate`), in order:
+
+1. **Instant paint first.** `ChatFeature.init` reads `ChatSnapshotClient.loadSnapshot`
+   synchronously and paints the cached transcript tail + model + usage, so the screen is never
+   blank while the socket connects. On an offline `resume` failure the cached paint is kept
+   with a subtle "reconnecting" status (never blanked).
+2. **`applyRuntimeInfo(info)`** overwrites model / reasoning effort / usage directly from the
+   response (partial info only overwrites present fields) — fixing the blank-model and
+   context-0 regressions.
+3. **`reconstructTranscript(messages)`** rebuilds the transcript wholesale from the
+   authoritative history — reasoning rows, assistant text, and tool-call rows (with
+   backward-matched `role:"tool"` results), keyed identically to the live fold's `toolRowIDs`.
+   The cached tail is replaced, never merged.
+4. **Working indicator + inflight seed.** `isSending` is set from the authoritative `running`
+   flag; `inflight.user`/`inflight.assistant` rows are appended and, when `inflight.streaming`
+   is set, an assistant streaming row is seeded eagerly with `streamingRowID` pointed at it so
+   the next `message.delta` reuses it instead of lazily creating a duplicate.
+5. **`reconcileTimer(running, anchor, now)`** restarts the elapsed "Thinking" timer from a
+   client-persisted turn-start anchor. **`running` decides *whether* the timer runs; the anchor
+   only supplies the *start instant*.** A running turn resumes ticking seeded at `now − anchor`;
+   a stopped turn with a stale anchor **discards** the anchor (no phantom timer) and leaves a
+   static `Thought · <elapsed>` disclosure. The anchor is written on `prompt.submit` /
+   `message.start` and cleared on `message.complete` / error / interrupt.
+6. **Write-back.** A fresh server-authoritative snapshot is persisted (debounced; flushed
+   immediately on `.background`/`.inactive` via `persistNow`) so the next cold open paints from
+   it.
+
+App lifecycle (`scenePhase`, observed in the SwiftUI shell and dispatched as
+`AppFeature.scenePhaseChanged`) routes `.active` into the open chat's `.foreground` (reconnect +
+re-hydrate via `session.resume`) plus a session-list refresh, and `.background`/`.inactive` into an immediate
+snapshot/anchor flush. The nav stack is **not** auto-restored on cold launch — opening a session
+is enough.
+
+The session-list **working glow** is driven event-driven by `ChatFeature.Delegate.runningChanged`
+(emitted on `message.start`/`complete`/`error` and from the `session.resume` `running` flag),
+routed by `AppFeature` to `SessionListFeature` so the row's glow clears/lights instantly. The
+existing poll stays the backstop for not-open sessions; a cached `running-guess` **never** starts
+a glow on its own — only one the server confirms.

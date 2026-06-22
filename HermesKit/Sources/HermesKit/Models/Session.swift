@@ -94,12 +94,91 @@ public struct SessionHandle: Equatable, Sendable, Decodable {
   }
 }
 
-/// A stored message from `GET /api/sessions/{id}/messages`. Columns verified against
-/// the `messages` table schema. Mapped to `ChatRow` during resume hydration (Task 8).
+/// The in-flight turn snapshot returned by `session.resume` for a live session: the
+/// user's prompt, any assistant text streamed so far, and whether the
+/// turn is still streaming. Lost when the agent process restarts (acceptable — no replay
+/// buffer). Lenient: every field optional. Mirrors the desktop `SessionInflightTurn`.
+public struct SessionInflight: Equatable, Sendable, Decodable {
+  public var user: String?
+  public var assistant: String?
+  public var streaming: Bool?
+
+  public init(user: String? = nil, assistant: String? = nil, streaming: Bool? = nil) {
+    self.user = user
+    self.assistant = assistant
+    self.streaming = streaming
+  }
+}
+
+/// Result of the `session.resume` hydration call (which serves both stored and live
+/// sessions). The type keeps the `Activate` name for continuity; the gateway RPC used is
+/// `session.resume` — `session.activate` is live-only and unused by the mobile client.
+/// Server-authoritative re-hydration payload: the full transcript `messages`, the runtime
+/// `info` (model/reasoning/usage), the authoritative `running` flag, and the `inflight`
+/// turn snapshot. The iOS client previously called only `session.resume` and ignored
+/// `info`/`running`/`inflight` — the core state-sync bug. Decoded leniently (every field
+/// but `sessionID` optional) so an old/odd response never crashes hydration.
+public struct ActivateResponse: Equatable, Sendable, Decodable {
+  public var sessionID: String
+  public var storedSessionID: String?
+  public var messages: [SessionMessage]
+  public var info: SessionInfo?
+  public var running: Bool?
+  public var inflight: SessionInflight?
+
+  enum CodingKeys: String, CodingKey {
+    case sessionID = "session_id"
+    case storedSessionID = "stored_session_id"
+    // `session.resume` returns the stored/persisted id under `resumed` (the live `session_id`
+    // it returns is the freshly-reattached in-memory id, used for subsequent RPCs).
+    case resumed
+    case messages, info, running, inflight
+  }
+
+  public init(
+    sessionID: String, storedSessionID: String? = nil, messages: [SessionMessage] = [],
+    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil
+  ) {
+    self.sessionID = sessionID
+    self.storedSessionID = storedSessionID
+    self.messages = messages
+    self.info = info
+    self.running = running
+    self.inflight = inflight
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    sessionID = (try? c.decode(String.self, forKey: .sessionID)) ?? ""
+    // Flatten the `try? decodeIfPresent` double-optional so an absent `stored_session_id`
+    // key actually falls through to `resumed` (`session.resume`'s stored-id key).
+    let storedKey = (try? c.decodeIfPresent(String.self, forKey: .storedSessionID)) ?? nil
+    let resumedKey = (try? c.decodeIfPresent(String.self, forKey: .resumed)) ?? nil
+    storedSessionID = storedKey ?? resumedKey
+    messages = (try? c.decodeIfPresent([SessionMessage].self, forKey: .messages)) ?? []
+    info = try? c.decodeIfPresent(SessionInfo.self, forKey: .info)
+    running = try? c.decodeIfPresent(Bool.self, forKey: .running)
+    inflight = try? c.decodeIfPresent(SessionInflight.self, forKey: .inflight)
+  }
+}
+
+/// A stored message from the session-history payload (the `messages` array on
+/// `ActivateResponse`). Columns verified against the `messages` table schema. Mapped to
+/// `ChatRow` during resume hydration by `reconstructTranscript`.
 public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   public var id: Int
   public var role: String
   public var content: String?
+  /// `session.resume` carries the message body under `text` (the cooked gateway shape from
+  /// the server's `_history_to_messages`); the raw DB/REST schema used `content`. We read
+  /// both so reconstruction works regardless of source — `displayText` prefers `text`.
+  public var text: String?
+  /// Cooked `role:"tool"` row fields (`{role:"tool", name, context}`): the tool's display
+  /// `name` and the short args/preview string the server already built (`_tool_ctx`). The
+  /// gateway flattens each tool call+result into one such row — there are no `tool_calls`
+  /// arrays or `tool_call_id` back-matching in the resume payload.
+  public var name: String?
+  public var context: String?
   public var timestamp: Double?
   public var toolName: String?
   /// Links a `tool` result message to the assistant `tool_calls` entry that requested it.
@@ -107,25 +186,57 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   /// On an assistant message: the tool calls it made (name + arguments) — used to
   /// recover the *command* shown in a tool's detail sheet on resume.
   public var toolCalls: [ToolCallRef]?
+  /// Reasoning/thinking text recorded on an assistant message. The server may send it
+  /// under any of `reasoning` / `reasoning_content` / `reasoning_details` (string form);
+  /// `reasoningText` collapses them, mirroring the desktop's `toChatMessages()`.
+  public var reasoning: String?
+  public var reasoningContent: String?
+  /// `reasoning_details` is provider-shaped (often an array). We only surface it when it
+  /// arrives as a plain string, matching the desktop fallback.
+  public var reasoningDetails: String?
+
+  /// The single reasoning string for this message, first-non-empty of the three variants
+  /// (`reasoning ?? reasoning_content ?? reasoning_details`), or `nil`.
+  public var reasoningText: String? {
+    reasoning?.nonEmpty ?? reasoningContent?.nonEmpty ?? reasoningDetails?.nonEmpty
+  }
+
+  /// The message body, preferring the cooked `text` field over the raw `content`.
+  public var displayText: String? { text?.nonEmpty ?? content?.nonEmpty }
+
+  /// The tool display name for a cooked `role:"tool"` row (`name`), falling back to the raw
+  /// `tool_name` from the DB/REST shape.
+  public var toolDisplayName: String? { name?.nonEmpty ?? toolName?.nonEmpty }
 
   enum CodingKeys: String, CodingKey {
-    case id, role, content, timestamp
+    case id, role, content, text, name, context, timestamp, reasoning
     case toolName = "tool_name"
     case toolCallID = "tool_call_id"
     case toolCalls = "tool_calls"
+    case reasoningContent = "reasoning_content"
+    case reasoningDetails = "reasoning_details"
   }
 
   public init(
-    id: Int, role: String, content: String? = nil, timestamp: Double? = nil,
-    toolName: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCallRef]? = nil
+    id: Int, role: String, content: String? = nil,
+    text: String? = nil, name: String? = nil, context: String? = nil,
+    timestamp: Double? = nil,
+    toolName: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCallRef]? = nil,
+    reasoning: String? = nil, reasoningContent: String? = nil, reasoningDetails: String? = nil
   ) {
     self.id = id
     self.role = role
     self.content = content
+    self.text = text
+    self.name = name
+    self.context = context
     self.timestamp = timestamp
     self.toolName = toolName
     self.toolCallID = toolCallID
     self.toolCalls = toolCalls
+    self.reasoning = reasoning
+    self.reasoningContent = reasoningContent
+    self.reasoningDetails = reasoningDetails
   }
 
   public init(from decoder: Decoder) throws {
@@ -133,11 +244,18 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     id = (try? c.decode(Int.self, forKey: .id)) ?? 0
     role = (try? c.decode(String.self, forKey: .role)) ?? ""
     content = try? c.decodeIfPresent(String.self, forKey: .content)
+    text = try? c.decodeIfPresent(String.self, forKey: .text)
+    name = try? c.decodeIfPresent(String.self, forKey: .name)
+    context = try? c.decodeIfPresent(String.self, forKey: .context)
     timestamp = try? c.decodeIfPresent(Double.self, forKey: .timestamp)
     toolName = try? c.decodeIfPresent(String.self, forKey: .toolName)
     toolCallID = try? c.decodeIfPresent(String.self, forKey: .toolCallID)
     // tool_calls is OpenAI-shaped; tolerate absence / odd shapes.
     toolCalls = try? c.decodeIfPresent([ToolCallRef].self, forKey: .toolCalls)
+    reasoning = try? c.decodeIfPresent(String.self, forKey: .reasoning)
+    reasoningContent = try? c.decodeIfPresent(String.self, forKey: .reasoningContent)
+    // `reasoning_details` is usually an array of provider blocks; surface only string form.
+    reasoningDetails = try? c.decodeIfPresent(String.self, forKey: .reasoningDetails)
   }
 }
 

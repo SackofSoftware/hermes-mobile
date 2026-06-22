@@ -1377,7 +1377,7 @@ public struct ChatFeature {
          .thinkingDelta, .reasoningAvailable, .statusUpdate,
          .toolStart, .toolComplete, .sessionInfo:
       return true
-    case .ready, .error, .approvalRequest, .clarifyRequest,
+    case .ready, .error, .authExpired, .approvalRequest, .clarifyRequest,
          .sudoRequest, .secretRequest, .unknown:
       return false
     }

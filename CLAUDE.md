@@ -159,6 +159,21 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   from `Usage` helpers in HermesKit — thresholds (green `<50` / yellow `≥50` / amber `>80` /
   red `≥95`) mirror the Hermes TUI and are unit-tested in HermesKit; the severity→color
   switch and popover presentation are local view state (`@State`), kept out of the reducer.
+- **Push notifications** span THREE artifacts but only the iOS app lives in this repo:
+  `hermes-push` (a standalone pip plugin — **hermes-agent is NOT modified**) and the
+  serverless **push gateway** (holds the `.p8`) are **local-only publisher infra, gitignored**
+  (never committed/pushed). Conventions: **capability-gate** — the toggle/controls hide when
+  `POST /api/plugins/hermes-push/register` 404s → `pushAvailable = false` (mirrors
+  attach/profiles). **Generic-body privacy rule** — NO message content/args/reasoning/command
+  ever goes in a push; only a generic title/body + `session_id` transit the gateway (content is
+  fetched in-app over the private net). Compile-time **`apns_env`** (`#if DEBUG` → `sandbox`,
+  else `production`) **must match the `aps-environment` entitlement**. **Permission is requested
+  on the sessions-list appearance** (right after login), per the product decision — NOT first
+  launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
+  canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload
+  parse, foreground-suppression) outside the guard. **Known limitation:** approval pushes work
+  today via the `pre_approval_request` hook; complete/error/clarify are built but need a
+  hermes-agent global `_emit` fan-out before the loopback-WS path can observe them live.
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky

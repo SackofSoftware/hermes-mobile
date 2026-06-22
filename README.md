@@ -54,6 +54,14 @@ from your desk and still keep your agent moving.
   when the link drops. Reopening a session — after navigating away, backgrounding the app,
   or a cold relaunch — restores its live state: the right model, context usage, full
   tool/thinking history, and an in-progress turn that keeps streaming with its timer ticking.
+- **Get pinged when it needs you.** Opt in to push notifications and the agent can ping
+  your phone — even when the app is closed — when it needs an approval (live today),
+  or when a turn finishes, hits an error, or asks to clarify. This rides a three-part
+  setup: a plugin on your own agent triggers the notification, a tiny stateless gateway
+  the app's publisher operates forwards it to Apple Push (it's the only place the APNs
+  key can safely live), and the app deep-links you straight to the session. Privacy by
+  design: only a generic title/body and the `session_id` ever transit the gateway — the
+  real message content is fetched in-app over your private network, never through Apple.
 
 ## Quick start
 

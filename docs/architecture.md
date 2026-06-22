@@ -77,6 +77,15 @@ a `testValue`/`.inMemory()` variant):
   seen counts, client-side pinned session ids, the session-list grouping mode
   (`SessionGroupingMode`), and the selected profile name (`hermes.selected-profile-id`). All
   cleared/reset on logout.
+- **`PushClient`** — push notifications: `requestAuthorization`/`authorizationStatus`,
+  device-token registration as an `AsyncStream<String>` (lowercase-hex, re-emits on OS token
+  rotation), an `incomingTaps()` stream of `PushTap` values (carrying `session_id` + optional
+  `type`), and badge control (`setBadgeCount`). The `liveValue` is iOS-only-guarded
+  (`#if canImport(UIKit)` over `UNUserNotificationCenter` + `registerForRemoteNotifications`,
+  fed by a process-wide `PushBridge` from the app-delegate adapter); the non-iOS fallback is
+  `testValue`, plus an `.inMemory()` variant. Pure helpers (hex encoding, the compile-time
+  `apnsEnv`, payload parsing, foreground-suppression decision) live outside the guard so they
+  are unit-tested on macOS.
 - **`PasteboardClient`** — copy.
 - **`DebugLogClient`** — an event ring buffer for the in-app debug log.
 
@@ -142,6 +151,55 @@ not assumed):
   (REST) — omitted for `"default"` so single-profile agents are byte-identical to today.
   **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
   intentionally omitted.
+
+## Push notifications
+
+Push lets the agent reach the phone when its WebSocket is gone (app backgrounded/closed).
+Because the app is a *publishable, multi-user* product and the APNs auth key (`.p8`, tied to
+the publisher's Team ID + bundle id) can't be safely distributed to self-hosters' machines,
+the feature is split across **three artifacts** — only the iOS app lives in this repo:
+
+```
+┌─ User's machine ──────────┐    ┌─ Publisher ──────┐    ┌─ Apple ─┐    ┌ Phone ┐
+│ Hermes Agent              │    │ Push gateway     │    │  APNs   │    │  App  │
+│  └─ hermes-push (plugin)  │──► │ (serverless fn,  │──► │         │──► │       │
+│     hooks + REST route    │POST│  holds .p8/JWT)  │HTTP│         │    │       │
+└───────────────────────────┘    └──────────────────┘    └─────────┘    └───────┘
+      ▲ device token + apns_env registered by app over private net ───────────┘
+```
+
+- **`hermes-push`** — a standalone pip-installable Hermes plugin (uses the public plugin
+  entry-point API; **hermes-agent itself is not modified**). It triggers notifications and
+  exposes the device-token registration REST route. **Maintained locally / out-of-repo** —
+  it's self-hoster infra, not committed here.
+- **Push gateway** — a tiny *stateless* serverless function (Cloudflare Workers) the
+  publisher operates; the only place the `.p8` / ES256 JWT lives. **Maintained locally /
+  out-of-repo** (it holds the Apple secret).
+- **iOS app** (this repo) — `PushClient` + reducer wiring; registers its device token with
+  the user's own agent over the private network and handles incoming pushes.
+
+This is the Home Assistant push model. **Privacy:** only a generic title/body + `session_id`
+ever transit the gateway; real message content is fetched in-app over the private network.
+
+**Protocol.** The app registers via `POST /api/plugins/hermes-push/register`
+`{device_token, apns_env, app_version}` (auth as for any `/api/` route; returns a per-device
+`hmac_secret`) and tears down via `/unregister`. A `404` from the register route means the
+plugin isn't installed → the app sets `pushAvailable = false` and hides the toggle (same
+capability-gating as attach/profiles). The plugin POSTs `{device_token, apns_env, type,
+session_id, title, body, thread_id, hmac}` to the gateway's `POST /push`; the gateway mints an
+ES256 JWT from the `.p8`, picks the APNs host from `apns_env` (`api.push.apple.com` vs
+`api.sandbox.push.apple.com`), and forwards. The optional `hmac` is HMAC-SHA256 over a
+**canonical signed string** (fixed key order, compact separators, `thread_id` omitted when
+absent) that the plugin (`sender.py`) and gateway (`validate.ts`) compute byte-identically.
+The app's compile-time `apns_env` (`#if DEBUG` → `sandbox`, else `production`) must match the
+`aps-environment` entitlement. When APNs returns `410 Unregistered` the gateway relays a prune
+signal so the plugin drops the dead token from its store.
+
+**Known limitation (documented honestly).** Approval notifications work today via the agent's
+`pre_approval_request` hook. Turn-complete / error / clarify are fully built (plugin mapper +
+gateway + app), but hermes-agent emits those events transport-scoped (no global broadcast / no
+hook), so the plugin's loopback-WS path can't observe them live without a hermes-agent change
+(a global `_emit` fan-out). They light up the moment that lands — no app/gateway change needed.
 
 ## Session re-hydration (`session.resume`)
 

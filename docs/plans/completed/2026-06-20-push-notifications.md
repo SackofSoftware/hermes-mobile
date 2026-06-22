@@ -381,10 +381,10 @@ a short window (collapse-id reinforces on the APNs side).
 **Files:**
 - Modify: `README.md`, `docs/architecture.md`, `CLAUDE.md`
 
-- [ ] document the push feature + the 3-part architecture (app / plugin / gateway)
-- [ ] add a `PushClient` entry to the dependency-clients list in `docs/architecture.md`
-- [ ] note new conventions in `CLAUDE.md` (push capability-gating, apns_env compile-time, generic-body privacy rule)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] document the push feature + the 3-part architecture (app / plugin / gateway)
+- [x] add a `PushClient` entry to the dependency-clients list in `docs/architecture.md`
+- [x] note new conventions in `CLAUDE.md` (push capability-gating, apns_env compile-time, generic-body privacy rule)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

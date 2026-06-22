@@ -277,10 +277,10 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Modify: `HermesKit/Sources/HermesKit/Features/SettingsFeature.swift` / wherever logout lives
 - Modify: relevant `*FeatureTests.swift`
 
-- [ ] logout calls `ChatSnapshotClient.wipeAll()` (snapshots + anchors) — fits the "logout clears everything" rule
-- [ ] verify the `activate→resume` fallback keeps old agents working end-to-end
-- [ ] write tests: logout wipes the snapshot store; old-agent fallback hydrates correctly
-- [ ] run tests — must pass before next task
+- [x] logout calls `ChatSnapshotClient.wipeAll()` (snapshots + anchors) — fits the "logout clears everything" rule
+- [x] verify the `activate→resume` fallback keeps old agents working end-to-end
+- [x] write tests: logout wipes the snapshot store; old-agent fallback hydrates correctly
+- [x] run tests — must pass before next task
 
 ### Task 10: Snapshot tests (view regressions)
 

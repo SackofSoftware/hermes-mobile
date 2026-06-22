@@ -188,10 +188,10 @@ struct SettingsFeatureTests {
     } withDependencies: {
       $0.push = push.client
       $0.preferences = .inMemory()
-      $0.keychain.savePushSecret = { @Sendable _ in }
+      // A non-advancing TestClock: the token arrives first, so the timeout never fires.
+      $0.continuousClock = TestClock()
       $0.hermesREST.registerPush = { @Sendable _, token, _, _ in
         registered.withValue { $0.append(token) }
-        return PushRegistration(hmacSecret: "secret")
       }
     }
 
@@ -237,8 +237,8 @@ struct SettingsFeatureTests {
     } withDependencies: {
       $0.push = push.client
       $0.preferences = .inMemory()
-      $0.keychain.savePushSecret = { @Sendable _ in }
-      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in PushRegistration(hmacSecret: "s") }
+      $0.continuousClock = TestClock()
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in }
       $0.hermesREST.sendTestPush = { @Sendable _ in sent.setValue(true) }
     }
 
@@ -260,8 +260,8 @@ struct SettingsFeatureTests {
     } withDependencies: {
       $0.push = push.client
       $0.preferences = .inMemory()
-      $0.keychain.savePushSecret = { @Sendable _ in }
-      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in PushRegistration(hmacSecret: "s") }
+      $0.continuousClock = TestClock()
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in }
       $0.hermesREST.sendTestPush = { @Sendable _ in throw RESTError.notFound }
     }
 
@@ -272,5 +272,61 @@ struct SettingsFeatureTests {
     await store.receive(\.testPushResult) {
       $0.testPushStatus = .failed
     }
+  }
+
+  @Test func sendTestPushTimesOutWhenNoTokenAndFailsFast() async {
+    // No token is ever emitted (no entitlement / offline / simulator) and nothing is persisted.
+    // The bounded wait must expire and the test-send must fail rather than hang on `.sending`.
+    let clock = TestClock()
+    let sent = LockIsolated(false)
+    let push = PushClient.inMemory(granted: true, status: .authorized)
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory() // no persisted token to fall back to
+      $0.continuousClock = clock
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in }
+      $0.hermesREST.sendTestPush = { @Sendable _ in sent.setValue(true) }
+    }
+
+    await store.send(.sendTestPushTapped) {
+      $0.testPushStatus = .sending
+    }
+    // Advance past the bounded wait → the timeout wins, no token, registration fails.
+    await clock.advance(by: .seconds(5))
+    await store.receive(\.testPushResult) {
+      $0.testPushStatus = .failed
+    }
+    #expect(sent.value == false) // never reached the test-send
+  }
+
+  @Test func sendTestPushFallsBackToPersistedTokenWhenNoneArrives() async {
+    // No live token arrives, but a token was persisted on a prior registration — fall back to it.
+    let clock = TestClock()
+    let sent = LockIsolated(false)
+    let registeredToken = LockIsolated<String?>(nil)
+    let push = PushClient.inMemory(granted: true, status: .authorized)
+    var prefs = PreferencesClient.inMemory()
+    prefs.savePushDeviceToken("persisted-tok")
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = prefs
+      $0.continuousClock = clock
+      $0.hermesREST.registerPush = { @Sendable _, token, _, _ in registeredToken.setValue(token) }
+      $0.hermesREST.sendTestPush = { @Sendable _ in sent.setValue(true) }
+    }
+
+    await store.send(.sendTestPushTapped) {
+      $0.testPushStatus = .sending
+    }
+    await clock.advance(by: .seconds(5))
+    await store.receive(\.testPushResult) {
+      $0.testPushStatus = .sent
+    }
+    #expect(registeredToken.value == "persisted-tok")
+    #expect(sent.value)
   }
 }

@@ -182,18 +182,24 @@ This is the Home Assistant push model. **Privacy:** only a generic title/body + 
 ever transit the gateway; real message content is fetched in-app over the private network.
 
 **Protocol.** The app registers via `POST /api/plugins/hermes-push/register`
-`{device_token, apns_env, app_version}` (auth as for any `/api/` route; returns a per-device
-`hmac_secret`) and tears down via `/unregister`. A `404` from the register route means the
-plugin isn't installed → the app sets `pushAvailable = false` and hides the toggle (same
-capability-gating as attach/profiles). The plugin POSTs `{device_token, apns_env, type,
-session_id, title, body, thread_id, hmac}` to the gateway's `POST /push`; the gateway mints an
-ES256 JWT from the `.p8`, picks the APNs host from `apns_env` (`api.push.apple.com` vs
-`api.sandbox.push.apple.com`), and forwards. The optional `hmac` is HMAC-SHA256 over a
-**canonical signed string** (fixed key order, compact separators, `thread_id` omitted when
-absent) that the plugin (`sender.py`) and gateway (`validate.ts`) compute byte-identically.
-The app's compile-time `apns_env` (`#if DEBUG` → `sandbox`, else `production`) must match the
-`aps-environment` entitlement. When APNs returns `410 Unregistered` the gateway relays a prune
-signal so the plugin drops the dead token from its store.
+`{device_token, apns_env, app_version}` (auth as for any `/api/` route) and tears down via
+`/unregister`. **The app never signs pushes**, so registration returns nothing the app must
+persist (no secret). A `404` from the register route means the plugin isn't installed → the app
+sets `pushAvailable = false` and hides the toggle (same capability-gating as attach/profiles).
+The plugin POSTs `{device_token, apns_env, type, session_id, title, body, thread_id, hmac}` to
+the gateway's `POST /push`; the gateway mints an ES256 JWT from the `.p8`, picks the APNs host
+from `apns_env` (`api.push.apple.com` vs `api.sandbox.push.apple.com`), and forwards. The
+optional `hmac` is HMAC-SHA256 over a **canonical signed string** (fixed key order, compact
+separators, `thread_id` omitted when absent) keyed by a **single shared secret**
+(`HERMES_PUSH_HMAC_SECRET`) the publisher provisions to *both* the plugin and the gateway —
+the stateless gateway has no per-device store, so a per-device secret could never match. If the
+shared secret is unset the plugin sends **unsigned** (the gateway allows unsigned). The plugin
+(`sender.py`) and gateway (`validate.ts`) compute the canonical string byte-identically. The
+app's compile-time `apns_env` (`#if DEBUG` → `sandbox`, else `production`) must match the
+`aps-environment` entitlement, which is driven per-build-configuration (`$(APS_ENVIRONMENT)`:
+`development` for Debug, `production` for Release) so distribution builds ship the right value.
+When APNs returns `410 Unregistered` the gateway relays it (HTTP 410) so the plugin drops the
+dead token from its store.
 
 **Known limitation (documented honestly).** Approval notifications work today via the agent's
 `pre_approval_request` hook. Turn-complete / error / clarify are fully built (plugin mapper +

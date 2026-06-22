@@ -275,9 +275,10 @@ public struct SessionListFeature {
     /// A device token arrived from `PushClient.register()` (initial registration OR an OS
     /// rotation) — (re-)register it with the agent. Carries the lowercase-hex token.
     case pushTokenReceived(String)
-    /// Result of `rest.registerPush`: success carries the minted per-device HMAC secret to
-    /// persist; a `.notFound` failure flips `pushAvailable` off (plugin not installed).
-    case pushRegistered(Result<PushRegistration, RESTError>)
+    /// `rest.registerPush` succeeded → push is available.
+    case pushRegistered
+    /// `rest.registerPush` failed; a `.notFound` flips `pushAvailable` off (plugin not installed).
+    case pushRegisterFailed(RESTError)
     case delegate(Delegate)
 
     @CasePathable
@@ -308,7 +309,6 @@ public struct SessionListFeature {
   @Dependency(\.date.now) var now
   @Dependency(\.preferences) var preferences
   @Dependency(\.push) var push
-  @Dependency(\.keychain) var keychain
 
   public init() {}
 
@@ -398,24 +398,22 @@ public struct SessionListFeature {
           let env = PushClient.apnsEnv
           let version = push.appVersion()
           do {
-            let registration = try await rest.registerPush(connection, token, env, version)
-            await send(.pushRegistered(.success(registration)))
+            try await rest.registerPush(connection, token, env, version)
+            await send(.pushRegistered)
           } catch let error as RESTError {
-            await send(.pushRegistered(.failure(error)))
+            await send(.pushRegisterFailed(error))
           } catch {
-            await send(.pushRegistered(.failure(.unreachable)))
+            await send(.pushRegisterFailed(.unreachable))
           }
         }
 
-      case let .pushRegistered(.success(registration)):
-        // Plugin present → push is available; persist the minted per-device HMAC secret
-        // securely (Keychain) for later use (C6 test-send).
+      case .pushRegistered:
+        // Plugin present → push is available. The app does not sign pushes (the plugin signs
+        // with a shared secret), so there's nothing to persist on success.
         state.pushAvailable = true
-        return .run { [keychain] _ in
-          try? keychain.savePushSecret(registration.hmacSecret)
-        }
+        return .none
 
-      case let .pushRegistered(.failure(error)):
+      case let .pushRegisterFailed(error):
         // A definitive 404 means the plugin isn't installed — capability-gate the push UI off.
         // Other (transient) failures leave `pushAvailable` as-is so we retry on the next token.
         if error == .notFound {

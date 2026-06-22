@@ -337,7 +337,6 @@ struct AppFeatureTests {
 
   @Test func disconnectUnregistersPushAndClearsPushState() async {
     let unregistered = LockIsolated<String?>(nil)
-    let secretDeleted = LockIsolated(false)
     let tokenCleared = LockIsolated(false)
     let store = TestStore(
       initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
@@ -346,7 +345,6 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.preferences.loadPushDeviceToken = { "cafef00d" }
       $0.preferences.clearPushDeviceToken = { @Sendable in tokenCleared.setValue(true) }
-      $0.keychain.deletePushSecret = { @Sendable in secretDeleted.setValue(true) }
       $0.hermesREST.unregisterPush = { @Sendable _, token in unregistered.setValue(token) }
     }
     store.exhaustivity = .off
@@ -356,7 +354,6 @@ struct AppFeatureTests {
     }
     await store.finish()
     #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
-    #expect(secretDeleted.value) // HMAC secret wiped from the Keychain
     #expect(tokenCleared.value) // device-token pref wiped
   }
 
@@ -747,5 +744,36 @@ struct AppFeatureTests {
     await store.finish()
     #expect(push.badgeCount == 0)
     #expect(store.state.pendingApprovalSessionIDs.isEmpty)
+  }
+
+  /// Two distinct pending approvals → badge count 2; opening one → badge drops to 1.
+  @Test func multiplePendingApprovalsSetBadgeThenClearOne() async {
+    let push = PushClient.inMemory()
+    // Onboarding (no home) so the approval taps can't open and just accumulate as pending.
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "s-one", type: "approval"))) {
+      $0.pendingApprovalSessionIDs = ["s-one"]
+    }
+    await store.send(.pushTapped(PushTap(sessionID: "s-two", type: "approval"))) {
+      $0.pendingApprovalSessionIDs = ["s-one", "s-two"]
+    }
+    await store.finish()
+    #expect(push.badgeCount == 2) // two pending approvals
+
+    // Sign in and open one of them → badge drops to the remaining pending count.
+    await store.send(.autoConnectSucceeded(connection)) {
+      $0.home = SessionListFeature.State(connection: self.connection)
+    }
+    await store.send(.home(.delegate(.openSession(Session(id: "s-one"))))) {
+      $0.pendingApprovalSessionIDs = ["s-two"]
+    }
+    await store.finish()
+    #expect(push.badgeCount == 1)
   }
 }

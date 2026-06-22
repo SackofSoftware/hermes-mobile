@@ -418,10 +418,10 @@ struct HermesRESTClientTests {
 
   // MARK: Push registration (C3 — hermes-push plugin)
 
-  @Test func registerPushPostsSnakeCaseBodyAndDecodesSecret() async throws {
-    MockURLProtocol.set(json: #"{"hmac_secret":"deadbeefcafe"}"#)
-    let result = try await makeClient().registerPush(connection, "abc123", "sandbox", "1.2.3")
-    #expect(result == PushRegistration(hmacSecret: "deadbeefcafe"))
+  @Test func registerPushPostsSnakeCaseBody() async throws {
+    // The app never signs pushes, so registration returns nothing the app must persist.
+    MockURLProtocol.set(json: #"{"ok":true,"device_token":"abc123","apns_env":"sandbox"}"#)
+    try await makeClient().registerPush(connection, "abc123", "sandbox", "1.2.3")
 
     let req = try #require(MockURLProtocol.lastRequest)
     #expect(req.httpMethod == "POST")

@@ -291,7 +291,6 @@ public struct AppFeature {
   private func unregisterPushOnLogout(connection: ServerConnection?) -> Effect<AppFeature.Action> {
     let token = preferences.loadPushDeviceToken()
     preferences.clearPushDeviceToken()
-    try? keychain.deletePushSecret()
     guard let connection, let token else { return .none }
     return .run { [rest] _ in
       try? await rest.unregisterPush(connection, token)

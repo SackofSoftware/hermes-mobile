@@ -167,9 +167,16 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   attach/profiles). **Generic-body privacy rule** — NO message content/args/reasoning/command
   ever goes in a push; only a generic title/body + `session_id` transit the gateway (content is
   fetched in-app over the private net). Compile-time **`apns_env`** (`#if DEBUG` → `sandbox`,
-  else `production`) **must match the `aps-environment` entitlement**. **Permission is requested
-  on the sessions-list appearance** (right after login), per the product decision — NOT first
-  launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
+  else `production`) **must match the `aps-environment` entitlement** — which is driven
+  **per-build-configuration** via `$(APS_ENVIRONMENT)` (Debug → `development`, Release →
+  `production`) in `Project.swift`, NOT a static value (Tuist emits the entitlement verbatim with
+  no Xcode export rewrite, so a static `development` would ship a sandbox entitlement on Release).
+  **The app does NOT sign pushes** — the **plugin** signs each push with a **single shared HMAC
+  secret** (`HERMES_PUSH_HMAC_SECRET`, provisioned to both the plugin and the stateless gateway;
+  the gateway has no per-device store so a per-device secret could never verify). So registration
+  returns no secret and the app persists none (no Keychain push-secret). **Permission is
+  requested on the sessions-list appearance** (right after login), per the product decision — NOT
+  first launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
   canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload
   parse, foreground-suppression) outside the guard. **Known limitation:** approval pushes work
   today via the `pre_approval_request` hook; complete/error/clarify are built but need a

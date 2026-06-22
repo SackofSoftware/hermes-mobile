@@ -881,7 +881,6 @@ struct SessionListFeatureTests {
 
   @Test func setupPushRegistersOnAppearanceWhenAuthorized() async {
     let push = PushClient.inMemory(granted: true)
-    let savedSecret = LockIsolated<String?>(nil)
     let registered = LockIsolated<(token: String, env: String, version: String)?>(nil)
     // Start with push "unavailable" so a successful registration visibly flips the flag on.
     var initial = SessionListFeature.State(connection: connection)
@@ -890,11 +889,9 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.push = push.client
-      $0.keychain.savePushSecret = { @Sendable secret in savedSecret.setValue(secret) }
       $0.preferences = .inMemory()
       $0.hermesREST.registerPush = { @Sendable _, token, env, version in
         registered.setValue((token, env, version))
-        return PushRegistration(hmacSecret: "sekret")
       }
     }
 
@@ -903,13 +900,12 @@ struct SessionListFeatureTests {
     // APNs delivers a device token.
     push.emit(token: "deadbeef")
     await store.receive(\.pushTokenReceived)
-    await store.receive(\.pushRegistered.success) {
+    await store.receive(\.pushRegistered) {
       $0.pushAvailable = true
     }
     #expect(registered.value?.token == "deadbeef")
     #expect(registered.value?.env == PushClient.apnsEnv)
     #expect(registered.value?.version == "1.2.3") // the in-memory client's app version
-    #expect(savedSecret.value == "sekret") // minted HMAC secret persisted securely
     await store.send(.onDisappear) // cancels the token-observe effect
   }
 
@@ -922,7 +918,6 @@ struct SessionListFeatureTests {
       $0.push = push.client
       $0.hermesREST.registerPush = { @Sendable _, _, _, _ in
         registered.setValue(true)
-        return PushRegistration(hmacSecret: "nope")
       }
     }
 
@@ -941,22 +936,20 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.push = push.client
-      $0.keychain.savePushSecret = { @Sendable _ in }
       $0.preferences = .inMemory()
       $0.hermesREST.registerPush = { @Sendable _, token, _, _ in
         tokens.withValue { $0.append(token) }
-        return PushRegistration(hmacSecret: "s")
       }
     }
 
     await store.send(.setupPush)
     push.emit(token: "tok1")
     await store.receive(\.pushTokenReceived)
-    await store.receive(\.pushRegistered.success)
+    await store.receive(\.pushRegistered)
     // The OS rotates the token — a second emission re-registers.
     push.emit(token: "tok2")
     await store.receive(\.pushTokenReceived)
-    await store.receive(\.pushRegistered.success)
+    await store.receive(\.pushRegistered)
     #expect(tokens.value == ["tok1", "tok2"])
     await store.send(.onDisappear)
   }
@@ -974,7 +967,7 @@ struct SessionListFeatureTests {
     await store.send(.setupPush)
     push.emit(token: "deadbeef")
     await store.receive(\.pushTokenReceived)
-    await store.receive(\.pushRegistered.failure) {
+    await store.receive(\.pushRegisterFailed) {
       $0.pushAvailable = false // plugin absent → capability-gated off
     }
     await store.send(.onDisappear)

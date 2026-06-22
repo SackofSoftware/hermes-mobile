@@ -103,6 +103,7 @@ public struct SettingsFeature {
   @Dependency(\.debugLog) var debugLog
   @Dependency(\.hermesREST) var rest
   @Dependency(\.push) var push
+  @Dependency(\.continuousClock) var clock
   @Dependency(\.dismiss) var dismiss
 
   public init() {}
@@ -157,12 +158,12 @@ public struct SettingsFeature {
         if granted {
           state.notificationsEnabled = true
           state.notificationsDenied = false
-          // Granted → ensure this device is registered (reuse the C4 register path: stream a
-          // device token, register it, persist the minted per-device HMAC secret).
-          return .run { [rest, push, keychain, preferences, connection = state.connection] _ in
-            await ensurePushRegistered(
-              rest: rest, push: push, keychain: keychain, preferences: preferences,
-              connection: connection
+          // Granted → ensure this device is registered (reuse the C4 register path: obtain a
+          // device token within a bounded wait, then register it). Best-effort.
+          return .run { [rest, push, preferences, clock, connection = state.connection] _ in
+            _ = await ensurePushRegistered(
+              rest: rest, push: push, preferences: preferences,
+              connection: connection, clock: clock
             )
           }
         } else {
@@ -173,12 +174,17 @@ public struct SettingsFeature {
 
       case .sendTestPushTapped:
         state.testPushStatus = .sending
-        // Register if needed (best-effort), then ask the plugin to deliver a sample push.
-        return .run { [rest, push, keychain, preferences, connection = state.connection] send in
-          await ensurePushRegistered(
-            rest: rest, push: push, keychain: keychain, preferences: preferences,
-            connection: connection
-          )
+        // Register if needed, then ask the plugin to deliver a sample push. The token wait is
+        // bounded inside `ensurePushRegistered` — if no token is ever obtained we fail fast
+        // rather than leaving `testPushStatus` stuck on `.sending`.
+        return .run { [rest, push, preferences, clock, connection = state.connection] send in
+          guard await ensurePushRegistered(
+            rest: rest, push: push, preferences: preferences,
+            connection: connection, clock: clock
+          ) else {
+            await send(.testPushResult(false))
+            return
+          }
           do {
             try await rest.sendTestPush(connection)
             await send(.testPushResult(true))
@@ -245,28 +251,49 @@ public struct SettingsFeature {
   }
 }
 
+/// Seconds to wait for a fresh device token before falling back to the persisted one. A
+/// token may never arrive (no entitlement / offline / simulator), so the wait MUST be bounded
+/// — otherwise `testPushStatus` would stay `.sending` forever.
+private let pushTokenWaitSeconds: UInt64 = 5
+
 /// Ensure this device is registered with the agent's push plugin — mirrors the C4
-/// `SessionListFeature` register path (stream one device token, `registerPush` it threading
-/// the compile-time APNs env + app version, persist the token + minted per-device HMAC
-/// secret). Best-effort: failures are swallowed so the test-send / toggle flows continue.
-/// Shared by the toggle-grant and "send test notification" paths so registration stays
-/// consistent. Takes only the first emitted token (registration is one-shot here; the
-/// long-running rotation stream lives in `SessionListFeature`).
+/// `SessionListFeature` register path (obtain a device token, `registerPush` it threading the
+/// compile-time APNs env + app version). The app never signs pushes (the plugin signs with a
+/// shared secret), so there is nothing to persist on success.
+///
+/// Shared by the toggle-grant and "send test notification" paths. The wait for a device token
+/// is **bounded** (`pushTokenWaitSeconds`): the first emitted token wins, but if none arrives
+/// in time we fall back to the last persisted token. Returns `true` when registration
+/// succeeded so the caller can surface a failure instead of hanging.
 @Sendable
 private func ensurePushRegistered(
   rest: HermesRESTClient,
   push: PushClient,
-  keychain: KeychainClient,
   preferences: PreferencesClient,
-  connection: ServerConnection
-) async {
-  for await token in push.register() {
-    preferences.savePushDeviceToken(token)
-    if let registration = try? await rest.registerPush(
-      connection, token, PushClient.apnsEnv, push.appVersion()
-    ) {
-      try? keychain.savePushSecret(registration.hmacSecret)
+  connection: ServerConnection,
+  clock: any Clock<Duration>
+) async -> Bool {
+  // Race the live token stream against a timeout; fall back to the persisted token.
+  let token: String? = await withTaskGroup(of: String?.self) { group in
+    group.addTask {
+      for await token in push.register() { return token }
+      return nil
     }
-    break // one token is enough to register; don't hold the stream open here.
+    group.addTask {
+      try? await clock.sleep(for: .seconds(pushTokenWaitSeconds))
+      return nil
+    }
+    let first = await group.next() ?? nil
+    group.cancelAll()
+    return first
+  } ?? preferences.loadPushDeviceToken()
+
+  guard let token else { return false }
+  preferences.savePushDeviceToken(token)
+  do {
+    try await rest.registerPush(connection, token, PushClient.apnsEnv, push.appVersion())
+    return true
+  } catch {
+    return false
   }
 }

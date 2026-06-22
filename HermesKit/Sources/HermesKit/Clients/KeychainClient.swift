@@ -35,13 +35,6 @@ public struct KeychainClient: Sendable {
   public var loadToken: @Sendable () -> String? = { nil }
   public var saveToken: @Sendable (_ token: String) throws -> Void
   public var deleteToken: @Sendable () throws -> Void
-
-  // Push: the per-device HMAC secret minted by the plugin on registration. A secret (it signs
-  // the gateway push payload), so it lives in the Keychain, separate from the auth session.
-  // Cleared on logout alongside the session (logout-clears-everything).
-  public var loadPushSecret: @Sendable () -> String? = { nil }
-  public var savePushSecret: @Sendable (_ secret: String) throws -> Void
-  public var deletePushSecret: @Sendable () throws -> Void
 }
 
 public enum KeychainError: Error, Equatable, Sendable {
@@ -100,47 +93,6 @@ public extension KeychainClient {
       // transports read them) so logout leaves nothing behind for the next user.
       clearSharedCookies()
     }
-    // The push HMAC secret lives in its own generic-password item (distinct account) so it has
-    // an independent lifecycle from the auth session but the same Keychain service.
-    let pushAccount = account + ".push-secret"
-    @Sendable func loadPushSecret() -> String? {
-      let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
-        kSecAttrAccount as String: pushAccount,
-        kSecReturnData as String: true,
-        kSecMatchLimit as String: kSecMatchLimitOne,
-      ]
-      var item: CFTypeRef?
-      guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-            let data = item as? Data
-      else { return nil }
-      return String(data: data, encoding: .utf8)
-    }
-    @Sendable func savePushSecret(_ secret: String) throws {
-      let identity: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
-        kSecAttrAccount as String: pushAccount,
-      ]
-      SecItemDelete(identity as CFDictionary)
-      var add = identity
-      add[kSecValueData as String] = Data(secret.utf8)
-      add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-      let status = SecItemAdd(add as CFDictionary, nil)
-      guard status == errSecSuccess else { throw KeychainError.unhandled(status) }
-    }
-    @Sendable func deletePushSecret() throws {
-      let identity: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
-        kSecAttrAccount as String: pushAccount,
-      ]
-      let status = SecItemDelete(identity as CFDictionary)
-      guard status == errSecSuccess || status == errSecItemNotFound else {
-        throw KeychainError.unhandled(status)
-      }
-    }
     return KeychainClient(
       loadSession: { load($0) },
       saveSession: { try save($0) },
@@ -148,17 +100,13 @@ public extension KeychainClient {
       activateCookieSession: { activateSharedCookieSession($0) },
       loadToken: { load(.shared)?.token },
       saveToken: { try save(.token($0)) },
-      deleteToken: { try delete() },
-      loadPushSecret: { loadPushSecret() },
-      savePushSecret: { try savePushSecret($0) },
-      deletePushSecret: { try deletePushSecret() }
+      deleteToken: { try delete() }
     )
   }
 
   /// Deterministic in-memory store for previews and tests.
   static func inMemory() -> KeychainClient {
     let box = SessionBox()
-    let pushSecret = LockIsolated<String?>(nil)
     @Sendable func load(_ storage: HTTPCookieStorage) -> AuthSession? {
       guard let session = box.get() else { return nil }
       rehydrate(session, into: storage)
@@ -174,10 +122,7 @@ public extension KeychainClient {
       activateCookieSession: { _ in },
       loadToken: { box.get()?.token },
       saveToken: { box.set(.token($0)) },
-      deleteToken: { box.set(nil) },
-      loadPushSecret: { pushSecret.value },
-      savePushSecret: { pushSecret.setValue($0) },
-      deletePushSecret: { pushSecret.setValue(nil) }
+      deleteToken: { box.set(nil) }
     )
   }
 }

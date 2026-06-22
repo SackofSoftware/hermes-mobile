@@ -4,6 +4,9 @@ import SwiftUI
 
 @main
 struct HermesMobileApp: App {
+  // Bridges APNs / notification callbacks into `PushClient` streams (#push C2).
+  @UIApplicationDelegateAdaptor(PushAppDelegate.self) var pushDelegate
+
   @MainActor
   static let store: StoreOf<AppFeature> = {
     #if DEBUG

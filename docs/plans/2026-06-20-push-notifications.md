@@ -297,12 +297,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `HermesMobile/Sources/PushAppDelegate.swift`
 - Modify: `HermesMobile/Sources/HermesMobileApp.swift` (`UIApplicationDelegateAdaptor`)
 
-- [ ] add delegate handling `didRegisterForRemoteNotificationsWithDeviceToken` + `didFailToRegister`
-- [ ] implement `UNUserNotificationCenterDelegate`: `didReceive` (tap) and `willPresent` (foreground)
-- [ ] forward token + taps into `PushClient` streams; **no logic in the delegate**
-- [ ] wire `UIApplicationDelegateAdaptor` in the App struct
-- [ ] write tests for any pure bridging helper extracted into HermesKit (token→hex, payload→`session_id` parse)
-- [ ] run tests — must pass before next task
+- [x] add delegate handling `didRegisterForRemoteNotificationsWithDeviceToken` + `didFailToRegister` — `PushAppDelegate` forwards the token via `PushBridge.shared.tokenReceived`; failure is logged via `os.Logger` (no business logic — failures surface no actionable state on the bridge)
+- [x] implement `UNUserNotificationCenterDelegate`: `didReceive` (tap) and `willPresent` (foreground) — `didReceive` → `PushBridge.shared.tapReceived(userInfo)` + completion; `willPresent` presents `[.banner, .sound]` (C2 minimal; nav-aware suppression deferred to C5)
+- [x] forward token + taps into `PushClient` streams; **no logic in the delegate** — delegate only converts callbacks to `PushBridge` calls (which feed `PushClient` streams from C1); zero decisions in the delegate
+- [x] wire `UIApplicationDelegateAdaptor` in the App struct — `@UIApplicationDelegateAdaptor(PushAppDelegate.self) var pushDelegate` in `HermesMobileApp`; delegate sets `UNUserNotificationCenter.current().delegate = self` at `didFinishLaunchingWithOptions`
+- [x] write tests for any pure bridging helper extracted into HermesKit (token→hex, payload→`session_id` parse) — covered by C1's `PushClientTests` (`hexToken*`, `sessionID*`); the delegate calls only those pure helpers, so no new helper/test was needed
+- [x] run tests — must pass before next task — `swift test --package-path HermesKit`: 467 tests passing; `tuist generate` + `xcodebuild` app build SUCCEEDED with the new delegate file
 
 ### Task C3: Add `register`/`unregister` to `HermesRESTClient` + capability detection
 

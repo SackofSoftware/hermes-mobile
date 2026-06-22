@@ -21,9 +21,14 @@ public struct RuntimeInfoTarget: Equatable, Sendable {
 /// **preserves** the existing value. This is what keeps a partial `session.info` push
 /// (e.g. usage-only) from blanking the model or zeroing the context pill.
 ///
+/// String fields are guarded on `.nonEmpty` — an empty-string `model`/`reasoningEffort`
+/// from the server **preserves** the existing value rather than blanking it, matching the
+/// live `.sessionInfo` fold (`info.model?.nonEmpty`) so a `""` push can't re-introduce the
+/// blank-model regression.
+///
 /// Pure: no I/O, no clock — operates only on its arguments.
 public func applyRuntimeInfo(_ info: SessionInfo, into target: inout RuntimeInfoTarget) {
-  if let model = info.model { target.model = model }
-  if let reasoningEffort = info.reasoningEffort { target.reasoningEffort = reasoningEffort }
+  if let model = info.model?.nonEmpty { target.model = model }
+  if let reasoningEffort = info.reasoningEffort?.nonEmpty { target.reasoningEffort = reasoningEffort }
   if let usage = info.usage { target.usage = usage }
 }

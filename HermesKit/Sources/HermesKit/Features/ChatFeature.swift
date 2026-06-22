@@ -216,7 +216,6 @@ public struct ChatFeature {
     /// server-authoritative re-hydration payload (messages + info + running + inflight).
     case activateResult(Result<ActivateResponse, GatewayError>)
     case usageResponse(Usage)
-    case historyResponse([SessionMessage])
     case composerSubmitted
     case promptSubmitFailed(message: String)
     case interruptTapped
@@ -279,8 +278,6 @@ public struct ChatFeature {
 
   /// Debounce window for write-back so heavy streaming doesn't thrash SQLite.
   private static let persistDebounce: Duration = .seconds(1)
-  /// Tail of rows persisted into the snapshot cache (matches the store's own cap).
-  private static let snapshotRowCap = 200
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
@@ -427,23 +424,15 @@ public struct ChatFeature {
         // App returned to the foreground: reconnect + re-`hydrate` via the same socket path
         // used on open. A live socket is torn down on `.onDisappear`/background, so reconnect
         // re-fires `.ready` → `hydrate`, re-reading the authoritative running/inflight/usage.
+        //
+        // Reset `hasRequestedSession` so the fresh `.ready` actually re-hydrates. On a fast
+        // background→foreground the prior socket may still be alive; `connect`'s
+        // `cancelInFlight` then cancels it mid-`for await`, and TCA drops the cancelled
+        // task's trailing `await send(.gatewayClosed)` — the only place that resets the flag.
+        // Without this reset the flag stays `true` and the new `.ready` short-circuits at the
+        // `guard !state.hasRequestedSession` below, so foreground would never re-hydrate.
+        state.hasRequestedSession = false
         return connect(state.connection)
-
-      case let .historyResponse(messages):
-        // Seed the transcript from REST history. user/assistant text → message rows;
-        // `tool` rows → reconstructed tool rows (so resumed sessions show tool/skill
-        // activity). Empty-content turns (an assistant tool-call turn with no text) are
-        // dropped so they don't render as blank bubbles.
-        // Index tool-call args by id so a `tool` result row can show the command it ran.
-        var argsByCallID: [String: String] = [:]
-        for message in messages {
-          for call in message.toolCalls ?? [] {
-            if let id = call.id, let args = call.arguments?.nonEmpty { argsByCallID[id] = args }
-          }
-        }
-        let rows = messages.compactMap { historyRow(from: $0, argsByCallID: argsByCallID) }
-        state.transcript.insert(contentsOf: rows, at: 0)
-        return .none
 
       case .composerSubmitted:
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }
@@ -516,7 +505,12 @@ public struct ChatFeature {
       case let .promptSubmitFailed(message):
         state.errorBanner = "Prompt failed: \(message)"
         state.isSending = false
-        return .none
+        // The anchor was written on submit; a failed submit never starts a turn (no
+        // `message.start`/`complete` to clear it), so clear it here. This keeps every
+        // `setTurnAnchor` paired with a clear, so anchors can't accumulate for sessions that
+        // never produce a snapshot row (those aren't counted by the LRU sweep, which only
+        // evicts `sessions` rows).
+        return clearTurnAnchor(state)
 
       case .interruptTapped:
         guard let sessionID = state.liveSessionID else { return .none }
@@ -1390,17 +1384,25 @@ public struct ChatFeature {
     .cancellable(id: CancelID.persist, cancelInFlight: true)
   }
 
-  /// Persist the current chat as a non-authoritative snapshot (capped row tail + model /
-  /// usage / running-guess). A no-op until we know the stored session id to key on.
+  /// Persist the current chat as a non-authoritative snapshot (model / reasoning / usage +
+  /// transcript rows). A no-op until we know the stored session id to key on. The store owns
+  /// the single row-tail cap (`maxRowsPerSession`), so we pass the full transcript. Attachment
+  /// image bytes are stripped before persisting — they can't be re-hydrated from the server
+  /// (`reconstructTranscript` never sets them) and base64 blobs would bloat the cache.
   private func persistSnapshotNow(_ state: State) -> Effect<Action> {
     guard let sessionID = state.storedSessionID ?? state.liveSessionID else { return .none }
+    let rows: [ChatRow] = state.transcript.map { row in
+      guard !row.attachmentImages.isEmpty else { return row }
+      var stripped = row
+      stripped.attachmentImages = []
+      return stripped
+    }
     let snapshot = ChatSnapshot(
       model: state.model,
       reasoningEffort: state.reasoningEffort,
       usage: state.usage,
-      runningGuess: state.isSending,
       updatedAt: now,
-      rows: Array(state.transcript.suffix(Self.snapshotRowCap))
+      rows: rows
     )
     return .run { [chatSnapshot] _ in
       chatSnapshot.saveSnapshot(sessionID, snapshot)
@@ -1459,43 +1461,6 @@ public struct ChatFeature {
     }
   }
 
-  /// Map a stored history message to a transcript row. `user`/`assistant` text → message
-  /// rows (empty turns dropped — an assistant tool-call turn has no text); `tool` rows →
-  /// reconstructed tool rows with the command (args, looked up by `tool_call_id`) and
-  /// result. Other roles are skipped.
-  private func historyRow(from message: SessionMessage, argsByCallID: [String: String]) -> ChatRow? {
-    switch message.role {
-    case "user", "assistant":
-      guard let text = message.content?.nonEmpty else { return nil }
-      let role: ChatRow.Role = message.role == "user" ? .user : .assistant
-      return ChatRow(id: uuid(), kind: .message(role: role, text: text, isComplete: true))
-    case "tool":
-      let name = message.toolName?.nonEmpty ?? "tool"
-      let argsString = message.toolCallID.flatMap { argsByCallID[$0] }
-      let parsedArgs = argsString.flatMap(Self.parseArgs)
-      let detail = ToolDetail(
-        argsText: parsedArgs == nil ? argsString : nil,
-        args: parsedArgs,
-        resultText: message.content?.nonEmpty
-      )
-      return ChatRow(id: uuid(), kind: .tool(
-        name: name, title: name, state: .complete,
-        detail: detail.isEmpty ? nil : detail, durationS: nil
-      ))
-    default:
-      return nil
-    }
-  }
-
-  /// Parse a tool-call `arguments` JSON string into a structured value for the detail
-  /// sheet — only when it's an object (a bare scalar stays raw text).
-  private static func parseArgs(_ string: String) -> JSONValue? {
-    guard let data = string.data(using: .utf8),
-          let value = try? JSONDecoder().decode(JSONValue.self, from: data),
-          case .object = value
-    else { return nil }
-    return value
-  }
 }
 
 private func backoffDelay(attempt: Int) -> Duration {

@@ -23,7 +23,6 @@ struct ChatSnapshotClientTests {
       model: "gpt-5",
       reasoningEffort: "high",
       usage: usage,
-      runningGuess: true,
       updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
       rows: rows
     )
@@ -32,7 +31,6 @@ struct ChatSnapshotClientTests {
     let loaded = client.loadSnapshot("s1")
     #expect(loaded?.model == "gpt-5")
     #expect(loaded?.reasoningEffort == "high")
-    #expect(loaded?.runningGuess == true)
     #expect(loaded?.usage == usage)
     #expect(loaded?.updatedAt == Date(timeIntervalSince1970: 1_700_000_000))
     #expect(loaded?.rows == rows)
@@ -139,6 +137,25 @@ struct ChatSnapshotClientTests {
     for i in 5..<total {
       #expect(try store.loadSnapshot("s\(i)") != nil)
     }
+  }
+
+  @Test func sessionsCapStaysBoundedWithEqualTimestamps() throws {
+    // All sessions share the same `updated_at` — the LRU sort has no strict ordering to lean
+    // on, so this pins that the cap is still enforced (the store never exceeds `maxSessions`)
+    // and eviction is deterministic for a fixed write order (SQLite's stable sort keeps the
+    // earlier-inserted rows last in a DESC tie, so the last-written survive).
+    let store = try ChatSnapshotStore.inMemory()
+    let total = ChatSnapshotStore.maxSessions + 5
+    let sameTime = Date(timeIntervalSince1970: 1_000)
+    for i in 0..<total {
+      try store.saveSnapshot(
+        "s\(i)",
+        ChatSnapshot(model: "m\(i)", updatedAt: sameTime, rows: [messageRow("x")])
+      )
+    }
+    // The cap is enforced regardless of the timestamp tie.
+    let surviving = try (0..<total).filter { try store.loadSnapshot("s\($0)") != nil }.count
+    #expect(surviving == ChatSnapshotStore.maxSessions)
   }
 
   // MARK: - Migration

@@ -43,6 +43,20 @@ struct RuntimeInfoApplyTests {
     #expect(target.usage == usage)
   }
 
+  @Test func emptyStringModelAndReasoningPreserveExisting() {
+    // A server push carrying empty-string `model`/`reasoningEffort` must NOT blank the
+    // existing values (matches the live `.sessionInfo` fold's `.nonEmpty` guard) — guards
+    // against re-introducing the blank-model regression.
+    let usage = Usage(contextUsed: 10, contextMax: 100, contextPercent: 10)
+    var target = RuntimeInfoTarget(model: "claude", reasoningEffort: "high", usage: nil)
+
+    applyRuntimeInfo(SessionInfo(model: "", reasoningEffort: "", usage: usage), into: &target)
+
+    #expect(target.model == "claude")  // empty string preserved, not blanked
+    #expect(target.reasoningEffort == "high")  // empty string preserved
+    #expect(target.usage == usage)  // usage still applied
+  }
+
   @Test func modelOnlyInfoLeavesUsageUntouched() {
     let usage = Usage(contextUsed: 10, contextMax: 100, contextPercent: 10)
     var target = RuntimeInfoTarget(model: "old", reasoningEffort: nil, usage: usage)

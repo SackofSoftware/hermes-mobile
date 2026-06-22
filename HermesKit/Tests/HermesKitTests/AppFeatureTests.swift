@@ -406,16 +406,16 @@ struct AppFeatureTests {
     }
   }
 
-  // CRITICAL RULE: a cached `running-guess` must NEVER start a glow on its own. The list only
-  // ever lights a glow from a server-confirmed source (the delegate above, or a poll). Painting
-  // a chat from its cache (`ChatFeature.State.init` reading the snapshot) does NOT push any
-  // `runningChanged` delegate, so no glow appears until the server confirms via `session.activate`.
-  @Test func cachedRunningGuessAloneDoesNotGlow() async {
+  // CRITICAL RULE: painting a chat from its cache must NEVER start a list glow on its own. The
+  // list only ever lights a glow from a server-confirmed source (the delegate above, or a poll).
+  // Painting a chat from its cache (`ChatFeature.State.init` reading the snapshot) does NOT push
+  // any `runningChanged` delegate, so no glow appears until the server confirms via
+  // `session.activate`.
+  @Test func cachedPaintAloneDoesNotGlow() async {
     let snapshotClient = ChatSnapshotClient.inMemory()
-    // A persisted snapshot with a stale `running-guess == true` for the session.
+    // A persisted snapshot for the session (cache never carries a running hint).
     snapshotClient.saveSnapshot("s1", ChatSnapshot(
       model: "claude-opus-4-8",
-      runningGuess: true,
       rows: [ChatRow(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, kind: .message(role: .user, text: "hi", isComplete: true))]
     ))
 

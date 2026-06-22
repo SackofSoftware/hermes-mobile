@@ -9,10 +9,6 @@ public struct ChatSnapshot: Equatable, Sendable {
   public var model: String?
   public var reasoningEffort: String?
   public var usage: Usage?
-  /// Best-effort guess of whether the turn was running when we last persisted. Used only as
-  /// a hint; the gateway's `running` flag wins on hydrate (and a cached guess must never
-  /// *start* a list glow on its own).
-  public var runningGuess: Bool
   public var updatedAt: Date
   /// The capped tail of transcript rows (oldest → newest within the kept window).
   public var rows: [ChatRow]
@@ -21,14 +17,12 @@ public struct ChatSnapshot: Equatable, Sendable {
     model: String? = nil,
     reasoningEffort: String? = nil,
     usage: Usage? = nil,
-    runningGuess: Bool = false,
     updatedAt: Date = Date(),
     rows: [ChatRow] = []
   ) {
     self.model = model
     self.reasoningEffort = reasoningEffort
     self.usage = usage
-    self.runningGuess = runningGuess
     self.updatedAt = updatedAt
     self.rows = rows
   }
@@ -82,7 +76,6 @@ struct ChatSnapshotStore {
           "model" TEXT,
           "reasoning_effort" TEXT,
           "usage_json" TEXT,
-          "running_guess" INTEGER NOT NULL DEFAULT 0,
           "updated_at" REAL NOT NULL DEFAULT 0
         ) STRICT
         """)
@@ -121,7 +114,7 @@ struct ChatSnapshotStore {
         let row = try Row.fetchOne(
           db,
           sql: """
-            SELECT "model", "reasoning_effort", "usage_json", "running_guess", "updated_at"
+            SELECT "model", "reasoning_effort", "usage_json", "updated_at"
             FROM "sessions" WHERE "id" = ?
             """,
           arguments: [sessionID]
@@ -148,7 +141,6 @@ struct ChatSnapshotStore {
         model: row["model"],
         reasoningEffort: row["reasoning_effort"],
         usage: usage,
-        runningGuess: (row["running_guess"] as Int64) != 0,
         updatedAt: Date(timeIntervalSince1970: row["updated_at"]),
         rows: rows
       )
@@ -166,18 +158,17 @@ struct ChatSnapshotStore {
       try db.execute(
         sql: """
           INSERT INTO "sessions"
-            ("id", "model", "reasoning_effort", "usage_json", "running_guess", "updated_at")
-          VALUES (?, ?, ?, ?, ?, ?)
+            ("id", "model", "reasoning_effort", "usage_json", "updated_at")
+          VALUES (?, ?, ?, ?, ?)
           ON CONFLICT("id") DO UPDATE SET
             "model" = excluded."model",
             "reasoning_effort" = excluded."reasoning_effort",
             "usage_json" = excluded."usage_json",
-            "running_guess" = excluded."running_guess",
             "updated_at" = excluded."updated_at"
           """,
         arguments: [
           sessionID, snapshot.model, snapshot.reasoningEffort, usageJSON,
-          snapshot.runningGuess ? 1 : 0, snapshot.updatedAt.timeIntervalSince1970,
+          snapshot.updatedAt.timeIntervalSince1970,
         ]
       )
 

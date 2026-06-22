@@ -466,4 +466,136 @@ struct HydrateTests {
     #expect(snapshotClient.turnAnchor("stored123") == Date(timeIntervalSince1970: 654))
     #expect(snapshotClient.loadSnapshot("stored123")?.updatedAt == Date(timeIntervalSince1970: 654))
   }
+
+  // MARK: Foreground genuinely re-hydrates
+
+  // Acceptance #2: background→foreground mid-turn must re-read the authoritative state, NOT just
+  // reconnect. A fast foreground may leave `hasRequestedSession == true` (the prior socket's
+  // `.gatewayClosed` reset is dropped when its task is cancelled), so `.foreground` resets the
+  // flag before reconnecting. This test starts with the flag already true, sends `.foreground`,
+  // drives the reconnect→`.ready`→`hydrate` chain, and asserts the activate payload genuinely
+  // lands (runtime info + inflight streaming row + resumed timer), proving foreground re-hydrates.
+  @Test func foregroundResetsRequestedFlagAndReHydrates() async {
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    // Simulate the post-reconnect state where the flag is stale-true (the dropped-reset bug).
+    initial.hasRequestedSession = true
+    initial.status = .reconnecting
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = snapshotClient
+      // Reconnect yields a single `.ready`, then idles.
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        AsyncStream { continuation in
+          continuation.yield(.ready)
+          // keep the stream open so the socket effect doesn't send `.gatewayClosed`
+        }
+      }
+      $0.hermesGateway.send = { @Sendable method, _ in
+        .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([
+            .object(["id": .number(1), "role": .string("user"), "content": .string("prior question")]),
+          ]),
+          "running": .bool(true),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+          "inflight": .object(["assistant": .string("partial answer"), "streaming": .bool(true)]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.foreground) {
+      // The flag is reset so the fresh `.ready` won't short-circuit `hydrate`.
+      $0.hasRequestedSession = false
+    }
+    // Reconnect fires `.ready` → hydrate runs (flag was reset).
+    await store.receive(\.gatewayEvent)
+    await store.receive(\.activateResult.success)
+
+    // Foreground genuinely re-hydrated: server runtime info + inflight streaming row applied,
+    // and the working indicator reflects the authoritative `running: true`.
+    #expect(store.state.model == "claude-opus-4-8")
+    #expect(store.state.isSending == true)
+    #expect(store.state.hasRequestedSession == true)
+    // The inflight streaming assistant row was seeded.
+    #expect(store.state.transcript.contains { row in
+      if case let .message(role, text, isComplete) = row.kind {
+        return role == .assistant && text == "partial answer" && !isComplete
+      }
+      return false
+    })
+
+    await store.send(.onDisappear)
+  }
+
+  // MARK: Instant-paint + delta-before-activate race
+
+  // Painting from cache leaves `streamingRowID == nil`; a `.messageDelta` could arrive while
+  // still reconnecting (before activate). The lazy delta appends a transient assistant row to
+  // the cached tail, but the wholesale rebuild on activate discards both the cached rows AND the
+  // transient delta row — so the transcript ends up exactly the server's history (no duplicate /
+  // corrupt cached tail).
+  @Test func deltaBeforeActivateIsDiscardedByWholesaleRebuild() async {
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let cachedRows = [
+      ChatRow(id: uuid(10), kind: .message(role: .user, text: "cached q", isComplete: true)),
+      ChatRow(id: uuid(11), kind: .message(role: .assistant, text: "cached a", isComplete: true)),
+    ]
+    snapshotClient.saveSnapshot("stored123", ChatSnapshot(model: "cached-model", rows: cachedRows))
+
+    let initial = withDependencies {
+      $0.chatSnapshot = snapshotClient
+    } operation: {
+      ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    }
+    #expect(Array(initial.transcript) == cachedRows)
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([
+            .object(["id": .number(1), "role": .string("user"), "content": .string("server q")]),
+            .object(["id": .number(2), "role": .string("assistant"), "content": .string("server a")]),
+          ]),
+          "running": .bool(false),
+          "info": .object(["model": .string("server-model")]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    // A stray delta arrives before activate (still reconnecting, painted from cache).
+    await store.send(.gatewayEvent(.messageDelta(text: "stray streamed text")))
+    // It lazily appended a transient assistant row onto the cached tail.
+    #expect(store.state.transcript.count == 3)
+
+    // Activate lands → wholesale rebuild discards cached + stray rows, leaving server history.
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.success)
+
+    #expect(store.state.model == "server-model")
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "server q", isComplete: true),
+      .message(role: .assistant, text: "server a", isComplete: true),
+    ])
+    // No trace of the cached or stray rows.
+    #expect(!store.state.transcript.contains { if case let .message(_, t, _) = $0.kind { return t.contains("stray") || t.contains("cached") }; return false })
+
+    await store.send(.onDisappear)
+  }
 }

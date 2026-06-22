@@ -155,7 +155,6 @@ final class HydrationSnapshotTests: SnapshotTestCase {
     let cached = ChatSnapshot(
       model: "claude-sonnet-4",
       usage: Usage(contextUsed: 42_000, contextMax: 200_000, contextPercent: 21),
-      runningGuess: false,
       rows: [
         ChatRow(id: id(0), kind: .message(role: .user, text: "Cached from a previous open.", isComplete: true)),
         ChatRow(id: id(1), kind: .message(

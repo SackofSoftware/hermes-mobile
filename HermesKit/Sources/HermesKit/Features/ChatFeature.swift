@@ -152,6 +152,19 @@ public struct ChatFeature {
       self.thinkingSeconds = 0
       self.attachments = []
       self.attachmentsUnsupported = false
+
+      // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
+      // its cached tail + model/usage immediately, before `session.activate` lands. The
+      // server always wins on hydrate (these rows are replaced wholesale in `applyActivate`).
+      // Only paint when the caller didn't already supply a transcript and we have a stored
+      // session id to look up.
+      if transcript.isEmpty, let storedID = resumeStoredID,
+         let snapshot = Dependency(\.chatSnapshot).wrappedValue.loadSnapshot(storedID) {
+        self.transcript = IdentifiedArrayOf(uniqueElements: snapshot.rows)
+        self.model = snapshot.model
+        self.reasoningEffort = snapshot.reasoningEffort
+        self.usage = snapshot.usage
+      }
     }
 
     public var canSend: Bool {
@@ -189,6 +202,8 @@ public struct ChatFeature {
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
     /// and reconnect the (previously paused) socket so the chat resumes in place.
     case resumeAfterReauth(ServerConnection)
+    /// Fires after the persist debounce window — writes a fresh snapshot to the cache.
+    case persistSnapshotTick
     case sessionResult(Result<SessionHandle, GatewayError>)
     /// Result of `session.activate` (or the `session.resume` fallback) — the
     /// server-authoritative re-hydration payload (messages + info + running + inflight).
@@ -245,10 +260,17 @@ public struct ChatFeature {
     }
   }
 
-  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer, thinkingTimer }
+  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer, thinkingTimer, persist }
+
+  /// Debounce window for write-back so heavy streaming doesn't thrash SQLite.
+  private static let persistDebounce: Duration = .seconds(1)
+  /// Tail of rows persisted into the snapshot cache (matches the store's own cap).
+  private static let snapshotRowCap = 200
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
+  @Dependency(\.chatSnapshot) var chatSnapshot
+  @Dependency(\.date.now) var now
   @Dependency(\.continuousClock) var clock
   @Dependency(\.uuid) var uuid
   @Dependency(\.pasteboard) var pasteboard
@@ -287,6 +309,7 @@ public struct ChatFeature {
           .cancel(id: CancelID.voiceLevels),
           .cancel(id: CancelID.voiceTimer),
           .cancel(id: CancelID.thinkingTimer),
+          .cancel(id: CancelID.persist),
           // Release the mic/session if we leave mid-recording.
           wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
         )
@@ -296,7 +319,15 @@ public struct ChatFeature {
         return .none
 
       case let .gatewayEvent(event):
-        return reduce(event: event, into: &state)
+        let effect = reduce(event: event, into: &state)
+        // Write-back: any event that mutates the transcript / model / usage schedules a
+        // debounced snapshot persist so the next open paints instantly. Debounced (and
+        // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
+        // known session id — nothing to key the snapshot on (and nothing to persist) until
+        // the session resolves.
+        guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
+        else { return effect }
+        return .merge(effect, debouncedPersist())
 
       case .gatewayClosed:
         state.hasRequestedSession = false
@@ -354,8 +385,16 @@ public struct ChatFeature {
         return applyActivate(response, into: &state)
 
       case let .activateResult(.failure(error)):
+        // Offline / connection error: keep the cached instant-paint on screen (never blank
+        // it) and show a subtle reconnecting status. The cached rows stay until a successful
+        // activate replaces them wholesale.
         state.errorBanner = error.message
+        state.status = .reconnecting
         return .none
+
+      case .persistSnapshotTick:
+        // Debounced write-back landed: persist a fresh non-authoritative snapshot.
+        return persistSnapshotNow(state)
 
       case let .historyResponse(messages):
         // Seed the transcript from REST history. user/assistant text → message rows;
@@ -1193,12 +1232,16 @@ public struct ChatFeature {
       }
     }
 
+    // Persist the freshly-hydrated, server-authoritative state back to the cache so the next
+    // cold open paints from it (debounced — coalesces with any immediately-following deltas).
+    let persist = debouncedPersist()
+
     // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors
     // the prior resume behavior so the gauge isn't blank until the next turn.
     if state.usage == nil {
-      return fetchUsage(sessionID: response.sessionID)
+      return .merge(fetchUsage(sessionID: response.sessionID), persist)
     }
-    return .none
+    return persist
   }
 
   /// Pull current context-window usage right after a session resolves. `session.info` /
@@ -1219,6 +1262,49 @@ public struct ChatFeature {
       } catch {
         // Transient failure; usage will still arrive on the next message.complete.
       }
+    }
+  }
+
+  // MARK: - Snapshot write-back
+
+  /// Whether a gateway event changes the transcript / model / usage enough to warrant a
+  /// snapshot refresh. (`.unknown`, blocking-request prompts, and bare status lines don't.)
+  private func persistRelevant(_ event: GatewayEvent) -> Bool {
+    switch event {
+    case .messageStart, .messageDelta, .messageComplete,
+         .thinkingDelta, .reasoningAvailable, .statusUpdate,
+         .toolStart, .toolComplete, .sessionInfo:
+      return true
+    case .ready, .error, .approvalRequest, .clarifyRequest,
+         .sudoRequest, .secretRequest, .unknown:
+      return false
+    }
+  }
+
+  /// Debounced write-back trigger: coalesces a burst of streaming deltas into a single
+  /// SQLite write `persistDebounce` after the last change (cancel-in-flight resets the timer).
+  private func debouncedPersist() -> Effect<Action> {
+    .run { [clock] send in
+      try await clock.sleep(for: Self.persistDebounce)
+      await send(.persistSnapshotTick)
+    }
+    .cancellable(id: CancelID.persist, cancelInFlight: true)
+  }
+
+  /// Persist the current chat as a non-authoritative snapshot (capped row tail + model /
+  /// usage / running-guess). A no-op until we know the stored session id to key on.
+  private func persistSnapshotNow(_ state: State) -> Effect<Action> {
+    guard let sessionID = state.storedSessionID ?? state.liveSessionID else { return .none }
+    let snapshot = ChatSnapshot(
+      model: state.model,
+      reasoningEffort: state.reasoningEffort,
+      usage: state.usage,
+      runningGuess: state.isSending,
+      updatedAt: now,
+      rows: Array(state.transcript.suffix(Self.snapshotRowCap))
+    )
+    return .run { [chatSnapshot] _ in
+      chatSnapshot.saveSnapshot(sessionID, snapshot)
     }
   }
 

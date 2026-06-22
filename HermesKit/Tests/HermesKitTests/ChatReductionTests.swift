@@ -595,6 +595,7 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
       $0.hermesGateway.send = { @Sendable method, params in
         if method == "session.activate" { activateParams.setValue(params) }
         return .object([
@@ -627,6 +628,7 @@ struct ChatReductionTests {
       "session_id": .string("stored123"),
       "profile": .string("work"),
     ]))
+    await store.send(.onDisappear)
   }
 
   @Test func readyWithStoredIDHydratesViaActivate() async {
@@ -637,6 +639,7 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
       $0.hermesGateway.send = { @Sendable method, _ in
         methods.withValue { $0.append(method) }
         return .object([
@@ -672,6 +675,7 @@ struct ChatReductionTests {
     #expect(methods.value == ["session.activate"])
     // Usage came from `info` — no fallback `session.usage` fetch.
     #expect(!methods.value.contains("session.usage"))
+    await store.send(.onDisappear)
   }
 
   @Test func activateWithNoUsageInResponseFallsBackToUsageFetch() async {
@@ -683,6 +687,7 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
       $0.hermesGateway.send = { @Sendable method, params in
         methods.withValue { $0.append(method) }
         if method == "session.usage" {
@@ -716,6 +721,7 @@ struct ChatReductionTests {
     #expect(methods.value.first == "session.activate")
     #expect(methods.value.contains("session.usage"))
     #expect(usageParams.value?["session_id"]?.stringValue == "live123")
+    await store.send(.onDisappear)
   }
 
   @Test func activateUnknownMethodFallsBackToResume() async {
@@ -726,6 +732,7 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
       $0.hermesGateway.send = { @Sendable method, _ in
         methods.withValue { $0.append(method) }
         if method == "session.activate" {
@@ -765,6 +772,7 @@ struct ChatReductionTests {
     }
     // Tried activate first, then resume.
     #expect(methods.value == ["session.activate", "session.resume"])
+    await store.send(.onDisappear)
   }
 
   @Test func activateSeedsRunningInflightAndDeltaReusesSeededRow() async {
@@ -775,6 +783,7 @@ struct ChatReductionTests {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
       $0.hermesGateway.send = { @Sendable _, _ in
         .object([
           "session_id": .string("live123"),
@@ -818,6 +827,7 @@ struct ChatReductionTests {
       $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Sure, here goes.", isComplete: false)
     }
     #expect(store.state.transcript.count == 2)
+    await store.send(.onDisappear)
   }
 
   @Test func historyReconstructsToolRowsAndDropsEmptyTurns() async {

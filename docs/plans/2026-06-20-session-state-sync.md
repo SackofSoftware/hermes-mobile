@@ -223,12 +223,12 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (init reads snapshot; persist on update)
 - Modify: `HermesKit/Tests/HermesKitTests/*` (ChatReduction/Hydrate tests)
 
-- [ ] read `ChatSnapshotClient.loadSnapshot` synchronously in `ChatFeature.init` → paint transcript tail + model + usage
-- [ ] on hydrate response, REPLACE cached rows wholesale + overwrite model/usage/running (never merge)
-- [ ] on `activate` failure (offline), keep the cached paint with a subtle "reconnecting" status (never blank)
-- [ ] persist a fresh snapshot (debounced) as the chat updates
-- [ ] write tests: init paints from cache; hydrate replaces wholesale; offline keeps cache + reconnecting status
-- [ ] run tests — must pass before next task
+- [x] read `ChatSnapshotClient.loadSnapshot` synchronously in `ChatFeature.init` → paint transcript tail + model + usage
+- [x] on hydrate response, REPLACE cached rows wholesale + overwrite model/usage/running (never merge)
+- [x] on `activate` failure (offline), keep the cached paint with a subtle "reconnecting" status (never blank)
+- [x] persist a fresh snapshot (debounced) as the chat updates
+- [x] write tests: init paints from cache; hydrate replaces wholesale; offline keeps cache + reconnecting status
+- [x] run tests — must pass before next task
 
 ### Task 6: Turn-start anchor wiring + timer continuity
 

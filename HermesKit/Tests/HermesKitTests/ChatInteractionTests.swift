@@ -348,11 +348,15 @@ struct ChatInteractionTests {
     let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = clock
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, _ in
         sent.setValue(method)
         return .object([:])
       }
     }
+    // The chat persists a debounced snapshot as it updates; we don't assert its contents
+    // here (covered by HydrateTests), so let the write-back tick pass non-exhaustively.
+    store.exhaustivity = .off(showSkippedAssertions: false)
 
     await store.send(.gatewayEvent(.messageStart)) {
       $0.isSending = true

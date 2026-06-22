@@ -31,10 +31,23 @@ public struct AppFeature {
     }
   }
 
+  /// App lifecycle phase, mirrored from SwiftUI's `ScenePhase` by the thin app shell so
+  /// HermesKit never imports SwiftUI. The shell maps `.active/.inactive/.background` onto
+  /// these cases and dispatches `scenePhaseChanged`.
+  public enum ScenePhase: Equatable {
+    case active
+    case inactive
+    case background
+  }
+
   public enum Action {
     case task
     case autoConnectSucceeded(ServerConnection)
     case autoConnectFailed(ServerConnection)
+    /// The app's scene phase changed (foreground/background) — observed at the app shell and
+    /// fanned out: `.active` reconnects + re-activates the open chat and refreshes the list;
+    /// `.background`/`.inactive` flushes the open chat's snapshot + anchor immediately.
+    case scenePhaseChanged(ScenePhase)
     case onboarding(ConnectionFeature.Action)
     case home(SessionListFeature.Action)
     case path(StackActionOf<ChatFeature>)
@@ -92,6 +105,25 @@ public struct AppFeature {
           token: connection.auth.token ?? ""
         )
         return .none
+
+      case let .scenePhaseChanged(phase):
+        // Fan lifecycle out to the currently-open chat (top of the nav path, if any) and the
+        // session list. We do NOT auto-restore the nav stack on cold launch — opening a session
+        // is enough; this only re-syncs what's already on screen.
+        let topChatID = state.path.ids.last
+        switch phase {
+        case .active:
+          // Foreground: reconnect + re-`session.activate` the open chat (re-reads
+          // running/inflight/usage) and refresh the list immediately (don't wait for the poll).
+          return .merge(
+            topChatID.map { .send(.path(.element(id: $0, action: .foreground))) } ?? .none,
+            state.home != nil ? .send(.home(.pulledToRefresh)) : .none
+          )
+        case .background, .inactive:
+          // Backgrounding: flush the open chat's snapshot + anchor IMMEDIATELY (don't rely on
+          // the 1s debounce) so a process kill can't lose the latest paint or the timer anchor.
+          return topChatID.map { .send(.path(.element(id: $0, action: .persistNow))) } ?? .none
+        }
 
       case let .onboarding(.delegate(.connected(connection))):
         state.home = SessionListFeature.State(connection: connection)

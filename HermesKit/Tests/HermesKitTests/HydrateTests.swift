@@ -414,4 +414,56 @@ struct HydrateTests {
 
     await store.send(.onDisappear)
   }
+
+  // MARK: Task 8 — background flush (`persistNow`)
+
+  // `.persistNow` (dispatched on background) writes the snapshot SYNCHRONOUSLY — no debounce
+  // wait — so a kill right after backgrounding keeps the latest paint.
+  @Test func persistNowWritesSnapshotImmediatelyWithoutDebounce() async {
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.model = "claude-opus-4-8"
+    initial.transcript = [ChatRow(id: uuid(1), kind: .message(role: .user, text: "hi", isComplete: true))]
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.date = .constant(Date(timeIntervalSince1970: 321))
+      $0.chatSnapshot = snapshotClient
+    }
+
+    // Not in flight → no anchor write, just the immediate snapshot.
+    await store.send(.persistNow)
+    let saved = snapshotClient.loadSnapshot("stored123")
+    #expect(saved?.model == "claude-opus-4-8")
+    #expect(saved?.updatedAt == Date(timeIntervalSince1970: 321))
+    #expect(saved?.rows == [ChatRow(id: uuid(1), kind: .message(role: .user, text: "hi", isComplete: true))])
+    // No anchor written (turn not in flight).
+    #expect(snapshotClient.turnAnchor("stored123") == nil)
+  }
+
+  // `.persistNow` mid-turn (`isSending`) also reaffirms the anchor at `now`.
+  @Test func persistNowMidTurnReaffirmsAnchor() async {
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.isSending = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 654))
+      $0.chatSnapshot = snapshotClient
+    }
+
+    await store.send(.persistNow)
+    #expect(snapshotClient.turnAnchor("stored123") == Date(timeIntervalSince1970: 654))
+    #expect(snapshotClient.loadSnapshot("stored123")?.updatedAt == Date(timeIntervalSince1970: 654))
+  }
 }

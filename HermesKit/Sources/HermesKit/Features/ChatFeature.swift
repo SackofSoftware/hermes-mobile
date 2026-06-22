@@ -204,6 +204,13 @@ public struct ChatFeature {
     case resumeAfterReauth(ServerConnection)
     /// Fires after the persist debounce window — writes a fresh snapshot to the cache.
     case persistSnapshotTick
+    /// App is backgrounding/inactivating — flush the snapshot to the cache IMMEDIATELY
+    /// (cancel the pending debounce, write now) and reaffirm the turn-start anchor while a
+    /// turn is in flight, so a process kill doesn't lose the latest paint or timer anchor.
+    case persistNow
+    /// App returned to the foreground — reconnect the socket and re-`hydrate` (re-read
+    /// running/inflight/usage) via the same unified path used by open/cold-launch.
+    case foreground
     case sessionResult(Result<SessionHandle, GatewayError>)
     /// Result of `session.activate` (or the `session.resume` fallback) — the
     /// server-authoritative re-hydration payload (messages + info + running + inflight).
@@ -404,6 +411,23 @@ public struct ChatFeature {
       case .persistSnapshotTick:
         // Debounced write-back landed: persist a fresh non-authoritative snapshot.
         return persistSnapshotNow(state)
+
+      case .persistNow:
+        // App backgrounding: don't wait for the 1s debounce — cancel it and write the
+        // snapshot synchronously now. Reaffirm the turn-start anchor while a turn is in
+        // flight so a kill mid-turn doesn't lose the elapsed-timer start instant.
+        let anchor = state.isSending ? setTurnAnchor(state) : .none
+        return .merge(
+          .cancel(id: CancelID.persist),
+          persistSnapshotNow(state),
+          anchor
+        )
+
+      case .foreground:
+        // App returned to the foreground: reconnect + re-`hydrate` via the same socket path
+        // used on open. A live socket is torn down on `.onDisappear`/background, so reconnect
+        // re-fires `.ready` → `hydrate`, re-reading the authoritative running/inflight/usage.
+        return connect(state.connection)
 
       case let .historyResponse(messages):
         // Seed the transcript from REST history. user/assistant text → message rows;

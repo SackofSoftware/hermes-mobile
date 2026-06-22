@@ -264,12 +264,12 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (foreground → hydrate; background → persist)
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift` / ChatReduction tests
 
-- [ ] observe `scenePhase` at the app shell; dispatch `scenePhaseChanged(.active/.background)`
-- [ ] `.active`: open `ChatFeature` reconnects + `session.activate` (re-attach, re-read running/inflight/usage); `SessionListFeature` immediate refresh
-- [ ] `.background`/`.inactive`: persist snapshot + anchor immediately (don't rely on debounce)
-- [ ] do NOT auto-restore the whole nav stack on cold launch (opening a session is enough)
-- [ ] write reducer tests: `.active` → reconnect + re-activate; `.background` → snapshot/anchor persisted
-- [ ] run tests — must pass before next task
+- [x] observe `scenePhase` at the app shell; dispatch `scenePhaseChanged(.active/.background)`
+- [x] `.active`: open `ChatFeature` reconnects + `session.activate` (re-attach, re-read running/inflight/usage); `SessionListFeature` immediate refresh
+- [x] `.background`/`.inactive`: persist snapshot + anchor immediately (don't rely on debounce)
+- [x] do NOT auto-restore the whole nav stack on cold launch (opening a session is enough)
+- [x] write reducer tests: `.active` → reconnect + re-activate; `.background` → snapshot/anchor persisted
+- [x] run tests — must pass before next task
 
 ### Task 9: Logout wipe + capability/backward-compat sweep
 

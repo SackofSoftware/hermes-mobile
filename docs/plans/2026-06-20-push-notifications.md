@@ -179,11 +179,11 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `gateway/src/validate.ts`
 - Create: `gateway/src/validate.test.ts`
 
-- [ ] validate payload shape; cap body size; reject malformed → 400
-- [ ] verify optional `hmac` over the payload using the per-device secret when present
-- [ ] rate-limit per `device_token` and per source IP
-- [ ] write tests for valid/invalid shapes, HMAC pass/fail, rate-limit trip
-- [ ] run tests — must pass before next task
+- [x] validate payload shape; cap body size; reject malformed → 400
+- [x] verify optional `hmac` over the payload using the per-device secret when present
+- [x] rate-limit per `device_token` and per source IP
+- [x] write tests for valid/invalid shapes, HMAC pass/fail, rate-limit trip
+- [x] run tests — must pass before next task
 
 ### Task A4: APNs forwarding + env→host selection + 410 handling
 

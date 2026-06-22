@@ -39,6 +39,46 @@ struct PushClientTests {
     #expect(PushClient.sessionID(fromPayload: ["session_id": 42]) == nil)
   }
 
+  // MARK: payload → PushTap (session_id + optional type)
+
+  @Test func tapParsesSessionAndType() {
+    let tap = PushClient.tap(fromPayload: ["session_id": "abc", "type": "approval"])
+    #expect(tap == PushTap(sessionID: "abc", type: "approval"))
+    #expect(tap?.isApproval == true)
+  }
+
+  @Test func tapHasNilTypeWhenMissingOrEmpty() {
+    #expect(PushClient.tap(fromPayload: ["session_id": "abc"]) == PushTap(sessionID: "abc", type: nil))
+    #expect(PushClient.tap(fromPayload: ["session_id": "abc", "type": ""]) == PushTap(sessionID: "abc", type: nil))
+    #expect(PushClient.tap(fromPayload: ["session_id": "abc"])?.isApproval == false)
+  }
+
+  @Test func tapIsNilForMalformedPayload() {
+    #expect(PushClient.tap(fromPayload: [:]) == nil)
+    #expect(PushClient.tap(fromPayload: ["session_id": ""]) == nil)
+  }
+
+  // MARK: pure foreground-presentation decision
+
+  @Test func suppressesForegroundOnlyForTheSessionBeingViewed() {
+    // Same session in the foreground → suppress (false).
+    #expect(PushClient.shouldPresentForeground(
+      incomingSessionID: "s1", currentlyViewingSessionID: "s1"
+    ) == false)
+    // Different session → present.
+    #expect(PushClient.shouldPresentForeground(
+      incomingSessionID: "s2", currentlyViewingSessionID: "s1"
+    ) == true)
+    // No chat open → present.
+    #expect(PushClient.shouldPresentForeground(
+      incomingSessionID: "s1", currentlyViewingSessionID: nil
+    ) == true)
+    // Malformed incoming (no session) → present (don't silently drop).
+    #expect(PushClient.shouldPresentForeground(
+      incomingSessionID: nil, currentlyViewingSessionID: "s1"
+    ) == true)
+  }
+
   // MARK: testValue (no-op double)
 
   @Test func testValueDeniesAndYieldsEmptyStreams() async {
@@ -86,5 +126,25 @@ struct PushClientTests {
     push.emit(tap: PushTap(sessionID: "session-7"))
     let received = await iterator.next()
     #expect(received == PushTap(sessionID: "session-7"))
+  }
+
+  // MARK: in-memory badge + current-session spies
+
+  @Test func inMemoryRecordsBadgeCount() async {
+    let push = PushClient.inMemory()
+    #expect(push.badgeCount == 0)
+    await push.client.setBadgeCount(3)
+    #expect(push.badgeCount == 3)
+    await push.client.setBadgeCount(0)
+    #expect(push.badgeCount == 0)
+  }
+
+  @Test func inMemoryRecordsCurrentSession() {
+    let push = PushClient.inMemory()
+    #expect(push.currentSession == nil)
+    push.client.setCurrentSession("s9")
+    #expect(push.currentSession == "s9")
+    push.client.setCurrentSession(nil)
+    #expect(push.currentSession == nil)
   }
 }

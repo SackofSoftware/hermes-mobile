@@ -15,13 +15,22 @@ public enum PushAuthorizationStatus: Equatable, Sendable {
 
 /// A tapped push notification, carrying just enough to deep-link (#push). Only generic
 /// metadata transits the gateway — real message content is fetched in-app — so a tap
-/// surfaces the `session_id` and nothing sensitive.
+/// surfaces the `session_id` (+ the trigger `type` when the payload includes it) and
+/// nothing sensitive.
 public struct PushTap: Equatable, Sendable {
   public let sessionID: String
+  /// The trigger type (`"approval"`, `"clarify"`, `"complete"`, `"error"`) when the APNs
+  /// payload carries it; `nil` for payloads that omit it (older gateway builds). Drives the
+  /// pending-approval badge — only `"approval"` taps bump it.
+  public let type: String?
 
-  public init(sessionID: String) {
+  public init(sessionID: String, type: String? = nil) {
     self.sessionID = sessionID
+    self.type = type
   }
+
+  /// Whether this tap is an approval request (the only type that bumps the badge).
+  public var isApproval: Bool { type == PushClient.approvalType }
 }
 
 /// Bridges APNs registration + notification handling behind a dependency so reducers stay
@@ -43,8 +52,32 @@ public struct PushClient: Sendable {
   /// registration so the plugin/gateway can record which build registered. Behind the client so
   /// reducers stay free of `Bundle` access and tests can inject a fixed value.
   public var appVersion: @Sendable () -> String = { "0.0" }
+  /// Set the app-icon badge to `count` (the pending-approval total). Behind the client so the
+  /// reducer owns the count and the only `UIApplication`/`UNUserNotificationCenter` side effect
+  /// lives here; the test double is a no-op.
+  public var setBadgeCount: @Sendable (_ count: Int) async -> Void
+  /// Record (or clear, with `nil`) the session the user is currently viewing. The app-delegate's
+  /// `willPresent` reads this via the bridge so a push for the session already on screen is
+  /// suppressed (foreground suppression). Updated by the reducer on chat open/close.
+  public var setCurrentSession: @Sendable (_ sessionID: String?) -> Void
 
   // MARK: - Pure logic (unit-tested on macOS, outside the iOS guard)
+
+  /// The trigger `type` string for an approval request (the only push that bumps the badge).
+  public static let approvalType = "approval"
+
+  /// The foreground-presentation decision (#push C5), kept pure so it's unit-tested on any
+  /// platform and the app delegate stays logic-free. Suppress the banner (return `false`) only
+  /// when the incoming push targets the **same** session the user is already viewing; otherwise
+  /// present it. A `nil` `currentlyViewing` (no chat open) always presents.
+  public static func shouldPresentForeground(
+    incomingSessionID: String?,
+    currentlyViewingSessionID: String?
+  ) -> Bool {
+    guard let incoming = incomingSessionID, let viewing = currentlyViewingSessionID
+    else { return true }
+    return incoming != viewing
+  }
 
   /// Encode an APNs device-token `Data` blob as a lowercase hex string (the form the
   /// gateway/plugin expect). Pure so it's testable on any platform.
@@ -69,6 +102,16 @@ public struct PushClient: Sendable {
     guard let id = payload["session_id"] as? String, !id.isEmpty else { return nil }
     return id
   }
+
+  /// Build a `PushTap` from an APNs userInfo payload, parsing the `session_id` (required) and
+  /// the optional trigger `type` (`{ "session_id": "…", "type": "approval" }`). Returns `nil`
+  /// for a malformed payload (no/empty session id). Pure. The `type` is only present when the
+  /// gateway includes it; absent → a non-approval tap (badge unaffected).
+  public static func tap(fromPayload payload: [AnyHashable: Any]) -> PushTap? {
+    guard let id = sessionID(fromPayload: payload) else { return nil }
+    let type = (payload["type"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    return PushTap(sessionID: id, type: type)
+  }
 }
 
 extension PushClient: DependencyKey {
@@ -81,7 +124,9 @@ extension PushClient: DependencyKey {
       authorizationStatus: { .notDetermined },
       register: { AsyncStream { $0.finish() } },
       incomingTaps: { AsyncStream { $0.finish() } },
-      appVersion: { "0.0" }
+      appVersion: { "0.0" },
+      setBadgeCount: { _ in },
+      setCurrentSession: { _ in }
     )
   }
 }
@@ -101,6 +146,8 @@ private final class PushBox: @unchecked Sendable {
   private let lock = NSLock()
   private var _granted: Bool
   private var _status: PushAuthorizationStatus
+  private var _badgeCount: Int = 0
+  private var _currentSession: String?
   private var tokenContinuations: [AsyncStream<String>.Continuation] = []
   private var tapContinuations: [AsyncStream<PushTap>.Continuation] = []
 
@@ -108,6 +155,12 @@ private final class PushBox: @unchecked Sendable {
     _granted = granted
     _status = status
   }
+
+  var badgeCount: Int { lock.withLock { _badgeCount } }
+  var currentSession: String? { lock.withLock { _currentSession } }
+
+  func setBadgeCount(_ count: Int) { lock.withLock { _badgeCount = count } }
+  func setCurrentSession(_ sessionID: String?) { lock.withLock { _currentSession = sessionID } }
 
   var granted: Bool {
     lock.withLock { _granted }
@@ -166,7 +219,9 @@ public extension PushClient {
         authorizationStatus: { box.status },
         register: { box.tokenStream() },
         incomingTaps: { box.tapStream() },
-        appVersion: { "1.2.3" }
+        appVersion: { "1.2.3" },
+        setBadgeCount: { count in box.setBadgeCount(count) },
+        setCurrentSession: { sessionID in box.setCurrentSession(sessionID) }
       )
     }
 
@@ -176,6 +231,10 @@ public extension PushClient {
     public func emit(tap: PushTap) { box.emit(tap: tap) }
     /// Change the granted result the next `requestAuthorization()` returns.
     public func setAuthorized(_ granted: Bool) { box.setAuthorized(granted) }
+    /// The last badge count the reducer set (spy hook for tests).
+    public var badgeCount: Int { box.badgeCount }
+    /// The session id the reducer last marked as currently-viewing (spy hook for tests).
+    public var currentSession: String? { box.currentSession }
   }
 
   /// Convenience: a controllable in-memory client + handle for driving its streams.
@@ -207,8 +266,29 @@ public extension PushClient {
     private var tokenContinuations: [AsyncStream<String>.Continuation] = []
     private var tapContinuations: [AsyncStream<PushTap>.Continuation] = []
     private var lastToken: String?
+    /// The session the user is currently viewing, set by the reducer (via
+    /// `PushClient.setCurrentSession`) on chat open/close. Read by `willPresent` to decide
+    /// foreground suppression — kept here so the app delegate carries no state of its own.
+    private var currentSessionID: String?
 
     private init() {}
+
+    /// Update the currently-viewing session (reducer → `PushClient.setCurrentSession`).
+    public func setCurrentSession(_ sessionID: String?) {
+      lock.withLock { currentSessionID = sessionID }
+    }
+
+    /// Decide whether a foreground push should present its banner, given the session it
+    /// targets. Suppresses (returns `false`) when the user is already viewing that session.
+    /// Called by the app delegate's `willPresent`; the actual rule is the pure
+    /// `PushClient.shouldPresentForeground`.
+    public func shouldPresentForeground(for payload: [AnyHashable: Any]) -> Bool {
+      let incoming = PushClient.sessionID(fromPayload: payload)
+      let viewing = lock.withLock { currentSessionID }
+      return PushClient.shouldPresentForeground(
+        incomingSessionID: incoming, currentlyViewingSessionID: viewing
+      )
+    }
 
     func tokenStream() -> AsyncStream<String> {
       AsyncStream { continuation in
@@ -239,9 +319,9 @@ public extension PushClient {
 
     /// Called by the app delegate on a notification tap (`didReceive`).
     public func tapReceived(_ payload: [AnyHashable: Any]) {
-      guard let id = PushClient.sessionID(fromPayload: payload) else { return }
+      guard let tap = PushClient.tap(fromPayload: payload) else { return }
       let continuations = lock.withLock { tapContinuations }
-      for continuation in continuations { continuation.yield(PushTap(sessionID: id)) }
+      for continuation in continuations { continuation.yield(tap) }
     }
   }
 
@@ -273,6 +353,12 @@ public extension PushClient {
         incomingTaps: { PushBridge.shared.tapStream() },
         appVersion: {
           (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0"
+        },
+        setBadgeCount: { count in
+          try? await UNUserNotificationCenter.current().setBadgeCount(count)
+        },
+        setCurrentSession: { sessionID in
+          PushBridge.shared.setCurrentSession(sessionID)
         }
       )
     }

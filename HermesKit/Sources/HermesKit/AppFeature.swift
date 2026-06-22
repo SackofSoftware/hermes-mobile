@@ -15,19 +15,33 @@ public struct AppFeature {
     /// The re-auth modal, presented when a live (gated) session dies mid-use. While shown,
     /// the dead chat's reconnect stays paused (it pauses itself via `awaitingReauth`).
     @Presents public var reauth: ReauthFeature.State?
+    /// Session ids with a pending approval surfaced via a push tap, not yet viewed. The app-icon
+    /// badge mirrors `pendingApprovalSessionIDs.count`; tapping/opening a session clears its
+    /// entry (and recomputes the badge). A small dedicated count — distinct from the list's
+    /// per-session *unread* (`seenCounts`) concept, which tracks message deltas, not approvals.
+    public var pendingApprovalSessionIDs: Set<String>
 
     public init(
       onboarding: ConnectionFeature.State = .init(),
       home: SessionListFeature.State? = nil,
       path: StackState<ChatFeature.State> = .init(),
       autoConnecting: Bool = false,
-      reauth: ReauthFeature.State? = nil
+      reauth: ReauthFeature.State? = nil,
+      pendingApprovalSessionIDs: Set<String> = []
     ) {
       self.onboarding = onboarding
       self.home = home
       self.path = path
       self.autoConnecting = autoConnecting
       self.reauth = reauth
+      self.pendingApprovalSessionIDs = pendingApprovalSessionIDs
+    }
+
+    /// The session the user is currently viewing — the top chat's session key
+    /// (`storedSessionID ?? liveSessionID`), or `nil` when no chat is open (or a new chat whose
+    /// id hasn't resolved yet). Drives foreground push suppression via `.onChange`.
+    var currentViewingSessionID: String? {
+      path.last.flatMap { $0.storedSessionID ?? $0.liveSessionID }
     }
   }
 
@@ -48,15 +62,22 @@ public struct AppFeature {
     /// fanned out: `.active` reconnects + re-hydrates the open chat and refreshes the list;
     /// `.background`/`.inactive` flushes the open chat's snapshot + anchor immediately.
     case scenePhaseChanged(ScenePhase)
+    /// A push notification was tapped — deep-link to its session (same path as a list tap) and,
+    /// for an approval, clear its pending-approval badge entry (the user is now viewing it).
+    case pushTapped(PushTap)
     case onboarding(ConnectionFeature.Action)
     case home(SessionListFeature.Action)
     case path(StackActionOf<ChatFeature>)
     case reauth(PresentationAction<ReauthFeature.Action>)
   }
 
+  /// One id for the long-running incoming-tap observer.
+  private enum CancelID { case pushTaps }
+
   @Dependency(\.keychain) var keychain
   @Dependency(\.preferences) var preferences
   @Dependency(\.hermesREST) var rest
+  @Dependency(\.push) var push
 
   public init() {}
 
@@ -67,6 +88,14 @@ public struct AppFeature {
     Reduce { state, action in
       switch action {
       case .task:
+        // Observe push taps for the whole app lifetime (a tap can arrive cold-launch or while
+        // running) and deep-link them; the actual nav happens in `.pushTapped`.
+        let tapObserver: Effect<Action> = .run { [push] send in
+          for await tap in push.incomingTaps() {
+            await send(.pushTapped(tap))
+          }
+        }
+        .cancellable(id: CancelID.pushTaps, cancelInFlight: true)
         // Launch auto-connect: if a persisted session (token *or* gated cookie) + server
         // URL exist, silently validate and skip onboarding. Only runs once, before we have
         // a home. `loadSession` rehydrates a `.cookie` session's cookies into `.shared` so
@@ -75,20 +104,23 @@ public struct AppFeature {
               let session = keychain.loadSession(.shared),
               let urlString = preferences.loadServerURL(),
               let url = parseServerURL(urlString)
-        else { return .none }
+        else { return tapObserver }
         // A `.token` session with an empty token is treated as "no creds" (matches the old
         // `loadToken()`-non-empty guard) so we stay on onboarding rather than probe blindly.
-        if case .token("") = session { return .none }
+        if case .token("") = session { return tapObserver }
         state.autoConnecting = true
         let connection = ServerConnection(baseURL: url, auth: session)
-        return .run { [rest] send in
-          do {
-            _ = try await rest.sessions(connection, 1, 0, .recent)
-            await send(.autoConnectSucceeded(connection))
-          } catch {
-            await send(.autoConnectFailed(connection))
+        return .merge(
+          tapObserver,
+          .run { [rest] send in
+            do {
+              _ = try await rest.sessions(connection, 1, 0, .recent)
+              await send(.autoConnectSucceeded(connection))
+            } catch {
+              await send(.autoConnectFailed(connection))
+            }
           }
-        }
+        )
 
       case let .autoConnectSucceeded(connection):
         state.autoConnecting = false
@@ -125,6 +157,27 @@ public struct AppFeature {
           return topChatID.map { .send(.path(.element(id: $0, action: .persistNow))) } ?? .none
         }
 
+      case let .pushTapped(tap):
+        // Deep-link a tapped push to its session via the SAME path a list tap uses, so taps and
+        // list-taps share one open-session flow. Prefer the loaded `Session` (carries a title);
+        // fall back to a minimal `Session(id:)` if it isn't in the list (the chat resumes by
+        // stored id and hydrates the title from `session.info`).
+        //
+        // Badge bookkeeping: an approval tap first MARKS the session pending (it's a relevant
+        // approval), then opening it CLEARS that entry below — so a tap that opens nets to zero,
+        // while an approval that can't be opened (no list yet) stays badged until viewed.
+        if tap.isApproval {
+          state.pendingApprovalSessionIDs.insert(tap.sessionID)
+        }
+        guard state.home != nil else {
+          // No session list yet (e.g. still on onboarding) — can't open; the badge reflects the
+          // now-pending approval.
+          return setBadge(state)
+        }
+        let session = state.home?.sessions[id: tap.sessionID] ?? Session(id: tap.sessionID)
+        // Opening clears the badge entry + marks current-viewing (handled in the openSession case).
+        return .send(.home(.delegate(.openSession(session))))
+
       case let .onboarding(.delegate(.connected(connection))):
         state.home = SessionListFeature.State(connection: connection)
         return .none
@@ -142,7 +195,11 @@ public struct AppFeature {
             title: session.resolvedTitle
           )
         )
-        return .none
+        // Opening a session clears its pending-approval badge entry (the user is now viewing it).
+        // The current-viewing marker is updated by the `.onChange(of: currentViewingSessionID)`
+        // modifier below (one source of truth for nav-derived state).
+        state.pendingApprovalSessionIDs.remove(session.id)
+        return setBadge(state)
 
       case .home(.delegate(.createSession)):
         guard let home = state.home else { return .none }
@@ -214,6 +271,15 @@ public struct AppFeature {
     .forEach(\.path, action: \.path) {
       ChatFeature()
     }
+    // Keep the push bridge's "currently viewing" session in sync with the top of the nav stack
+    // (one source of truth, evaluated AFTER the child reducers so pops/dismissals AND a new chat
+    // resolving its `liveSessionID` are reflected) so a foreground push for the on-screen session
+    // is suppressed. Opening, popping back to the list, and id-resolution all flow through here.
+    .onChange(of: \.currentViewingSessionID) { _, newValue in
+      Reduce { _, _ in
+        .run { [push] _ in push.setCurrentSession(newValue) }
+      }
+    }
   }
 
   /// Best-effort push cleanup on logout: unregister the last-known device token with the
@@ -230,6 +296,13 @@ public struct AppFeature {
     return .run { [rest] _ in
       try? await rest.unregisterPush(connection, token)
     }
+  }
+
+  /// Push the app-icon badge to the current pending-approval count (the only side effect; the
+  /// count itself lives in `state.pendingApprovalSessionIDs`, kept testable in the reducer).
+  private func setBadge(_ state: State) -> Effect<AppFeature.Action> {
+    let count = state.pendingApprovalSessionIDs.count
+    return .run { [push] _ in await push.setBadgeCount(count) }
   }
 
   /// Seed a `ReauthFeature.State` from the connection of the expired chat: a fixed server

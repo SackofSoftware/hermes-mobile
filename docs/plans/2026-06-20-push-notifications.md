@@ -335,11 +335,11 @@ a short window (collapse-id reinforces on the APNs side).
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift` / `AppFeature.swift`
 - Modify: corresponding `*FeatureTests.swift`
 
-- [ ] handle incoming tap action → open `session_id` via existing `openSession` delegate path
-- [ ] `willPresent`: suppress banner if already viewing that session (check nav state)
-- [ ] badge for pending approvals; clear on viewing the session
-- [ ] write reducer tests for tap→openSession, suppress-when-foregrounded, badge set/clear
-- [ ] run tests — must pass before next task
+- [x] handle incoming tap action → open `session_id` via existing `openSession` delegate path — `AppFeature` observes `push.incomingTaps()` as a long-running cancellable effect on `.task` (lifetime of the app) → `.pushTapped(PushTap)` → routes through the SAME `.home(.delegate(.openSession(session)))` path a list tap uses. Reuses the loaded `Session` (carries title) when present, else a minimal `Session(id:)` (the chat resumes by stored id + hydrates the title from `session.info`). No `home` yet (onboarding) → no open.
+- [x] `willPresent`: suppress banner if already viewing that session (check nav state) — decision is the PURE `PushClient.shouldPresentForeground(incomingSessionID:currentlyViewingSessionID:)`; the delegate calls it via `PushBridge.shared.shouldPresentForeground(for:payload)`. The bridge holds the current-viewing id, kept in sync by `AppFeature`'s `.onChange(of: \.currentViewingSessionID)` (top chat's `storedSessionID ?? liveSessionID`) → `push.setCurrentSession`. Same session → `[]` (suppressed); else `[.banner,.sound]`.
+- [x] badge for pending approvals; clear on viewing the session — `AppFeature.State.pendingApprovalSessionIDs` (dedicated, distinct from the list's `seenCounts` unread). An approval tap (`PushTap.type == "approval"`, parsed from the payload) inserts the id; opening the session removes it; the app-icon badge is set via `push.setBadgeCount(count)` (behind the client, `#if canImport(UIKit)` → `UNUserNotificationCenter.setBadgeCount`, no-op testValue). NOTE: the gateway body must include `type` for the badge to light up; the iOS side is forward-compatible (absent type → non-approval, badge unaffected).
+- [x] write reducer tests for tap→openSession, suppress-when-foregrounded, badge set/clear — `AppFeatureTests`: `pushTapDeepLinksThroughOpenSession`, `incomingTapStreamDrivesDeepLink` (via the live stream), `openAndCloseChatSetsAndClearsCurrentViewingSession`, `approvalBadgeSetsWhenUnopenedAndClearsOnView`, `approvalTapThatOpensNetsZeroBadge`; `PushClientTests`: `suppressesForegroundOnlyForTheSessionBeingViewed` (pure helper), `tapParsesSessionAndType`/`tapHasNilTypeWhenMissingOrEmpty`/`tapIsNilForMalformedPayload`, `inMemoryRecordsBadgeCount`, `inMemoryRecordsCurrentSession`.
+- [x] run tests — must pass before next task — `script -q /dev/null swift test --package-path HermesKit`: 489 tests passing (478 + 11 new). `make generate` + `make build` (xcodebuild iOS Simulator) SUCCEEDED with the nav-aware delegate.
 
 ### Task C6: Settings — notifications toggle + "send test notification"
 

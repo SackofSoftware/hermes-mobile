@@ -46,13 +46,18 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
     completionHandler()
   }
 
-  /// A notification arrived while the app is foregrounded. C2 keeps this minimal: present a
-  /// sensible default banner + sound. Nav-aware suppression is C5.
+  /// A notification arrived while the app is foregrounded. Nav-aware suppression (C5): if the
+  /// user is already viewing the push's session we present nothing (the chat already shows the
+  /// state); otherwise a banner + sound. The decision is the pure
+  /// `PushClient.shouldPresentForeground`, called via the bridge that holds the current session
+  /// id — the delegate carries no logic.
   func userNotificationCenter(
     _: UNUserNotificationCenter,
-    willPresent _: UNNotification,
+    willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    completionHandler([.banner, .sound])
+    let payload = notification.request.content.userInfo
+    let present = PushBridge.shared.shouldPresentForeground(for: payload)
+    completionHandler(present ? [.banner, .sound] : [])
   }
 }

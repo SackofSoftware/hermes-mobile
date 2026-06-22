@@ -307,10 +307,10 @@ list-glow delegate → scenePhase lifecycle → snapshot tests + verify.
 **Files:**
 - Modify: `docs/architecture.md`, `CLAUDE.md`, `README.md` (if user-facing)
 
-- [ ] document the unified `hydrate(sessionID)` flow + `session.activate` usage in `docs/architecture.md`
-- [ ] add `ChatSnapshotClient` to the dependency-clients list; note the non-authoritative-cache rule
-- [ ] note new conventions in `CLAUDE.md` (server-authoritative re-hydration; anchor for elapsed timer; list-glow via delegate; SQLiteData behind a client)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] document the unified `hydrate(sessionID)` flow + `session.activate` usage in `docs/architecture.md` — added a "Session re-hydration (`session.activate`)" section: instant-paint from cache → connect + activate (resume fallback) → applyRuntimeInfo + reconstructTranscript (wholesale) + reconcileTimer from anchor + inflight seed → write-back; notes open/foreground/cold-launch all funnel through `hydrate` and the scenePhase routing
+- [x] add `ChatSnapshotClient` to the dependency-clients list; note the non-authoritative-cache rule (cache only makes UI faster, never differs; server wins; replaced wholesale; wiped on logout)
+- [x] note new conventions in `CLAUDE.md` (server-authoritative re-hydration via `session.activate` with resume fallback; client turn-start anchor for timer continuity; list-glow via `ChatFeature.Delegate.runningChanged`; SQLiteData behind `ChatSnapshotClient`, non-authoritative) — plus a brief README mention that sessions resume live state
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

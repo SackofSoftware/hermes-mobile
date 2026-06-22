@@ -310,11 +310,11 @@ a short window (collapse-id reinforces on the APNs side).
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift`
 
-- [ ] add `registerPush(deviceToken, apnsEnv, appVersion)` → `POST /api/plugins/hermes-push/register`
-- [ ] add `unregisterPush(deviceToken)` → `/unregister`
-- [ ] surface 404 distinctly so the reducer can capability-gate (mirror attach/profiles)
-- [ ] write tests (injected `URLSession`/transport): success, 404-not-available, error
-- [ ] run tests — must pass before next task
+- [x] add `registerPush(deviceToken, apnsEnv, appVersion)` → `POST /api/plugins/hermes-push/register` — returns `PushRegistration {hmacSecret}` decoded from `{"hmac_secret":…}`; snake_case body, token/cookie auth + base URL via the shared `postJSON` helper
+- [x] add `unregisterPush(deviceToken)` → `/unregister` — `POST {device_token}` via shared `send` helper
+- [x] surface 404 distinctly so the reducer can capability-gate (mirror attach/profiles) — reused the **existing `RESTError.notFound`** mechanism (the shared `validate` maps 404 → `.notFound`, exactly as `HermesProfileClient.list` does); no new bespoke sentinel
+- [x] write tests (injected `URLSession`/transport): success, 404-not-available, error — `registerPush` success (POST, path, snake_case body, auth header, decoded `hmac_secret`), `registerPush` 404→`.notFound`, `registerPush` 500→`.server`, `unregisterPush` success (path + `{device_token}` body), `unregisterPush` 404→`.notFound` (5 tests via `MockURLProtocol`)
+- [x] run tests — must pass before next task — `script -q /dev/null swift test --package-path HermesKit`: 472 tests passing (467 + 5 new)
 
 ### Task C4: Registration reducer wiring (connect / token-change / logout)
 

@@ -36,6 +36,23 @@ public enum SessionOrder: String, Sendable {
   case recent
 }
 
+/// Result of registering a device token with the `hermes-push` plugin
+/// (`POST /api/plugins/hermes-push/register`). Carries the per-device HMAC secret the
+/// plugin minted so the app can persist it; the gateway later verifies the signed push
+/// payload against this secret. Decoded leniently — only `hmac_secret` is required.
+public struct PushRegistration: Equatable, Sendable, Decodable {
+  /// Per-device HMAC secret (hex). Persist this; it is reused, not rotated, on re-register.
+  public var hmacSecret: String
+
+  public init(hmacSecret: String) {
+    self.hmacSecret = hmacSecret
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case hmacSecret = "hmac_secret"
+  }
+}
+
 /// Subset of `/api/status` we use for the reachability/health check (lenient).
 public struct ServerStatus: Equatable, Sendable, Decodable {
   public var version: String?
@@ -118,6 +135,15 @@ public struct HermesRESTClient: Sendable {
   /// Transcribe recorded audio — `POST /api/audio/transcribe` `{data_url, mime_type?}` →
   /// `{ok, transcript}`. Returns the transcript text; throws `.transcriptionFailed` on `ok:false`.
   public var transcribe: @Sendable (_ connection: ServerConnection, _ dataURL: String, _ mimeType: String?) async throws -> String
+  /// Register this device's APNs token with the `hermes-push` plugin —
+  /// `POST /api/plugins/hermes-push/register` `{device_token, apns_env, app_version}` →
+  /// `{hmac_secret, …}`. Returns the minted per-device HMAC secret. A missing plugin
+  /// surfaces as `RESTError.notFound` (404) so the caller can capability-gate (mirrors the
+  /// profiles/attach pattern).
+  public var registerPush: @Sendable (_ connection: ServerConnection, _ deviceToken: String, _ apnsEnv: String, _ appVersion: String) async throws -> PushRegistration
+  /// Unregister this device's APNs token — `POST /api/plugins/hermes-push/unregister`
+  /// `{device_token}`. A missing plugin surfaces as `RESTError.notFound` (404).
+  public var unregisterPush: @Sendable (_ connection: ServerConnection, _ deviceToken: String) async throws -> Void
 }
 
 public extension HermesRESTClient {
@@ -209,6 +235,22 @@ public extension HermesRESTClient {
           throw RESTError.transcriptionFailed(response.error ?? "")
         }
         return transcript
+      },
+      registerPush: { conn, deviceToken, apnsEnv, appVersion in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-push/register")
+        let body = try JSONSerialization.data(withJSONObject: [
+          "device_token": deviceToken,
+          "apns_env": apnsEnv,
+          "app_version": appVersion,
+        ] as [String: Any])
+        // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
+        return try await postJSON(url, body: body, token: conn.token, session: session)
+      },
+      unregisterPush: { conn, deviceToken in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-push/unregister")
+        let body = try JSONSerialization.data(withJSONObject: ["device_token": deviceToken])
+        // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
+        try await send(url, method: "POST", body: body, token: conn.token, session: session)
       }
     )
   }

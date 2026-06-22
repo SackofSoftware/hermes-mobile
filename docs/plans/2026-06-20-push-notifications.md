@@ -362,11 +362,11 @@ a short window (collapse-id reinforces on the APNs side).
 - Modify: `Project.swift`
 - Create: `HermesMobile/HermesMobile.entitlements` (if not using inline)
 
-- [ ] add Push Notifications entitlement (`aps-environment`)
-- [ ] add `UIBackgroundModes: [remote-notification]` to Info.plist
-- [ ] run `tuist generate` and confirm the app target builds with the new capability
-- [ ] write/adjust any affected snapshot/build smoke as needed
-- [ ] run tests — must pass before next task
+- [x] add Push Notifications entitlement (`aps-environment`) — inline `entitlements: .dictionary(["aps-environment": "development"])` on the HermesMobile target in `Project.swift` (matches the existing inline `infoPlist` mechanism; Tuist emits `Derived/Entitlements/HermesMobile.entitlements`, which is gitignored). `development` = sandbox APNs for Debug/TestFlight-dev; Xcode/export rewrites to `production` for App Store distribution, mirroring the compile-time `apns_env` (DEBUG → "sandbox").
+- [x] add `UIBackgroundModes: [remote-notification]` to Info.plist — added `"UIBackgroundModes": ["remote-notification"]` to the inline `.extendingDefault(with:)` Info.plist in `Project.swift` (no prior `UIBackgroundModes` to merge); verified present in the generated `Derived/InfoPlists/HermesMobile-Info.plist`.
+- [x] run `tuist generate` and confirm the app target builds with the new capability — `make generate` (TUIST_-env-aware) succeeds; `make build` (xcodebuild, iOS Simulator, no signing) → `** BUILD SUCCEEDED **` with the new entitlement + background mode.
+- [x] write/adjust any affected snapshot/build smoke as needed — no snapshot/code changes needed (entitlement/plist are build config only); confirmed `make snapshot` → TEST SUCCEEDED unchanged.
+- [x] run tests — must pass before next task — `swift test --package-path HermesKit`: 498 passing; `make snapshot`: TEST SUCCEEDED.
 
 ### Task C8: Verify acceptance criteria
 

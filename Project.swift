@@ -52,9 +52,19 @@ let project = Project(
         // Only standard encryption (HTTPS/TLS) — exempt; lets TestFlight skip the
         // export-compliance prompt so builds are testable immediately.
         "ITSAppUsesNonExemptEncryption": false,
+        // Wake the app to process incoming remote notifications while backgrounded —
+        // the gateway socket drops in the background, so pushes are how the agent reaches us.
+        "UIBackgroundModes": ["remote-notification"],
       ]),
       sources: ["HermesMobile/Sources/**"],
       resources: ["HermesMobile/Resources/**"],
+      // Push Notifications capability. `aps-environment` is `development` for the
+      // sandbox APNs host (Debug + TestFlight-dev builds); Xcode/export rewrites it to
+      // `production` for App Store distribution. The compile-time `apns_env` elsewhere
+      // mirrors this (DEBUG → "sandbox", else "production").
+      entitlements: .dictionary([
+        "aps-environment": "development",
+      ]),
       dependencies: [
         .package(product: "HermesKit"),
       ],

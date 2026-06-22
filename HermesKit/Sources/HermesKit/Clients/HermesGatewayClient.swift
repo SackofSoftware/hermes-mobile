@@ -59,6 +59,15 @@ public enum GatewayError: Error, Equatable, Sendable {
     }
     return false
   }
+
+  /// True when the socket dropped (no transport) — distinct from a server-side protocol
+  /// error. A dropped socket is already surfaced by the reducer's `.reconnecting` status, so
+  /// callers can avoid raising a redundant "Connection lost." banner that would linger past
+  /// the reconnect.
+  public var isDisconnected: Bool {
+    if case .disconnected = self { return true }
+    return false
+  }
 }
 
 // MARK: - Live / factory

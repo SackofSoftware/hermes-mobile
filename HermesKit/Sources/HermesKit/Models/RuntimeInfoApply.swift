@@ -26,9 +26,15 @@ public struct RuntimeInfoTarget: Equatable, Sendable {
 /// live `.sessionInfo` fold (`info.model?.nonEmpty`) so a `""` push can't re-introduce the
 /// blank-model regression.
 ///
+/// `usage` is likewise only overwritten when it carries a real consumption signal
+/// (`hasUsageSignal`): a freshly-resumed agent reports an all-zero usage until its first turn
+/// re-counts the loaded history, so on re-open we'd otherwise clobber the real (cached) context
+/// gauge with a placeholder zero. An all-zero usage only takes hold when there's nothing to
+/// preserve (a genuinely fresh session, `target.usage == nil`).
+///
 /// Pure: no I/O, no clock — operates only on its arguments.
 public func applyRuntimeInfo(_ info: SessionInfo, into target: inout RuntimeInfoTarget) {
   if let model = info.model?.nonEmpty { target.model = model }
   if let reasoningEffort = info.reasoningEffort?.nonEmpty { target.reasoningEffort = reasoningEffort }
-  if let usage = info.usage { target.usage = usage }
+  if let usage = info.usage, usage.hasUsageSignal || target.usage == nil { target.usage = usage }
 }

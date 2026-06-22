@@ -128,6 +128,86 @@ struct HydrateTests {
     await store.send(.onDisappear)
   }
 
+  // MARK: Cold-resume usage preservation + stale-banner clearing
+
+  @Test func coldResumePreservesCachedUsageAndClearsStaleBanner() async {
+    // A freshly-resumed (cold) agent reports zero usage until its first turn re-counts the
+    // loaded history. That placeholder must NOT clobber the real cached context gauge — and a
+    // stale "Connection lost." banner from a prior drop must clear once we reconnect+hydrate.
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let cachedUsage = Usage(contextUsed: 42_000, contextMax: 200_000, contextPercent: 21)
+    snapshotClient.saveSnapshot("stored123", ChatSnapshot(
+      model: "claude-opus-4-8",
+      usage: cachedUsage,
+      rows: [ChatRow(id: uuid(10), kind: .message(role: .user, text: "earlier", isComplete: true))]
+    ))
+
+    var initial = withDependencies {
+      $0.chatSnapshot = snapshotClient
+    } operation: {
+      ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    }
+    initial.errorBanner = "Connection lost."  // left over from a lock/unlock drop
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in
+        // Cold-resume payload: model known, usage all-zero (context_max set, used 0).
+        .object([
+          "session_id": .string("live123"),
+          "resumed": .string("stored123"),
+          "messages": .array([
+            .object(["role": .string("user"), "text": .string("earlier")]),
+          ]),
+          "running": .bool(false),
+          "info": .object([
+            "model": .string("claude-opus-4-8"),
+            "usage": .object([
+              "context_used": .number(0), "context_max": .number(200_000), "context_percent": .number(0),
+            ]),
+          ]),
+        ])
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.success)
+
+    // Usage preserved from cache (the cold zero didn't win); banner cleared on reconnect.
+    #expect(store.state.usage == cachedUsage)
+    #expect(store.state.errorBanner == nil)
+    #expect(store.state.status == .ready)
+    await store.send(.onDisappear)
+  }
+
+  @Test func realProtocolErrorStillRaisesBanner() async {
+    // A genuine (non-`.disconnected`) failure must still surface a banner — only a dropped
+    // socket is silenced (the reconnecting status conveys that one).
+    let store = TestStore(initialState: ChatFeature.State(connection: conn, resumeStoredID: "stored123")) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.hermesGateway.send = { @Sendable _, _ in throw GatewayError.server("boom") }
+    }
+
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.failure) {
+      $0.errorBanner = "boom"
+      $0.status = .reconnecting
+    }
+    await store.send(.onDisappear)
+  }
+
   // MARK: Offline keeps the cache + reconnecting status
 
   @Test func offlineKeepsCachedPaintAndShowsReconnecting() async {
@@ -164,7 +244,9 @@ struct HydrateTests {
       $0.hasRequestedSession = true
     }
     await store.receive(\.activateResult.failure) {
-      $0.errorBanner = GatewayError.disconnected.message
+      // A dropped socket is conveyed by the reconnecting status alone — no banner is raised
+      // for `.disconnected` (it would otherwise linger after reconnect; see the lock/unlock
+      // regression). The cached paint stays put.
       $0.status = .reconnecting
     }
     // Cache still on screen — never blanked.

@@ -398,7 +398,14 @@ public struct ChatFeature {
         return .none
 
       case let .sessionResult(.failure(error)):
-        state.errorBanner = error.message
+        // A dropped socket (e.g. lock/unlock) reconnects on its own — the `.reconnecting`
+        // status conveys it; don't raise a banner that would linger past reconnect. Surface
+        // only real protocol/server failures.
+        if error.isDisconnected {
+          state.status = .reconnecting
+        } else {
+          state.errorBanner = error.message
+        }
         return .none
 
       case let .activateResult(.success(response)):
@@ -407,9 +414,12 @@ public struct ChatFeature {
       case let .activateResult(.failure(error)):
         // Offline / connection error: keep the cached instant-paint on screen (never blank
         // it) and show a subtle reconnecting status. The cached rows stay until a successful
-        // activate replaces them wholesale.
-        state.errorBanner = error.message
+        // resume replaces them wholesale. A plain `.disconnected` (the socket dropped — e.g.
+        // lock/unlock) is already conveyed by the `.reconnecting` status, so we do NOT raise a
+        // banner for it (it would otherwise linger after reconnect); only a real protocol/server
+        // error gets a banner.
         state.status = .reconnecting
+        if !error.isDisconnected { state.errorBanner = error.message }
         return .none
 
       case .persistSnapshotTick:
@@ -895,6 +905,9 @@ public struct ChatFeature {
     case .ready:
       state.status = .ready
       state.reconnectAttempt = 0
+      // The socket is (re)connected — clear any stale connection banner (e.g. a "Connection
+      // lost." left over from a lock/unlock drop) so it doesn't linger after we reconnect.
+      state.errorBanner = nil
       guard !state.hasRequestedSession else { return .none }
       state.hasRequestedSession = true
       // No stored id → a fresh session: `session.create` (handle only). A stored id →
@@ -1240,6 +1253,8 @@ public struct ChatFeature {
     state.liveSessionID = response.sessionID
     state.storedSessionID = response.storedSessionID ?? state.storedSessionID
     state.status = .ready
+    // A successful hydrate means we're connected — clear any stale connection banner.
+    state.errorBanner = nil
 
     // Runtime info: model / reasoning / usage straight from the response (fixes the blank
     // model + context-0 bugs on re-open).

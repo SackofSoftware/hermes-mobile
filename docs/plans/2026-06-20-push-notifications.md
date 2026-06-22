@@ -239,12 +239,12 @@ a short window (collapse-id reinforces on the APNs side).
 - Create: `hermes-push/hermes_push/triggers.py`
 - Create: `hermes-push/tests/test_triggers.py`
 
-- [ ] register `pre_approval_request` (approval; honor `surface`, ignore CLI-only)
-- [ ] register `pre_gateway_dispatch` for `message.complete` (turn complete) + `error`
-- [ ] ⚠️ VERIFY `clarify.request` surfaces through a hook; if not, add the thin loopback `/api/ws` client fallback (subscribe read-only) — document which path is used
-- [ ] map each event → `{type, session_id, title, generic body}` (no message content)
-- [ ] write tests for hook→payload mapping for all four event types
-- [ ] run tests — must pass before next task
+- [x] register `pre_approval_request` (approval; honor `surface`, ignore CLI-only) — bound to `TriggerDispatcher.on_pre_approval_request`; gateway surface → payload, cli/empty → skipped
+- [x] register `pre_gateway_dispatch` for `message.complete` (turn complete) + `error` — **N/A via this hook**: `pre_gateway_dispatch` fires only for *incoming* user `MessageEvent`s (gateway/run.py:7418), never outbound events. complete/error/clarify are `_emit`-ed straight to the WS transport (tui_gateway/server.py:512) with no hook, so they are mapped via the loopback `/api/ws` client instead (see next item). The hook stays registered as a strict no-op observer.
+- [x] ⚠️ VERIFY `clarify.request` surfaces through a hook; if not, add the thin loopback `/api/ws` client fallback (subscribe read-only) — **VERIFIED: NO hook path.** `clarify.request` (tui_gateway/server.py:2158), `message.complete` (:4699) and `error` (:4826) are all emitted via `_emit(...)` direct to the WS transport — none pass through a registerable hook. **Path: loopback WS fallback** — the pure event→payload mapper `triggers.map_ws_event` / `TriggerDispatcher.handle_ws_event` (exact event `type` strings `"clarify.request"`, `"message.complete"`, `"error"`) is implemented + unit-tested here in B3; the guarded, off-thread connector to `/api/ws` is wired in B5 (it needs the sender lifecycle). Only `type` + `session_id` are read — never the content `payload`.
+- [x] map each event → `{type, session_id, title, generic body}` (no message content) — `make_payload` builds `{type, session_id, title, body, thread_id=session_id}`; titles/bodies are centralized constants (`TITLES`/`BODIES`), no event content interpolated
+- [x] write tests for hook→payload mapping for all four event types — `tests/test_triggers.py`: all 4 types, approval surface-gating (gateway→mapped, cli/empty→skipped), WS mapper for complete/error/clarify + ignored events, dispatcher sink wiring + non-raising, content-leak guard (28 tests)
+- [x] run tests — must pass before next task — `54 passed` (26 prior + 28 B3)
 
 ### Task B4: Suppression policy + dedup
 

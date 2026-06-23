@@ -170,11 +170,11 @@ the feature is split across **three artifacts** — only the iOS app lives in th
 
 - **`hermes-push`** — a standalone pip-installable Hermes plugin (uses the public plugin
   entry-point API; **hermes-agent itself is not modified**). It triggers notifications and
-  exposes the device-token registration REST route. **Maintained locally / out-of-repo** —
-  it's self-hoster infra, not committed here.
+  exposes the device-token registration REST route. Lives in its own **public** repo:
+  `git@github.com:goncharik/hermes-mobile-push-plugin.git` — self-hoster infra, not in this repo.
 - **Push gateway** — a tiny *stateless* serverless function (Cloudflare Workers) the
-  publisher operates; the only place the `.p8` / ES256 JWT lives. **Maintained locally /
-  out-of-repo** (it holds the Apple secret).
+  publisher operates; the only place the `.p8` / ES256 JWT lives. Lives in its own **private**
+  repo: `git@github.com:goncharik/hermes-mobile-push-gateway.git` (it holds the Apple secret).
 - **iOS app** (this repo) — `PushClient` + reducer wiring; registers its device token with
   the user's own agent over the private network and handles incoming pushes.
 

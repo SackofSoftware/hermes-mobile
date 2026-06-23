@@ -161,8 +161,10 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   switch and popover presentation are local view state (`@State`), kept out of the reducer.
 - **Push notifications** span THREE artifacts but only the iOS app lives in this repo:
   `hermes-push` (a standalone pip plugin — **hermes-agent is NOT modified**) and the
-  serverless **push gateway** (holds the `.p8`) are **local-only publisher infra, gitignored**
-  (never committed/pushed). Conventions: **capability-gate** — the toggle/controls hide when
+  serverless **push gateway** (holds the `.p8`) live in **separate repos** —
+  plugin: `goncharik/hermes-mobile-push-plugin` (public); gateway:
+  `goncharik/hermes-mobile-push-gateway` (private, holds the Apple secret). Conventions:
+  **capability-gate** — the toggle/controls hide when
   `POST /api/plugins/hermes-push/register` 404s → `pushAvailable = false` (mirrors
   attach/profiles). **Generic-body privacy rule** — NO message content/args/reasoning/command
   ever goes in a push; only a generic title/body + `session_id` transit the gateway (content is

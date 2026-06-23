@@ -24,8 +24,3 @@ build/
 # the local machine's skills/tools inventory + home paths. Keep out of git.
 Probe/fixtures/
 /tmp/hermes-probe
-
-# Push-notifications publisher infra — kept local, never pushed (per user)
-# Gateway = Cloudflare Worker (holds APNs .p8); hermes-push = standalone pip plugin.
-gateway/
-hermes-push/

@@ -46,11 +46,15 @@ struct SettingsFeatureTests {
     } withDependencies: {
       $0.preferences = preferences
       $0.debugLog.stream = { @Sendable in AsyncStream { $0.finish() } }
+      $0.push.authorizationStatus = { .notDetermined }
     }
 
     await store.send(.task) {
       $0.chatRenderer = .collectionView
     }
+    // `.task` also probes push authorization (merged in from the push-notifications work);
+    // .notDetermined leaves the notification flags at their defaults (no state change).
+    await store.receive(\.authorizationStatusLoaded)
   }
 
   @Test func selectingChatRendererPersistsPreference() async {

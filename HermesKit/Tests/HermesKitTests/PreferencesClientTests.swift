@@ -105,4 +105,42 @@ struct PreferencesClientTests {
     #expect(suite.string(forKey: "hermes.selected-profile-id") == nil)
     #expect(prefs.loadSelectedProfileID() == nil)
   }
+
+  @Test func inMemoryChatRendererRoundTripAndDefault() {
+    let prefs = PreferencesClient.inMemory()
+    #expect(prefs.loadChatRenderer() == .swiftUI) // default when unset
+
+    prefs.saveChatRenderer(.collectionView)
+    #expect(prefs.loadChatRenderer() == .collectionView)
+
+    prefs.saveChatRenderer(.swiftUI)
+    #expect(prefs.loadChatRenderer() == .swiftUI)
+  }
+
+  @Test func liveChatRendererBacksOntoProvidedDefaults() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.renderer")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.renderer")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    #expect(prefs.loadChatRenderer() == .swiftUI) // default when unset
+    prefs.saveChatRenderer(.collectionView)
+    #expect(suite.string(forKey: "hermes.chat-renderer") == "collectionView")
+    #expect(prefs.loadChatRenderer() == .collectionView)
+  }
+
+  @Test func liveChatRendererDefaultsWhenValueIsGarbage() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.renderer.garbage")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.renderer.garbage")
+    suite.set("not-a-renderer", forKey: "hermes.chat-renderer")
+    let prefs = PreferencesClient.live(defaults: suite)
+    #expect(prefs.loadChatRenderer() == .swiftUI) // unknown raw value → default
+  }
+
+  @Test func clearIdentityScopedPrefsKeepsChatRenderer() {
+    // chatRenderer is a device-local A/B pref — a user-switch must not wipe it.
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveChatRenderer(.swiftUI)
+    prefs.clearIdentityScopedPrefs()
+    #expect(prefs.loadChatRenderer() == .swiftUI)
+  }
 }

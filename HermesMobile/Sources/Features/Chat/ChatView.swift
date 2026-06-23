@@ -6,7 +6,6 @@ import SwiftUI
 /// the composer. Streams over the gateway via `ChatFeature`.
 struct ChatView: View {
   @Bindable var store: StoreOf<ChatFeature>
-  @State private var isAtBottom = true
   @FocusState private var composerFocused: Bool
 
   var body: some View {
@@ -111,69 +110,58 @@ struct ChatView: View {
     )
   }
 
+  /// The transcript, rendered behind the shared renderer boundary (`SwiftUITranscriptView`).
+  /// The reducer owns no scroll state — stick-to-bottom / pin behaviour is renderer-local.
+  /// `canLoadOlder` (= `hasMoreAbove`) gates the top sentinel so it can't page past the start
+  /// and can't get stuck mid-load when already at the true top of history.
+  @ViewBuilder
   private var transcript: some View {
-    ScrollViewReader { proxy in
-      GeometryReader { outer in
-        ScrollView {
-          LazyVStack(alignment: .leading, spacing: 10) {
-            ForEach(store.transcript) { row in
-              rowView(row)
-                .id(row.id)
-                .contextMenu {
-                  Button {
-                    store.send(.copyRow(id: row.id))
-                  } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                  }
-                }
-            }
-            // Invisible anchor at the very bottom; its position relative to the viewport
-            // tells us whether the user is scrolled to the latest message.
-            Color.clear.frame(height: 1)
-              .id(Self.bottomAnchor)
-              .background(GeometryReader { inner in
-                Color.clear.preference(
-                  key: BottomDistanceKey.self,
-                  value: inner.frame(in: .global).minY - outer.frame(in: .global).maxY
-                )
-              })
-          }
-          .padding()
-        }
-        .scrollDismissesKeyboard(.interactively)
-        // Tap on empty transcript space dismisses the keyboard without stealing taps
-        // from row buttons, context menus, or markdown links.
-        .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
-        .onPreferenceChange(BottomDistanceKey.self) { distance in
-          isAtBottom = distance < 60 // within ~60pt of the bottom counts as "at bottom"
-        }
-        // Scroll on row count changes, not just the last row's id: the thinking row is
-        // pinned last, so appending a tool/answer row reorders without changing `last?.id`.
-        .onChange(of: store.transcript.count) { _, count in
-          guard count > 0 else { return }
-          withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
-        }
-        .overlay(alignment: .bottomTrailing) {
-          if !isAtBottom {
-            ScrollToBottomButton {
-              withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
-            }
-            .padding(.trailing, 16)
-            .padding(.bottom, 12)
-            .transition(.scale.combined(with: .opacity))
-          }
-        }
-        .animation(.spring(duration: 0.25), value: isAtBottom)
+    let rows = Array(store.visibleRows)
+    let turnState: TurnState = store.isSending ? .streaming : .idle
+    let canLoadOlder = store.hasMoreAbove
+    let onLoadOlder = { _ = store.send(.loadOlderRequested) }
+
+    // The device-local A/B preference selects the engine. Both renderers share the same
+    // initializer shape and the same `cell` closure, so flipping the pref re-instantiates
+    // the chosen renderer with identical rows.
+    Group {
+      switch store.chatRenderer {
+      case .swiftUI:
+        SwiftUITranscriptView(
+          rows: rows,
+          turnState: turnState,
+          canLoadOlder: canLoadOlder,
+          onLoadOlder: onLoadOlder,
+          cell: transcriptCell
+        )
+      case .collectionView:
+        CollectionTranscriptView(
+          rows: rows,
+          turnState: turnState,
+          canLoadOlder: canLoadOlder,
+          onLoadOlder: onLoadOlder,
+          cell: transcriptCell
+        )
       }
     }
+    // Keyboard dismissal is drag-driven (`.interactively`). We intentionally do NOT add a
+    // `.simultaneousGesture(TapGesture())` here: over the SwiftUI engine's `.plain`-style
+    // `ScrollToBottomButton` that combination swallows the button's tap (the button only worked in
+    // the UICollectionView engine, whose hosted button sits outside this gesture). Dropping it
+    // makes the jump-to-bottom button tappable in both engines.
+    .scrollDismissesKeyboard(.interactively)
   }
 
-  private static let bottomAnchor = "transcript-bottom-anchor"
-
-  /// Bottom anchor's distance below the viewport bottom (≤0 ⇒ visible ⇒ at bottom).
-  private struct BottomDistanceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+  @ViewBuilder
+  private func transcriptCell(_ row: ChatRow) -> some View {
+    rowView(row)
+      .contextMenu {
+        Button {
+          store.send(.copyRow(id: row.id))
+        } label: {
+          Label("Copy", systemImage: "doc.on.doc")
+        }
+      }
   }
 
   @ViewBuilder

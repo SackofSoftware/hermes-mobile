@@ -48,6 +48,25 @@ public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
     case thinking(reasoning: String, status: String?, elapsedSeconds: Int, isComplete: Bool)
     /// A transient status line (e.g. "searching…"); `kind` is an open string.
     case status(kind: String, text: String)
+
+    /// A stable, role-agnostic token per case (NOT its mutable payload). The **single source**
+    /// for the row-identity discriminator — `ChatRow.kindDiscriminator` and
+    /// `reconstructTranscript` both read this so the value can never drift between them.
+    public var discriminator: String {
+      switch self {
+      case .message: return "message"
+      case .tool: return "tool"
+      case .thinking: return "thinking"
+      case .status: return "status"
+      }
+    }
+
+    /// The message role for `.message` cases; `nil` for non-message kinds. Single source for
+    /// role extraction used by `ChatRow.rowRole` and `reconstructTranscript`.
+    public var role: Role? {
+      if case let .message(role, _, _) = self { return role }
+      return nil
+    }
   }
 
   /// Text put on the pasteboard when the user copies this row (Task 11). Tool rows
@@ -67,6 +86,38 @@ public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
   public enum Role: Equatable, Sendable, Codable {
     case user
     case assistant
+  }
+
+  /// A stable, role-agnostic token per `Kind` *case* (NOT its mutable payload), used to
+  /// derive a deterministic, content-derived `ChatRow.ID`. Excludes streaming text so a
+  /// `message.delta` append (which mutates `text`/`reasoning`) keeps the same discriminator —
+  /// and therefore the same row id. This is why message #7's reasoning row and its text row
+  /// get distinct-but-reproducible ids: they live at distinct sequence indices with distinct
+  /// discriminators.
+  public var kindDiscriminator: String { kind.discriminator }
+
+  /// The message role for `.message` rows (used as a stable id component); `nil` for
+  /// non-message kinds.
+  var rowRole: Role? { kind.role }
+
+  /// Build a deterministic `ChatRow.ID` from `(sequenceIndex, role, kindDiscriminator)`,
+  /// excluding any mutable text so streaming deltas preserve identity. The same logical row
+  /// (same ordinal + role + kind) always hashes to the same UUID, so re-running
+  /// `reconstructTranscript` over identical history yields byte-identical ids — which is what
+  /// lets a diffing engine preserve scroll/animate inserts across a hydrate.
+  public static func deterministicID(
+    sequenceIndex: Int,
+    role: Role?,
+    kindDiscriminator: String
+  ) -> UUID {
+    let roleToken: String
+    switch role {
+    case .some(.user): roleToken = "user"
+    case .some(.assistant): roleToken = "assistant"
+    case .none: roleToken = "_"
+    }
+    let seed = "\(sequenceIndex)|\(roleToken)|\(kindDiscriminator)"
+    return UUID.deterministic(from: seed)
   }
 
   public enum ToolState: Equatable, Sendable, Codable {
@@ -101,6 +152,35 @@ public struct ToolDetail: Equatable, Sendable, Codable {
 
   public var isEmpty: Bool {
     argsText == nil && (args == nil || args == .null) && resultText == nil && inlineDiff == nil
+  }
+}
+
+extension UUID {
+  /// A reproducible UUID derived from an arbitrary seed string via two independent FNV-1a
+  /// 64-bit hashes (one over the seed, one over a salted seed) packed into the 16 UUID bytes.
+  /// Pure and platform-independent (no `Foundation` randomness / crypto), so the same seed
+  /// always yields the same UUID across runs and OSes — the property `reconstructTranscript`
+  /// relies on for stable row identity.
+  static func deterministic(from seed: String) -> UUID {
+    func fnv1a(_ string: String) -> UInt64 {
+      var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+      for byte in string.utf8 {
+        hash ^= UInt64(byte)
+        hash = hash &* 0x0000_0100_0000_01b3
+      }
+      return hash
+    }
+    let hi = fnv1a(seed)
+    let lo = fnv1a("salt:" + seed)
+    var bytes = [UInt8](repeating: 0, count: 16)
+    for i in 0..<8 { bytes[i] = UInt8(truncatingIfNeeded: hi >> (UInt64(i) * 8)) }
+    for i in 0..<8 { bytes[8 + i] = UInt8(truncatingIfNeeded: lo >> (UInt64(i) * 8)) }
+    return UUID(uuid: (
+      bytes[0], bytes[1], bytes[2], bytes[3],
+      bytes[4], bytes[5], bytes[6], bytes[7],
+      bytes[8], bytes[9], bytes[10], bytes[11],
+      bytes[12], bytes[13], bytes[14], bytes[15]
+    ))
   }
 }
 

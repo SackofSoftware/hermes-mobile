@@ -6,15 +6,22 @@ struct ScrollToBottomButton: View {
   let action: () -> Void
 
   var body: some View {
-    Button(action: action) {
-      Image(systemName: "chevron.down")
-        .font(.body.weight(.semibold))
-        .foregroundStyle(.primary)
-        .frame(width: 44, height: 44)
-    }
-    .buttonStyle(.plain) // keep the chevron `.primary`, not the accent tint
-    .modifier(GlassCircle())
-    .accessibilityLabel("Scroll to latest")
+    // Uses `.onTapGesture`, NOT `Button`: inside the SwiftUI transcript engine a `Button` here
+    // never received taps (a sibling `.onTapGesture` in the same container did — verified on
+    // device), while the UICollectionView engine hosts this view in its own controller where
+    // either works. An explicit tap gesture is reliable in both contexts; button semantics are
+    // restored for VoiceOver via accessibility traits/action.
+    Image(systemName: "chevron.down")
+      .font(.body.weight(.semibold))
+      .foregroundStyle(.primary)
+      .frame(width: 44, height: 44)
+      .modifier(GlassCircle())
+      .contentShape(Circle())
+      .onTapGesture(perform: action)
+      .accessibilityElement()
+      .accessibilityLabel("Scroll to latest")
+      .accessibilityAddTraits(.isButton)
+      .accessibilityAction(.default, action)
   }
 }
 
@@ -22,6 +29,9 @@ struct ScrollToBottomButton: View {
 private struct GlassCircle: ViewModifier {
   func body(content: Content) -> some View {
     if #available(iOS 26.0, *) {
+      // `.interactive()` gives the Liquid Glass press highlight (the glass reacts to the touch on
+      // its own — it doesn't require a `Button`), so it coexists with our `.onTapGesture` which
+      // owns the actual tap action.
       content.glassEffect(.regular.interactive(), in: .circle)
     } else {
       content

@@ -210,8 +210,8 @@ CLI and gateway sessions:
 - **clarify** — `pre_tool_call` filtered to the `clarify` tool, fired before the user is
   prompted; not duration-gated (an input-needed pause, like approval)
 
-All payloads stay generic/content-free. (A clarify turn can yield two pushes — the clarify
-"input needed" at the tool call, then "turn complete" if the whole turn runs >10s.)
+All payloads stay generic/content-free. (When a clarify push fires during a turn, the
+trailing "turn complete" for that same turn is suppressed as redundant.)
 
 ## Session re-hydration (`session.resume`)
 

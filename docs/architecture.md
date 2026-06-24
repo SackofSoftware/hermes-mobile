@@ -201,11 +201,13 @@ app's compile-time `apns_env` (`#if DEBUG` → `sandbox`, else `production`) mus
 When APNs returns `410 Unregistered` the gateway relays it (HTTP 410) so the plugin drops the
 dead token from its store.
 
-**Known limitation (documented honestly).** Approval notifications work today via the agent's
-`pre_approval_request` hook. Turn-complete / error / clarify are fully built (plugin mapper +
-gateway + app), but hermes-agent emits those events transport-scoped (no global broadcast / no
-hook), so the plugin's loopback-WS path can't observe them live without a hermes-agent change
-(a global `_emit` fan-out). They light up the moment that lands — no app/gateway change needed.
+**Triggers.** The plugin fires notifications from real Hermes plugin hooks, working in both
+CLI and gateway sessions: **approval** (`pre_approval_request`), **turn-complete**
+(`post_llm_call` — gated to longer turns via a `pre_llm_call` turn-start anchor + the ~>10s
+duration gate, so quick turns stay quiet), and **error** (`on_session_end`, genuine failures
+only — not successful or user-interrupted turns). All payloads stay generic/content-free.
+**`clarify` is not delivered** — Hermes has no registerable hook for an input-needed pause —
+so that one trigger is currently unsupported.
 
 ## Session re-hydration (`session.resume`)
 

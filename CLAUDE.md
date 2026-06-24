@@ -180,10 +180,11 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   requested on the sessions-list appearance** (right after login), per the product decision — NOT
   first launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
   canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload
-  parse, foreground-suppression) outside the guard. **Triggers fire via real plugin hooks**
-  (CLI + gateway): approval (`pre_approval_request`), turn-complete (`post_llm_call`, gated to
-  ~>10s turns via a `pre_llm_call` start anchor), and error (`on_session_end`, genuine failures
-  only — not success/interrupt). `clarify` is **not** delivered (Hermes exposes no hook for it).
+  parse, foreground-suppression) outside the guard. **All four triggers fire via real plugin
+  hooks** (CLI + gateway): approval (`pre_approval_request`), turn-complete (`post_llm_call`,
+  gated to ~>10s turns via a `pre_llm_call` start anchor), error (`on_session_end`, genuine
+  failures only — not success/interrupt), and clarify (`pre_tool_call` filtered to the `clarify`
+  tool, fired before the user is prompted — not duration-gated).
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky

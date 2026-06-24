@@ -202,12 +202,16 @@ When APNs returns `410 Unregistered` the gateway relays it (HTTP 410) so the plu
 dead token from its store.
 
 **Triggers.** The plugin fires notifications from real Hermes plugin hooks, working in both
-CLI and gateway sessions: **approval** (`pre_approval_request`), **turn-complete**
-(`post_llm_call` — gated to longer turns via a `pre_llm_call` turn-start anchor + the ~>10s
-duration gate, so quick turns stay quiet), and **error** (`on_session_end`, genuine failures
-only — not successful or user-interrupted turns). All payloads stay generic/content-free.
-**`clarify` is not delivered** — Hermes has no registerable hook for an input-needed pause —
-so that one trigger is currently unsupported.
+CLI and gateway sessions:
+- **approval** — `pre_approval_request`
+- **turn-complete** — `post_llm_call`, gated to longer turns via a `pre_llm_call` turn-start
+  anchor + the ~>10s duration gate, so quick turns stay quiet
+- **error** — `on_session_end`, genuine failures only (not successful or user-interrupted turns)
+- **clarify** — `pre_tool_call` filtered to the `clarify` tool, fired before the user is
+  prompted; not duration-gated (an input-needed pause, like approval)
+
+All payloads stay generic/content-free. (A clarify turn can yield two pushes — the clarify
+"input needed" at the tool call, then "turn complete" if the whole turn runs >10s.)
 
 ## Session re-hydration (`session.resume`)
 

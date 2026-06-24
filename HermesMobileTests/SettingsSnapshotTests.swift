@@ -77,6 +77,14 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  /// The "how push works / install the plugin" info sheet.
+  func testPushSetupGuideView() {
+    let view = NavigationStack {
+      PushSetupGuideView()
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   func testConnectionDebugView() {
     let view = NavigationStack {
       ConnectionDebugView(entries: [

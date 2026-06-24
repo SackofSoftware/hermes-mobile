@@ -7,6 +7,9 @@ import UIKit
 /// the live connection debug log.
 struct SettingsView: View {
   @Bindable var store: StoreOf<SettingsFeature>
+  /// Presentation-only: the "how push works / install the plugin" info sheet. Pure view
+  /// state — there's no reducer behavior behind it.
+  @State private var showingPushGuide = false
 
   var body: some View {
     Form {
@@ -84,15 +87,20 @@ struct SettingsView: View {
             Label("Couldn't send test notification", systemImage: "exclamationmark.triangle")
               .foregroundStyle(.orange).font(.footnote)
           }
+          Button("How push notifications work") { showingPushGuide = true }
+            .font(.footnote)
         } else {
           Label("Notifications aren't available on this server", systemImage: "bell.slash")
             .foregroundStyle(.secondary).font(.footnote)
+          Button("How to enable push notifications") { showingPushGuide = true }
         }
       } header: {
         Text("Notifications")
       } footer: {
         if store.pushAvailable {
           Text("Get a push when Hermes needs your approval, even while the app is closed.")
+        } else {
+          Text("Needs the hermes-push plugin running on your agent.")
         }
       }
 
@@ -111,6 +119,7 @@ struct SettingsView: View {
         Button("Done") { store.send(.doneTapped) }
       }
     }
+    .sheet(isPresented: $showingPushGuide) { PushSetupGuideView() }
     .task { store.send(.task) }
   }
 }

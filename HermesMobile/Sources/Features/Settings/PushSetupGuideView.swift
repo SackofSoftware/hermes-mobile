@@ -1,27 +1,22 @@
+import HermesKit
 import SwiftUI
-import UIKit
 
-/// Static, presentation-only info sheet explaining how push notifications work and how to
-/// install the `hermes-push` plugin on the user's own Hermes agent. There is no reducer
-/// state behind it — it's presented via local `@State` from `SettingsView` (mirrors the
-/// context-usage popover convention: pure presentation stays out of the reducer).
+/// Presentation-only info sheet explaining how push notifications work and offering two
+/// actions: ask the agent to install the `hermes-push` plugin (pre-fills a new chat), or
+/// snooze ("Later"). A small text link opens the plugin's GitHub page.
 ///
 /// It deliberately talks about the **plugin only** — the relay/gateway is publisher infra
-/// the user never has to know about.
+/// the user never has to know about. The two actions are surfaced as closures so both call
+/// sites (the sessions-list auto-present and Settings) reuse the same view.
 struct PushSetupGuideView: View {
   @Environment(\.dismiss) private var dismiss
 
-  /// Public repo for the plugin users install on their own agent.
-  private static let pluginURL = URL(string: "https://github.com/goncharik/hermes-mobile-push-plugin")!
-  private static let installCommand =
-    "pip install git+https://github.com/goncharik/hermes-mobile-push-plugin.git"
-  /// A ready-to-paste instruction the user can hand to their own agent to self-install.
-  private static let installPrompt = """
-    Please install the hermes-push plugin so I can receive push notifications on my phone. \
-    Run: pip install git+https://github.com/goncharik/hermes-mobile-push-plugin.git — it's a \
-    standard Hermes plugin (entry-point group "hermes_agent.plugins"). Then restart yourself \
-    so the plugin loads and its REST routes mount.
-    """
+  /// Open a new chat with the install prompt pre-filled (the caller dismisses + routes).
+  let onAskAgent: () -> Void
+  /// Snooze the prompt (the caller dismisses + persists the backoff).
+  let onLater: () -> Void
+
+  private static let pluginURL = URL(string: PushSetup.pluginURLString)!
 
   var body: some View {
     NavigationStack {
@@ -38,32 +33,29 @@ struct PushSetupGuideView: View {
           point(
             "It runs on your own agent",
             icon: "lock.shield",
-            text: "Notifications are triggered by a small plugin on your Hermes agent and relayed to Apple. Only a generic alert (e.g. “Approval needed”) leaves your server — your messages and data never do."
+            text: "Notifications come from a small plugin on your own Hermes agent, relayed to Apple. Only a generic alert (e.g. “Approval needed”) leaves your server — your messages and data never do."
           )
 
-          VStack(alignment: .leading, spacing: 8) {
-            Label("Install the plugin", systemImage: "terminal")
-              .font(.headline)
-            Text("On the machine running your Hermes agent, install the plugin and restart the agent:")
-              .font(.subheadline)
-              .foregroundStyle(.secondary)
-            CopyableBlock(text: Self.installCommand)
+          VStack(spacing: 12) {
+            Button {
+              onAskAgent()
+            } label: {
+              Label("Ask agent to install", systemImage: "sparkles")
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
 
-            Text("Or just ask your agent to install it — paste this prompt:")
-              .font(.subheadline)
-              .foregroundStyle(.secondary)
-              .padding(.top, 4)
-            CopyableBlock(text: Self.installPrompt)
+            Button("Later") { onLater() }
+              .buttonStyle(.bordered)
+              .controlSize(.large)
+              .frame(maxWidth: .infinity)
           }
+          .padding(.top, 4)
 
-          Link(destination: Self.pluginURL) {
-            Label("View the plugin on GitHub", systemImage: "arrow.up.right.square")
-          }
-          .font(.body.weight(.medium))
-
-          Text("Once the plugin is running, reopen Settings — the notifications toggle will appear.")
+          Link("View the plugin on GitHub", destination: Self.pluginURL)
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -71,8 +63,8 @@ struct PushSetupGuideView: View {
       .navigationTitle("Push notifications")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .confirmationAction) {
-          Button("Done") { dismiss() }
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Close") { dismiss() }
         }
       }
     }
@@ -98,48 +90,6 @@ struct PushSetupGuideView: View {
   }
 }
 
-/// A monospaced box with a top-trailing copy button — mirrors the chat's `CodeBlockView`
-/// (`doc.on.doc` → green `checkmark` on copy). Self-contained: the "copied" feedback is
-/// local `@State` (this sheet has no reducer), and it copies via `UIPasteboard` directly
-/// since copying is a pure view concern here.
-private struct CopyableBlock: View {
-  let text: String
-  @State private var isCopied = false
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  var body: some View {
-    Text(text)
-      .font(.system(.footnote, design: .monospaced))
-      .textSelection(.enabled)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(10)
-      .padding(.trailing, 28) // leave room for the copy button
-      .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-      .overlay(alignment: .topTrailing) {
-        Button(action: copy) {
-          Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-            .font(.caption.weight(.medium))
-            .foregroundStyle(isCopied ? Color.green : Color.secondary)
-            .padding(6)
-            .background(.thinMaterial, in: .circle)
-        }
-        .buttonStyle(.plain)
-        .padding(6)
-        .accessibilityLabel(isCopied ? "Copied" : "Copy")
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isCopied)
-      }
-  }
-
-  private func copy() {
-    UIPasteboard.general.string = text
-    isCopied = true
-    Task {
-      try? await Task.sleep(for: .seconds(2))
-      isCopied = false
-    }
-  }
-}
-
 #Preview {
-  PushSetupGuideView()
+  PushSetupGuideView(onAskAgent: {}, onLater: {})
 }

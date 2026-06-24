@@ -201,11 +201,16 @@ public struct AppFeature {
         state.pendingApprovalSessionIDs.remove(session.id)
         return setBadge(state)
 
-      case .home(.delegate(.createSession)):
+      case let .home(.delegate(.createSession(initialComposerText))):
         guard let home = state.home else { return .none }
-        // New chats are created under the currently-selected profile.
+        // New chats are created under the currently-selected profile. `initialComposerText`
+        // (push "Ask agent to install") seeds the composer draft but is NOT auto-sent.
         state.path.append(
-          ChatFeature.State(connection: home.connection, profileName: home.scopedProfileName)
+          ChatFeature.State(
+            connection: home.connection,
+            profileName: home.scopedProfileName,
+            composerText: initialComposerText ?? ""
+          )
         )
         return .none
 
@@ -291,6 +296,7 @@ public struct AppFeature {
   private func unregisterPushOnLogout(connection: ServerConnection?) -> Effect<AppFeature.Action> {
     let token = preferences.loadPushDeviceToken()
     preferences.clearPushDeviceToken()
+    preferences.clearPushPromptSnooze() // device-local push prompt state — reset on logout
     guard let connection, let token else { return .none }
     return .run { [rest] _ in
       try? await rest.unregisterPush(connection, token)

@@ -132,6 +132,12 @@ public struct HermesRESTClient: Sendable {
   /// button to verify the end-to-end pipeline. A missing plugin surfaces as
   /// `RESTError.notFound` (404).
   public var sendTestPush: @Sendable (_ connection: ServerConnection) async throws -> Void
+  /// Authoritative readiness probe for the `hermes-push` plugin — `GET /api/dashboard/plugins/hub`
+  /// → `{plugins: [{name, runtime_status, …}], …}`. Matches the plugin by `name == "hermes-push"`
+  /// and maps: `runtime_status == "enabled"` → `.ready`; present-but-not-enabled or absent →
+  /// `.notReady`; a 404 / transport failure → `.unknown` (don't nag — caller leaves capability
+  /// as-is). Used on the session list and to gate the Settings toggle.
+  public var pushPluginStatus: @Sendable (_ connection: ServerConnection) async throws -> PushPluginStatus
 }
 
 public extension HermesRESTClient {
@@ -246,6 +252,22 @@ public extension HermesRESTClient {
         // No body needed — the plugin looks up the caller's registered device(s).
         // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
         try await send(url, method: "POST", body: Data("{}".utf8), token: conn.token, session: session)
+      },
+      pushPluginStatus: { conn in
+        let url = try makeURL(conn.baseURL, "/api/dashboard/plugins/hub")
+        do {
+          let response: PluginsHubResponse = try await get(url, token: conn.token, session: session)
+          // Match our plugin by name; `runtime_status == "enabled"` is the only "ready" state.
+          guard let plugin = response.plugins.first(where: { $0.name == PushSetup.pluginName })
+          else { return .notReady } // absent from the list → not installed
+          return plugin.runtimeStatus == "enabled" ? .ready : .notReady
+        } catch RESTError.notFound {
+          // Endpoint missing (old agent / no dashboard) → can't tell; don't nag.
+          return .unknown
+        } catch {
+          // Any transport/HTTP/decode failure → unknown (leave capability as-is).
+          return .unknown
+        }
       }
     )
   }
@@ -507,4 +529,21 @@ private struct TranscriptionResponse: Decodable {
   let transcript: String?
   let provider: String?
   let error: String?
+}
+
+/// `/api/dashboard/plugins/hub` response — `{plugins: [{name, runtime_status, …}], …}`. We
+/// only read the plugin rows (and only `name` + `runtime_status` off each); everything else is
+/// ignored leniently.
+private struct PluginsHubResponse: Decodable {
+  let plugins: [PluginHubItem]
+}
+
+private struct PluginHubItem: Decodable {
+  let name: String
+  let runtimeStatus: String?
+
+  enum CodingKeys: String, CodingKey {
+    case name
+    case runtimeStatus = "runtime_status"
+  }
 }

@@ -119,7 +119,15 @@ struct SettingsView: View {
         Button("Done") { store.send(.doneTapped) }
       }
     }
-    .sheet(isPresented: $showingPushGuide) { PushSetupGuideView() }
+    .sheet(isPresented: $showingPushGuide) {
+      PushSetupGuideView(
+        onAskAgent: {
+          showingPushGuide = false
+          store.send(.askAgentToInstallTapped)
+        },
+        onLater: { showingPushGuide = false }
+      )
+    }
     .task { store.send(.task) }
   }
 }

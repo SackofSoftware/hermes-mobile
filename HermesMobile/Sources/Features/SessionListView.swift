@@ -104,6 +104,14 @@ struct SessionListView: View {
         AddProfileView(store: addProfileStore)
       }
     }
+    // Push onboarding info sheet — raised by the reducer when the plugin isn't ready and the
+    // prompt isn't snoozed. Its two buttons send `SessionListFeature` actions.
+    .sheet(isPresented: $store.showPushSetupSheet) {
+      PushSetupGuideView(
+        onAskAgent: { store.send(.pushSetupAskAgentTapped) },
+        onLater: { store.send(.pushSetupLaterTapped) }
+      )
+    }
   }
 
   /// The non-search list body: the "Sessions" header, the pinned section, the interactive

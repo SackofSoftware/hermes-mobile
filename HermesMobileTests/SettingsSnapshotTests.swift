@@ -77,11 +77,9 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// The "how push works / install the plugin" info sheet.
+  /// The "how push works" info sheet — two buttons (Ask agent / Later) + a GitHub link.
   func testPushSetupGuideView() {
-    let view = NavigationStack {
-      PushSetupGuideView()
-    }
+    let view = PushSetupGuideView(onAskAgent: {}, onLater: {})
     assertSnapshot(of: view, as: deviceImage())
   }
 

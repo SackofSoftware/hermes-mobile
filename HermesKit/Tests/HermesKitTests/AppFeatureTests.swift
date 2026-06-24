@@ -134,9 +134,25 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.home(.delegate(.createSession))) {
+    await store.send(.home(.delegate(.createSession(initialComposerText: nil)))) {
       $0.path.append(
-        ChatFeature.State(connection: self.connection, profileName: nil)
+        ChatFeature.State(connection: self.connection, profileName: nil, composerText: "")
+      )
+    }
+  }
+
+  @Test func creatingSessionWithPrefilledComposerSeedsDraft() async {
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.home(.delegate(.createSession(initialComposerText: PushSetup.installPrompt)))) {
+      $0.path.append(
+        ChatFeature.State(
+          connection: self.connection, profileName: nil, composerText: PushSetup.installPrompt
+        )
       )
     }
   }
@@ -176,9 +192,9 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.home(.delegate(.createSession))) {
+    await store.send(.home(.delegate(.createSession(initialComposerText: nil)))) {
       $0.path.append(
-        ChatFeature.State(connection: self.connection, profileName: "work")
+        ChatFeature.State(connection: self.connection, profileName: "work", composerText: "")
       )
     }
   }
@@ -390,9 +406,9 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.home(.delegate(.createSession))) {
+    await store.send(.home(.delegate(.createSession(initialComposerText: nil)))) {
       $0.path.append(
-        ChatFeature.State(connection: self.connection, profileName: nil)
+        ChatFeature.State(connection: self.connection, profileName: nil, composerText: "")
       )
     }
   }

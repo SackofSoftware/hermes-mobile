@@ -143,4 +143,37 @@ struct PreferencesClientTests {
     prefs.clearIdentityScopedPrefs()
     #expect(prefs.loadChatRenderer() == .swiftUI)
   }
+
+  // MARK: Push prompt snooze
+
+  @Test func inMemoryPushPromptSnoozeRoundTripAndClear() {
+    let prefs = PreferencesClient.inMemory()
+    #expect(prefs.loadPushPromptSnooze() == nil) // never snoozed
+
+    let until = Date(timeIntervalSince1970: 1_750_000_000)
+    prefs.savePushPromptSnooze(3, until)
+    let snooze = prefs.loadPushPromptSnooze()
+    #expect(snooze?.count == 3)
+    #expect(snooze?.until == until)
+
+    prefs.clearPushPromptSnooze()
+    #expect(prefs.loadPushPromptSnooze() == nil)
+  }
+
+  @Test func livePushPromptSnoozeBacksOntoProvidedDefaults() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.pushsnooze")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.pushsnooze")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    #expect(prefs.loadPushPromptSnooze() == nil) // no `until` persisted yet
+    let until = Date(timeIntervalSince1970: 1_750_000_000)
+    prefs.savePushPromptSnooze(2, until)
+    #expect(suite.integer(forKey: "hermes.push-prompt-snooze-count") == 2)
+    let snooze = prefs.loadPushPromptSnooze()
+    #expect(snooze?.count == 2)
+    #expect(snooze?.until == until)
+
+    prefs.clearPushPromptSnooze()
+    #expect(prefs.loadPushPromptSnooze() == nil)
+  }
 }

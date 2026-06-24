@@ -35,6 +35,12 @@ public struct PreferencesClient: Sendable {
   public var loadPushDeviceToken: @Sendable () -> String? = { nil }
   public var savePushDeviceToken: @Sendable (_ token: String) -> Void
   public var clearPushDeviceToken: @Sendable () -> Void
+  /// Push info-sheet snooze: the number of "Later" taps so far (drives the Fibonacci backoff)
+  /// and the Date until which the sheet stays suppressed. `nil` count/date means never snoozed.
+  /// Cleared on logout (and when the plugin becomes ready, so a later uninstall re-prompts fresh).
+  public var loadPushPromptSnooze: @Sendable () -> (count: Int, until: Date)? = { nil }
+  public var savePushPromptSnooze: @Sendable (_ count: Int, _ until: Date) -> Void
+  public var clearPushPromptSnooze: @Sendable () -> Void
 }
 
 public extension PreferencesClient {
@@ -59,6 +65,8 @@ public extension PreferencesClient {
     let selectedProfileKey = "hermes.selected-profile-id"
     let chatRendererKey = "hermes.chat-renderer"
     let pushTokenKey = "hermes.push-device-token"
+    let pushSnoozeCountKey = "hermes.push-prompt-snooze-count"
+    let pushSnoozeUntilKey = "hermes.push-prompt-snooze-until"
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
     return PreferencesClient(
@@ -82,7 +90,21 @@ public extension PreferencesClient {
       saveChatRenderer: { store.set($0.rawValue, forKey: chatRendererKey) },
       loadPushDeviceToken: { store.string(forKey: pushTokenKey) },
       savePushDeviceToken: { store.set($0, forKey: pushTokenKey) },
-      clearPushDeviceToken: { store.removeObject(forKey: pushTokenKey) }
+      clearPushDeviceToken: { store.removeObject(forKey: pushTokenKey) },
+      loadPushPromptSnooze: {
+        // A missing `until` (never snoozed) returns nil; the count defaults to 0 otherwise.
+        guard store.object(forKey: pushSnoozeUntilKey) != nil else { return nil }
+        let until = Date(timeIntervalSince1970: store.double(forKey: pushSnoozeUntilKey))
+        return (count: store.integer(forKey: pushSnoozeCountKey), until: until)
+      },
+      savePushPromptSnooze: { count, until in
+        store.set(count, forKey: pushSnoozeCountKey)
+        store.set(until.timeIntervalSince1970, forKey: pushSnoozeUntilKey)
+      },
+      clearPushPromptSnooze: {
+        store.removeObject(forKey: pushSnoozeCountKey)
+        store.removeObject(forKey: pushSnoozeUntilKey)
+      }
     )
   }
 
@@ -95,6 +117,7 @@ public extension PreferencesClient {
     let selectedProfile = LockIsolated<String?>(nil)
     let chatRenderer = LockIsolated<ChatRendererKind>(.default)
     let pushToken = LockIsolated<String?>(nil)
+    let pushSnooze = LockIsolated<(count: Int, until: Date)?>(nil)
     return PreferencesClient(
       loadServerURL: { box.value },
       saveServerURL: { url in box.setValue(url) },
@@ -112,7 +135,10 @@ public extension PreferencesClient {
       saveChatRenderer: { chatRenderer.setValue($0) },
       loadPushDeviceToken: { pushToken.value },
       savePushDeviceToken: { pushToken.setValue($0) },
-      clearPushDeviceToken: { pushToken.setValue(nil) }
+      clearPushDeviceToken: { pushToken.setValue(nil) },
+      loadPushPromptSnooze: { pushSnooze.value },
+      savePushPromptSnooze: { count, until in pushSnooze.setValue((count: count, until: until)) },
+      clearPushPromptSnooze: { pushSnooze.setValue(nil) }
     )
   }
 }

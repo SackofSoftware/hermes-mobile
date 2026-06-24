@@ -493,5 +493,50 @@ struct HermesRESTClientTests {
       try await makeClient().sendTestPush(connection)
     }
   }
+
+  // MARK: - Push plugin readiness (GET /api/dashboard/plugins/hub)
+
+  @Test func pushPluginStatusEnabledIsReady() async throws {
+    MockURLProtocol.set(json: #"""
+      {"plugins":[{"name":"other","runtime_status":"inactive"},
+                  {"name":"hermes-push","runtime_status":"enabled","version":"1.0"}]}
+      """#)
+    let status = try await makeClient().pushPluginStatus(connection)
+    #expect(status == .ready)
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/dashboard/plugins/hub")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+  }
+
+  @Test func pushPluginStatusDisabledIsNotReady() async throws {
+    MockURLProtocol.set(json: #"{"plugins":[{"name":"hermes-push","runtime_status":"disabled"}]}"#)
+    #expect(try await makeClient().pushPluginStatus(connection) == .notReady)
+  }
+
+  @Test func pushPluginStatusInactiveIsNotReady() async throws {
+    MockURLProtocol.set(json: #"{"plugins":[{"name":"hermes-push","runtime_status":"inactive"}]}"#)
+    #expect(try await makeClient().pushPluginStatus(connection) == .notReady)
+  }
+
+  @Test func pushPluginStatusAbsentIsNotReady() async throws {
+    MockURLProtocol.set(json: #"{"plugins":[{"name":"something-else","runtime_status":"enabled"}]}"#)
+    #expect(try await makeClient().pushPluginStatus(connection) == .notReady)
+  }
+
+  @Test func pushPluginStatusNotFoundIsUnknown() async throws {
+    MockURLProtocol.set(status: 404)
+    #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
+  }
+
+  @Test func pushPluginStatusTransportErrorIsUnknown() async throws {
+    MockURLProtocol.set(fail: true)
+    #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
+  }
+
+  @Test func pushPluginStatusServerErrorIsUnknown() async throws {
+    MockURLProtocol.set(status: 500)
+    #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
+  }
 }
 } // extension RESTTransportSuite

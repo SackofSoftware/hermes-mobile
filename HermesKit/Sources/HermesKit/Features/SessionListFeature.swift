@@ -57,6 +57,10 @@ public struct SessionListFeature {
     /// (plugin not installed). Threaded into Settings so the notifications UI is capability-gated.
     /// Defaults to `true` (optimistic) so we attempt registration before the first probe.
     public var pushAvailable: Bool
+    /// Whether the push info sheet is presented. Raised when the plugin is not ready and the
+    /// prompt isn't currently snoozed; dismissed by either of the sheet's two buttons. Pure
+    /// presentation state (a `Bool`) — the sheet's buttons send `SessionListFeature` actions.
+    public var showPushSetupSheet: Bool
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
     @Presents public var addProfile: AddProfileFeature.State?
@@ -89,6 +93,7 @@ public struct SessionListFeature {
       renamingProfileName: String? = nil,
       profileRenameDraft: String = "",
       pushAvailable: Bool = true,
+      showPushSetupSheet: Bool = false,
       settings: SettingsFeature.State? = nil,
       addProfile: AddProfileFeature.State? = nil
     ) {
@@ -112,6 +117,7 @@ public struct SessionListFeature {
       self.renamingProfileName = renamingProfileName
       self.profileRenameDraft = profileRenameDraft
       self.pushAvailable = pushAvailable
+      self.showPushSetupSheet = showPushSetupSheet
       self.settings = settings
       self.addProfile = addProfile
     }
@@ -269,9 +275,20 @@ public struct SessionListFeature {
     /// sessions. A no-op for an unknown id (the session isn't in the current list).
     case setSessionRunning(id: Session.ID, running: Bool)
     // MARK: Push notifications
-    /// Kicks off contextual push setup once the list appears (right after login): prompt for
-    /// authorization, and if granted, start observing the device-token stream. Fired from `.task`.
+    /// Kicks off contextual push setup once the list appears (right after login): first probe
+    /// the `hermes-push` plugin readiness, then branch on the result. Fired from `.task`.
     case setupPush
+    /// Result of the plugin-readiness probe (`rest.pushPluginStatus`). `ready` → permission +
+    /// register (and clear any snooze); `notReady` → set `pushAvailable=false` and raise the
+    /// info sheet unless snoozed; `unknown` → leave capability as-is (don't nag).
+    case pushPluginStatusLoaded(PushPluginStatus)
+    /// Begin the permission-request + token-observe flow (only when the plugin is ready).
+    case requestPushAuthorization
+    /// The info sheet's "Ask agent to install" button — open a new chat with the install prompt
+    /// pre-filled in the composer (dismisses the sheet; bubbles up via the create delegate).
+    case pushSetupAskAgentTapped
+    /// The info sheet's "Later" button — dismiss + snooze (Fibonacci backoff on the Later count).
+    case pushSetupLaterTapped
     /// A device token arrived from `PushClient.register()` (initial registration OR an OS
     /// rotation) — (re-)register it with the agent. Carries the lowercase-hex token.
     case pushTokenReceived(String)
@@ -290,7 +307,9 @@ public struct SessionListFeature {
     @CasePathable
     public enum Delegate {
       case openSession(Session)
-      case createSession
+      /// Open a NEW chat. `initialComposerText` (when non-nil) is pre-filled in the composer
+      /// but NOT sent — used by the push "Ask agent to install" flow so the user reviews + sends.
+      case createSession(initialComposerText: String?)
       case disconnect
     }
   }
@@ -377,10 +396,42 @@ public struct SessionListFeature {
         return .none
 
       case .setupPush:
-        // Contextual permission request (after login, on the list). If granted, observe the
-        // device-token stream as a long-running cancellable effect — each emitted token (the
-        // first registration and any OS rotation) drives a (re-)register. If denied we do
-        // nothing further; the toggle in Settings can re-prompt later.
+        // Push onboarding (after login, on the list). FIRST probe whether the `hermes-push`
+        // plugin is installed + enabled (a REST-only check that works without the WS); the
+        // result decides whether to request permission, raise the info sheet, or do nothing.
+        return .run { [rest, connection = state.connection] send in
+          let status = (try? await rest.pushPluginStatus(connection)) ?? .unknown
+          await send(.pushPluginStatusLoaded(status))
+        }
+        .cancellable(id: CancelID.pushTokens, cancelInFlight: true)
+
+      case let .pushPluginStatusLoaded(status):
+        switch status {
+        case .ready:
+          // Plugin is live → push is available. Clear any prior snooze (so a later uninstall
+          // re-prompts fresh) and run the existing permission-request + token-register flow.
+          state.pushAvailable = true
+          state.showPushSetupSheet = false
+          preferences.clearPushPromptSnooze()
+          return .send(.requestPushAuthorization)
+        case .notReady:
+          // Plugin absent / disabled → push isn't available. Raise the info sheet unless the
+          // prompt is currently snoozed (Fibonacci backoff from prior "Later" taps).
+          state.pushAvailable = false
+          if !isPushPromptSnoozed() {
+            state.showPushSetupSheet = true
+          }
+          return .none
+        case .unknown:
+          // Endpoint 404 / network error — can't tell. Don't nag; leave capability as-is.
+          return .none
+        }
+
+      case .requestPushAuthorization:
+        // Contextual permission request. If granted, observe the device-token stream as a
+        // long-running cancellable effect — each emitted token (the first registration and any
+        // OS rotation) drives a (re-)register. If denied we do nothing further; the toggle in
+        // Settings can re-prompt later.
         return .run { [push] send in
           guard await push.requestAuthorization() else { return }
           for await token in push.register() {
@@ -388,6 +439,21 @@ public struct SessionListFeature {
           }
         }
         .cancellable(id: CancelID.pushTokens, cancelInFlight: true)
+
+      case .pushSetupAskAgentTapped:
+        // Dismiss the sheet and open a new chat with the install prompt pre-filled (NOT sent —
+        // the user reviews and sends). Bubbles up via the create delegate, carrying the text.
+        state.showPushSetupSheet = false
+        return .send(.delegate(.createSession(initialComposerText: PushSetup.installPrompt)))
+
+      case .pushSetupLaterTapped:
+        // Dismiss + snooze: bump the Later count and push the next prompt out by the matching
+        // Fibonacci interval, persisting both so it survives relaunch.
+        state.showPushSetupSheet = false
+        let count = (preferences.loadPushPromptSnooze()?.count ?? 0) + 1
+        let until = now.addingTimeInterval(Double(pushPromptSnoozeDays(laterCount: count)) * 86_400)
+        preferences.savePushPromptSnooze(count, until)
+        return .none
 
       case let .pushTokenReceived(token):
         // (Re-)register this device token with the agent's push plugin, threading the
@@ -645,7 +711,7 @@ public struct SessionListFeature {
         return .none
 
       case .newSessionButtonTapped:
-        return .send(.delegate(.createSession))
+        return .send(.delegate(.createSession(initialComposerText: nil)))
 
       case .settingsButtonTapped:
         state.settings = SettingsFeature.State(
@@ -822,6 +888,12 @@ public struct SessionListFeature {
         // Manual reconnect = re-fetch the list over REST.
         return .send(.pulledToRefresh)
 
+      case .settings(.presented(.delegate(.installPushPlugin))):
+        // The Settings push guide's "Ask agent" → dismiss Settings (Settings already requested
+        // its own dismissal) and open a new chat with the install prompt pre-filled.
+        state.settings = nil
+        return .send(.delegate(.createSession(initialComposerText: PushSetup.installPrompt)))
+
       case .settings:
         return .none
 
@@ -869,6 +941,13 @@ public struct SessionListFeature {
     // Shared `fetch` id: a newer load/search/poll cancels this one, so an older in-flight
     // fetch finishing late can't overwrite `state.sessions` (stale list or search results).
     .cancellable(id: CancelID.fetch, cancelInFlight: true)
+  }
+
+  /// Whether the push info sheet is currently snoozed — a persisted `until` exists and `now`
+  /// is still before it. A cleared snooze (ready/logout) or an elapsed window returns `false`.
+  private func isPushPromptSnoozed() -> Bool {
+    guard let snooze = preferences.loadPushPromptSnooze() else { return false }
+    return now < snooze.until
   }
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {

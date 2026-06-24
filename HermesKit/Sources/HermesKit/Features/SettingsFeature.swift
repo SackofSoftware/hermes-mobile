@@ -85,6 +85,9 @@ public struct SettingsFeature {
     case sendTestPushTapped
     /// Result of the test-push request.
     case testPushResult(Bool)
+    /// The push guide's "Ask agent to install" button — dismiss Settings and bubble up so the
+    /// app opens a new chat with the install prompt pre-filled.
+    case askAgentToInstallTapped
     case delegate(Delegate)
 
     @CasePathable
@@ -92,6 +95,9 @@ public struct SettingsFeature {
       case disconnect             // token cleared → back to onboarding
       case reconnect              // reload the session list
       case tokenSaved(String)     // re-pasted token persisted
+      /// The push guide's "Ask agent to install" — dismiss Settings and open a new chat with
+      /// the install prompt pre-filled (handled up the chain by `AppFeature`).
+      case installPushPlugin
     }
   }
 
@@ -196,6 +202,14 @@ public struct SettingsFeature {
       case let .testPushResult(ok):
         state.testPushStatus = ok ? .sent : .failed
         return .none
+
+      case .askAgentToInstallTapped:
+        // Dismiss Settings and bubble up — `AppFeature` opens a new chat with the install
+        // prompt pre-filled (the user reviews and sends).
+        return .merge(
+          .send(.delegate(.installPushPlugin)),
+          .run { [dismiss] _ in await dismiss() }
+        )
 
       case let .logUpdated(entries):
         state.log = entries

@@ -173,10 +173,17 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   **per-build-configuration** via `$(APS_ENVIRONMENT)` (Debug → `development`, Release →
   `production`) in `Project.swift`, NOT a static value (Tuist emits the entitlement verbatim with
   no Xcode export rewrite, so a static `development` would ship a sandbox entitlement on Release).
-  **The app does NOT sign pushes** — the **plugin** signs each push with a **single shared HMAC
-  secret** (`HERMES_PUSH_HMAC_SECRET`, provisioned to both the plugin and the stateless gateway;
-  the gateway has no per-device store so a per-device secret could never verify). So registration
-  returns no secret and the app persists none (no Keychain push-secret). **Permission is
+  **The app does NOT sign pushes, and the plugin holds NO shared secret** — the gateway is the
+  only place the signing key (`HMAC_SECRET`) lives (a single hosted gateway serves all App Store
+  users, so a plugin-held shared secret would be world-readable). The gateway instead **issues a
+  device-scoped capability**: `POST /register {device_token} → {capability}` where
+  `capability = hex(HMAC-SHA256(HMAC_SECRET, "hpc1:"+device_token))`. The plugin fetches it lazily,
+  caches it per-device in its token store, and presents it on every `POST /push` (which **requires**
+  `capability` — the old shared-secret `hmac`-over-all-fields is gone), re-fetching once on a
+  `403 invalid_capability`. A leaked capability can only push to its own device. The iOS app is
+  unchanged: it still calls the **plugin's** `/register` (`{device_token, apns_env, app_version}` →
+  `{ok, device_token, apns_env}`, a different endpoint from the gateway's capability `/register`)
+  and persists no secret (no Keychain push-secret). **Permission is
   requested on the sessions-list appearance** (right after login), per the product decision — NOT
   first launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
   canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload

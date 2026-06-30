@@ -27,9 +27,12 @@ struct PushSetupTests {
     #expect(pushPromptSnoozeDays(laterCount: -5) == 1)
   }
 
-  // The install prompt is defined once and references the plugin's pip-install command.
-  @Test func installPromptMentionsPipInstall() {
-    #expect(PushSetup.installPrompt.contains("pip install"))
+  // The install prompt asks the agent to install the plugin as a DIRECTORY plugin (clone into
+  // ~/.hermes/plugins/) and enable it — a plain pip install won't mount the registration route.
+  @Test func installPromptDescribesDirectoryInstall() {
+    #expect(PushSetup.installPrompt.contains("git clone"))
+    #expect(PushSetup.installPrompt.contains("~/.hermes/plugins/hermes-push"))
+    #expect(PushSetup.installPrompt.contains("plugins.enabled") || PushSetup.installPrompt.contains("plugins enable"))
     #expect(PushSetup.installPrompt.contains("hermes-push"))
   }
 }

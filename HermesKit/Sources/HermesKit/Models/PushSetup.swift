@@ -15,13 +15,16 @@ public enum PushSetup {
 
   /// Defined ONCE here so the reducer can seed a new chat's composer with it (and the info
   /// sheet no longer renders it). A plain, ready-to-send instruction the user reviews before
-  /// sending — it asks the agent to pip-install the standard Hermes plugin and restart so its
-  /// REST routes mount.
+  /// sending — it asks the agent to install the plugin **as a directory plugin** (the only
+  /// install that mounts its registration route) and enable + restart.
   public static let installPrompt = """
-    Please install the hermes-push plugin so I can receive push notifications on my phone. \
-    Run: pip install git+https://github.com/goncharik/hermes-mobile-push-plugin.git — it's a \
-    standard Hermes plugin (entry-point group "hermes_agent.plugins"). Then restart yourself \
-    so the plugin loads and its REST routes mount.
+    Please install the hermes-push plugin so I can receive push notifications on my phone. It \
+    has to be installed as a directory plugin (a plain pip install loads the hooks but does NOT \
+    mount the registration route the app needs). Run: \
+    git clone https://github.com/goncharik/hermes-mobile-push-plugin.git ~/.hermes/plugins/hermes-push \
+    (and `pip install fastapi` if it isn't already available), then enable it with \
+    `hermes plugins enable hermes-push` (or add `hermes-push` under `plugins.enabled` in \
+    ~/.hermes/config.yaml) and restart yourself so the plugin loads and its REST routes mount.
     """
 }
 

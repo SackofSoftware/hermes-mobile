@@ -1,6 +1,15 @@
 import HermesKit
 import SwiftUI
 
+/// The turn's high-level activity, supplied by the reducer so the renderer can apply the
+/// stick-to-bottom contract without reaching into feature state. `.streaming` covers any
+/// in-flight turn (deltas growing the last cell / new rows appended); `.idle` is a settled
+/// transcript. (Declared outside the `#if canImport(UIKit)` guard so `ChatView` can name it.)
+enum TurnState: Equatable {
+  case idle
+  case streaming
+}
+
 #if canImport(UIKit)
 import UIKit
 

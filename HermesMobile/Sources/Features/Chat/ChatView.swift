@@ -121,34 +121,19 @@ struct ChatView: View {
     let canLoadOlder = store.hasMoreAbove
     let onLoadOlder = { _ = store.send(.loadOlderRequested) }
 
-    // The device-local A/B preference selects the engine. Both renderers share the same
-    // initializer shape and the same `cell` closure, so flipping the pref re-instantiates
-    // the chosen renderer with identical rows.
-    Group {
-      switch store.chatRenderer {
-      case .swiftUI:
-        SwiftUITranscriptView(
-          rows: rows,
-          turnState: turnState,
-          canLoadOlder: canLoadOlder,
-          onLoadOlder: onLoadOlder,
-          cell: transcriptCell
-        )
-      case .collectionView:
-        CollectionTranscriptView(
-          rows: rows,
-          turnState: turnState,
-          canLoadOlder: canLoadOlder,
-          onLoadOlder: onLoadOlder,
-          cell: transcriptCell
-        )
-      }
-    }
+    // The transcript is rendered by the `UICollectionView`-backed engine (the only engine):
+    // a diffable data source keyed on the deterministic row id gives stable diffing, scroll
+    // restoration, and prepend-preservation that the pure-SwiftUI `ScrollView` couldn't.
+    CollectionTranscriptView(
+      rows: rows,
+      turnState: turnState,
+      canLoadOlder: canLoadOlder,
+      onLoadOlder: onLoadOlder,
+      cell: transcriptCell
+    )
     // Keyboard dismissal is drag-driven (`.interactively`). We intentionally do NOT add a
-    // `.simultaneousGesture(TapGesture())` here: over the SwiftUI engine's `.plain`-style
-    // `ScrollToBottomButton` that combination swallows the button's tap (the button only worked in
-    // the UICollectionView engine, whose hosted button sits outside this gesture). Dropping it
-    // makes the jump-to-bottom button tappable in both engines.
+    // `.simultaneousGesture(TapGesture())` here: it would swallow the hosted
+    // `ScrollToBottomButton`'s tap.
     .scrollDismissesKeyboard(.interactively)
   }
 

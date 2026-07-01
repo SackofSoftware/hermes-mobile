@@ -57,19 +57,18 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   `visibleRows` (the slice the view renders). `.loadOlderRequested` does
   `windowStart = max(0, windowStart - pageSize)`; hydrate/wholesale-replace resets to the bottom
   window; streaming append keeps the newest row visible without yanking a scrolled-up user.
-- **Two swappable transcript renderers** sit behind one `ChatTranscriptView` interface
-  (`rows`/`turnState`/`onLoadOlder`/`onScrollPositionChanged` + a shared `@ViewBuilder cell` so both
-  reuse the caller's `rowView`): **`SwiftUITranscriptView`** (`ScrollView`+`LazyVStack`,
-  `.defaultScrollAnchor(.bottom)`, `onScrollGeometryChange`, `ScrollPosition` binding) and
-  **`CollectionTranscriptView`** (`UICollectionView` + diffable data source keyed on the
-  deterministic id + `UIHostingConfiguration` cells; coordinator owns contentOffset re-pin and the
-  prepend offset-preservation recipe, `#if canImport(UIKit)`-guarded with pure
-  `TranscriptScrollMath`/`TranscriptDiffKind` helpers outside the guard). Selected at runtime by the
-  `chatRenderer` `PreferencesClient` pref (`ChatRendererKind` `.swiftUI`|`.collectionView`, default
-  **`.collectionView`**); it is **device-scoped — NOT cleared on logout** (Settings → "Chat list
-  engine — experimental"). The **stick-to-bottom contract is renderer-local** (not in the reducer):
-  `isPinnedToBottom` from scroll geometry (~60pt), open/hydrate jumps to bottom, pinned →
-  animated follow, scrolled-up → no-yank, reduce-motion → instant jumps.
+- **The transcript renderer is `CollectionTranscriptView`** — the single engine
+  (`init(rows:turnState:canLoadOlder:onLoadOlder:cell:)` with a `@ViewBuilder cell` reusing the
+  caller's `rowView`): a **`UICollectionView`** + diffable data source keyed on the deterministic
+  row id + `UIHostingConfiguration` cells; the coordinator owns the contentOffset re-pin and the
+  prepend offset-preservation recipe. `#if canImport(UIKit)`-guarded, with the pure
+  `TranscriptScrollMath`/`TranscriptDiffKind` helpers (and `TurnState`) outside the guard. (The old
+  pure-SwiftUI `ScrollView`+`LazyVStack` renderer and the `chatRenderer`/`ChatRendererKind`
+  device-pref that switched between them were **removed** — the SwiftUI engine dropped tail messages
+  on large histories; CollectionView is now the only path, no Settings toggle.) The
+  **stick-to-bottom contract is renderer-local** (not in the reducer): `isPinnedToBottom` from
+  scroll geometry (~60pt), open/hydrate jumps to bottom, pinned → animated follow, scrolled-up →
+  no-yank, reduce-motion → instant jumps.
 - **Chat Markdown renders block-level structure** (#27) — pure classification in `MarkdownSegment`
   (headers / blockquotes / tables alongside prose + fenced code; fences take precedence, odd markup
   degrades to prose), rendered in `MarkdownText` (headings → scaled bold, blockquote → indented bar,
@@ -240,9 +239,8 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   up (sources are globbed at generation time).
 - **`@Sendable` effect closures** must capture dependencies explicitly (`[dismiss]`,
   `[gateway]`) — the reducer `self` is not `Sendable`.
-- **Deployment target is iOS 18** (`Project.swift` + `HermesKit/Package.swift`; raised for
-  `onScrollGeometryChange`/`ScrollPosition` in `SwiftUITranscriptView`). iOS-18 scroll APIs are now
-  available directly. Still gate genuinely-newer APIs: `#available(iOS 26, *)` for Liquid Glass
+- **Deployment target is iOS 18** (`Project.swift` + `HermesKit/Package.swift`). iOS-18 scroll APIs
+  are available directly. Still gate genuinely-newer APIs: `#available(iOS 26, *)` for Liquid Glass
   (`.glassEffect`) with a material fallback.
 - **A `public struct` nested in feature State** needs an explicit `public init` to be
   constructed from the app/snapshot target (the memberwise init is internal).

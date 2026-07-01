@@ -35,10 +35,6 @@ public struct ChatFeature {
     /// `.loadOlderRequested`, and is reset to the bottom window on every wholesale transcript
     /// replace (hydrate). The view renders `visibleRows`, never `transcript` directly.
     public var windowStart: Int
-    /// Which transcript rendering engine to use — a device-local A/B preference loaded from
-    /// `PreferencesClient` on `.task`. The view switches renderers on this; flipping it (via
-    /// Settings) re-instantiates the renderer with the same rows on next chat open.
-    public var chatRenderer: ChatRendererKind = .default
     public var composerText: String
     public var status: Status
     public var errorBanner: String?
@@ -137,11 +133,9 @@ public struct ChatFeature {
       title: String? = nil,
       transcript: IdentifiedArrayOf<ChatRow> = [],
       composerText: String = "",
-      status: Status = .connecting,
-      chatRenderer: ChatRendererKind = .default
+      status: Status = .connecting
     ) {
       self.connection = connection
-      self.chatRenderer = chatRenderer
       self.profileName = profileName
       self.storedSessionID = resumeStoredID
       self.title = title
@@ -361,8 +355,6 @@ public struct ChatFeature {
         return .none
 
       case .task:
-        // Load the device-local A/B renderer preference so the view can pick the engine.
-        state.chatRenderer = preferences.loadChatRenderer()
         // History is now hydrated server-authoritatively from the `session.resume`
         // response on `.ready` — see `hydrate`. No separate
         // REST `loadHistory` call: the activate response carries `messages` + `info` +

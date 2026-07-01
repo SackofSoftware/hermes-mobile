@@ -9,13 +9,12 @@ import XCTest
 final class ChatSnapshotTests: SnapshotTestCase {
   // MARK: ChatView
 
-  /// Build a `ChatView` over `rows` for a specific rendering engine, so we can A/B the two
-  /// interchangeable renderers on identical fixtures.
+  /// Build a `ChatView` over `rows`. The transcript is rendered by the sole
+  /// `UICollectionView`-backed engine.
   private func chatView(
     rows: [ChatRow],
     title: String,
-    status: ChatFeature.State.Status,
-    renderer: ChatRendererKind
+    status: ChatFeature.State.Status
   ) -> some View {
     NavigationStack {
       ChatView(
@@ -24,8 +23,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
             connection: connection,
             title: title,
             transcript: IdentifiedArray(uniqueElements: rows),
-            status: status,
-            chatRenderer: renderer
+            status: status
           )
         ) {
           ChatFeature()
@@ -38,8 +36,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
     }
   }
 
-  /// Render the same fixture under both engines (suffixed snapshot names).
-  private func assertBothEngines(
+  private func assertChatView(
     rows: [ChatRow],
     title: String,
     status: ChatFeature.State.Status,
@@ -47,16 +44,13 @@ final class ChatSnapshotTests: SnapshotTestCase {
     testName: String = #function,
     line: UInt = #line
   ) {
-    for renderer in ChatRendererKind.allCases {
-      assertSnapshot(
-        of: chatView(rows: rows, title: title, status: status, renderer: renderer),
-        as: deviceImage(),
-        named: renderer.rawValue,
-        file: file,
-        testName: testName,
-        line: line
-      )
-    }
+    assertSnapshot(
+      of: chatView(rows: rows, title: title, status: status),
+      as: deviceImage(),
+      file: file,
+      testName: testName,
+      line: line
+    )
   }
 
   func testChatView() {
@@ -70,7 +64,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
         isComplete: true
       )),
     ]
-    assertBothEngines(rows: rows, title: "Protocol chat", status: .ready)
+    assertChatView(rows: rows, title: "Protocol chat", status: .ready)
   }
 
   /// Fenced code block + list rendering (Task 11 markdown polish).
@@ -84,7 +78,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
       )),
     ]
     // .reconnecting exercises the connection banner too.
-    assertBothEngines(rows: rows, title: "Protocol chat", status: .reconnecting)
+    assertChatView(rows: rows, title: "Protocol chat", status: .reconnecting)
   }
 
   func testChatView_sentImageAttachment() {
@@ -96,7 +90,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
       ),
       ChatRow(id: id(1), kind: .message(role: .assistant, text: "A solid teal square.", isComplete: true)),
     ]
-    assertBothEngines(rows: rows, title: "Vision chat", status: .ready)
+    assertChatView(rows: rows, title: "Vision chat", status: .ready)
   }
 
   // MARK: Code-block copy affordance (#9)
@@ -130,7 +124,10 @@ final class ChatSnapshotTests: SnapshotTestCase {
 
   func testApprovalCard() {
     let view = ApprovalCardView(
-      request: ApprovalRequest(requestID: "r1", command: "rm -rf build/ && git clean -fdx"),
+      request: ApprovalRequest(
+        command: "rm -rf build/ && git clean -fdx",
+        detail: "Delete the build directory and all untracked files"
+      ),
       onApprove: { _ in },
       onDeny: {}
     )

@@ -16,8 +16,6 @@ public struct SettingsFeature {
     public var savedConfirmation: Bool
     /// Live debug log, newest last; fed by `DebugLogClient`.
     public var log: [GatewayLogEntry]
-    /// The selected chat transcript rendering engine (device-local A/B preference).
-    public var chatRenderer: ChatRendererKind
     /// Whether the connected agent exposes the `hermes-push` plugin (passed down from the
     /// session list's capability probe). When false the notifications UI (C6) shows a
     /// "not available on this server" note instead of the toggle.
@@ -53,7 +51,6 @@ public struct SettingsFeature {
       self.token = connection.token ?? ""
       self.savedConfirmation = false
       self.log = []
-      self.chatRenderer = .default
       self.pushAvailable = pushAvailable
       self.notificationsEnabled = notificationsEnabled
       self.notificationsDenied = notificationsDenied
@@ -119,7 +116,6 @@ public struct SettingsFeature {
     Reduce { state, action in
       switch action {
       case .task:
-        state.chatRenderer = preferences.loadChatRenderer()
         return .merge(
           .run { [debugLog] send in
             for await entries in debugLog.stream() {
@@ -217,10 +213,6 @@ public struct SettingsFeature {
 
       case .binding(\.token):
         state.savedConfirmation = false
-        return .none
-
-      case .binding(\.chatRenderer):
-        preferences.saveChatRenderer(state.chatRenderer)
         return .none
 
       case .binding:

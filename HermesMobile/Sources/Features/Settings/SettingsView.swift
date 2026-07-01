@@ -121,6 +121,8 @@ struct SettingsView: View {
     }
     .sheet(isPresented: $showingPushGuide) {
       PushSetupGuideView(
+        // Already installed → the sheet is purely informational (no install actions).
+        pluginInstalled: store.pushAvailable,
         onAskAgent: {
           showingPushGuide = false
           store.send(.askAgentToInstallTapped)

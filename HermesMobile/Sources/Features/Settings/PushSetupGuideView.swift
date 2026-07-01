@@ -11,6 +11,9 @@ import SwiftUI
 struct PushSetupGuideView: View {
   @Environment(\.dismiss) private var dismiss
 
+  /// When the plugin is already installed/available, the sheet is purely informational:
+  /// the install actions (Ask agent / Later) are hidden.
+  let pluginInstalled: Bool
   /// Open a new chat with the install prompt pre-filled (the caller dismisses + routes).
   let onAskAgent: () -> Void
   /// Snooze the prompt (the caller dismisses + persists the backoff).
@@ -36,22 +39,24 @@ struct PushSetupGuideView: View {
             text: "Notifications come from a small plugin on your own Hermes agent, relayed to Apple. Only a generic alert (e.g. “Approval needed”) leaves your server — your messages and data never do."
           )
 
-          VStack(spacing: 12) {
-            Button {
-              onAskAgent()
-            } label: {
-              Label("Ask agent to install", systemImage: "sparkles")
+          if !pluginInstalled {
+            VStack(spacing: 12) {
+              Button {
+                onAskAgent()
+              } label: {
+                Label("Ask agent to install plugin", systemImage: "sparkles")
+                  .frame(maxWidth: .infinity)
+              }
+              .buttonStyle(.borderedProminent)
+              .controlSize(.large)
+
+              Button("Later") { onLater() }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-
-            Button("Later") { onLater() }
-              .buttonStyle(.bordered)
-              .controlSize(.large)
-              .frame(maxWidth: .infinity)
+            .padding(.top, 4)
           }
-          .padding(.top, 4)
 
           Link("View the plugin on GitHub", destination: Self.pluginURL)
             .font(.footnote)
@@ -90,6 +95,10 @@ struct PushSetupGuideView: View {
   }
 }
 
-#Preview {
-  PushSetupGuideView(onAskAgent: {}, onLater: {})
+#Preview("Not installed") {
+  PushSetupGuideView(pluginInstalled: false, onAskAgent: {}, onLater: {})
+}
+
+#Preview("Installed") {
+  PushSetupGuideView(pluginInstalled: true, onAskAgent: {}, onLater: {})
 }

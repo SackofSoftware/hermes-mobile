@@ -23,6 +23,72 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  /// Notifications enabled: toggle on, push available, no test sent yet.
+  func testSettingsNotificationsEnabled() {
+    let initial = SettingsFeature.State(
+      connection: connection,
+      pushAvailable: true,
+      notificationsEnabled: true
+    )
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue
+          $0.push = PushClient.inMemory(granted: true, status: .authorized).client
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Push not available on this server (plugin missing) → "not available" note, no controls.
+  func testSettingsNotificationsUnavailable() {
+    let initial = SettingsFeature.State(
+      connection: connection,
+      pushAvailable: false
+    )
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue
+          $0.push = PushClient.inMemory(granted: false, status: .notDetermined).client
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Test notification just sent → confirmation label.
+  func testSettingsNotificationsTestSent() {
+    let initial = SettingsFeature.State(
+      connection: connection,
+      pushAvailable: true,
+      notificationsEnabled: true,
+      testPushStatus: .sent
+    )
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue
+          $0.push = PushClient.inMemory(granted: true, status: .authorized).client
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// The "how push works" info sheet, plugin NOT installed — shows the install actions.
+  func testPushSetupGuideView() {
+    let view = PushSetupGuideView(pluginInstalled: false, onAskAgent: {}, onLater: {})
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Plugin already installed — informational only (no Ask agent / Later buttons).
+  func testPushSetupGuideView_installed() {
+    let view = PushSetupGuideView(pluginInstalled: true, onAskAgent: {}, onLater: {})
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   func testConnectionDebugView() {
     let view = NavigationStack {
       ConnectionDebugView(entries: [

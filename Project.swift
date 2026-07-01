@@ -52,9 +52,23 @@ let project = Project(
         // Only standard encryption (HTTPS/TLS) — exempt; lets TestFlight skip the
         // export-compliance prompt so builds are testable immediately.
         "ITSAppUsesNonExemptEncryption": false,
+        // Wake the app to process incoming remote notifications while backgrounded —
+        // the gateway socket drops in the background, so pushes are how the agent reaches us.
+        "UIBackgroundModes": ["remote-notification"],
       ]),
       sources: ["HermesMobile/Sources/**"],
       resources: ["HermesMobile/Resources/**"],
+      // Push Notifications capability. `aps-environment` is driven by the
+      // `$(APS_ENVIRONMENT)` build setting (set per-configuration below) so it tracks
+      // the compile-time `apns_env` exactly: Debug → "development" (sandbox APNs host),
+      // Release → "production" (App Store / distribution APNs host). Tuist emits the
+      // entitlements value verbatim with no Xcode export rewrite, so a static
+      // "development" would otherwise ship a sandbox entitlement on Release builds while
+      // the app reports production — APNs would reject. The compile-time `apns_env`
+      // (DEBUG → "sandbox", else "production") mirrors this.
+      entitlements: .dictionary([
+        "aps-environment": "$(APS_ENVIRONMENT)",
+      ]),
       dependencies: [
         .package(product: "HermesKit"),
       ],
@@ -73,10 +87,17 @@ let project = Project(
         ],
         configurations: [
           // Local dev → blue icon, so it's visually distinct from the production app.
-          .debug(name: "Debug", settings: ["ASSETCATALOG_COMPILER_APPICON_NAME": "AppIconDev"]),
+          // `APS_ENVIRONMENT=development` → sandbox APNs (matches DEBUG `apns_env`).
+          .debug(name: "Debug", settings: [
+            "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIconDev",
+            "APS_ENVIRONMENT": "development",
+          ]),
           // App Store / external TestFlight → orange (base). Internal TF reuses this config
           // with the icon overridden on the command line (see Makefile / README).
-          .release(name: "Release"),
+          // `APS_ENVIRONMENT=production` → production APNs (matches non-DEBUG `apns_env`).
+          .release(name: "Release", settings: [
+            "APS_ENVIRONMENT": "production",
+          ]),
         ]
       )
     ),

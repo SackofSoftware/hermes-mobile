@@ -134,9 +134,25 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.home(.delegate(.createSession))) {
+    await store.send(.home(.delegate(.createSession(initialComposerText: nil)))) {
       $0.path.append(
-        ChatFeature.State(connection: self.connection, profileName: nil)
+        ChatFeature.State(connection: self.connection, profileName: nil, composerText: "")
+      )
+    }
+  }
+
+  @Test func creatingSessionWithPrefilledComposerSeedsDraft() async {
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.home(.delegate(.createSession(initialComposerText: PushSetup.installPrompt)))) {
+      $0.path.append(
+        ChatFeature.State(
+          connection: self.connection, profileName: nil, composerText: PushSetup.installPrompt
+        )
       )
     }
   }
@@ -176,9 +192,9 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.home(.delegate(.createSession))) {
+    await store.send(.home(.delegate(.createSession(initialComposerText: nil)))) {
       $0.path.append(
-        ChatFeature.State(connection: self.connection, profileName: "work")
+        ChatFeature.State(connection: self.connection, profileName: "work", composerText: "")
       )
     }
   }
@@ -333,6 +349,30 @@ struct AppFeatureTests {
     #expect(urlCleared.value)
   }
 
+  // MARK: Push cleanup on logout (Task C4)
+
+  @Test func disconnectUnregistersPushAndClearsPushState() async {
+    let unregistered = LockIsolated<String?>(nil)
+    let tokenCleared = LockIsolated(false)
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences.loadPushDeviceToken = { "cafef00d" }
+      $0.preferences.clearPushDeviceToken = { @Sendable in tokenCleared.setValue(true) }
+      $0.hermesREST.unregisterPush = { @Sendable _, token in unregistered.setValue(token) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.delegate(.disconnect))) {
+      $0.home = nil
+    }
+    await store.finish()
+    #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
+    #expect(tokenCleared.value) // device-token pref wiped
+  }
+
   @Test func tokenSessionExpiredSeedsTokenReauthModal() async {
     var path = StackState<ChatFeature.State>()
     path.append(ChatFeature.State(connection: connection)) // `.token` connection
@@ -366,9 +406,9 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.home(.delegate(.createSession))) {
+    await store.send(.home(.delegate(.createSession(initialComposerText: nil)))) {
       $0.path.append(
-        ChatFeature.State(connection: self.connection, profileName: nil)
+        ChatFeature.State(connection: self.connection, profileName: nil, composerText: "")
       )
     }
   }
@@ -600,5 +640,156 @@ struct AppFeatureTests {
     await store.receive(\.path[id: id].persistNow)
 
     #expect(snapshotClient.loadSnapshot("s1")?.updatedAt == Date(timeIntervalSince1970: 7))
+  }
+
+  // MARK: Push tap deep-link + foreground suppression + badge (C5)
+
+  /// A push tap routes through the SAME `openSession` delegate path a list tap uses, opening
+  /// (resuming) the tapped session. A loaded `Session` is reused (so its title carries over);
+  /// here the session isn't loaded, so a minimal `Session(id:)` is resumed.
+  @Test func pushTapDeepLinksThroughOpenSession() async {
+    let push = PushClient.inMemory()
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "20260620_xyz")))
+    await store.receive(\.home.delegate.openSession)
+    #expect(store.state.path.last?.storedSessionID == "20260620_xyz")
+    // The reducer marked the now-open session as currently-viewing (foreground suppression).
+    #expect(push.currentSession == "20260620_xyz")
+  }
+
+  /// Feeding a tap through `PushClient.incomingTaps()` (the live bridge stream) drives the same
+  /// deep-link — taps observed on `.task` and direct `.pushTapped` share one code path.
+  @Test func incomingTapStreamDrivesDeepLink() async {
+    let push = PushClient.inMemory()
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      // No stored creds → `.task` only starts the tap observer (no auto-connect).
+      $0.keychain.loadSession = { @Sendable _ in nil }
+      $0.preferences.loadServerURL = { nil }
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+
+    await store.send(.task)
+    push.emit(tap: PushTap(sessionID: "from-stream"))
+    await store.receive(\.pushTapped)
+    await store.receive(\.home.delegate.openSession)
+    #expect(store.state.path.last?.storedSessionID == "from-stream")
+    // The tap observer is a long-running effect on the in-memory stream — drop it at teardown.
+    await store.skipInFlightEffects()
+  }
+
+  /// Foreground suppression: opening a chat marks it currently-viewing; popping back to the list
+  /// (empty path) clears the marker so a later foreground push presents again.
+  @Test func openAndCloseChatSetsAndClearsCurrentViewingSession() async {
+    let push = PushClient.inMemory()
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+    let session = Session(id: "20260610_abc", title: "Chat")
+
+    await store.send(.home(.delegate(.openSession(session))))
+    await store.finish()
+    #expect(push.currentSession == "20260610_abc")
+
+    // Pop the chat (path empties) → current-viewing marker cleared.
+    await store.send(.path(.popFrom(id: store.state.path.ids.last!)))
+    await store.finish()
+    #expect(push.currentSession == nil)
+  }
+
+  /// An approval tap with no session list yet (can't open) bumps the pending-approval badge;
+  /// then opening that session clears it back to zero.
+  @Test func approvalBadgeSetsWhenUnopenedAndClearsOnView() async {
+    let push = PushClient.inMemory()
+    // Onboarding (no home) — the tap can't open a session, so the badge reflects the pending approval.
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "s-approve", type: "approval"))) {
+      $0.pendingApprovalSessionIDs = ["s-approve"]
+    }
+    await store.finish()
+    #expect(push.badgeCount == 1) // badge shows the pending approval
+
+    // Now sign in and open that session → badge clears.
+    await store.send(.autoConnectSucceeded(connection)) {
+      $0.home = SessionListFeature.State(connection: self.connection)
+    }
+    await store.send(.home(.delegate(.openSession(Session(id: "s-approve"))))) {
+      $0.pendingApprovalSessionIDs = []
+    }
+    await store.finish()
+    #expect(push.badgeCount == 0)
+  }
+
+  /// An approval tap that immediately opens its session nets to a zero badge (mark-then-clear).
+  @Test func approvalTapThatOpensNetsZeroBadge() async {
+    let push = PushClient.inMemory()
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "s-approve", type: "approval")))
+    await store.receive(\.home.delegate.openSession)
+    await store.finish()
+    #expect(push.badgeCount == 0)
+    #expect(store.state.pendingApprovalSessionIDs.isEmpty)
+  }
+
+  /// Two distinct pending approvals → badge count 2; opening one → badge drops to 1.
+  @Test func multiplePendingApprovalsSetBadgeThenClearOne() async {
+    let push = PushClient.inMemory()
+    // Onboarding (no home) so the approval taps can't open and just accumulate as pending.
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "s-one", type: "approval"))) {
+      $0.pendingApprovalSessionIDs = ["s-one"]
+    }
+    await store.send(.pushTapped(PushTap(sessionID: "s-two", type: "approval"))) {
+      $0.pendingApprovalSessionIDs = ["s-one", "s-two"]
+    }
+    await store.finish()
+    #expect(push.badgeCount == 2) // two pending approvals
+
+    // Sign in and open one of them → badge drops to the remaining pending count.
+    await store.send(.autoConnectSucceeded(connection)) {
+      $0.home = SessionListFeature.State(connection: self.connection)
+    }
+    await store.send(.home(.delegate(.openSession(Session(id: "s-one"))))) {
+      $0.pendingApprovalSessionIDs = ["s-two"]
+    }
+    await store.finish()
+    #expect(push.badgeCount == 1)
   }
 }

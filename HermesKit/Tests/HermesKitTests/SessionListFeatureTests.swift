@@ -18,6 +18,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       // Old agent (no /api/profiles) → falls back to the unscoped session fetch.
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown } // can't tell → don't nag
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", title: "Hello", preview: "hi")]
       }
@@ -27,6 +28,8 @@ struct SessionListFeatureTests {
       $0.now = now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush) // probes the plugin hub
+    await store.receive(\.pushPluginStatusLoaded) // unknown → no further effects
     await store.receive(\.profilesResponse.failure) // capability probe → not supported
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -43,6 +46,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -50,6 +54,8 @@ struct SessionListFeatureTests {
       $0.now = now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.failure) {
       $0.isLoading = false
@@ -69,6 +75,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = clock
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         fetchCount.withValue { $0 += 1 }
         return [Session(id: "s1", isActive: true)]
@@ -80,6 +87,8 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -385,6 +394,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       $0.preferences = prefs
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
     }
 
@@ -393,6 +403,8 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.pinnedIDs = ["s1"]
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -851,6 +863,155 @@ struct SessionListFeatureTests {
     await store.receive(\.delegate.createSession)
   }
 
+  // MARK: Push onboarding (plugin readiness + info sheet + snooze)
+
+  @Test func setupPushReadyClearsSnoozeAndRequestsAuthorization() async {
+    let push = PushClient.inMemory(granted: true)
+    let prefs = PreferencesClient.inMemory()
+    prefs.savePushPromptSnooze(2, now.addingTimeInterval(86_400)) // a stale snooze to be cleared
+    let registered = LockIsolated<String?>(nil)
+    var initial = SessionListFeature.State(connection: connection)
+    initial.pushAvailable = false
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.push = push.client
+      $0.preferences = prefs
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .ready }
+      $0.hermesREST.registerPush = { @Sendable _, token, _, _ in registered.setValue(token) }
+    }
+
+    await store.send(.setupPush)
+    await store.receive(\.pushPluginStatusLoaded) {
+      $0.pushAvailable = true // ready → push available
+    }
+    #expect(prefs.loadPushPromptSnooze() == nil) // snooze cleared on ready
+    await store.receive(\.requestPushAuthorization)
+    push.emit(token: "deadbeef")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered)
+    #expect(registered.value == "deadbeef")
+    await store.send(.onDisappear)
+  }
+
+  @Test func setupPushNotReadyAndNotSnoozedRaisesSheet() async {
+    let prefs = PreferencesClient.inMemory()
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .notReady }
+    }
+
+    await store.send(.setupPush)
+    await store.receive(\.pushPluginStatusLoaded) {
+      $0.pushAvailable = false // plugin not enabled → not available
+      $0.showPushSetupSheet = true // not snoozed → raise the sheet
+    }
+  }
+
+  @Test func setupPushNotReadyButSnoozedDoesNotRaiseSheet() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.savePushPromptSnooze(1, now.addingTimeInterval(86_400)) // snoozed until tomorrow
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .notReady }
+    }
+
+    await store.send(.setupPush)
+    await store.receive(\.pushPluginStatusLoaded) {
+      $0.pushAvailable = false
+      // showPushSetupSheet stays false — still snoozed.
+    }
+  }
+
+  @Test func setupPushUnknownLeavesCapabilityUnchanged() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.pushAvailable = true // optimistic default
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = .inMemory()
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+    }
+
+    await store.send(.setupPush)
+    await store.receive(\.pushPluginStatusLoaded) // unknown → no state change, no sheet
+    #expect(store.state.pushAvailable == true)
+    #expect(store.state.showPushSetupSheet == false)
+  }
+
+  @Test func pushSetupLaterSnoozesOneDayOnFirstTap() async {
+    let prefs = PreferencesClient.inMemory()
+    var initial = SessionListFeature.State(connection: connection)
+    initial.showPushSetupSheet = true
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+    }
+
+    // First "Later" → count 1 → 1 day.
+    await store.send(.pushSetupLaterTapped) {
+      $0.showPushSetupSheet = false
+    }
+    let snooze = prefs.loadPushPromptSnooze()
+    #expect(snooze?.count == 1)
+    #expect(snooze?.until == now.addingTimeInterval(1 * 86_400))
+  }
+
+  @Test func pushSetupLaterIncrementsCountAndUsesNextFibonacciInterval() async {
+    // A prior snooze already recorded one "Later" — the next bumps to count 2 → 2 days out.
+    let prefs = PreferencesClient.inMemory()
+    prefs.savePushPromptSnooze(1, now.addingTimeInterval(-1)) // already elapsed
+    var initial = SessionListFeature.State(connection: connection)
+    initial.showPushSetupSheet = true
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+    }
+
+    await store.send(.pushSetupLaterTapped) {
+      $0.showPushSetupSheet = false
+    }
+    let snooze = prefs.loadPushPromptSnooze()
+    #expect(snooze?.count == 2)
+    #expect(snooze?.until == now.addingTimeInterval(2 * 86_400))
+  }
+
+  @Test func pushSetupAskAgentOpensPrefilledChat() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.showPushSetupSheet = true
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.pushSetupAskAgentTapped) {
+      $0.showPushSetupSheet = false
+    }
+    // The create delegate carries the install prompt (the AppFeature test asserts it reaches
+    // the composer); here we only confirm the delegate fires from the "Ask agent" button.
+    await store.receive(\.delegate.createSession)
+  }
+
+  @Test func settingsInstallPushPluginOpensPrefilledChat() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.settings = SettingsFeature.State(connection: connection)
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.settings(.presented(.delegate(.installPushPlugin)))) {
+      $0.settings = nil
+    }
+    await store.receive(\.delegate.createSession)
+  }
+
   // MARK: Settings presentation (Task 12)
 
   @Test func settingsButtonPresentsSettings() async {
@@ -861,6 +1022,112 @@ struct SessionListFeatureTests {
     await store.send(.settingsButtonTapped) {
       $0.settings = SettingsFeature.State(connection: self.connection)
     }
+  }
+
+  @Test func settingsPresentationThreadsPushAvailability() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.pushAvailable = false // a 404 earlier flipped push off
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.settingsButtonTapped) {
+      $0.settings = SettingsFeature.State(connection: self.connection, pushAvailable: false)
+    }
+  }
+
+  // MARK: Push registration (Task C4)
+
+  @Test func requestAuthorizationRegistersWhenAuthorized() async {
+    let push = PushClient.inMemory(granted: true)
+    let registered = LockIsolated<(token: String, env: String, version: String)?>(nil)
+    // Start with push "unavailable" so a successful registration visibly flips the flag on.
+    var initial = SessionListFeature.State(connection: connection)
+    initial.pushAvailable = false
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory()
+      $0.hermesREST.registerPush = { @Sendable _, token, env, version in
+        registered.setValue((token, env, version))
+      }
+    }
+
+    // The ready branch requests authorization; granted → observe tokens.
+    await store.send(.requestPushAuthorization)
+    // APNs delivers a device token.
+    push.emit(token: "deadbeef")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered) {
+      $0.pushAvailable = true
+    }
+    #expect(registered.value?.token == "deadbeef")
+    #expect(registered.value?.env == PushClient.apnsEnv)
+    #expect(registered.value?.version == "1.2.3") // the in-memory client's app version
+    await store.send(.onDisappear) // cancels the token-observe effect
+  }
+
+  @Test func requestAuthorizationDoesNothingWhenNotAuthorized() async {
+    let push = PushClient.inMemory(granted: false)
+    let registered = LockIsolated(false)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in
+        registered.setValue(true)
+      }
+    }
+
+    // Denied → the token stream is never observed, so no registration happens.
+    await store.send(.requestPushAuthorization)
+    push.emit(token: "deadbeef") // ignored — no consumer
+    await store.finish()
+    #expect(registered.value == false)
+    #expect(store.state.pushAvailable == true) // unchanged (no definitive 404)
+  }
+
+  @Test func tokenRotationReRegisters() async {
+    let push = PushClient.inMemory(granted: true)
+    let tokens = LockIsolated<[String]>([])
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory()
+      $0.hermesREST.registerPush = { @Sendable _, token, _, _ in
+        tokens.withValue { $0.append(token) }
+      }
+    }
+
+    await store.send(.requestPushAuthorization)
+    push.emit(token: "tok1")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered)
+    // The OS rotates the token — a second emission re-registers.
+    push.emit(token: "tok2")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegistered)
+    #expect(tokens.value == ["tok1", "tok2"])
+    await store.send(.onDisappear)
+  }
+
+  @Test func registerPush404DisablesPushCapability() async {
+    let push = PushClient.inMemory(granted: true)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.preferences = .inMemory()
+      $0.hermesREST.registerPush = { @Sendable _, _, _, _ in throw RESTError.notFound }
+    }
+
+    await store.send(.requestPushAuthorization)
+    push.emit(token: "deadbeef")
+    await store.receive(\.pushTokenReceived)
+    await store.receive(\.pushRegisterFailed) {
+      $0.pushAvailable = false // plugin absent → capability-gated off
+    }
+    await store.send(.onDisappear)
   }
 
   @Test func settingsDisconnectDismissesAndBubblesUp() async {
@@ -936,6 +1203,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       $0.preferences = prefs
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -944,6 +1212,8 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.groupingMode = .chronological // seeded from prefs on load
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
     await store.send(.onDisappear)
@@ -1000,6 +1270,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.preferences = prefs
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
@@ -1014,6 +1285,8 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.selectedProfileName = "work" // loaded from the persisted pref
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.success) {
       $0.profilesSupported = true
       $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work")]
@@ -1035,6 +1308,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         unscopedFetch.withValue { $0 += 1 }
         return [Session(id: "s1")]
@@ -1045,6 +1319,8 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure) // old agent → selector stays hidden
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
@@ -1255,6 +1531,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.preferences = prefs
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
@@ -1269,6 +1546,8 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.selectedProfileName = "gone" // loaded from the (now-stale) persisted pref
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.success) {
       $0.profilesSupported = true
       $0.profiles = [Profile(name: "default", isDefault: true), Profile(name: "work")]
@@ -1534,6 +1813,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.continuousClock = clock
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", isActive: active.value)]
       }
@@ -1543,6 +1823,8 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
+    await store.receive(\.setupPush)
+    await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false

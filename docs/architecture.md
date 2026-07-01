@@ -77,6 +77,15 @@ a `testValue`/`.inMemory()` variant):
   seen counts, client-side pinned session ids, the session-list grouping mode
   (`SessionGroupingMode`), and the selected profile name (`hermes.selected-profile-id`). All
   cleared/reset on logout.
+- **`PushClient`** — push notifications: `requestAuthorization`/`authorizationStatus`,
+  device-token registration as an `AsyncStream<String>` (lowercase-hex, re-emits on OS token
+  rotation), an `incomingTaps()` stream of `PushTap` values (carrying `session_id` + optional
+  `type`), and badge control (`setBadgeCount`). The `liveValue` is iOS-only-guarded
+  (`#if canImport(UIKit)` over `UNUserNotificationCenter` + `registerForRemoteNotifications`,
+  fed by a process-wide `PushBridge` from the app-delegate adapter); the non-iOS fallback is
+  `testValue`, plus an `.inMemory()` variant. Pure helpers (hex encoding, the compile-time
+  `apnsEnv`, payload parsing, foreground-suppression decision) live outside the guard so they
+  are unit-tested on macOS.
 - **`PasteboardClient`** — copy.
 - **`DebugLogClient`** — an event ring buffer for the in-app debug log.
 
@@ -142,6 +151,67 @@ not assumed):
   (REST) — omitted for `"default"` so single-profile agents are byte-identical to today.
   **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
   intentionally omitted.
+
+## Push notifications
+
+Push lets the agent reach the phone when its WebSocket is gone (app backgrounded/closed).
+Because the app is a *publishable, multi-user* product and the APNs auth key (`.p8`, tied to
+the publisher's Team ID + bundle id) can't be safely distributed to self-hosters' machines,
+the feature is split across **three artifacts** — only the iOS app lives in this repo:
+
+```
+┌─ User's machine ──────────┐    ┌─ Publisher ──────┐    ┌─ Apple ─┐    ┌ Phone ┐
+│ Hermes Agent              │    │ Push gateway     │    │  APNs   │    │  App  │
+│  └─ hermes-push (plugin)  │──► │ (serverless fn,  │──► │         │──► │       │
+│     hooks + REST route    │POST│  holds .p8/JWT)  │HTTP│         │    │       │
+└───────────────────────────┘    └──────────────────┘    └─────────┘    └───────┘
+      ▲ device token + apns_env registered by app over private net ───────────┘
+```
+
+- **`hermes-push`** — a standalone pip-installable Hermes plugin (uses the public plugin
+  entry-point API; **hermes-agent itself is not modified**). It triggers notifications and
+  exposes the device-token registration REST route. Lives in its own **public** repo:
+  `git@github.com:goncharik/hermes-mobile-push-plugin.git` — self-hoster infra, not in this repo.
+- **Push gateway** — a tiny *stateless* serverless function (Cloudflare Workers) the
+  publisher operates; the only place the `.p8` / ES256 JWT lives. Lives in its own **private**
+  repo: `git@github.com:goncharik/hermes-mobile-push-gateway.git` (it holds the Apple secret).
+- **iOS app** (this repo) — `PushClient` + reducer wiring; registers its device token with
+  the user's own agent over the private network and handles incoming pushes.
+
+This is the Home Assistant push model. **Privacy:** only a generic title/body + `session_id`
+ever transit the gateway; real message content is fetched in-app over the private network.
+
+**Protocol.** The app registers via `POST /api/plugins/hermes-push/register`
+`{device_token, apns_env, app_version}` (auth as for any `/api/` route) and tears down via
+`/unregister`. **The app never signs pushes**, so registration returns nothing the app must
+persist (no secret). A `404` from the register route means the plugin isn't installed → the app
+sets `pushAvailable = false` and hides the toggle (same capability-gating as attach/profiles).
+The plugin POSTs `{device_token, apns_env, type, session_id, title, body, thread_id, hmac}` to
+the gateway's `POST /push`; the gateway mints an ES256 JWT from the `.p8`, picks the APNs host
+from `apns_env` (`api.push.apple.com` vs `api.sandbox.push.apple.com`), and forwards. The
+optional `hmac` is HMAC-SHA256 over a **canonical signed string** (fixed key order, compact
+separators, `thread_id` omitted when absent) keyed by a **single shared secret**
+(`HERMES_PUSH_HMAC_SECRET`) the publisher provisions to *both* the plugin and the gateway —
+the stateless gateway has no per-device store, so a per-device secret could never match. If the
+shared secret is unset the plugin sends **unsigned** (the gateway allows unsigned). The plugin
+(`sender.py`) and gateway (`validate.ts`) compute the canonical string byte-identically. The
+app's compile-time `apns_env` (`#if DEBUG` → `sandbox`, else `production`) must match the
+`aps-environment` entitlement, which is driven per-build-configuration (`$(APS_ENVIRONMENT)`:
+`development` for Debug, `production` for Release) so distribution builds ship the right value.
+When APNs returns `410 Unregistered` the gateway relays it (HTTP 410) so the plugin drops the
+dead token from its store.
+
+**Triggers.** The plugin fires notifications from real Hermes plugin hooks, working in both
+CLI and gateway sessions:
+- **approval** — `pre_approval_request`
+- **turn-complete** — `post_llm_call`, gated to longer turns via a `pre_llm_call` turn-start
+  anchor + the ~>10s duration gate, so quick turns stay quiet
+- **error** — `on_session_end`, genuine failures only (not successful or user-interrupted turns)
+- **clarify** — `pre_tool_call` filtered to the `clarify` tool, fired before the user is
+  prompted; not duration-gated (an input-needed pause, like approval)
+
+All payloads stay generic/content-free. (When a clarify push fires during a turn, the
+trailing "turn complete" for that same turn is suppressed as redundant.)
 
 ## Session re-hydration (`session.resume`)
 

@@ -159,6 +159,39 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   from `Usage` helpers in HermesKit — thresholds (green `<50` / yellow `≥50` / amber `>80` /
   red `≥95`) mirror the Hermes TUI and are unit-tested in HermesKit; the severity→color
   switch and popover presentation are local view state (`@State`), kept out of the reducer.
+- **Push notifications** span THREE artifacts but only the iOS app lives in this repo:
+  `hermes-push` (a standalone pip plugin — **hermes-agent is NOT modified**) and the
+  serverless **push gateway** (holds the `.p8`) live in **separate repos** —
+  plugin: `goncharik/hermes-mobile-push-plugin` (public); gateway:
+  `goncharik/hermes-mobile-push-gateway` (private, holds the Apple secret). Conventions:
+  **capability-gate** — the toggle/controls hide when
+  `POST /api/plugins/hermes-push/register` 404s → `pushAvailable = false` (mirrors
+  attach/profiles). **Generic-body privacy rule** — NO message content/args/reasoning/command
+  ever goes in a push; only a generic title/body + `session_id` transit the gateway (content is
+  fetched in-app over the private net). Compile-time **`apns_env`** (`#if DEBUG` → `sandbox`,
+  else `production`) **must match the `aps-environment` entitlement** — which is driven
+  **per-build-configuration** via `$(APS_ENVIRONMENT)` (Debug → `development`, Release →
+  `production`) in `Project.swift`, NOT a static value (Tuist emits the entitlement verbatim with
+  no Xcode export rewrite, so a static `development` would ship a sandbox entitlement on Release).
+  **The app does NOT sign pushes, and the plugin holds NO shared secret** — the gateway is the
+  only place the signing key (`HMAC_SECRET`) lives (a single hosted gateway serves all App Store
+  users, so a plugin-held shared secret would be world-readable). The gateway instead **issues a
+  device-scoped capability**: `POST /register {device_token} → {capability}` where
+  `capability = hex(HMAC-SHA256(HMAC_SECRET, "hpc1:"+device_token))`. The plugin fetches it lazily,
+  caches it per-device in its token store, and presents it on every `POST /push` (which **requires**
+  `capability` — the old shared-secret `hmac`-over-all-fields is gone), re-fetching once on a
+  `403 invalid_capability`. A leaked capability can only push to its own device. The iOS app is
+  unchanged: it still calls the **plugin's** `/register` (`{device_token, apns_env, app_version}` →
+  `{ok, device_token, apns_env}`, a different endpoint from the gateway's capability `/register`)
+  and persists no secret (no Keychain push-secret). **Permission is
+  requested on the sessions-list appearance** (right after login), per the product decision — NOT
+  first launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
+  canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload
+  parse, foreground-suppression) outside the guard. **All four triggers fire via real plugin
+  hooks** (CLI + gateway): approval (`pre_approval_request`), turn-complete (`post_llm_call`,
+  gated to ~>10s turns via a `pre_llm_call` start anchor), error (`on_session_end`, genuine
+  failures only — not success/interrupt), and clarify (`pre_tool_call` filtered to the `clarify`
+  tool, fired before the user is prompted — not duration-gated).
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky

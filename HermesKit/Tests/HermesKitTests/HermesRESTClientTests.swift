@@ -415,5 +415,128 @@ struct HermesRESTClientTests {
       _ = try await makeClient().transcribe(connection, "data:audio/m4a;base64,AAA=", nil)
     }
   }
+
+  // MARK: Push registration (C3 — hermes-push plugin)
+
+  @Test func registerPushPostsSnakeCaseBody() async throws {
+    // The app never signs pushes, so registration returns nothing the app must persist.
+    MockURLProtocol.set(json: #"{"ok":true,"device_token":"abc123","apns_env":"sandbox"}"#)
+    try await makeClient().registerPush(connection, "abc123", "sandbox", "1.2.3")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "POST")
+    #expect(req.url?.path == "/api/plugins/hermes-push/register")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+    #expect(req.value(forHTTPHeaderField: "Content-Type") == "application/json")
+    let json = try JSONSerialization.jsonObject(with: bodyData(req)) as? [String: String]
+    #expect(json == [
+      "device_token": "abc123",
+      "apns_env": "sandbox",
+      "app_version": "1.2.3",
+    ])
+  }
+
+  @Test func registerPushNotFoundSurfacesCapabilityGate() async throws {
+    // Plugin not installed → 404 → `RESTError.notFound` (mirrors profiles/attach gating).
+    MockURLProtocol.set(status: 404)
+    await #expect(throws: RESTError.notFound) {
+      _ = try await makeClient().registerPush(connection, "abc123", "sandbox", "1.2.3")
+    }
+  }
+
+  @Test func registerPushServerErrorMapsToTypedError() async throws {
+    MockURLProtocol.set(status: 500, json: #"{"detail":"boom"}"#)
+    await #expect(throws: RESTError.server(status: 500, detail: "boom")) {
+      _ = try await makeClient().registerPush(connection, "abc123", "sandbox", "1.2.3")
+    }
+  }
+
+  @Test func unregisterPushPostsDeviceTokenBody() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().unregisterPush(connection, "abc123")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "POST")
+    #expect(req.url?.path == "/api/plugins/hermes-push/unregister")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+    let json = try JSONSerialization.jsonObject(with: bodyData(req)) as? [String: String]
+    #expect(json == ["device_token": "abc123"])
+  }
+
+  @Test func unregisterPushNotFoundSurfacesCapabilityGate() async throws {
+    MockURLProtocol.set(status: 404)
+    await #expect(throws: RESTError.notFound) {
+      try await makeClient().unregisterPush(connection, "abc123")
+    }
+  }
+
+  @Test func sendTestPushPostsToTestRoute() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().sendTestPush(connection)
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "POST")
+    #expect(req.url?.path == "/api/plugins/hermes-push/test")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+  }
+
+  @Test func sendTestPushNotFoundSurfacesCapabilityGate() async throws {
+    MockURLProtocol.set(status: 404)
+    await #expect(throws: RESTError.notFound) {
+      try await makeClient().sendTestPush(connection)
+    }
+  }
+
+  @Test func sendTestPushServerErrorMapsToTypedError() async throws {
+    MockURLProtocol.set(status: 500, json: #"{"detail":"boom"}"#)
+    await #expect(throws: RESTError.server(status: 500, detail: "boom")) {
+      try await makeClient().sendTestPush(connection)
+    }
+  }
+
+  // MARK: - Push plugin readiness (GET /api/dashboard/plugins/hub)
+
+  @Test func pushPluginStatusEnabledIsReady() async throws {
+    MockURLProtocol.set(json: #"""
+      {"plugins":[{"name":"other","runtime_status":"inactive"},
+                  {"name":"hermes-push","runtime_status":"enabled","version":"1.0"}]}
+      """#)
+    let status = try await makeClient().pushPluginStatus(connection)
+    #expect(status == .ready)
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/dashboard/plugins/hub")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+  }
+
+  @Test func pushPluginStatusDisabledIsNotReady() async throws {
+    MockURLProtocol.set(json: #"{"plugins":[{"name":"hermes-push","runtime_status":"disabled"}]}"#)
+    #expect(try await makeClient().pushPluginStatus(connection) == .notReady)
+  }
+
+  @Test func pushPluginStatusInactiveIsNotReady() async throws {
+    MockURLProtocol.set(json: #"{"plugins":[{"name":"hermes-push","runtime_status":"inactive"}]}"#)
+    #expect(try await makeClient().pushPluginStatus(connection) == .notReady)
+  }
+
+  @Test func pushPluginStatusAbsentIsNotReady() async throws {
+    MockURLProtocol.set(json: #"{"plugins":[{"name":"something-else","runtime_status":"enabled"}]}"#)
+    #expect(try await makeClient().pushPluginStatus(connection) == .notReady)
+  }
+
+  @Test func pushPluginStatusNotFoundIsUnknown() async throws {
+    MockURLProtocol.set(status: 404)
+    #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
+  }
+
+  @Test func pushPluginStatusTransportErrorIsUnknown() async throws {
+    MockURLProtocol.set(fail: true)
+    #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
+  }
+
+  @Test func pushPluginStatusServerErrorIsUnknown() async throws {
+    MockURLProtocol.set(status: 500)
+    #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
+  }
 }
 } // extension RESTTransportSuite

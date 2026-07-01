@@ -24,7 +24,9 @@ public enum PushSetup {
     git clone https://github.com/goncharik/hermes-mobile-push-plugin.git ~/.hermes/plugins/hermes-push \
     (and `pip install fastapi` if it isn't already available), then enable it with \
     `hermes plugins enable hermes-push` (or add `hermes-push` under `plugins.enabled` in \
-    ~/.hermes/config.yaml) and restart yourself so the plugin loads and its REST routes mount.
+    ~/.hermes/config.yaml). Finally, RESTART the Hermes web/dashboard server (not just the chat \
+    process) — the plugin's REST routes only mount when that server starts up, so this restart is \
+    required for device registration to work. After restarting, tell me it's done.
     """
 }
 

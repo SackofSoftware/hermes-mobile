@@ -35,10 +35,6 @@ public struct ChatFeature {
     /// `.loadOlderRequested`, and is reset to the bottom window on every wholesale transcript
     /// replace (hydrate). The view renders `visibleRows`, never `transcript` directly.
     public var windowStart: Int
-    /// Which transcript rendering engine to use — a device-local A/B preference loaded from
-    /// `PreferencesClient` on `.task`. The view switches renderers on this; flipping it (via
-    /// Settings) re-instantiates the renderer with the same rows on next chat open.
-    public var chatRenderer: ChatRendererKind = .default
     public var composerText: String
     public var status: Status
     public var errorBanner: String?
@@ -137,11 +133,9 @@ public struct ChatFeature {
       title: String? = nil,
       transcript: IdentifiedArrayOf<ChatRow> = [],
       composerText: String = "",
-      status: Status = .connecting,
-      chatRenderer: ChatRendererKind = .default
+      status: Status = .connecting
     ) {
       self.connection = connection
-      self.chatRenderer = chatRenderer
       self.profileName = profileName
       self.storedSessionID = resumeStoredID
       self.title = title
@@ -269,6 +263,11 @@ public struct ChatFeature {
     case usageResponse(Usage)
     case composerSubmitted
     case promptSubmitFailed(message: String)
+    /// A self-heal re-resume/recreate landed a fresh live session id for an outbound RPC that
+    /// failed with "session not found" (#17). Apply it WITHOUT a wholesale transcript rebuild
+    /// (unlike `activateResult`) so the optimistic user/attachment row stays put while the
+    /// retried RPC replays. Carries the fresh stored id too when the heal learned one.
+    case liveSessionIDRefreshed(liveSessionID: String, storedSessionID: String?)
     case interruptTapped
     case respondToApproval(approve: Bool, all: Bool)
     case respondToClarify(answer: String)
@@ -356,8 +355,6 @@ public struct ChatFeature {
         return .none
 
       case .task:
-        // Load the device-local A/B renderer preference so the view can pick the engine.
-        state.chatRenderer = preferences.loadChatRenderer()
         // History is now hydrated server-authoritatively from the `session.resume`
         // response on `.ready` — see `hydrate`. No separate
         // REST `loadHistory` call: the activate response carries `messages` + `info` +
@@ -469,6 +466,16 @@ public struct ChatFeature {
         return applyActivate(response, into: &state)
 
       case let .activateResult(.failure(error)):
+        // A real server "session not found" from the foreground `session.resume` is NOT a
+        // benign socket drop: the stored id the agent had is gone (e.g. it expired/rebuilt).
+        // Don't leave a stale `liveSessionID` standing (the next prompt.submit would fail too) —
+        // recreate a fresh session so the chat can keep sending (#17). Keep the cached paint.
+        if error.isSessionNotFound {
+          state.status = .reconnecting
+          state.liveSessionID = nil
+          state.hasRequestedSession = true // createSession is the in-flight request
+          return createSession(profile: state.scopedProfile)
+        }
         // Offline / connection error: keep the cached instant-paint on screen (never blank
         // it) and show a subtle reconnecting status. The cached rows stay until a successful
         // resume replaces them wholesale. A plain `.disconnected` (the socket dropped — e.g.
@@ -522,11 +529,17 @@ public struct ChatFeature {
           for index in state.attachments.indices { state.attachments[index].uploadState = .uploading }
           // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
           let anchor = setTurnAnchor(state)
+          let stored = state.storedSessionID
+          let profile = state.scopedProfile
           return .merge(anchor, .run { [gateway, uuid] send in
-            do {
+            // The uploads + submit target the live id, which can be stale after a
+            // background→foreground; self-heal the whole upload→submit sequence once on a
+            // "session not found" by re-resuming for a fresh id and replaying (#17). The
+            // uploads are idempotent (the agent re-stages the bytes against the fresh session).
+            func runUploadAndSubmit(_ targetID: String) async throws {
               var refs: [String] = []
               for attachment in attachments {
-                if let ref = try await uploadAttachment(attachment, sessionID: sessionID, gateway: gateway) {
+                if let ref = try await uploadAttachment(attachment, sessionID: targetID, gateway: gateway) {
                   refs.append(ref)
                 }
               }
@@ -534,8 +547,16 @@ public struct ChatFeature {
               // image/pdf are picked up from session state by prompt.submit.
               let body = (refs + (text.isEmpty ? [] : [text])).joined(separator: "\n")
               _ = try await gateway.send("prompt.submit", .object([
-                "session_id": .string(sessionID), "text": .string(body),
+                "session_id": .string(targetID), "text": .string(body),
               ]))
+            }
+            do {
+              // Stale live id: re-resume/recreate for a fresh one, apply it, replay the whole
+              // upload→submit sequence once (uploads are idempotent).
+              try await withSessionHeal(
+                runUploadAndSubmit, sessionID: sessionID, storedSessionID: stored,
+                profile: profile, gateway: gateway, send: send
+              )
               // Echo images as thumbnails in the bubble; non-image files (no thumbnail)
               // fall back to their names when there's no typed text.
               let images = attachments.filter { $0.kind == .image }.map(\.data)
@@ -565,16 +586,19 @@ public struct ChatFeature {
         let anchor = setTurnAnchor(state)
         // prompt.submit acks fast (`{status:"streaming"}`); the turn streams via events,
         // so success does nothing here — only a thrown error (timeout / server / drop)
-        // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung).
+        // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung). A stale
+        // live id after background→foreground answers "session not found" — self-heal once by
+        // re-resuming for a fresh id and replaying the submit (#17).
+        let stored = state.storedSessionID
+        let profile = state.scopedProfile
         return .merge(anchor, .run { [gateway] send in
-          do {
+          await submitPrompt(
+            sessionID: sessionID, storedSessionID: stored, profile: profile,
+            gateway: gateway, send: send
+          ) { healedID in
             _ = try await gateway.send("prompt.submit", .object([
-              "session_id": .string(sessionID), "text": .string(text),
+              "session_id": .string(healedID), "text": .string(text),
             ]))
-          } catch let error as GatewayError {
-            await send(.promptSubmitFailed(message: error.message))
-          } catch {
-            await send(.promptSubmitFailed(message: GatewayError.disconnected.message))
           }
         })
 
@@ -587,6 +611,15 @@ public struct ChatFeature {
         // never produce a snapshot row (those aren't counted by the LRU sweep, which only
         // evicts `sessions` rows).
         return clearTurnAnchor(state)
+
+      case let .liveSessionIDRefreshed(liveSessionID, storedSessionID):
+        // Self-heal landed a fresh runtime id (#17). Swap it in so subsequent RPCs target the
+        // valid session; do NOT touch the transcript (the retried RPC's events repaint it, and a
+        // wholesale replace here would wipe the optimistic user/attachment row mid-retry).
+        state.liveSessionID = liveSessionID
+        state.storedSessionID = storedSessionID ?? state.storedSessionID
+        state.status = .ready
+        return .none
 
       case .interruptTapped:
         guard let sessionID = state.liveSessionID else { return .none }
@@ -604,19 +637,22 @@ public struct ChatFeature {
         )
 
       case let .respondToApproval(approve, all):
-        guard case let .approval(request) = state.pendingInteraction,
+        guard case .approval = state.pendingInteraction,
               let sessionID = state.liveSessionID
         else { return .none }
         state.pendingInteraction = nil
         state.transcript.append(
           ChatRow(id: uuid(), kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
         )
-        let requestID = request.requestID
-        let choice = approve ? "approve" : "deny"
+        // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
+        // just this command; "session" persists the pattern for the rest of the session
+        // (the "Approve all in this session" toggle). Approvals are resolved by the
+        // server's per-session queue, so NO `request_id` is sent (unlike clarify/secret);
+        // `all` maps to `resolve_all` to clear any other queued approvals at once.
+        let choice = approve ? (all ? "session" : "once") : "deny"
         return .run { [gateway] _ in
           _ = try? await gateway.send("approval.respond", .object([
             "session_id": .string(sessionID),
-            "request_id": .string(requestID),
             "choice": .string(choice),
             "all": .bool(all),
           ]))
@@ -936,12 +972,21 @@ public struct ChatFeature {
         state.title = trimmed
         state.renameDraft = nil
         state.errorBanner = nil
+        let stored = state.storedSessionID
+        let profile = state.scopedProfile
         return .run { [gateway] send in
-          do {
+          func rename(_ targetID: String) async throws {
             _ = try await gateway.send("session.title", .object([
-              "session_id": .string(sessionID),
+              "session_id": .string(targetID),
               "title": .string(trimmed),
             ]))
+          }
+          do {
+            // Stale live id after foreground: self-heal once, then replay the rename (#17).
+            try await withSessionHeal(
+              rename, sessionID: sessionID, storedSessionID: stored,
+              profile: profile, gateway: gateway, send: send
+            )
           } catch {
             await send(.renameFailed(previousTitle: previousTitle))
           }
@@ -1344,15 +1389,36 @@ public struct ChatFeature {
       state.usage = target.usage
     }
 
+    // Working indicator from the authoritative `running` flag.
+    let running = response.running ?? false
+    state.isSending = running
+
+    // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the
+    // client's own live thinking + tool rows are not in the server payload (`SessionInflight`
+    // carries only user/assistant/streaming — no reasoning, no tools). Capture those live rows
+    // (in transcript order, tools then thinking) BEFORE the wholesale replace so they survive
+    // the round-trip; we re-append them after the authoritative history is rebuilt and restore
+    // their tracking ids so subsequent `tool.*`/`message.delta` events reconcile in place.
+    // A COMPLETED turn (`running == false`) keeps the strict server-wins behavior: no preserved
+    // live rows leak into a finished transcript.
+    var preservedToolRows: [(toolKey: String, row: ChatRow)] = []
+    var preservedThinkingRow: ChatRow?
+    if running {
+      // Tool rows in transcript order (so re-append preserves the original ordering).
+      preservedToolRows = state.transcript.compactMap { row -> (String, ChatRow)? in
+        guard let entry = state.toolRowIDs.first(where: { $0.value == row.id }) else { return nil }
+        return (entry.key, row)
+      }
+      if let thinkingID = state.thinkingRowID {
+        preservedThinkingRow = state.transcript[id: thinkingID]
+      }
+    }
+
     // Rebuild the transcript wholesale from the authoritative history (server wins).
     state.transcript = IdentifiedArrayOf(uniqueElements: reconstructTranscript(response.messages))
     state.streamingRowID = nil
     state.thinkingRowID = nil
     state.toolRowIDs = [:]
-
-    // Working indicator from the authoritative `running` flag.
-    let running = response.running ?? false
-    state.isSending = running
 
     // Seed the in-flight turn snapshot (lost when the agent process restarts — acceptable).
     // Use DETERMINISTIC, position-derived ids (same convention as `reconstructTranscript`) so
@@ -1385,12 +1451,24 @@ public struct ChatFeature {
       }
     }
 
+    // #26: re-append the preserved live tool rows (in their original transcript order) after the
+    // rebuilt history + seeded inflight rows, restoring `toolRowIDs` so a later `tool.complete`
+    // for the same tool key reconciles the same row in place. Keep the ORIGINAL row ids (the
+    // running tool calls already exist client-side under those ids) — no UUID churn, no diff
+    // delete/insert. The thinking row is handled by `reconcileTurnTimer` so it can stay last.
+    for (toolKey, row) in preservedToolRows where state.transcript[id: row.id] == nil {
+      state.transcript.append(row)
+      state.toolRowIDs[toolKey] = row.id
+    }
+
     // Reconcile the live "Thinking" elapsed timer from the client-persisted turn-start anchor
     // against the authoritative `running` flag. `running` decides *whether* the timer runs;
     // the anchor only supplies the *start instant*. A `!running` + stale anchor must DISCARD
     // the anchor (no phantom timer); a `running` turn resumes the tick seeded at the elapsed
     // offset rather than restarting at 0.
-    let timerEffect = reconcileTurnTimer(running: running, into: &state)
+    let timerEffect = reconcileTurnTimer(
+      running: running, preservedThinkingRow: preservedThinkingRow, into: &state
+    )
 
     // Server wins: a wholesale transcript replace resets the client-side window to the bottom
     // (newest) so the chat opens/re-hydrates parked at the latest rows, discarding any prior
@@ -1424,7 +1502,9 @@ public struct ChatFeature {
   ///     phantom timer; the reconstructed (complete) reasoning row stands as a static
   ///     `Thought · <elapsed>` disclosure;
   ///   - `.none` → no in-flight turn; nothing to do.
-  private func reconcileTurnTimer(running: Bool, into state: inout State) -> Effect<Action> {
+  private func reconcileTurnTimer(
+    running: Bool, preservedThinkingRow: ChatRow? = nil, into state: inout State
+  ) -> Effect<Action> {
     // Read the anchor under the same key the submit path wrote it (`storedSessionID ??
     // liveSessionID`), NOT `response.sessionID` (the live id) — they differ for a resumed
     // session keyed by its stored id.
@@ -1433,19 +1513,30 @@ public struct ChatFeature {
     case let .running(elapsed):
       let seconds = Int(elapsed)
       state.thinkingSeconds = seconds
-      // Recreate the live thinking row (the in-flight one was dropped by the wholesale
-      // transcript rebuild). Created eagerly with the seeded elapsed so it renders as a live
-      // shimmering "Thinking <n>s" while the tick continues. Deterministic, position-derived id
-      // (same convention as `reconstructTranscript` / the seeded in-flight rows) so repeated
-      // hydrates of the same running turn don't churn its identity.
-      let thinkingKind = ChatRow.Kind.thinking(
-        reasoning: "", status: nil, elapsedSeconds: seconds, isComplete: false
-      )
-      let thinkingID = ChatRow.deterministicID(
-        sequenceIndex: state.transcript.count, role: thinkingKind.role,
-        kindDiscriminator: thinkingKind.discriminator
-      )
-      state.transcript.append(ChatRow(id: thinkingID, kind: thinkingKind))
+      // #26: if a live thinking row was preserved from before the wholesale replace, re-use it
+      // (same id + accumulated reasoning + latest status) so the thinking block does NOT restart
+      // — its content survives the background→foreground round-trip and the next `thinking.delta`
+      // mutates it in place. Otherwise recreate an empty live thinking row (the in-flight one was
+      // dropped by the wholesale rebuild) with a deterministic, position-derived id so repeated
+      // hydrates of the same running turn don't churn its identity. Either way it renders as a
+      // live shimmering "Thinking <n>s" (the view reads the live `thinkingSeconds`) while the
+      // tick continues.
+      let thinkingID: ChatRow.ID
+      if let preserved = preservedThinkingRow {
+        thinkingID = preserved.id
+        if state.transcript[id: preserved.id] == nil {
+          state.transcript.append(preserved)
+        }
+      } else {
+        let thinkingKind = ChatRow.Kind.thinking(
+          reasoning: "", status: nil, elapsedSeconds: seconds, isComplete: false
+        )
+        thinkingID = ChatRow.deterministicID(
+          sequenceIndex: state.transcript.count, role: thinkingKind.role,
+          kindDiscriminator: thinkingKind.discriminator
+        )
+        state.transcript.append(ChatRow(id: thinkingID, kind: thinkingKind))
+      }
       state.thinkingRowID = thinkingID
       keepThinkingLast(into: &state)
       // Resume the tick (seeded `thinkingSeconds` continues incrementing from `elapsed`).
@@ -1583,6 +1674,92 @@ public struct ChatFeature {
 
 private func backoffDelay(attempt: Int) -> Duration {
   .seconds(min(30.0, pow(2.0, Double(max(0, attempt - 1)))))
+}
+
+/// Self-heal an outbound RPC that failed with "session not found" (#17): obtain a FRESH live
+/// session id by re-resuming the stored session (`session.resume`), or — when no stored id is
+/// known (a brand-new session whose `session.create` returned no `stored_session_id`) —
+/// recreating one (`session.create`). Applies the fresh id to state via
+/// `.liveSessionIDRefreshed` (no transcript rebuild, so the optimistic row survives the retry)
+/// and returns it so the caller can replay the original RPC ONCE. Throws if the heal itself
+/// fails (the caller surfaces the banner — no second retry, no recursion). The default/nil
+/// profile is omitted so single-profile/token-mode requests stay byte-identical.
+private func healLiveSessionID(
+  storedSessionID: String?,
+  profile: String?,
+  gateway: HermesGatewayClient,
+  send: Send<ChatFeature.Action>
+) async throws -> String {
+  if let storedSessionID {
+    var fields: [String: JSONValue] = ["session_id": .string(storedSessionID)]
+    if let profile { fields["profile"] = .string(profile) }
+    let result = try await gateway.send("session.resume", .object(fields))
+    guard let response = result.decoded(ActivateResponse.self), !response.sessionID.isEmpty else {
+      throw GatewayError.server("Malformed session.resume result")
+    }
+    await send(.liveSessionIDRefreshed(
+      liveSessionID: response.sessionID, storedSessionID: response.storedSessionID
+    ))
+    return response.sessionID
+  }
+  // No stored id to resume against — recreate a fresh session so the heal still has a target.
+  var fields: [String: JSONValue] = [:]
+  if let profile { fields["profile"] = .string(profile) }
+  let result = try await gateway.send("session.create", .object(fields))
+  guard let handle = result.decoded(SessionHandle.self) else {
+    throw GatewayError.server("Malformed session.create result")
+  }
+  await send(.liveSessionIDRefreshed(
+    liveSessionID: handle.sessionID, storedSessionID: handle.storedSessionID
+  ))
+  return handle.sessionID
+}
+
+/// Run an outbound RPC with transparent self-heal on "session not found" (#17): run `op`
+/// against the current live id; if it throws `isSessionNotFound`, re-resume/recreate for a
+/// fresh id (applying it via `.liveSessionIDRefreshed`) and replay `op(healedID)` ONCE. A
+/// single retry — never recurses. This is the SHARED inner mechanism; callers keep their own
+/// OUTER catch to map a failure (heal, retry, or any other error) to the right per-call action
+/// (`.promptSubmitFailed` / `.attachmentUploadFailed` / `.renameFailed`).
+private func withSessionHeal(
+  _ op: (_ targetID: String) async throws -> Void,
+  sessionID: String,
+  storedSessionID: String?,
+  profile: String?,
+  gateway: HermesGatewayClient,
+  send: Send<ChatFeature.Action>
+) async throws {
+  do {
+    try await op(sessionID)
+  } catch let error as GatewayError where error.isSessionNotFound {
+    let healedID = try await healLiveSessionID(
+      storedSessionID: storedSessionID, profile: profile, gateway: gateway, send: send
+    )
+    try await op(healedID)
+  }
+}
+
+/// Run a `prompt.submit` with transparent self-heal on "session not found" (#17): replay the
+/// submit ONCE against a freshly re-resumed/recreated id; on any other failure (or a failed
+/// heal/retry) surface `.promptSubmitFailed`.
+private func submitPrompt(
+  sessionID: String,
+  storedSessionID: String?,
+  profile: String?,
+  gateway: HermesGatewayClient,
+  send: Send<ChatFeature.Action>,
+  submit: @escaping (_ targetID: String) async throws -> Void
+) async {
+  do {
+    try await withSessionHeal(
+      submit, sessionID: sessionID, storedSessionID: storedSessionID,
+      profile: profile, gateway: gateway, send: send
+    )
+  } catch let error as GatewayError {
+    await send(.promptSubmitFailed(message: error.message))
+  } catch {
+    await send(.promptSubmitFailed(message: GatewayError.disconnected.message))
+  }
 }
 
 /// Upload one staged attachment to the session via the method its kind dictates (#8).

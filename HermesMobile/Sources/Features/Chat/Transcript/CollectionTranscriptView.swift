@@ -1,6 +1,15 @@
 import HermesKit
 import SwiftUI
 
+/// The turn's high-level activity, supplied by the reducer so the renderer can apply the
+/// stick-to-bottom contract without reaching into feature state. `.streaming` covers any
+/// in-flight turn (deltas growing the last cell / new rows appended); `.idle` is a settled
+/// transcript. (Declared outside the `#if canImport(UIKit)` guard so `ChatView` can name it.)
+enum TurnState: Equatable {
+  case idle
+  case streaming
+}
+
 #if canImport(UIKit)
 import UIKit
 
@@ -85,6 +94,9 @@ struct CollectionTranscriptView<Cell: View>: UIViewRepresentable {
     collectionView.backgroundColor = .clear
     collectionView.keyboardDismissMode = .interactive
     collectionView.alwaysBounceVertical = true
+    // Rows are never "selected" as cells; turning this off stops the cell's tap/long-press
+    // highlight gesture from competing with text selection inside hosted UITextViews.
+    collectionView.allowsSelection = false
     collectionView.delegate = context.coordinator
     collectionView.onViewportHeightShrink = { [weak coordinator = context.coordinator] in
       coordinator?.viewportDidShrink()

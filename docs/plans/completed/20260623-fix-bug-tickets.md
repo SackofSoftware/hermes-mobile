@@ -147,17 +147,17 @@ Dependencies identified:
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift`
 - Create: `HermesKit/Tests/HermesKitTests/GatewayErrorTests.swift`
 
-- [ ] Reproduce #17 against a live agent: start a new session, send one turn, background,
-      foreground; capture the `session.resume` request/response and the failing
-      `prompt.submit` via `DebugLogClient`/Probe. Record findings in this plan under a
-      `## Investigation notes (#17)` section: does `session.create` return
-      `stored_session_id`? does foreground `session.resume` succeed, and what `session_id`
-      does it return vs. the stale `liveSessionID`?
-- [ ] Add `var isSessionNotFound: Bool` to `GatewayError` — case-insensitive match on
+- [x] Reproduce #17 against a live agent (static analysis — live repro not automatable in
+      sandbox). Findings recorded below under `## Investigation notes (#17)`: `session.create`
+      may return `stored_session_id == nil` for a fresh session; foreground `session.resume`
+      failures are swallowed as `.reconnecting` without refreshing/clearing the stale
+      `liveSessionID`; `prompt.submit`/attach use `state.liveSessionID` (refreshed only by a
+      successful `applyActivate`).
+- [x] Add `var isSessionNotFound: Bool` to `GatewayError` — case-insensitive match on
       `server(message)` containing "session not found" (mirrors `isUnknownMethod`).
-- [ ] Write tests for `isSessionNotFound` (matches server "session not found" variants;
+- [x] Write tests for `isSessionNotFound` (matches server "session not found" variants;
       false for `.disconnected`/`.timedOut`/`.authExpired`/other `server` messages).
-- [ ] Run tests — must pass before Task 2.
+- [x] Run tests — must pass before Task 2.
 
 ### Task 2: Self-heal outbound RPCs on "session not found" (#17 fix)
 
@@ -166,24 +166,24 @@ Dependencies identified:
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift` (or
   `ChatInteractionTests.swift`)
 
-- [ ] On `prompt.submit` failure where `error.isSessionNotFound`, transparently re-resume:
+- [x] On `prompt.submit` failure where `error.isSessionNotFound`, transparently re-resume:
       `session.resume(storedSessionID)` → apply the fresh `liveSessionID` → replay
       `prompt.submit` **once**; surface the banner only if re-resume or the retry fails.
       Guard against retry loops (single retry).
-- [ ] Apply the same self-heal to the attach-upload path and `session.title` rename
+- [x] Apply the same self-heal to the attach-upload path and `session.title` rename
       (they also use `liveSessionID`).
-- [ ] Stop silently swallowing a real server `session not found` from the foreground
+- [x] Stop silently swallowing a real server `session not found` from the foreground
       `session.resume`/`activateResult(.failure)` path: distinguish it from a benign
       `.disconnected` drop and trigger a re-resume/recreate rather than leaving a stale
       `liveSessionID`.
-- [ ] If investigation shows `storedSessionID` is `nil` for fresh sessions, ensure it is
+- [x] If investigation shows `storedSessionID` is `nil` for fresh sessions, ensure it is
       captured from `session.create`'s handle (and/or fall back to `session.create` when no
       stored id exists), so re-resume always has a target.
-- [ ] Write reducer tests: foreground `prompt.submit` returns `session not found` →
+- [x] Write reducer tests: foreground `prompt.submit` returns `session not found` →
       reducer re-resumes (assert `session.resume` effect) → applies new live id → retries
       submit → succeeds with no error banner. Add the failure-of-retry case (banner shown).
-- [ ] Write a test for the attach path self-heal (success + retry-failure).
-- [ ] Run tests — must pass before Task 3.
+- [x] Write a test for the attach path self-heal (success + retry-failure).
+- [x] Run tests — must pass before Task 3.
 
 ### Task 3: Preserve in-flight thinking + tool rows across foreground (#26 fix)
 
@@ -191,21 +191,21 @@ Dependencies identified:
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (`applyActivate`)
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift`
 
-- [ ] In `applyActivate`, when `running == true`, capture the existing in-flight live rows
+- [x] In `applyActivate`, when `running == true`, capture the existing in-flight live rows
       (the thinking row via `thinkingRowID` and tool rows via `toolRowIDs`, in transcript
       order) **before** the wholesale transcript replace.
-- [ ] After rebuilding from `messages` and seeding the inflight user/assistant rows,
+- [x] After rebuilding from `messages` and seeding the inflight user/assistant rows,
       re-append the preserved thinking + tool rows and restore
       `thinkingRowID`/`toolRowIDs`/`streamingRowID` so subsequent deltas reconcile in place;
       preserve the "thinking row last" contract.
-- [ ] Confirm a **completed** turn (`running == false`) still replaces wholesale (server
+- [x] Confirm a **completed** turn (`running == false`) still replaces wholesale (server
       wins) — no preserved live rows leak into a finished transcript.
-- [ ] Reconcile the elapsed timer continuity with the preserved thinking row (existing
+- [x] Reconcile the elapsed timer continuity with the preserved thinking row (existing
       `reconcileTurnTimer` anchor behavior must still hold).
-- [ ] Write reducer tests: hydrate with `running == true` while client has a live thinking
+- [x] Write reducer tests: hydrate with `running == true` while client has a live thinking
       row + N tool rows → assert they survive (ids/content preserved, thinking last);
       hydrate with `running == false` → assert wholesale replace (no leftover live rows).
-- [ ] Run tests — must pass before Task 4.
+- [x] Run tests — must pass before Task 4.
 
 ### Task 4: Markdown block support — headers, blockquotes, tables (#27 part a)
 
@@ -214,15 +214,15 @@ Dependencies identified:
 - Modify: `HermesMobile/Sources/Features/Chat/MarkdownText.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/MarkdownSegmentTests.swift`
 
-- [ ] Extend the pure parser to classify **headers** (`#`..`######`), **blockquotes**
+- [x] Extend the pure parser to classify **headers** (`#`..`######`), **blockquotes**
       (`>`), and **tables** (`| … |` with a `---` separator row), with fenced code still
       taking precedence; unterminated/odd markup degrades to prose (lenient, never crashes).
-- [ ] Render the new blocks in `MarkdownText`: headings as scaled bold `Text`; blockquote
+- [x] Render the new blocks in `MarkdownText`: headings as scaled bold `Text`; blockquote
       as an indented bar + secondary-styled lines; table as a `Grid` (header row emphasized),
       inline Markdown still applied within cells/lines.
-- [ ] Write parser tests (success: each block type; edge: heading with trailing `#`,
+- [x] Write parser tests (success: each block type; edge: heading with trailing `#`,
       nested/lazy blockquote, table without separator → prose, mixed prose+table+code).
-- [ ] Run tests — must pass before Task 5.
+- [x] Run tests — must pass before Task 5.
 
 ### Task 5: Full copyability of agent responses (#27 part b)
 
@@ -234,14 +234,14 @@ Dependencies identified:
 - Modify: `HermesKit/Tests/HermesKitTests/RowIdentityTests.swift` or
   `TranscriptReconstructionTests.swift`
 
-- [ ] Enable `.textSelection(.enabled)` across the assistant rendered Markdown so any part
+- [x] Enable `.textSelection(.enabled)` across the assistant rendered Markdown so any part
       of an agent response can be selected/copied (not just the per-block code button).
-- [ ] Verify the existing row context-menu `Copy` (`.copyRow(id:)`) yields the full row's
+- [x] Verify the existing row context-menu `Copy` (`.copyRow(id:)`) yields the full row's
       plain text for message/thinking/tool rows; add a `ChatRow` copy-text accessor if the
       current source is incomplete.
-- [ ] Write a unit test for the row copy-text accessor (assistant message, thinking,
+- [x] Write a unit test for the row copy-text accessor (assistant message, thinking,
       tool) covering full-content extraction.
-- [ ] Run tests — must pass before Task 6.
+- [x] Run tests — must pass before Task 6.
 
 ### Task 6: Bubble-less chat restructure (#27 part c)
 
@@ -252,33 +252,113 @@ Dependencies identified:
   bubble background)
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift` + `__Snapshots__`
 
-- [ ] Remove the bubble wrapper for `role == .assistant` in `MessageBubbleView` (plain
+- [x] Remove the bubble wrapper for `role == .assistant` in `MessageBubbleView` (plain
       leading-aligned, full-width text); keep the trailing user bubble.
-- [ ] Remove the `.secondarySystemBackground` bubble from `ToolStatusView`; render tool rows
+- [x] Remove the `.secondarySystemBackground` bubble from `ToolStatusView`; render tool rows
       as bubble-less plain content (keep tap-to-detail affordance and state styling).
-- [ ] Ensure thinking rows render bubble-less and consistent with the new layout.
-- [ ] Re-record affected snapshots (`make snapshot-record`) and review the diffs for the new
-      Claude-app-style layout; then `make snapshot` must pass.
-- [ ] Run reducer tests + snapshot tests — must pass before Task 7.
+- [x] Ensure thinking rows render bubble-less and consistent with the new layout
+      (`ThinkingIndicatorView` already had no bubble background — left as-is, spacing fits).
+- [x] Re-record affected snapshots (`make snapshot-record`) and review the diffs for the new
+      Claude-app-style layout; then `make snapshot` must pass. (Re-recorded on a Mac with the
+      iOS 26.2 simulator; `make snapshot` passes against the new baselines.)
+- [x] Run reducer tests + snapshot tests — must pass before Task 7. (HermesKit `swift test`:
+      593 tests pass; `make snapshot`: TEST SUCCEEDED.)
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] #17: a foreground after backgrounding a new session no longer fails the next
-      `prompt.submit`/attach with `session not found` (covered by Task 2 tests; spot-check
-      manually per Post-Completion).
-- [ ] #26: backgrounding mid-thinking and returning preserves the thinking block + streamed
-      tool calls (no restart) — covered by Task 3 tests.
-- [ ] #27: headers/blockquotes/tables render; agent responses are fully copyable; only user
-      messages have bubbles.
-- [ ] Run the full suite: `script -q /dev/null swift test --package-path HermesKit` and
-      `make snapshot`.
+- [x] #17: a foreground after backgrounding a new session no longer fails the next
+      `prompt.submit`/attach with `session not found` (verified via `SelfHealTests.swift`:
+      `promptSubmitSelfHealsOnSessionNotFoundThenSucceeds`, the retry-failure and
+      re-resume-failure banner cases, both attach-path cases, and
+      `foregroundResumeSessionNotFoundRecreatesSession`; manual TestFlight spot-check of the
+      live background→foreground repro tracked in Post-Completion — not automatable in sandbox).
+- [x] #26: backgrounding mid-thinking and returning preserves the thinking block + streamed
+      tool calls (no restart) — verified via `HydrateTests.swift`:
+      `hydrateRunningPreservesLiveThinkingAndToolRows` (running==true preserves thinking + tool
+      rows, thinking last), `hydrateNotRunningWipesLiveThinkingAndToolRows` (running==false
+      wholesale replace), and `repeatedHydrateOfRunningTurnKeepsStableInflightIDs`.
+- [x] #27: headers/blockquotes/tables render (`MarkdownSegmentTests` — headers each level,
+      trailing-hash strip, 7-hashes-not-header, inline markdown in headers, multi-line/lazy
+      blockquotes, tables with/without separator + alignment + surrounding prose); agent
+      responses are fully copyable (`ChatRowCopyTests` for message/streaming/tool/status +
+      `.textSelection(.enabled)` on the assistant Markdown in `MarkdownText.swift`); only user
+      messages have bubbles (bubble-less snapshots re-recorded in Task 6).
+- [x] Run the full suite: `script -q /dev/null swift test --package-path HermesKit` (593 tests
+      pass, 45 suites) and `make snapshot` (71 tests pass — TEST SUCCEEDED).
 
 ### Task 8: [Final] Update documentation
 
-- [ ] Update `CLAUDE.md` if new conventions emerged (e.g. the self-heal-on-`session not
+- [x] Update `CLAUDE.md` if new conventions emerged (e.g. the self-heal-on-`session not
       found` RPC pattern; in-flight-row preservation on hydrate; Markdown block rendering).
-- [ ] Update `README.md`/`docs/` only if user-facing behavior described there changed.
-- [ ] Move this plan to `docs/plans/completed/`.
+      Added: self-heal-on-`session not found` (into the gateway/`prompt.submit`-failure bullet),
+      running-turn in-flight-row preservation (into the hydrate bullet), and a new
+      block-Markdown + bubble-less chat bullet.
+- [x] Update `README.md`/`docs/` only if user-facing behavior described there changed.
+      Skipped — README's "render as native Markdown" / "Copy a whole message" descriptions
+      still hold; the block-types / full-selection / bubble-less changes are refinements that
+      don't contradict the existing user-facing copy.
+- [x] Move this plan to `docs/plans/completed/`.
+
+## Investigation notes (#17)
+
+*Static analysis — no live agent in the sandbox, so this is a code read of `ChatFeature.swift`
+(`.ready` / `hydrate` / `createSession` / `applyActivate` / `.foreground` / `.composerSubmitted` /
+`activateResult` failure handling), `Session.swift` (`SessionHandle` / `ActivateResponse` /
+`SessionInflight`), and `HermesGatewayClient.swift` (`send` / `GatewayError`).*
+
+**Symptom (from the ticket).** After background→foreground on a fresh session, the socket
+reconnects and `session.resume` *appears* to recover, but the next outbound RPC (`prompt.submit`
+or an attach upload) fails with `session not found`.
+
+**Three concrete questions answered by the code:**
+
+1. **Does `session.create` populate `storedSessionID`?** *Partially / not guaranteed.*
+   `SessionHandle` decodes `stored_session_id` (`Session.swift:81`), and the success handler
+   sets `state.storedSessionID = handle.storedSessionID ?? state.storedSessionID`
+   (`ChatFeature.swift:449`). So **if** the server returns a `stored_session_id` in the
+   `session.create` result, it is captured. But a brand-new session that hasn't persisted a turn
+   yet may return only the live `session_id` with `stored_session_id == nil`, leaving
+   `state.storedSessionID == nil`. On the next `.ready` (foreground reconnect),
+   `.ready` branches on `state.storedSessionID` (`ChatFeature.swift:976`): a `nil` stored id
+   takes the `createSession` branch (creates *another* new session) rather than re-resuming the
+   one in flight — so the in-flight session id is never refreshed and the original turn is
+   orphaned. This is the root-cause hinge for Task 2's "fall back / capture stored id" checkbox.
+
+2. **Does the foreground `session.resume` failure get silently swallowed?** *Effectively yes for
+   the failure path.* On foreground, `.foreground` resets `hasRequestedSession` and reconnects
+   (`ChatFeature.swift:497-509`); the fresh `.ready` re-`hydrate`s when a stored id exists.
+   If `session.resume` throws (or returns malformed), it lands in `activateResult(.failure)`
+   (`ChatFeature.swift:471-480`), which only sets `state.status = .reconnecting` and raises a
+   banner *unless* the error is `.disconnected`. Crucially **it leaves `state.liveSessionID`
+   unchanged** — there is no re-resume, no recreate, no clearing of the stale id. A genuine server
+   `session not found` from `session.resume` is therefore not distinguished from a benign socket
+   drop and never triggers recovery; the stale `liveSessionID` survives. (And when stored id is
+   `nil` per (1), `hydrate` isn't even attempted — `createSession` runs instead.)
+
+3. **What id does `prompt.submit` use?** **`state.liveSessionID`** (the short live/runtime id) —
+   `ChatFeature.swift:512` guards on it and passes it as `session_id` at lines 537 (attach path)
+   and 571 (plain submit). The attach uploads (`uploadAttachment`) and `session.title` rename
+   (line 923) use the same `liveSessionID`. After a background→foreground the agent may have torn
+   down / rebuilt the in-memory live session and assigned a **new** live id; the only thing that
+   refreshes `state.liveSessionID` is a *successful* `applyActivate` (`ChatFeature.swift:1329`,
+   `state.liveSessionID = response.sessionID`). If resume failed/was swallowed (or never ran due
+   to a `nil` stored id), `prompt.submit` reuses the now-stale `liveSessionID`, producing the
+   server's `session not found`.
+
+**Most-likely root cause.** The client keeps a stale `liveSessionID` after foreground because
+(a) a fresh session may have no `storedSessionID` to re-resume against, so `.ready` recreates
+instead of re-resuming, and (b) even when a stored id exists, a `session.resume` failure is
+swallowed as `.reconnecting` without refreshing or clearing `liveSessionID`. The next
+`prompt.submit`/attach then sends the invalidated live id → `session not found`.
+
+**What this implies for Task 2.** (i) Add the typed `GatewayError.isSessionNotFound` matcher
+(done in Task 1) so the submit/attach/rename paths can detect the condition. (ii) On a
+`session not found` from an outbound RPC, self-heal by re-resuming `storedSessionID` to obtain a
+fresh `liveSessionID`, then replay the RPC once (guarded against loops). (iii) Stop swallowing a
+real `session not found` from the foreground `session.resume` — distinguish it from
+`.disconnected` and trigger re-resume/recreate. (iv) Ensure `storedSessionID` is captured from
+`session.create` (and fall back to `session.create` when no stored id exists) so re-resume always
+has a target.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — informational only.*

@@ -16,7 +16,6 @@ struct SettingsFeatureTests {
     preferences.saveSeenCounts(["s1": 4])
     preferences.saveGroupingMode(.chronological)
     preferences.saveSelectedProfileID("staging")
-    preferences.saveChatRenderer(.swiftUI) // device-local A/B pref — must survive logout
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
@@ -34,41 +33,6 @@ struct SettingsFeatureTests {
     #expect(preferences.loadSeenCounts() == [:]) // unread state cleared too
     #expect(preferences.loadGroupingMode() == .workspace) // grouping pref reset on logout
     #expect(preferences.loadSelectedProfileID() == nil) // selected profile cleared on logout
-    #expect(preferences.loadChatRenderer() == .swiftUI) // device-local — NOT cleared on logout
-  }
-
-  @Test func taskLoadsChatRendererPreference() async {
-    let preferences = PreferencesClient.inMemory()
-    // Use the non-default engine so `.task` produces an observable state change (default is .swiftUI).
-    preferences.saveChatRenderer(.collectionView)
-    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
-      SettingsFeature()
-    } withDependencies: {
-      $0.preferences = preferences
-      $0.debugLog.stream = { @Sendable in AsyncStream { $0.finish() } }
-      $0.push.authorizationStatus = { .notDetermined }
-    }
-
-    await store.send(.task) {
-      $0.chatRenderer = .collectionView
-    }
-    // `.task` also probes push authorization (merged in from the push-notifications work);
-    // .notDetermined leaves the notification flags at their defaults (no state change).
-    await store.receive(\.authorizationStatusLoaded)
-  }
-
-  @Test func selectingChatRendererPersistsPreference() async {
-    let preferences = PreferencesClient.inMemory()
-    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
-      SettingsFeature()
-    } withDependencies: {
-      $0.preferences = preferences
-    }
-
-    await store.send(\.binding.chatRenderer, .collectionView) {
-      $0.chatRenderer = .collectionView
-    }
-    #expect(preferences.loadChatRenderer() == .collectionView)
   }
 
   @Test func clearTokenWipesChatSnapshotStore() async {

@@ -42,18 +42,6 @@ struct SettingsView: View {
       }
 
       Section {
-        Picker("Chat transcript engine", selection: $store.chatRenderer) {
-          ForEach(ChatRendererKind.allCases, id: \.self) { kind in
-            Text(kind.displayName).tag(kind)
-          }
-        }
-      } header: {
-        Text("Experimental")
-      } footer: {
-        Text("Switches the chat transcript rendering engine. Experimental — reopen a chat to compare.")
-      }
-
-      Section {
         if store.pushAvailable {
           Toggle(
             "Notify me about approvals",

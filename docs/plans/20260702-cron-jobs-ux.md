@@ -214,12 +214,12 @@ issue #24's direction **A (unread parity)** plus **desktop-style job→runs grou
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] unread dots light up on cron runs and the header badge counts them (issue gap 1 closed)
-- [ ] section groups by job with next-run countdown and expandable runs (issue gap 2, desktop parity within the list)
-- [ ] old-agent fallback verified (cronJobs 404 → flat section, no badge regressions)
-- [ ] regular session-list UX unchanged (pinned/workspace/chronological/search/archived flows)
-- [ ] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run snapshot suite: `make snapshot`
+- [x] unread dots light up on cron runs and the header badge counts them (issue gap 1 closed — reducer tests + grouped/fallback snapshots)
+- [x] section groups by job with next-run countdown and expandable runs (issue gap 2, desktop parity within the list — grouping tests + snapshots)
+- [x] old-agent fallback verified (cronJobs 404 → supported flag off, later fetches skipped, flat section snapshot w/ working badge)
+- [x] regular session-list UX unchanged (all pre-existing tests pass; existing snapshot baselines byte-identical)
+- [x] run full test suite: 651 tests / 48 suites pass
+- [x] run snapshot suite: all pass
 
 ### Task 7: [Final] Update documentation
 

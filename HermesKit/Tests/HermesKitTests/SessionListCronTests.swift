@@ -288,6 +288,127 @@ struct SessionListCronTests {
     }
   }
 
+  // MARK: Manage actions (trigger / pause / resume)
+
+  @Test func triggerSuccessRefetchesSessionsAndJobs() async {
+    let triggered = LockIsolated<String?>(nil)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.triggerCronJob = { @Sendable _, id, _ in triggered.setValue(id) }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", state: "running")] }
+    }
+
+    await store.send(.triggerCronJob(id: "job1")) {
+      $0.cronActionInFlightIDs = ["job1"]
+    }
+    await store.receive(\.cronJobActionFinished) {
+      $0.cronActionInFlightIDs = []
+      $0.now = self.now
+      $0.isLoading = true  // trigger → FULL load so the new run session appears
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+    }
+    await store.receive(\.cronJobsResponse.success) {
+      $0.cronJobs = [CronJob(id: "job1", state: "running")]
+    }
+    #expect(triggered.value == "job1")
+  }
+
+  @Test func pauseSuccessRefetchesJobsOnly() async {
+    // `hermesREST.sessions` is deliberately NOT stubbed: if pause triggered a session
+    // fetch, the unimplemented dependency would fail this test.
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        cronJobs: [CronJob(id: "job1", state: "scheduled")]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.hermesREST.pauseCronJob = { @Sendable _, _, _ in }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", state: "paused")] }
+    }
+
+    await store.send(.pauseCronJob(id: "job1")) {
+      $0.cronActionInFlightIDs = ["job1"]
+    }
+    await store.receive(\.cronJobActionFinished) {
+      $0.cronActionInFlightIDs = []
+    }
+    await store.receive(\.cronJobsResponse.success) {
+      $0.cronJobs = [CronJob(id: "job1", state: "paused")]  // server-reconciled, not optimistic
+    }
+  }
+
+  @Test func resumeSuccessRefetchesJobsOnly() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        cronJobs: [CronJob(id: "job1", state: "paused")]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.hermesREST.resumeCronJob = { @Sendable _, _, _ in }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", state: "scheduled")] }
+    }
+
+    await store.send(.resumeCronJob(id: "job1")) {
+      $0.cronActionInFlightIDs = ["job1"]
+    }
+    await store.receive(\.cronJobActionFinished) {
+      $0.cronActionInFlightIDs = []
+    }
+    await store.receive(\.cronJobsResponse.success) {
+      $0.cronJobs = [CronJob(id: "job1", state: "scheduled")]
+    }
+  }
+
+  @Test func actionFailureSurfacesBannerAndKeepsState() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        cronJobs: [CronJob(id: "job1", state: "scheduled")]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.hermesREST.triggerCronJob = { @Sendable _, _, _ in
+        throw RESTError.server(status: 400, detail: "job is paused")
+      }
+    }
+
+    await store.send(.triggerCronJob(id: "job1")) {
+      $0.cronActionInFlightIDs = ["job1"]
+    }
+    await store.receive(\.cronJobActionFinished) {
+      $0.cronActionInFlightIDs = []
+      $0.loadError = RESTError.server(status: 400, detail: "job is paused").message
+    }
+    // No refetch on failure — jobs stay as they were.
+    #expect(store.state.cronJobs == [CronJob(id: "job1", state: "scheduled")])
+  }
+
+  @Test func actionIsIgnoredWhileAlreadyInFlight() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        cronActionInFlightIDs: ["job1"]
+      )
+    ) {
+      SessionListFeature()
+    }
+    // No RPC stub: firing the request would fail on the unimplemented dependency.
+    await store.send(.triggerCronJob(id: "job1"))
+    await store.send(.pauseCronJob(id: "job1"))
+    await store.send(.resumeCronJob(id: "job1"))
+  }
+
   @Test func openingACronRunMarksItSeen() async {
     let run = cronSession("job1", stamp: "20260702_090000", messageCount: 5)
     let store = TestStore(

@@ -191,12 +191,12 @@ issue #24's direction **A (unread parity)** plus **desktop-style job→runs grou
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] add actions `.triggerCronJob(id:)`, `.pauseCronJob(id:)`, `.resumeCronJob(id:)` firing the REST call with `scopedProfileName`
-- [ ] on success refetch cron jobs (and sessions after trigger, so the new run appears); on failure surface `loadError` with the server detail
-- [ ] guard double-fire: ignore an action for a job whose RPC is already in flight (transient in-flight set, mirroring `archivingIDs`)
-- [ ] write tests: each action success path (RPC + refetch), failure path (error banner, state unchanged)
-- [ ] write tests: in-flight double-fire guard
-- [ ] run tests — must pass before task 5
+- [x] add actions `.triggerCronJob(id:)`, `.pauseCronJob(id:)`, `.resumeCronJob(id:)` firing the REST call (profile scoping = literal selected name when supported, matching the jobs fetch)
+- [x] on success refetch: full load after trigger (new run session), jobs-only for pause/resume; on failure surface `loadError` with the server detail — funneled through one `.cronJobActionFinished` action
+- [x] guard double-fire: `cronActionInFlightIDs` transient set (mirrors `archivingIDs`)
+- [x] write tests: trigger (sessions+jobs refetch), pause/resume (jobs-only — unstubbed sessions dependency proves no list fetch), failure (banner, no refetch)
+- [x] write tests: in-flight double-fire guard (all three actions)
+- [x] run tests — must pass before task 5 (651 tests / 48 suites pass)
 
 ### Task 5: View — grouped cron section, badge, peek, fallback + snapshots
 

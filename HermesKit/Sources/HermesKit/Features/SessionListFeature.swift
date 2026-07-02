@@ -90,6 +90,9 @@ public struct SessionListFeature {
     /// The job whose inline run-peek is expanded — single-open so the section stays
     /// scannable (mirrors the desktop sidebar's peek).
     public var expandedCronJobID: String?
+    /// Job ids whose trigger/pause/resume RPC is IN FLIGHT. Transient double-fire guard
+    /// (mirrors `archivingIDs`): added when the POST starts, removed on success/failure.
+    public var cronActionInFlightIDs: Set<String>
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
     @Presents public var addProfile: AddProfileFeature.State?
@@ -126,6 +129,7 @@ public struct SessionListFeature {
       cronJobs: IdentifiedArrayOf<CronJob> = [],
       cronJobsSupported: Bool = true,
       expandedCronJobID: String? = nil,
+      cronActionInFlightIDs: Set<String> = [],
       settings: SettingsFeature.State? = nil,
       addProfile: AddProfileFeature.State? = nil
     ) {
@@ -153,6 +157,7 @@ public struct SessionListFeature {
       self.cronJobs = cronJobs
       self.cronJobsSupported = cronJobsSupported
       self.expandedCronJobID = expandedCronJobID
+      self.cronActionInFlightIDs = cronActionInFlightIDs
       self.settings = settings
       self.addProfile = addProfile
     }
@@ -377,6 +382,17 @@ public struct SessionListFeature {
     case cronJobsResponse(Result<[CronJob], RESTError>)
     /// Toggle a job's inline run-peek (single-open: expanding one collapses another).
     case cronJobTapped(id: String)
+    /// "Run now" on a job row — `POST /api/cron/jobs/{id}/trigger`.
+    case triggerCronJob(id: String)
+    /// Pause a job — `POST /api/cron/jobs/{id}/pause`.
+    case pauseCronJob(id: String)
+    /// Resume a paused job — `POST /api/cron/jobs/{id}/resume`.
+    case resumeCronJob(id: String)
+    /// A cron action RPC finished: lift the in-flight guard; on success refetch from the
+    /// server (the full load after a trigger so the new run session appears, jobs-only for
+    /// pause/resume); on failure surface the banner. No optimistic mutation — job state is
+    /// server-computed and the refetch/poll reconciles.
+    case cronJobActionFinished(id: String, refetchSessions: Bool, error: RESTError?)
     // MARK: Push notifications
     /// Kicks off contextual push setup once the list appears (right after login): first probe
     /// the `hermes-push` plugin readiness, then branch on the result. Fired from `.task`.
@@ -518,6 +534,39 @@ public struct SessionListFeature {
       case let .cronJobTapped(id):
         state.expandedCronJobID = state.expandedCronJobID == id ? nil : id
         return .none
+
+      case let .triggerCronJob(id):
+        return performCronAction(&state, id: id, refetchSessions: true) { rest, conn, jobID, profile in
+          try await rest.triggerCronJob(conn, jobID, profile)
+        }
+
+      case let .pauseCronJob(id):
+        return performCronAction(&state, id: id, refetchSessions: false) { rest, conn, jobID, profile in
+          try await rest.pauseCronJob(conn, jobID, profile)
+        }
+
+      case let .resumeCronJob(id):
+        return performCronAction(&state, id: id, refetchSessions: false) { rest, conn, jobID, profile in
+          try await rest.resumeCronJob(conn, jobID, profile)
+        }
+
+      case let .cronJobActionFinished(id, refetchSessions, error):
+        state.cronActionInFlightIDs.remove(id)
+        if let error {
+          // Surface the server's copy verbatim (e.g. a 400 detail) via the existing banner.
+          state.loadError = error.message
+          return .none
+        }
+        // Success → reconcile from the server. A trigger just spawned a run session, so do
+        // the full load (sessions + jobs); pause/resume only changed the job, so a
+        // jobs-only refetch avoids churning the list.
+        if refetchSessions { return load(&state) }
+        return .run { [
+          rest, connection = state.connection,
+          profile = state.profilesSupported ? state.selectedProfileName : nil
+        ] send in
+          await send(fetchCronJobs(rest: rest, connection: connection, profile: profile))
+        }
 
       case .setupPush:
         // Push onboarding (after login, on the list). FIRST probe whether the `hermes-push`
@@ -1091,6 +1140,31 @@ public struct SessionListFeature {
   private func isPushPromptSnoozed() -> Bool {
     guard let snooze = preferences.loadPushPromptSnooze() else { return false }
     return now < snooze.until
+  }
+
+  /// Shared trigger/pause/resume flow: guard against a double-fire while the job's RPC is
+  /// in flight, then run it and funnel the outcome through `.cronJobActionFinished`.
+  /// Threads the same profile scoping as the jobs fetch (literal selected name when the
+  /// agent supports profiles, else nil).
+  private func performCronAction(
+    _ state: inout State,
+    id: String,
+    refetchSessions: Bool,
+    rpc: @escaping @Sendable (HermesRESTClient, ServerConnection, String, String?) async throws -> Void
+  ) -> Effect<Action> {
+    guard !state.cronActionInFlightIDs.contains(id) else { return .none }
+    state.cronActionInFlightIDs.insert(id)
+    let profile = state.profilesSupported ? state.selectedProfileName : nil
+    return .run { [rest, connection = state.connection] send in
+      do {
+        try await rpc(rest, connection, id, profile)
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: nil))
+      } catch let error as RESTError {
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: error))
+      } catch {
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: .unreachable))
+      }
+    }
   }
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {

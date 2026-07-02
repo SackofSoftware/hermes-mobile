@@ -160,12 +160,12 @@ issue #24's direction **A (unread parity)** plus **desktop-style job→runs grou
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift`
 
-- [ ] add `cronJobs: (ServerConnection, _ profile: String?) async throws -> [CronJob]` hitting `GET /api/cron/jobs` (`?profile=` only when non-nil, per `scopedProfileName` convention)
-- [ ] add `triggerCronJob` / `pauseCronJob` / `resumeCronJob` `(ServerConnection, _ id: String, _ profile: String?)` POSTs, mapping errors through the existing `RESTError` taxonomy (404 → `.notFound`)
-- [ ] provide `testValue` no-ops consistent with the client's existing pattern
-- [ ] write tests: cronJobs success decode + profile query threading (present when scoped, absent for default)
-- [ ] write tests: 404 → `.notFound`, non-2xx → `.server`, action endpoints hit the right paths/methods
-- [ ] run tests — must pass before task 3
+- [x] add `cronJobs: (ServerConnection, _ profile: String?) async throws -> [CronJob]` hitting `GET /api/cron/jobs` (`?profile=` only when non-nil, per `scopedProfileName` convention)
+- [x] add `triggerCronJob` / `pauseCronJob` / `resumeCronJob` `(ServerConnection, _ id: String, _ profile: String?)` POSTs via a shared `cronJobAction` helper, errors through the existing `RESTError` taxonomy (404 → `.notFound`)
+- [x] provide `testValue` no-ops consistent with the client's existing pattern (`@DependencyClient` unimplemented defaults)
+- [x] write tests: cronJobs success decode + profile query threading (present when scoped, absent for default)
+- [x] write tests: 404 → `.notFound`, non-2xx → `.server`, action endpoints hit the right paths/methods
+- [x] run tests — must pass before task 3 (53/53 REST suite passes)
 
 ### Task 3: Reducer — fetch jobs, capability gate, grouped computed state, unread fix
 

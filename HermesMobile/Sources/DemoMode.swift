@@ -52,6 +52,13 @@ enum DemoMode {
     deps.hermesProfiles.sessions = { _, _, _, _, _, _ in seededSessions }
     // The agent always exposes the default profile, so the "default" pill is always present.
     deps.hermesProfiles.list = { _ in [Profile(name: "default", isDefault: true)] }
+    // Keep the grouped Cron Jobs section frozen on the seeded jobs across polls.
+    deps.hermesREST.cronJobs = { _, _ in seededCronJobs }
+    // "notify" needs REAL notification permission (the panel captures a live banner from
+    // `simctl push`), so report the plugin ready → the reducer runs the OS permission
+    // prompt. Every other scenario reports unknown: no prompt, no sheet, no live REST.
+    let pushStatus: PushPluginStatus = scenario == "notify" ? .ready : .unknown
+    deps.hermesREST.pushPluginStatus = { _ in pushStatus }
     // Deterministic relative timestamps.
     deps.date = .constant(now)
     // Persisted UI prefs, pre-seeded so `reloadPrefs` keeps our curated grouping/pins.
@@ -64,9 +71,11 @@ enum DemoMode {
     client.loadGroupingMode = { .chronological }
     client.loadPinnedIDs = { ["s0"] }
     client.loadSeenCounts = {
-      // s1 has unread activity (seen < messageCount); the rest are caught up.
+      // s1 and the newest digest run have unread activity (seen < messageCount) — the
+      // cron run lights the job row's dot AND the section header's badge.
       var seen = Dictionary(uniqueKeysWithValues: seededSessions.map { ($0.id, $0.messageCount ?? 0) })
       seen["s1"] = 6
+      seen["cron_digest01_20260610_070000"] = 1
       return seen
     }
     return client
@@ -76,7 +85,9 @@ enum DemoMode {
 
   private static func state(for scenario: String) -> AppFeature.State {
     switch scenario {
-    case "sessions":
+    // "notify" shares the sessions backdrop — the panel's banner arrives live via
+    // `simctl push` after the scenario grants notification permission (see `configure`).
+    case "sessions", "notify":
       return AppFeature.State(home: sessionListState)
     case "work":
       return chatScenario(workChat)
@@ -122,19 +133,56 @@ enum DemoMode {
         isActive: t.2
       )
     }
-    // A cron-scheduled session → pulled into the always-on "Cron Jobs" section.
-    sessions.append(
+    // Cron run sessions → grouped under their jobs in the "Cron Jobs" section. The run
+    // id embeds the owning job id (`cron_{job_id}_{timestamp}`), exactly like the real
+    // scheduler names them. The digest has two runs (this morning + yesterday); the
+    // paused sweep has one.
+    sessions.append(contentsOf: [
       Session(
-        id: "cron0",
+        id: "cron_digest01_20260610_070000",
         title: "Morning news digest",
-        updatedAt: Date(timeIntervalSince1970: 1_749_560_000),
-        startedAt: Date(timeIntervalSince1970: 1_749_560_000),
+        updatedAt: Date(timeIntervalSince1970: 1_749_589_200),  // this morning, unread
+        startedAt: Date(timeIntervalSince1970: 1_749_589_200),
         messageCount: 3,
         source: "cron"
-      )
-    )
+      ),
+      Session(
+        id: "cron_digest01_20260609_070000",
+        title: "Morning news digest",
+        updatedAt: Date(timeIntervalSince1970: 1_749_502_800),  // yesterday
+        startedAt: Date(timeIntervalSince1970: 1_749_502_800),
+        messageCount: 3,
+        source: "cron"
+      ),
+      Session(
+        id: "cron_sweep02_20260609_180000",
+        title: "Evening inbox sweep",
+        updatedAt: Date(timeIntervalSince1970: 1_749_542_400),
+        startedAt: Date(timeIntervalSince1970: 1_749_542_400),
+        messageCount: 2,
+        source: "cron"
+      ),
+    ])
     return sessions
   }()
+
+  /// The cron *jobs* the runs above belong to: the digest is live with a visible
+  /// next-run countdown; the sweep is paused (amber pip, schedule line).
+  private static let seededCronJobs: [CronJob] = [
+    CronJob(
+      id: "digest01",
+      name: "Morning news digest",
+      scheduleDisplay: "every day at 07:00",
+      state: "scheduled",
+      nextRunAt: Date(timeIntervalSince1970: 1_749_600_000 + 21 * 3_600)  // "in 21 hr."
+    ),
+    CronJob(
+      id: "sweep02",
+      name: "Evening inbox sweep",
+      scheduleDisplay: "every day at 18:00",
+      state: "paused"
+    ),
+  ]
 
   private static var sessionListState: SessionListFeature.State {
     SessionListFeature.State(
@@ -142,7 +190,10 @@ enum DemoMode {
       sessions: IdentifiedArray(uniqueElements: seededSessions),
       now: now,
       pinnedIDs: ["s0"],
-      groupingMode: .chronological
+      groupingMode: .chronological,
+      cronJobs: IdentifiedArray(uniqueElements: seededCronJobs),
+      // The digest's peek starts open so the panel shows job → runs at a glance.
+      expandedCronJobID: "digest01"
     )
   }
 
@@ -165,7 +216,16 @@ enum DemoMode {
           detail: ToolDetail(resultText: "3 articles"), durationS: 1.1)),
         ChatRow(id: rowID(2), kind: .message(
           role: .assistant,
-          text: "Here's the gist:\n\n- **Keep a steady schedule** — same sleep and wake time, even on weekends\n- **Wind down screens** 60–90 min before bed, and dim the lights\n- **Watch caffeine** — it has a ~6-hour half-life, so stop by early afternoon",
+          text: "## The gist\n\n- **Keep a steady schedule** — same sleep and wake time, even on weekends\n- **Wind down screens** 60–90 min before bed, and dim the lights\n\n| Habit | Payoff |\n| --- | --- |\n| Fixed wake time | Deeper sleep |\n| No caffeine after 2pm | Faster wind-down |\n| Cool, dark room | Fewer wake-ups |",
+          isComplete: true)),
+        ChatRow(id: rowID(3), kind: .message(
+          role: .user, text: "Love it. Remind me to wind down at 10pm tonight?", isComplete: true)),
+        ChatRow(id: rowID(4), kind: .tool(
+          name: "reminders", title: "Added “Wind down” at 10:00 PM", state: .complete,
+          detail: ToolDetail(resultText: "reminder set"), durationS: 0.4)),
+        ChatRow(id: rowID(5), kind: .message(
+          role: .assistant,
+          text: "Done — I'll nudge you at **10:00 pm**. Sleep well 🌙",
           isComplete: true)),
       ]),
       status: .ready

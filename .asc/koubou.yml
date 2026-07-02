@@ -37,37 +37,12 @@ screenshots:
         position: ['50%', '62%']
         scale: 0.84
 
-  02_sessions:
+  02_work:
     background:
       type: radial
       center: ['50%', '54%']
       radius: 78%
       colors: ['#EC9626', '#0C0805']
-    content:
-      - type: text
-        content: Pick up every chat
-        position: ['50%', '7%']
-        size: 58
-        weight: semibold
-        color: '#F7EFE4'
-      - type: text
-        content: right where you left off
-        position: ['50%', '12.5%']
-        size: 66
-        weight: bold
-        color: '#FFB02E'
-      - type: image
-        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/sessions.png
-        frame: true
-        position: ['50%', '62%']
-        scale: 0.84
-
-  03_work:
-    background:
-      type: radial
-      center: ['50%', '54%']
-      radius: 78%
-      colors: ['#E6852C', '#0C0805']
     content:
       - type: text
         content: It researches, plans,
@@ -87,7 +62,32 @@ screenshots:
         position: ['50%', '62%']
         scale: 0.84
 
-  04_voice:
+  03_cron:
+    background:
+      type: radial
+      center: ['50%', '54%']
+      radius: 78%
+      colors: ['#E6852C', '#0C0805']
+    content:
+      - type: text
+        content: Runs on your schedule,
+        position: ['50%', '7%']
+        size: 56
+        weight: semibold
+        color: '#F7EFE4'
+      - type: text
+        content: even while you sleep
+        position: ['50%', '12.5%']
+        size: 66
+        weight: bold
+        color: '#FFB02E'
+      - type: image
+        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/cron.png
+        frame: true
+        position: ['50%', '62%']
+        scale: 0.84
+
+  04_notify:
     background:
       type: radial
       center: ['50%', '54%']
@@ -95,19 +95,19 @@ screenshots:
       colors: ['#DE7A30', '#0C0805']
     content:
       - type: text
-        content: Talk, type, or attach —
+        content: And pings your phone
         position: ['50%', '7%']
         size: 56
         weight: semibold
         color: '#F7EFE4'
       - type: text
-        content: ask it anything
+        content: when it needs you
         position: ['50%', '12.5%']
-        size: 72
+        size: 68
         weight: bold
         color: '#FFB02E'
       - type: image
-        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/voice.png
+        asset: /Users/eugene/Documents/Development/Personal/hermes-mobile/screenshots/raw/notify.png
         frame: true
         position: ['50%', '62%']
         scale: 0.84

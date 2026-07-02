@@ -146,13 +146,13 @@ issue #24's direction **A (unread parity)** plus **desktop-style job→runs grou
 - Create: `HermesKit/Sources/HermesKit/Models/CronJob.swift`
 - Create: `HermesKit/Tests/HermesKitTests/CronJobTests.swift`
 
-- [ ] add `CronJob` Decodable/Equatable/Sendable/Identifiable with lenient `CodingKeys` decoding (`schedule_display`, `next_run_at`, `last_run_at`, ISO8601 dates with/without fractional seconds)
-- [ ] add `title` (name → 60-char prompt clip → id) and `effectiveState` (explicit `state` else `enabled == false ? "disabled" : "scheduled"`) mirroring the desktop's `jobTitle`/`jobState`
-- [ ] add `CronJob.jobID(fromSessionID:)` static parser for `cron_{job_id}_{YYYYMMDD_HHMMSS}` ids (nil for non-matching/interactive ids)
-- [ ] add `relativeRunLabel(from:to:)` coarse relative-time helper (min/hr/day, past + future)
-- [ ] write tests: decoding (full payload, minimal payload, unknown fields/state), title/state fallback chains
-- [ ] write tests: jobID parse (valid, legacy/odd ids, non-cron ids → nil), relativeRunLabel units + past/future
-- [ ] run tests — must pass before task 2
+- [x] add `CronJob` Decodable/Equatable/Sendable/Identifiable with lenient `CodingKeys` decoding (`schedule_display`, `next_run_at`, `last_run_at`, ISO8601 dates with/without fractional seconds)
+- [x] add `title` (name → 60-char prompt clip → id) and `effectiveState` (explicit `state` else `enabled == false ? "disabled" : "scheduled"`) mirroring the desktop's `jobTitle`/`jobState`
+- [x] add `CronJob.jobID(fromSessionID:)` static parser for `cron_{job_id}_{YYYYMMDD_HHMMSS}` ids (nil for non-matching/interactive ids)
+- [x] add `relativeRunLabel(for:now:)` coarse relative-time helper (sec/min/hr/day, past + future, locale-deterministic manual strings)
+- [x] write tests: decoding (full payload, minimal payload, unknown fields/state), title/state fallback chains
+- [x] write tests: jobID parse (valid, legacy/odd ids, non-cron ids → nil), relativeRunLabel units + past/future
+- [x] run tests — must pass before task 2 (13/13 pass)
 
 ### Task 2: REST endpoints for cron jobs + actions
 

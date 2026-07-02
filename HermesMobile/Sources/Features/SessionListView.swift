@@ -8,6 +8,7 @@ import SwiftUI
 /// bottom search field).
 struct SessionListView: View {
   @Bindable var store: StoreOf<SessionListFeature>
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     List {
@@ -163,20 +164,145 @@ struct SessionListView: View {
       .accessibilityAddTraits(.isHeader)
   }
 
-  /// Always-on "Cron Jobs" section for `source == "cron"` sessions. The header mirrors
-  /// `sessionsSectionHeader`'s visual weight but adds the Clock icon to match desktop. Rows
-  /// reuse the standard `row(_:)` builder so swipe/context actions and unread/active styling
-  /// stay identical to the interactive list.
+  /// Always-on "Cron Jobs" section. When the agent exposes `/api/cron/jobs` the rows are
+  /// the *jobs* (state dot, next-run countdown, unread dot), desktop-style: tapping a job
+  /// expands a single-open inline peek of its recent *runs* (standard `row(_:)`, so
+  /// tap-to-open and unread styling stay identical); a context menu offers Run now /
+  /// Pause / Resume. Older agents (or before the first jobs fetch) fall back to the flat
+  /// run list. The header carries the aggregate unread badge either way.
   @ViewBuilder
   private var cronJobsSection: some View {
-    Label("Cron Jobs", systemImage: "clock")
-      .font(.title2.weight(.bold))
-      .listRowSeparator(.hidden)
-      .listRowBackground(Color.clear)
-      .accessibilityAddTraits(.isHeader)
-    ForEach(store.cronSessions) { session in
-      row(session)
+    cronSectionHeader
+    if store.cronJobGroups.isEmpty {
+      // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
+      ForEach(store.cronSessions) { session in
+        row(session)
+      }
+    } else {
+      ForEach(store.cronJobGroups) { group in
+        cronJobRow(group)
+        if store.expandedCronJobID == group.id {
+          if group.runs.isEmpty {
+            Text("No runs yet")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+              .padding(.leading, 24)
+              .listRowSeparator(.hidden)
+          }
+          ForEach(group.runs) { run in
+            row(run)
+              .padding(.leading, 24) // indented under the owning job
+          }
+        }
+      }
+      // Runs whose job no longer exists (deleted job, legacy id) — never hide output.
+      ForEach(store.unmatchedCronSessions) { session in
+        row(session)
+      }
     }
+  }
+
+  /// "Cron Jobs" header with the aggregate unread badge (count of cron runs with unseen
+  /// output — the desktop's `CRON JOBS 4`), so activity is visible even from the header.
+  private var cronSectionHeader: some View {
+    HStack(spacing: 8) {
+      Label("Cron Jobs", systemImage: "clock")
+        .font(.title2.weight(.bold))
+      if store.cronUnreadCount > 0 {
+        Text("\(store.cronUnreadCount)")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.white)
+          .padding(.horizontal, 7)
+          .padding(.vertical, 2)
+          .background(Color.hermesAccent, in: Capsule())
+          .accessibilityLabel("\(store.cronUnreadCount) unread cron runs")
+      }
+      Spacer()
+    }
+    .listRowSeparator(.hidden)
+    .listRowBackground(Color.clear)
+    .accessibilityAddTraits(.isHeader)
+  }
+
+  /// One cron *job* row: state dot, title, next-run countdown (relative, from the same
+  /// `now` the row timestamps use — refreshed by the poll, no per-second ticker), unread
+  /// dot when any of the job's runs is unread, and a disclosure chevron for the peek.
+  private func cronJobRow(_ group: CronJobGroup) -> some View {
+    let isExpanded = store.expandedCronJobID == group.id
+    return Button {
+      store.send(.cronJobTapped(id: group.id), animation: reduceMotion ? nil : .snappy)
+    } label: {
+      HStack(spacing: 10) {
+        Circle()
+          .fill(cronStateColor(group.job.effectiveState))
+          .frame(width: 8, height: 8)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(group.job.title)
+            .fontWeight(group.hasUnread ? .semibold : .regular)
+            .lineLimit(1)
+          if let next = group.job.nextRunAt {
+            Text("Next \(CronJob.relativeRunLabel(for: next, now: store.now))")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          } else if let schedule = group.job.scheduleDisplay {
+            Text(schedule)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+        }
+        Spacer()
+        if group.hasUnread {
+          Circle().fill(Color.hermesAccent).frame(width: 8, height: 8)
+        }
+        Image(systemName: "chevron.right")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.tertiary)
+          .rotationEffect(.degrees(isExpanded ? 90 : 0))
+      }
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .listRowSeparator(.hidden)
+    .accessibilityLabel(cronJobAccessibilityLabel(group, isExpanded: isExpanded))
+    .contextMenu {
+      Button("Run now", systemImage: "play") {
+        store.send(.triggerCronJob(id: group.id))
+      }
+      if group.job.isPaused {
+        Button("Resume", systemImage: "play.circle") {
+          store.send(.resumeCronJob(id: group.id))
+        }
+      } else {
+        Button("Pause", systemImage: "pause.circle") {
+          store.send(.pauseCronJob(id: group.id))
+        }
+      }
+    }
+  }
+
+  /// Status-pip color per job state — mirrors the desktop's `STATE_DOT` mapping, except
+  /// live states are green (the desktop uses its accent, but ours is orange and would be
+  /// indistinguishable from the amber paused pip): green live, amber paused, red error,
+  /// gray inactive/unknown.
+  private func cronStateColor(_ state: String) -> Color {
+    switch state {
+    case "scheduled", "running", "enabled": .green
+    case "paused": .orange
+    case "error": .red
+    default: Color(.systemGray3) // completed / disabled / unknown
+    }
+  }
+
+  private func cronJobAccessibilityLabel(_ group: CronJobGroup, isExpanded: Bool) -> String {
+    var parts = [group.job.title]
+    if group.job.isPaused { parts.append("paused") }
+    if let next = group.job.nextRunAt {
+      parts.append("next run \(CronJob.relativeRunLabel(for: next, now: store.now))")
+    }
+    if group.hasUnread { parts.append("unread runs") }
+    parts.append(isExpanded ? "expanded" : "collapsed")
+    return parts.joined(separator: ", ")
   }
 
   // MARK: Profile pill

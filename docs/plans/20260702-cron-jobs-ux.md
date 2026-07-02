@@ -204,13 +204,13 @@ issue #24's direction **A (unread parity)** plus **desktop-style job→runs grou
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 - Modify: `HermesMobileTests/SessionListSnapshotTests.swift` (name per existing suite)
 
-- [ ] replace `cronJobsSection` rows with job rows when `cronJobsSupported && !cronJobGroups.isEmpty`: state dot (color per `effectiveState`, respects reduce-motion for any animation), `title`, `relativeRunLabel(nextRunAt, now)` countdown, unread dot when the job has unread runs
-- [ ] section header: keep clock icon + add aggregate unread badge (`cronUnreadCount`, hidden at 0)
-- [ ] tap job → `.cronJobTapped` inline peek: the job's runs via the standard `row(_:)` builder (unread/active styling for free); tap run → existing open path; render `unmatchedCronSessions` flat below the groups
-- [ ] context menu on job rows: Run now / Pause (or Resume when paused), wired to the new actions
-- [ ] fallback: `!cronJobsSupported` (or no jobs) renders today's flat section unchanged; search continues to hide the cron section
-- [ ] add snapshot tests: grouped collapsed w/ badge, expanded peek w/ unread run, paused job row, fallback flat section (pinned `now`)
-- [ ] run `make snapshot` (re-record intentionally changed list snapshots) + full `make test` — must pass before task 6
+- [x] replace `cronJobsSection` rows with job rows when groups exist: state dot (➕ live states are GREEN, not accent — the app accent is orange and would be indistinguishable from the amber paused pip), `title`, `relativeRunLabel` countdown (schedule line when no next run), unread dot when the job has unread runs; expand animation respects reduce-motion
+- [x] section header: clock icon + aggregate unread badge (`cronUnreadCount`, hidden at 0)
+- [x] tap job → `.cronJobTapped` inline peek (indented, single-open, "No runs yet" empty state): runs via the standard `row(_:)` builder; `unmatchedCronSessions` flat below the groups
+- [x] context menu on job rows: Run now / Pause (or Resume when paused)
+- [x] fallback: `!cronJobsSupported` (or no jobs yet) renders today's flat section unchanged; search continues to hide the cron section
+- [x] add snapshot tests: grouped collapsed w/ badge + paused row, expanded peek w/ unread run, unsupported-agent flat fallback w/ badge (pinned `now`; existing baselines unchanged)
+- [x] run snapshot record + assert (all pass; ➕ stale generated project needed `tuist generate` after the transcript-renderer removal; spurious swift-snapshot-testing lockfile pin reverted per prior convention) — before task 6
 
 ### Task 6: Verify acceptance criteria
 

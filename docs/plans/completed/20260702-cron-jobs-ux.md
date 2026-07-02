@@ -223,9 +223,9 @@ issue #24's direction **A (unread parity)** plus **desktop-style job→runs grou
 
 ### Task 7: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` cron-sessions bullet (grouping model, capability gate, unread badge)
-- [ ] update `docs/architecture.md` / `README.md` if the feature overview mentions the cron section
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `CLAUDE.md`: new bullet documenting the grouped cron model (id-prefix binding, capability gate, unread badge, action semantics, state-pip colors, profile scoping)
+- [x] `docs/architecture.md` / `README.md` don't mention the cron section — no changes needed
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

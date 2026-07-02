@@ -173,16 +173,17 @@ issue #24's direction **A (unread parity)** plus **desktop-style job→runs grou
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] add state: `cronJobs: IdentifiedArrayOf<CronJob>`, `cronJobsSupported: Bool = true`, `expandedCronJobID: String?`
-- [ ] fetch cron jobs alongside sessions on `.task`, `.pulledToRefresh`, and `.pollTick`; add `.cronJobsResponse(Result<[CronJob], RESTError>)` — success stores jobs, `.notFound` sets `cronJobsSupported = false`, other errors keep previous jobs (no UI flap)
-- [ ] add computed `cronJobGroups: [CronJobGroup]` (desktop sort: soonest next-run first, nil last, then title; runs = id-prefix-matched cron sessions, `updatedAt` desc, peek-capped at 5) and `unmatchedCronSessions`
-- [ ] add computed `cronUnreadCount` (cron sessions in `unreadSessionIDs`)
-- [ ] fix unread seeding: include cron sessions wherever discovery seeds `seenCounts` (the `:523` visible-only loop) so dots + badge can light up; opening a run via `sessionTapped` marks it seen (existing path — verify it isn't cron-filtered)
-- [ ] add `.cronJobTapped(id:)` toggling the single-open `expandedCronJobID`
-- [ ] reset cron state on profile switch/logout consistent with existing list resets
-- [ ] write tests: jobs fetched with sessions, 404 flips supported flag, transport error keeps previous jobs
-- [ ] write tests: grouping (match, unmatched bucket, sort order, peek cap), `cronUnreadCount`, cron seeding + seen-on-open, expand/collapse toggling
-- [ ] run tests — must pass before task 4
+- [x] add state: `cronJobs: IdentifiedArrayOf<CronJob>`, `cronJobsSupported: Bool = true`, `expandedCronJobID: String?`
+- [x] fetch cron jobs alongside sessions on `.task`, `.pulledToRefresh`, and `.pollTick`; add `.cronJobsResponse(Result<[CronJob], RESTError>)` — success stores jobs, `.notFound` sets `cronJobsSupported = false`, other errors keep previous jobs (no UI flap). ➕ Implemented INSIDE the session-load effect (sequential, after `.sessionsResponse`) rather than a merged parallel effect, so TestStore receive order is deterministic and one CancelID covers both.
+- [x] add computed `cronJobGroups: [CronJobGroup]` (desktop sort: soonest next-run first, nil last, then title; runs = id-prefix-matched cron sessions, `updatedAt` desc, peek-capped at 5) and `unmatchedCronSessions`
+- [x] add computed `cronUnreadCount` (cron sessions in `unreadSessionIDs`)
+- [x] unread seeding: ➕ verified the `:523` seeding loop and `unreadSessionIDs` ALREADY cover cron sessions (the gap in the issue text predates the ChatView-rewrite refactor) — locked in with regression tests (seed-on-discovery, seen-on-open, badge count) instead of re-fixing
+- [x] add `.cronJobTapped(id:)` toggling the single-open `expandedCronJobID`
+- [x] reset cron state on profile switch (selectProfile + delete-profile re-home); logout recreates state
+- [x] write tests: jobs fetched with sessions (profile scoping both ways), 404 flips supported flag + skips later fetches, transport error keeps previous jobs
+- [x] write tests: grouping (match, unmatched bucket, sort order, peek cap + unread-outside-peek), `cronUnreadCount`, cron seeding + seen-on-open, expand/collapse toggling (12 tests in `SessionListCronTests.swift`)
+- [x] ➕ update 16 existing SessionListFeature tests + 2 AppFeature foreground tests for the new fetch (stub + one `.cronJobsResponse` receive each)
+- [x] run tests — must pass before task 4 (full suite: 646 tests / 48 suites pass)
 
 ### Task 4: Reducer — job manage actions (trigger / pause / resume)
 

@@ -19,6 +19,7 @@ struct SessionListFeatureTests {
       // Old agent (no /api/profiles) → falls back to the unscoped session fetch.
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown } // can't tell → don't nag
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", title: "Hello", preview: "hi")]
       }
@@ -36,6 +37,9 @@ struct SessionListFeatureTests {
       $0.sessions = [Session(id: "s1", title: "Hello", preview: "hi")]
       $0.seenCounts = ["s1": 0] // seeded so the session isn't shown unread on first sight
     }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
+    }
     await store.send(.onDisappear) // cancels the auto-poll loop
   }
 
@@ -47,6 +51,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -60,6 +65,9 @@ struct SessionListFeatureTests {
     await store.receive(\.sessionsResponse.failure) {
       $0.isLoading = false
       $0.loadError = RESTError.unreachable.message
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
     await store.send(.onDisappear) // cancels the auto-poll loop
   }
@@ -76,6 +84,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = clock
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         fetchCount.withValue { $0 += 1 }
         return [Session(id: "s1", isActive: true)]
@@ -94,6 +103,9 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1", isActive: true)]
       $0.seenCounts = ["s1": 0]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
     #expect(fetchCount.value == 1)
 
@@ -147,6 +159,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -166,6 +179,9 @@ struct SessionListFeatureTests {
     }
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
   }
 
@@ -395,6 +411,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
     }
 
@@ -410,6 +427,9 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1")]
       $0.seenCounts = ["s1": 0]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
     await store.send(.onDisappear) // cancels the auto-poll loop
   }
@@ -553,6 +573,9 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       $0.preferences = prefs
       $0.hermesREST.archive = { @Sendable _, _, _, _ in }
+      // The cancelled load still runs its trailing cron fetch (the send is dropped) — stub
+      // it so the unimplemented-dependency check doesn't trip; no response is received.
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         // Block until released, then return the OLD list (both sessions) — stale data.
         var iterator = gate.stream.makeAsyncIterator()
@@ -769,6 +792,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -788,6 +812,9 @@ struct SessionListFeatureTests {
     }
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
   }
 
@@ -1148,6 +1175,7 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.date = .constant(now)
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
     }
 
@@ -1160,6 +1188,9 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1")]
       $0.seenCounts = ["s1": 0]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
   }
 
@@ -1204,6 +1235,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -1216,6 +1248,9 @@ struct SessionListFeatureTests {
     await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
     await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
+    }
     await store.send(.onDisappear)
   }
 
@@ -1271,6 +1306,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       $0.preferences = prefs
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
@@ -1296,6 +1332,9 @@ struct SessionListFeatureTests {
       $0.sessions = [Session(id: "w1", title: "Work")]
       $0.seenCounts = ["w1": 0]
     }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
+    }
     #expect(scopedFetch.value == ["work"]) // scoped to the active profile
     await store.send(.onDisappear)
   }
@@ -1309,6 +1348,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         unscopedFetch.withValue { $0 += 1 }
         return [Session(id: "s1")]
@@ -1326,6 +1366,9 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1")]
       $0.seenCounts = ["s1": 0]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
     #expect(store.state.profilesSupported == false)
     #expect(unscopedFetch.value == 1) // today's /api/sessions, not the scoped endpoint
@@ -1349,6 +1392,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = prefs
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
         scopedFetch.withValue { $0.append(profile) }
         return [Session(id: "w1")]
@@ -1366,6 +1410,9 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.sessions = [Session(id: "w1")]
       $0.seenCounts = ["w1": 0]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
     #expect(prefs.loadSelectedProfileID() == "work") // persisted
     #expect(scopedFetch.value == ["work"]) // refetched scoped to the new profile
@@ -1390,6 +1437,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = prefs
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "fresh")]
       }
@@ -1412,6 +1460,9 @@ struct SessionListFeatureTests {
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
     }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
+    }
     #expect(prefs.loadSelectedProfileID() == "fresh")
   }
 
@@ -1430,6 +1481,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = prefs
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.delete = { @Sendable _, name in deleted.withValue { $0.append(name) } }
       $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
     }
@@ -1463,6 +1515,9 @@ struct SessionListFeatureTests {
     }
     await store.receive(\.sessionsResponse.success) {
       $0.isLoading = false
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
     #expect(deleted.value == ["work"])
     #expect(prefs.loadSelectedProfileID() == "default")
@@ -1532,6 +1587,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = TestClock()
       $0.preferences = prefs
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
@@ -1557,6 +1613,9 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.sessions = [Session(id: "d1")]
       $0.seenCounts = ["d1": 0]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
     #expect(prefs.loadSelectedProfileID() == "default") // persisted re-home
     #expect(scopedFetch.value == ["default"]) // scoped to default
@@ -1814,6 +1873,7 @@ struct SessionListFeatureTests {
       $0.continuousClock = clock
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", isActive: active.value)]
       }
@@ -1830,6 +1890,9 @@ struct SessionListFeatureTests {
       $0.isLoading = false
       $0.sessions = [Session(id: "s1", isActive: false)]
       $0.seenCounts = ["s1": 0]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
     }
 
     // The agent starts working this session elsewhere; the next poll observes it.

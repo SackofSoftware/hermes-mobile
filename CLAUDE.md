@@ -146,6 +146,26 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   non-cron `interactiveSessions` that feeds `pinnedSessions`/`groups`/`chronologicalSessions`),
   so cron rows never appear in Pinned/workspace/chronological. Rendered with a `clock`-icon
   header below the interactive sections, and **not shown during search** (search stays flat).
+- **The Cron Jobs section groups runs under their *jobs*, desktop-style** (#24):
+  `GET /api/cron/jobs` is fetched sequentially INSIDE the session-load effect (after
+  `.sessionsResponse`, same CancelID — deterministic TestStore order, no racy merge); a run
+  session binds to its job via the id-embedded prefix (`cron_{job_id}_{ts}` →
+  `CronJob.jobID(fromSessionID:)`) — upstream has a `/runs` endpoint, but the client groups
+  from the already-fetched sessions so **older agents work too**. Job rows: state pip
+  (**green live / amber paused** — deliberately NOT the accent, which is orange and would be
+  indistinguishable from amber; red error, gray inactive), `relativeRunLabel` next-run
+  countdown off `state.now` (poll-refreshed — no per-second ticker), unread dot judged over
+  ALL the job's runs (not just the peeked 5), and a context menu (Run now / Pause / Resume →
+  `cronActionInFlightIDs` double-fire guard; success refetches — full load after trigger,
+  jobs-only for pause/resume; **no optimistic job-state mutation**). Tap = single-open
+  inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the standard
+  `row(_:)`; runs matching no fetched job render flat below (`unmatchedCronSessions` —
+  never hide output). The header carries the aggregate `cronUnreadCount` badge; cron
+  sessions ride the same `seenCounts` unread pipeline as interactive rows. **Capability-
+  gated**: a 404 flips `cronJobsSupported` off → flat run list, fetch skipped thereafter;
+  transient failures keep the previous jobs (no flapping). Jobs are fetched with the
+  LITERAL selected profile name when `profilesSupported` (matching the scoped session list,
+  so a job's runs are actually present), unscoped otherwise.
 - **Auto-poll** (e.g. the session-list working glow): a cancellable `continuousClock`
   `sleep`-loop effect started on `.task` and cancelled by an explicit `.onDisappear`
   action — not a bare `.task` cancellation. Pause it while searching. Testable with

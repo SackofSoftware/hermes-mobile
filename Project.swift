@@ -77,7 +77,7 @@ let project = Project(
           "DEVELOPMENT_TEAM": .string(developmentTeam),
           "CODE_SIGN_STYLE": "Automatic",
           "MARKETING_VERSION": "1.0",
-          "CURRENT_PROJECT_VERSION": "26",
+          "CURRENT_PROJECT_VERSION": "45",
           // Production default (App Store / external TestFlight) — the orange "AppIcon".
           // Debug builds override to the blue "AppIconDev" below. INTERNAL TestFlight
           // archives the Release config but overrides the icon on the xcodebuild command

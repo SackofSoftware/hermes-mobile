@@ -508,6 +508,7 @@ struct AppFeatureTests {
       // The chat reconnect opens a never-yielding socket; the list refresh hits REST.
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.date = .constant(Date(timeIntervalSince1970: 0))
     }
@@ -534,6 +535,7 @@ struct AppFeatureTests {
       AppFeature()
     } withDependencies: {
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.date = .constant(Date(timeIntervalSince1970: 0))
     }

@@ -1,6 +1,24 @@
 import ComposableArchitecture
 import Foundation
 
+/// A cron job with its run-history sessions — one row of the grouped Cron Jobs section.
+/// Built by `SessionListFeature.State.cronJobGroups`.
+public struct CronJobGroup: Equatable, Sendable, Identifiable {
+  public var job: CronJob
+  /// The job's most recent runs (newest first), capped to `State.cronPeekLimit`.
+  public var runs: [Session]
+  /// Whether ANY of the job's runs (capped or not) is unread — drives the job row's dot.
+  public var hasUnread: Bool
+
+  public var id: String { job.id }
+
+  public init(job: CronJob, runs: [Session], hasUnread: Bool = false) {
+    self.job = job
+    self.runs = runs
+    self.hasUnread = hasUnread
+  }
+}
+
 /// Lists Hermes sessions for the connected server and supports full-text search.
 /// Tapping a row or the "+" button emits a delegate the parent uses to open chat
 /// (resume) or start a new session — `ChatFeature` wiring lands in Task 8.
@@ -61,6 +79,20 @@ public struct SessionListFeature {
     /// prompt isn't currently snoozed; dismissed by either of the sheet's two buttons. Pure
     /// presentation state (a `Bool`) — the sheet's buttons send `SessionListFeature` actions.
     public var showPushSetupSheet: Bool
+    /// Cron jobs fetched from `GET /api/cron/jobs` — the grouping spine of the Cron Jobs
+    /// section. Empty until the first fetch lands (the section falls back to the flat run
+    /// list meanwhile).
+    public var cronJobs: IdentifiedArrayOf<CronJob>
+    /// Whether the agent exposes `/api/cron/jobs` (set false on a definitive 404 — older
+    /// agent). When false the section renders today's flat cron-session rows and the jobs
+    /// fetch is skipped on subsequent polls.
+    public var cronJobsSupported: Bool
+    /// The job whose inline run-peek is expanded — single-open so the section stays
+    /// scannable (mirrors the desktop sidebar's peek).
+    public var expandedCronJobID: String?
+    /// Job ids whose trigger/pause/resume RPC is IN FLIGHT. Transient double-fire guard
+    /// (mirrors `archivingIDs`): added when the POST starts, removed on success/failure.
+    public var cronActionInFlightIDs: Set<String>
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
     @Presents public var addProfile: AddProfileFeature.State?
@@ -94,6 +126,10 @@ public struct SessionListFeature {
       profileRenameDraft: String = "",
       pushAvailable: Bool = true,
       showPushSetupSheet: Bool = false,
+      cronJobs: IdentifiedArrayOf<CronJob> = [],
+      cronJobsSupported: Bool = true,
+      expandedCronJobID: String? = nil,
+      cronActionInFlightIDs: Set<String> = [],
       settings: SettingsFeature.State? = nil,
       addProfile: AddProfileFeature.State? = nil
     ) {
@@ -118,6 +154,10 @@ public struct SessionListFeature {
       self.profileRenameDraft = profileRenameDraft
       self.pushAvailable = pushAvailable
       self.showPushSetupSheet = showPushSetupSheet
+      self.cronJobs = cronJobs
+      self.cronJobsSupported = cronJobsSupported
+      self.expandedCronJobID = expandedCronJobID
+      self.cronActionInFlightIDs = cronActionInFlightIDs
       self.settings = settings
       self.addProfile = addProfile
     }
@@ -154,6 +194,66 @@ public struct SessionListFeature {
     /// id surfaces only under Cron Jobs).
     public var interactiveSessions: [Session] {
       sessions.filter { !$0.isCron }
+    }
+
+    /// Runs shown in a job's inline peek — enough to glance at history without turning the
+    /// section into a full history browser (mirrors the desktop sidebar's limit).
+    public static let cronPeekLimit = 5
+
+    /// The Cron Jobs section grouped desktop-style: one entry per *job* (sorted soonest
+    /// next-run first, no-next-run last, then title), each carrying its most recent *runs*
+    /// (the cron sessions whose id-embedded job id matches, capped to `cronPeekLimit`).
+    /// Empty when the agent lacks the jobs API or no jobs were fetched yet — the view then
+    /// falls back to the flat run list.
+    public var cronJobGroups: [CronJobGroup] {
+      guard cronJobsSupported, !cronJobs.isEmpty else { return [] }
+      var runsByJob: [String: [Session]] = [:]
+      for session in cronSessions {  // recency-sorted, so each bucket inherits newest-first
+        guard let jobID = CronJob.jobID(fromSessionID: session.id) else { continue }
+        runsByJob[jobID, default: []].append(session)
+      }
+      let unread = unreadSessionIDs
+      return cronJobs.elements
+        .sorted(by: Self.cronJobOrder)
+        .map { job in
+          let runs = runsByJob[job.id] ?? []
+          return CronJobGroup(
+            job: job,
+            runs: Array(runs.prefix(Self.cronPeekLimit)),
+            // Unread is judged over ALL the job's runs (not just the peeked ones) so a
+            // burst of runs can't hide an unread older one.
+            hasUnread: runs.contains { unread.contains($0.id) }
+          )
+        }
+    }
+
+    /// Cron sessions that match none of the fetched jobs (deleted job, legacy id shape) —
+    /// rendered flat below the groups so no run is ever invisible. Empty while grouping is
+    /// inactive (the flat fallback shows everything then).
+    public var unmatchedCronSessions: [Session] {
+      guard cronJobsSupported, !cronJobs.isEmpty else { return [] }
+      let known = Set(cronJobs.ids)
+      return cronSessions.filter { session in
+        CronJob.jobID(fromSessionID: session.id).map { !known.contains($0) } ?? true
+      }
+    }
+
+    /// Cron sessions with unseen output — the section header's aggregate badge (the
+    /// desktop's `CRON JOBS 4`), visible without scrolling into the section.
+    public var cronUnreadCount: Int {
+      let unread = unreadSessionIDs
+      return cronSessions.filter { unread.contains($0.id) }.count
+    }
+
+    /// Desktop-parity job ordering: soonest next run first, jobs without a next run sink
+    /// to the bottom, then title for stability.
+    private static func cronJobOrder(_ a: CronJob, _ b: CronJob) -> Bool {
+      switch (a.nextRunAt, b.nextRunAt) {
+      case let (l?, r?) where l != r: return l < r
+      case (.some, .none): return true
+      case (.none, .some): return false
+      default: return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
+      }
     }
 
     /// Pinned sessions resolved from `pinnedIDs`, in pin order; stale ids are dropped. Cron
@@ -274,6 +374,25 @@ public struct SessionListFeature {
     /// so it can never start a glow on its own. The poll remains the backstop for not-open
     /// sessions. A no-op for an unknown id (the session isn't in the current list).
     case setSessionRunning(id: Session.ID, running: Bool)
+    // MARK: Cron jobs
+    /// Result of the `GET /api/cron/jobs` fetch (runs alongside every session load).
+    /// Success stores the jobs; a definitive `.notFound` flips `cronJobsSupported` off
+    /// (older agent → flat fallback, fetch skipped from then on); transient failures keep
+    /// the previous jobs so the section doesn't flap.
+    case cronJobsResponse(Result<[CronJob], RESTError>)
+    /// Toggle a job's inline run-peek (single-open: expanding one collapses another).
+    case cronJobTapped(id: String)
+    /// "Run now" on a job row — `POST /api/cron/jobs/{id}/trigger`.
+    case triggerCronJob(id: String)
+    /// Pause a job — `POST /api/cron/jobs/{id}/pause`.
+    case pauseCronJob(id: String)
+    /// Resume a paused job — `POST /api/cron/jobs/{id}/resume`.
+    case resumeCronJob(id: String)
+    /// A cron action RPC finished: lift the in-flight guard; on success refetch from the
+    /// server (the full load after a trigger so the new run session appears, jobs-only for
+    /// pause/resume); on failure surface the banner. No optimistic mutation — job state is
+    /// server-computed and the refetch/poll reconciles.
+    case cronJobActionFinished(id: String, refetchSessions: Bool, error: RESTError?)
     // MARK: Push notifications
     /// Kicks off contextual push setup once the list appears (right after login): first probe
     /// the `hermes-push` plugin readiness, then branch on the result. Fired from `.task`.
@@ -394,6 +513,60 @@ public struct SessionListFeature {
         guard state.sessions[id: id]?.isActive != running else { return .none }
         state.sessions[id: id]?.isActive = running
         return .none
+
+      case let .cronJobsResponse(.success(jobs)):
+        state.cronJobsSupported = true
+        // Defensive uniquing (first wins): the unscoped fetch aggregates every profile's
+        // jobs file, so never crash on a duplicated id (e.g. a copied profile home).
+        state.cronJobs = IdentifiedArray(jobs, uniquingIDsWith: { first, _ in first })
+        return .none
+
+      case let .cronJobsResponse(.failure(error)):
+        // A definitive 404 → old agent without the cron API. Fall back to the flat section
+        // and stop fetching. Anything transient keeps the previous jobs (no flapping).
+        if error == .notFound {
+          state.cronJobsSupported = false
+          state.cronJobs = []
+          state.expandedCronJobID = nil
+        }
+        return .none
+
+      case let .cronJobTapped(id):
+        state.expandedCronJobID = state.expandedCronJobID == id ? nil : id
+        return .none
+
+      case let .triggerCronJob(id):
+        return performCronAction(&state, id: id, refetchSessions: true) { rest, conn, jobID, profile in
+          try await rest.triggerCronJob(conn, jobID, profile)
+        }
+
+      case let .pauseCronJob(id):
+        return performCronAction(&state, id: id, refetchSessions: false) { rest, conn, jobID, profile in
+          try await rest.pauseCronJob(conn, jobID, profile)
+        }
+
+      case let .resumeCronJob(id):
+        return performCronAction(&state, id: id, refetchSessions: false) { rest, conn, jobID, profile in
+          try await rest.resumeCronJob(conn, jobID, profile)
+        }
+
+      case let .cronJobActionFinished(id, refetchSessions, error):
+        state.cronActionInFlightIDs.remove(id)
+        if let error {
+          // Surface the server's copy verbatim (e.g. a 400 detail) via the existing banner.
+          state.loadError = error.message
+          return .none
+        }
+        // Success → reconcile from the server. A trigger just spawned a run session, so do
+        // the full load (sessions + jobs); pause/resume only changed the job, so a
+        // jobs-only refetch avoids churning the list.
+        if refetchSessions { return load(&state) }
+        return .run { [
+          rest, connection = state.connection,
+          profile = state.profilesSupported ? state.selectedProfileName : nil
+        ] send in
+          await send(fetchCronJobs(rest: rest, connection: connection, profile: profile))
+        }
 
       case .setupPush:
         // Push onboarding (after login, on the list). FIRST probe whether the `hermes-push`
@@ -765,6 +938,10 @@ public struct SessionListFeature {
         // Reset the list UI on switch (search + group expansion don't carry across profiles).
         state.searchQuery = ""
         state.expandedGroups = []
+        // Cron jobs are profile-scoped too: drop the old profile's jobs + peek so the
+        // section can't show cross-profile rows while the scoped refetch is in flight.
+        state.cronJobs = []
+        state.expandedCronJobID = nil
         preferences.saveSelectedProfileID(name)
         return load(&state)
 
@@ -867,6 +1044,8 @@ public struct SessionListFeature {
           state.selectedProfileName = Self.State.defaultProfileName
           state.searchQuery = ""
           state.expandedGroups = []
+          state.cronJobs = []
+          state.expandedCronJobID = nil
           preferences.saveSelectedProfileID(Self.State.defaultProfileName)
           return load(&state)
         }
@@ -931,12 +1110,25 @@ public struct SessionListFeature {
     state.isLoading = true
     return .run { [
       rest, profiles, connection = state.connection, query = state.searchQuery,
-      profileName = state.selectedProfileName, profilesSupported = state.profilesSupported
+      profileName = state.selectedProfileName, profilesSupported = state.profilesSupported,
+      cronJobsSupported = state.cronJobsSupported
     ] send in
       await send(fetchSessions(
         rest: rest, profiles: profiles, connection: connection, query: query,
         profileName: profileName, profilesSupported: profilesSupported
       ))
+      // Refresh the cron jobs in the SAME effect, after the list, so the two responses
+      // arrive in a deterministic order (no racy merge). Skipped while searching (the
+      // section is hidden then) and once the agent proved it lacks the API. When the agent
+      // supports profiles the fetch is scoped to the SELECTED profile (the literal name,
+      // incl. "default" — matching the scoped session list, so a job's runs are actually
+      // in `sessions`); unscoped agents omit the param.
+      if cronJobsSupported, query.trimmingCharacters(in: .whitespaces).isEmpty {
+        await send(fetchCronJobs(
+          rest: rest, connection: connection,
+          profile: profilesSupported ? profileName : nil
+        ))
+      }
     }
     // Shared `fetch` id: a newer load/search/poll cancels this one, so an older in-flight
     // fetch finishing late can't overwrite `state.sessions` (stale list or search results).
@@ -948,6 +1140,31 @@ public struct SessionListFeature {
   private func isPushPromptSnoozed() -> Bool {
     guard let snooze = preferences.loadPushPromptSnooze() else { return false }
     return now < snooze.until
+  }
+
+  /// Shared trigger/pause/resume flow: guard against a double-fire while the job's RPC is
+  /// in flight, then run it and funnel the outcome through `.cronJobActionFinished`.
+  /// Threads the same profile scoping as the jobs fetch (literal selected name when the
+  /// agent supports profiles, else nil).
+  private func performCronAction(
+    _ state: inout State,
+    id: String,
+    refetchSessions: Bool,
+    rpc: @escaping @Sendable (HermesRESTClient, ServerConnection, String, String?) async throws -> Void
+  ) -> Effect<Action> {
+    guard !state.cronActionInFlightIDs.contains(id) else { return .none }
+    state.cronActionInFlightIDs.insert(id)
+    let profile = state.profilesSupported ? state.selectedProfileName : nil
+    return .run { [rest, connection = state.connection] send in
+      do {
+        try await rpc(rest, connection, id, profile)
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: nil))
+      } catch let error as RESTError {
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: error))
+      } catch {
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: .unreachable))
+      }
+    }
   }
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {
@@ -965,6 +1182,23 @@ public struct SessionListFeature {
 /// endpoint (`profiles.sessions(profile:…)`); otherwise it falls back to today's
 /// unscoped `/api/sessions`. Search is never profile-scoped (mirrors the desktop) — it
 /// always goes through `rest.search`.
+/// Fetch the cron jobs and map to a response action. `profile` is the literal selected
+/// name when the agent supports profiles (matching the scoped session list), else nil
+/// (the server aggregates all — which on a single-profile agent is just "default").
+private func fetchCronJobs(
+  rest: HermesRESTClient,
+  connection: ServerConnection,
+  profile: String?
+) async -> SessionListFeature.Action {
+  do {
+    return .cronJobsResponse(.success(try await rest.cronJobs(connection, profile)))
+  } catch let error as RESTError {
+    return .cronJobsResponse(.failure(error))
+  } catch {
+    return .cronJobsResponse(.failure(.unreachable))
+  }
+}
+
 private func fetchSessions(
   rest: HermesRESTClient,
   profiles: HermesProfileClient,

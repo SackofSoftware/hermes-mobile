@@ -550,5 +550,68 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(status: 500)
     #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
   }
+
+  // MARK: Cron jobs
+
+  @Test func cronJobsDecodesListWithoutProfileParam() async throws {
+    MockURLProtocol.set(json: #"""
+    [{"id":"a1b2c3d4e5f6","name":"Morning digest","state":"scheduled","enabled":true,"next_run_at":"2026-07-02T09:00:00+00:00","profile":"default"}]
+    """#)
+    let jobs = try await makeClient().cronJobs(connection, nil)
+    #expect(jobs.count == 1)
+    #expect(jobs.first?.id == "a1b2c3d4e5f6")
+    #expect(jobs.first?.name == "Morning digest")
+    #expect(MockURLProtocol.lastRequest?.url?.path == "/api/cron/jobs")
+    // nil profile → no query at all (server defaults to aggregating all profiles).
+    #expect(MockURLProtocol.lastRequest?.url?.query == nil)
+    #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+  }
+
+  @Test func cronJobsThreadsScopedProfile() async throws {
+    MockURLProtocol.set(json: "[]")
+    _ = try await makeClient().cronJobs(connection, "work")
+    #expect(MockURLProtocol.lastRequest?.url?.query == "profile=work")
+  }
+
+  @Test func cronJobsNotFoundThrowsForCapabilityGate() async throws {
+    MockURLProtocol.set(status: 404)
+    await #expect(throws: RESTError.notFound) {
+      _ = try await makeClient().cronJobs(connection, nil)
+    }
+  }
+
+  @Test func cronJobsServerErrorThrows() async throws {
+    MockURLProtocol.set(status: 500)
+    await #expect(throws: RESTError.server(status: 500)) {
+      _ = try await makeClient().cronJobs(connection, nil)
+    }
+  }
+
+  @Test func triggerCronJobPostsToTriggerPath() async throws {
+    MockURLProtocol.set(json: #"{"id":"a1b2c3d4e5f6"}"#)
+    try await makeClient().triggerCronJob(connection, "a1b2c3d4e5f6", nil)
+    #expect(MockURLProtocol.lastRequest?.httpMethod == "POST")
+    #expect(MockURLProtocol.lastRequest?.url?.path == "/api/cron/jobs/a1b2c3d4e5f6/trigger")
+    #expect(MockURLProtocol.lastRequest?.url?.query == nil)
+  }
+
+  @Test func pauseAndResumePostToTheirPathsWithProfile() async throws {
+    MockURLProtocol.set(json: "{}")
+    try await makeClient().pauseCronJob(connection, "abc", "work")
+    #expect(MockURLProtocol.lastRequest?.httpMethod == "POST")
+    #expect(MockURLProtocol.lastRequest?.url?.path == "/api/cron/jobs/abc/pause")
+    #expect(MockURLProtocol.lastRequest?.url?.query == "profile=work")
+
+    MockURLProtocol.set(json: "{}")
+    try await makeClient().resumeCronJob(connection, "abc", "work")
+    #expect(MockURLProtocol.lastRequest?.url?.path == "/api/cron/jobs/abc/resume")
+  }
+
+  @Test func cronActionNotFoundThrows() async throws {
+    MockURLProtocol.set(status: 404)
+    await #expect(throws: RESTError.notFound) {
+      try await makeClient().triggerCronJob(connection, "gone", nil)
+    }
+  }
 }
 } // extension RESTTransportSuite

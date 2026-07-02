@@ -132,6 +132,18 @@ public struct HermesRESTClient: Sendable {
   /// button to verify the end-to-end pipeline. A missing plugin surfaces as
   /// `RESTError.notFound` (404).
   public var sendTestPush: @Sendable (_ connection: ServerConnection) async throws -> Void
+  /// Cron jobs on the connected agent — `GET /api/cron/jobs` (hermes-agent v0.16+). Pass
+  /// `profile` (non-default) to scope to that profile's jobs; `nil` omits the param and the
+  /// server aggregates every profile (each job carries its `profile` annotation). A missing
+  /// endpoint (older agent) surfaces as `RESTError.notFound` so the caller can
+  /// capability-gate back to the flat cron section.
+  public var cronJobs: @Sendable (_ connection: ServerConnection, _ profile: String?) async throws -> [CronJob]
+  /// Fire a cron job immediately — `POST /api/cron/jobs/{id}/trigger`. `profile` as above.
+  public var triggerCronJob: @Sendable (_ connection: ServerConnection, _ id: String, _ profile: String?) async throws -> Void
+  /// Pause a cron job — `POST /api/cron/jobs/{id}/pause`. `profile` as above.
+  public var pauseCronJob: @Sendable (_ connection: ServerConnection, _ id: String, _ profile: String?) async throws -> Void
+  /// Resume a paused cron job — `POST /api/cron/jobs/{id}/resume`. `profile` as above.
+  public var resumeCronJob: @Sendable (_ connection: ServerConnection, _ id: String, _ profile: String?) async throws -> Void
   /// Authoritative readiness probe for the `hermes-push` plugin — `GET /api/dashboard/plugins/hub`
   /// → `{plugins: [{name, runtime_status, …}], …}`. Matches the plugin by `name == "hermes-push"`
   /// and maps: `runtime_status == "enabled"` → `.ready`; present-but-not-enabled or absent →
@@ -253,6 +265,22 @@ public extension HermesRESTClient {
         // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
         try await send(url, method: "POST", body: Data("{}".utf8), token: conn.token, session: session)
       },
+      cronJobs: { conn, profile in
+        // `nil` profile omits the param entirely — the server then aggregates all profiles
+        // (its default `all`), matching how the unscoped session list behaves.
+        let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
+        let url = try makeURL(conn.baseURL, "/api/cron/jobs", query: query)
+        return try await get(url, token: conn.token, session: session)
+      },
+      triggerCronJob: { conn, id, profile in
+        try await cronJobAction(conn, id: id, action: "trigger", profile: profile, session: session)
+      },
+      pauseCronJob: { conn, id, profile in
+        try await cronJobAction(conn, id: id, action: "pause", profile: profile, session: session)
+      },
+      resumeCronJob: { conn, id, profile in
+        try await cronJobAction(conn, id: id, action: "resume", profile: profile, session: session)
+      },
       pushPluginStatus: { conn in
         let url = try makeURL(conn.baseURL, "/api/dashboard/plugins/hub")
         do {
@@ -284,6 +312,17 @@ public extension DependencyValues {
     get { self[HermesRESTClient.self] }
     set { self[HermesRESTClient.self] = newValue }
   }
+}
+
+/// Shared POST for the cron job actions (`trigger` / `pause` / `resume`) — same
+/// URL/query/body shape, only the trailing path segment differs. Interpolates the RAW id
+/// (`makeURL` percent-encodes the path). 404 → `RESTError.notFound` (job gone or old agent).
+private func cronJobAction(
+  _ conn: ServerConnection, id: String, action: String, profile: String?, session: URLSession
+) async throws {
+  let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
+  let url = try makeURL(conn.baseURL, "/api/cron/jobs/\(id)/\(action)", query: query)
+  try await send(url, method: "POST", body: Data("{}".utf8), token: conn.token, session: session)
 }
 
 // MARK: - Transport helpers

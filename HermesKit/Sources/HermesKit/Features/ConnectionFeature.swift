@@ -105,6 +105,8 @@ public struct ConnectionFeature {
 
   public enum Action: BindableAction {
     case binding(BindingAction<State>)
+    /// The screen appeared — auto-check a pre-filled URL (#38).
+    case onAppear
     /// Reachability check (debounced after typing, or fired on submit/focus-loss).
     case checkServer
     /// The URL field was submitted or lost focus — check immediately.
@@ -151,6 +153,17 @@ public struct ConnectionFeature {
 
       case .binding:
         return .none
+
+      case .onAppear:
+        // A pre-filled URL (launch auto-connect fallback / logout) is validated immediately
+        // so the sign-in step unlocks without the user having to focus the field first (#38).
+        // Reuses the field-driven check path — no duplicated validation logic. Only fires
+        // from a pristine `.idle` so a re-appear (e.g. popping back from the secure-connect
+        // details screen) never clobbers a completed or in-flight check.
+        guard state.status == .idle,
+              !state.serverURL.trimmingCharacters(in: .whitespaces).isEmpty
+        else { return .none }
+        return .send(.checkServer)
 
       case .serverFieldCommitted:
         // Submit / focus-loss → check now, pre-empting the debounce.

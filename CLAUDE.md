@@ -110,6 +110,25 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   `message.start` and clear it on complete/error/interrupt. On hydrate, **`running` decides
   whether the timer runs; the anchor only supplies the start instant** — a stopped turn with a
   stale anchor **discards** the anchor (no phantom timer).
+- **A running chat keeps its socket across navigation** (#33) — the open chat's state lives in
+  an `AppFeature`-owned **live-chat slot** (`liveChat: ChatFeature.State?` via `.ifLet`); the nav
+  `path` holds only thin `ChatScreen` session-key markers, so popping destroys nothing. **Teardown
+  is an `AppFeature` policy**, not a view event: idle pop / turn-end-while-detached / slot
+  replacement / archiving the slot's session / logout do `persistNow` + `.teardown`; a running
+  turn keeps streaming into the slot (list glow via `runningChanged`). Re-opening the slot's
+  session pushes the marker + `.reattached` — always hydrate, but **never cancel-and-redial a
+  healthy socket** (`connect` only when `status != .ready`; `ChatView.task` is gated by
+  `hasStarted`). The view's disappear action is `.viewDisappeared` (mic/voice cleanup only).
+- **Backgrounding gets a ~30s grace** via `BackgroundTaskClient` (`begin(name) →
+  AsyncStream<Void>` yielding once on early expiry; `#if canImport(UIKit)` liveValue wrapping
+  `beginBackgroundTask`, test-drivable expiry in `testValue`): `.background` with a running slot →
+  `persistNow` + begin (`CancelID.backgroundGrace`); expiry while still backgrounded → final
+  persist + `.teardownSocketOnly` (state stays in memory for the #26 foreground catch-up); `.active`
+  before expiry ends the task; idle/no-slot background = persist only, **no task, no battery burn**.
+- **Push-tap routing dedups against the slot** (#32) — `pushTapped` compares the pushed
+  `session_id` to slot + path: matches slot with its marker on top → **no navigation** (in-place
+  hydrate; badge bookkeeping still runs); matches slot from the list → push marker + `.reattached`;
+  different session → replace slot + **SET** the path to the single new marker (never stack).
 - **Session-list working glow is event-driven** via `ChatFeature.Delegate.runningChanged`
   (emitted on `message.start`/`complete`/`error` and the `session.resume` `running` flag),
   routed by `AppFeature` to `SessionListFeature` for an instant row-glow patch; the poll is only

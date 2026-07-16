@@ -275,10 +275,10 @@ struct BackgroundTaskClient {
 
 ### Task 8: Update documentation and close out
 
-- [ ] update `CLAUDE.md` conventions: the live-chat-slot ownership rule, BackgroundTaskClient, push-tap dedup routing
-- [ ] update `README.md` if the feature list mentions lifecycle behavior
-- [ ] post the #33 write-up comment (decision: 30s grace + slot; no background modes) and reference this plan; note #32 is fixed
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `CLAUDE.md` conventions: the live-chat-slot ownership rule, BackgroundTaskClient, push-tap dedup routing
+- [x] update `README.md` if the feature list mentions lifecycle behavior — no change needed: the "Stays connected" bullet already describes restore-on-reopen accurately; the new behavior only strengthens it (nothing is now wrong)
+- [x] post the #33 write-up comment (decision: 30s grace + slot; no background modes) and reference this plan; note #32 is fixed (drafted; posted with PR)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

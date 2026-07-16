@@ -517,7 +517,11 @@ public struct ChatFeature {
 
       case .composerSubmitted:
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }
-        let text = state.composerText
+        // Trim stray leading/trailing whitespace/newlines (soft-wrap, dictation, accidental
+        // returns) before submitting; interior formatting is preserved (#31). `canSend`
+        // already rejects whitespace-only input with no attachments, so `text` can only be
+        // empty here when attachments carry the send.
+        let text = state.composerText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // With attachments we must upload bytes first (iOS shares no FS with the agent),
         // then submit — so we keep the composer/attachments until success and only echo the

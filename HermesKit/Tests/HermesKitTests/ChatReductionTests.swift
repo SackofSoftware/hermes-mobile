@@ -480,6 +480,57 @@ struct ChatReductionTests {
     }
   }
 
+  // Leading/trailing whitespace and newlines are trimmed before submit (#31); interior
+  // formatting is preserved. The trimmed text is both what's echoed in the user row and
+  // what goes out on the wire.
+  @Test func composerSubmitTrimsLeadingTrailingWhitespaceAndNewlines() async {
+    let sentText = LockIsolated<String?>(nil)
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable _, params in
+        sentText.setValue(params["text"]?.stringValue)
+        return .object(["status": .string("streaming")])
+      }
+    }
+
+    let raw = "  \n\nline one\n\n  indented line two  \n \n"
+    let trimmed = "line one\n\n  indented line two"
+    await store.send(\.binding.composerText, raw) { $0.composerText = raw }
+    await store.send(.composerSubmitted) {
+      $0.transcript = [ChatRow(id: uuid(0), kind: .message(role: .user, text: trimmed, isComplete: true))]
+      $0.composerText = ""
+      $0.isSending = true
+    }
+    await store.finish()
+    #expect(sentText.value == trimmed)
+  }
+
+  // Whitespace-only input never submits: canSend is false, so composerSubmitted is a no-op
+  // (nothing sent, composer untouched).
+  @Test func composerSubmitIgnoresWhitespaceOnlyInput() async {
+    let didSend = LockIsolated(false)
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        didSend.setValue(true)
+        return .object(["status": .string("streaming")])
+      }
+    }
+
+    await store.send(\.binding.composerText, "  \n\n \t ") { $0.composerText = "  \n\n \t " }
+    #expect(store.state.canSend == false)
+    await store.send(.composerSubmitted)
+    #expect(didSend.value == false)
+  }
+
   // MARK: Bootstrap (create on first ready)
 
   @Test func createsSessionOnFirstReady() async {

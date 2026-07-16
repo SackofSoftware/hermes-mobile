@@ -77,8 +77,10 @@ public struct AppFeature {
     /// `.background` with a RUNNING turn additionally requests a finite background window
     /// (`BackgroundTaskClient`) so the socket keeps streaming ~30s past suspension.
     case scenePhaseChanged(ScenePhase)
-    /// A push notification was tapped — deep-link to its session (same path as a list tap) and,
-    /// for an approval, clear its pending-approval badge entry (the user is now viewing it).
+    /// A push notification was tapped — deep-link to its session, routed by comparing the
+    /// tapped id against the live slot + path (#32): already on screen → badge bookkeeping
+    /// only; detached slot match → re-attach push; different session → replace the slot and
+    /// SET the path (never stack). Approval taps clear their pending-badge entry on view.
     case pushTapped(PushTap)
     case onboarding(ConnectionFeature.Action)
     case home(SessionListFeature.Action)
@@ -228,10 +230,9 @@ public struct AppFeature {
         )
 
       case let .pushTapped(tap):
-        // Deep-link a tapped push to its session via the SAME path a list tap uses, so taps and
-        // list-taps share one open-session flow. Prefer the loaded `Session` (carries a title);
-        // fall back to a minimal `Session(id:)` if it isn't in the list (the chat resumes by
-        // stored id and hydrates the title from `session.info`).
+        // Deep-link a tapped push to its session — routed by comparing `tap.sessionID`
+        // against the live slot + path (#32) so a tap for the already-open session never
+        // stacks a duplicate chat screen.
         //
         // Badge bookkeeping: an approval tap first MARKS the session pending (it's a relevant
         // approval), then opening it CLEARS that entry below — so a tap that opens nets to zero,
@@ -240,10 +241,27 @@ public struct AppFeature {
           state.pendingApprovalSessionIDs.insert(tap.sessionID)
         }
         guard state.home != nil else {
-          // No session list yet (e.g. still on onboarding) — can't open; the badge reflects the
-          // now-pending approval.
+          // No session list yet (e.g. cold launch still on onboarding) — can't open; the badge
+          // reflects the now-pending approval.
           return setBadge(state)
         }
+        // Matches the slot AND its marker is on the path (the chat is on screen) → NO
+        // navigation. Badge bookkeeping only: the user is now viewing it, so the pending
+        // entry clears (mark-then-clear nets zero); the content update arrives in place —
+        // the live socket is already streaming, and the tap's app activation fires the
+        // existing `.foreground` re-hydrate.
+        if let chat = state.liveChat,
+           (chat.storedSessionID ?? chat.liveSessionID) == tap.sessionID,
+           !state.path.isEmpty {
+          state.pendingApprovalSessionIDs.remove(tap.sessionID)
+          return setBadge(state)
+        }
+        // Otherwise share the SAME `openSession` flow a list tap uses: a detached slot match
+        // (user on the list) pushes the marker back and re-attaches live (no re-init, no dup);
+        // a different session replaces the slot and SETS the path to the single new marker
+        // (`fillLiveChat` resets rather than appends — no stacking on cold launch either).
+        // Prefer the loaded `Session` (carries a title); fall back to a minimal `Session(id:)`
+        // if it isn't in the list (the chat resumes by stored id and hydrates the title).
         let session = state.home?.sessions[id: tap.sessionID] ?? Session(id: tap.sessionID)
         // Opening clears the badge entry + marks current-viewing (handled in the openSession case).
         return .send(.home(.delegate(.openSession(session))))

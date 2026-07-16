@@ -260,10 +260,10 @@ struct BackgroundTaskClient {
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] route `pushTapped` by slot/path comparison: matches slot + marker on top → no path change (badge bookkeeping only); matches slot + on list → push marker + `.reattached`; different → replace slot + SET path to the single new marker
-- [ ] keep cold-launch behavior correct (no home yet → badge only, as today)
-- [ ] write tests: matching id with chat open → no path change; matching id from list → re-attach push, no duplicate; different id → slot replaced, path set (not appended); approval badge bookkeeping preserved
-- [ ] run tests — must pass before task 7
+- [x] route `pushTapped` by slot/path comparison: matches slot + marker on top → no path change (badge bookkeeping only); matches slot + on list → push marker + `.reattached`; different → replace slot + SET path to the single new marker
+- [x] keep cold-launch behavior correct (no home yet → badge only, as today)
+- [x] write tests: matching id with chat open → no path change; matching id from list → re-attach push, no duplicate; different id → slot replaced, path set (not appended); approval badge bookkeeping preserved
+- [x] run tests — must pass before task 7
 
 ### Task 7: Verify acceptance criteria
 

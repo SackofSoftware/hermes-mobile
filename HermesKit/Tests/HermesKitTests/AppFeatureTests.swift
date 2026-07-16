@@ -1295,6 +1295,122 @@ struct AppFeatureTests {
     #expect(store.state.pendingApprovalSessionIDs.isEmpty)
   }
 
+  /// A tap for the session that is ALREADY on screen (slot match + marker in the path) must
+  /// not navigate at all (#32) — no `openSession`, no duplicate marker, no slot re-init. An
+  /// approval tap still runs its badge bookkeeping (mark-then-clear nets zero: the user is
+  /// viewing the session).
+  @Test func pushTapForOnScreenSessionDoesNotNavigate() async {
+    let push = PushClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+
+    // Exhaustive: any follow-up action (an `openSession`, a path mutation) would fail the
+    // test. The approval's mark-then-clear leaves the state byte-identical; only the badge
+    // side effect runs.
+    await store.send(.pushTapped(PushTap(sessionID: "s1", type: "approval")))
+    await store.finish()
+    #expect(store.state.path.count == 1)
+    #expect(store.state.path.last?.sessionKey == "s1")
+    #expect(store.state.liveChat?.storedSessionID == "s1")
+    #expect(push.badgeCount == 0)
+
+    // A plain (non-approval) tap for the on-screen session is equally a no-nav no-op.
+    await store.send(.pushTapped(PushTap(sessionID: "s1")))
+    await store.finish()
+    #expect(store.state.path.count == 1)
+  }
+
+  /// A tap matching the DETACHED slot's session (user popped to the list mid-turn) routes
+  /// through `openSession`'s re-attach branch: the marker is pushed back exactly once (no
+  /// duplicate) and the slot state — accumulated rows, composer draft — is NOT re-inited.
+  @Test func pushTapForDetachedSlotSessionReattachesWithoutDuplicate() async {
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.status = .ready
+    chat.hasRequestedSession = true
+    chat.hasStarted = true
+    chat.composerText = "unsent draft"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        // Empty path — the user is on the list; the slot streams detached.
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live1"),
+          "stored_session_id": .string("s1"),
+          "messages": .array([]),
+          "running": .bool(false),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.pushTapped(PushTap(sessionID: "s1")))
+    await store.receive(\.home.delegate.openSession)
+    await store.receive(\.liveChat.reattached)
+    // Marker pushed back exactly once; the slot state survived (no fresh `ChatFeature.State`).
+    #expect(store.state.path.count == 1)
+    #expect(store.state.path.last?.sessionKey == "s1")
+    #expect(store.state.liveChat?.composerText == "unsent draft")
+
+    await store.send(.liveChat(.teardown))
+  }
+
+  /// A tap for a DIFFERENT session while the slot is occupied replaces the slot (flush +
+  /// teardown first) and SETS the path to the single new marker — never appends on top of
+  /// the old one (#32's stacking bug).
+  @Test func pushTapForDifferentSessionReplacesSlotAndSetsPath() async {
+    var liveChat = ChatFeature.State(connection: connection, resumeStoredID: "old")
+    liveChat.liveSessionID = "old-live"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "old")]),
+        liveChat: liveChat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "new")))
+    await store.receive(\.home.delegate.openSession)
+    await store.receive(\.liveChat.persistNow)
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.fillLiveChat)
+    // Path SET, not appended: exactly one marker, pointing at the new session.
+    #expect(store.state.path.count == 1)
+    #expect(store.state.path.last?.sessionKey == "new")
+    #expect(store.state.liveChat?.storedSessionID == "new")
+  }
+
   /// Two distinct pending approvals → badge count 2; opening one → badge drops to 1.
   @Test func multiplePendingApprovalsSetBadgeThenClearOne() async {
     let push = PushClient.inMemory()

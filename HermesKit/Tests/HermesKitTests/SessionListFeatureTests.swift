@@ -538,6 +538,8 @@ struct SessionListFeatureTests {
       $0.seenCounts = ["b": 2]
       $0.archivingIDs = ["a"] // in-flight guard while the PATCH runs
     }
+    // The parent is told FIRST (it tears the live-chat slot down when it matches).
+    await store.receive(\.delegate.sessionArchived)
     // Success clears the transient guard (so the poll resumes) and cancels any stale in-flight
     // fetch — no permanent filter (server now excludes the archived session anyway).
     await store.receive(\.archiveSucceeded) {
@@ -596,6 +598,8 @@ struct SessionListFeatureTests {
       $0.sessions = [Session(id: "b")]
       $0.archivingIDs = ["a"]
     }
+    // The parent notification precedes the PATCH bookkeeping.
+    await store.receive(\.delegate.sessionArchived)
     // Success clears the guard but cancels the in-flight fetch, so its stale response still
     // can't land afterward to resurrect "a".
     await store.receive(\.archiveSucceeded) {
@@ -639,6 +643,8 @@ struct SessionListFeatureTests {
       $0.sessions = [Session(id: "b")]
       $0.archivingIDs = ["a"]
     }
+    // The parent notification fires regardless of the PATCH outcome (the archive was confirmed).
+    await store.receive(\.delegate.sessionArchived)
     // Failure restores the session at its original index (no reload), lifts the guard, sets error.
     await store.receive(\.archiveFailed) {
       $0.sessions = [session, Session(id: "b")]
@@ -681,6 +687,8 @@ struct SessionListFeatureTests {
       $0.seenCounts = ["b": 2]
       $0.archivingIDs = ["a"]
     }
+    // The parent notification fires regardless of the PATCH outcome (the archive was confirmed).
+    await store.receive(\.delegate.sessionArchived)
     // Failure restores the session + pin + seen baseline LOCALLY (no reload), persists them,
     // lifts the guard, and sets the error.
     await store.receive(\.archiveFailed) {

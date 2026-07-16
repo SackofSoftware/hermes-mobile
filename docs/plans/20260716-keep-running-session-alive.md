@@ -192,12 +192,14 @@ struct BackgroundTaskClient {
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift` (+ any test/snapshot host constructing `path`)
 
-- [ ] add `ChatScreen.State` (session-key marker) and switch `AppFeature.State.path` to `StackState<ChatScreen.State>`; add `liveChat: ChatFeature.State?` + `.ifLet(\.liveChat, action: \.liveChat)`; update `currentViewingSessionID`
-- [ ] rewire `openSession`/`createSession` to fill the slot and push a marker; rewire `sessionExpired`/`resumeAfterReauth`/`runningChanged`/logout paths from `path.last`/`path.ids.last` to `liveChat`
-- [ ] split `ChatFeature.onDisappear` into `.viewDisappeared` (mic/voice cleanup only) and `.teardown` (persist + full cancel of socket/reconnect/thinking/persist effects); `ChatView` sends the former
-- [ ] update `AppView` destination to scope `store.liveChat` into `ChatView` (defensive empty view when nil); keep behavior byte-identical for the plain open→pop-idle flow (pop while idle tears down via the Task 2 policy — for this task, wire pop→teardown unconditionally so no socket leaks between tasks)
-- [ ] write/adjust AppFeature tests: open fills slot + pushes marker; logout clears slot; reauth resume targets `liveChat`; existing suites green
-- [ ] run tests — must pass before task 2
+- [x] add `ChatScreen.State` (session-key marker) and switch `AppFeature.State.path` to `StackState<ChatScreen.State>`; add `liveChat: ChatFeature.State?` + `.ifLet(\.liveChat, action: \.liveChat)`; update `currentViewingSessionID`
+- [x] rewire `openSession`/`createSession` to fill the slot and push a marker; rewire `sessionExpired`/`resumeAfterReauth`/`runningChanged`/logout paths from `path.last`/`path.ids.last` to `liveChat`
+- [x] split `ChatFeature.onDisappear` into `.viewDisappeared` (mic/voice cleanup only) and `.teardown` (full cancel of socket/reconnect/thinking/persist effects; the snapshot flush is `AppFeature`'s `.persistNow`-before-`.teardown` sequence on pop, matching the lifecycle table); `ChatView` sends the former
+- [x] update `AppView` destination to scope `store.liveChat` into `ChatView` (defensive empty view when nil); keep behavior byte-identical for the plain open→pop-idle flow (pop while idle tears down via the Task 2 policy — for this task, wire pop→teardown unconditionally so no socket leaks between tasks)
+- [x] write/adjust AppFeature tests: open fills slot + pushes marker; logout clears slot; reauth resume targets `liveChat`; existing suites green
+- [x] run tests — must pass before task 2
+- ➕ [x] open-different-session while the slot is occupied already tears the old slot down in Task 1 (concatenated `.teardown` → `.fillLiveChat`): slot cancel IDs are position-scoped, so a leaked old socket would feed events into the replacement state. Task 2 adds `persistNow` to that sequence.
+- ➕ [x] one slot ↔ one marker: `fillLiveChat` resets the path (removeAll + append) instead of appending, so duplicate markers can never stack; Task 6 still adds the same-session routing compare.
 
 ### Task 2: Slot lifecycle policy (keep-while-running, teardown rules)
 
@@ -206,12 +208,12 @@ struct BackgroundTaskClient {
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift` (archived delegate)
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] on pop (`.path(.popFrom)` / path-emptied): keep the slot untouched when `liveChat.isRunning`; otherwise `persistNow` + `.teardown` + `liveChat = nil`
-- [ ] on `runningChanged(running: false)` (and error/interrupt completions) while no marker is in the path: flush persist then tear the slot down
-- [ ] on open-different-session while the slot is occupied: `persistNow` + `.teardown` the old slot before filling the new one
-- [ ] surface a `sessionArchived(id)` delegate from `SessionListFeature` and tear the slot down first when it matches the slot's session
-- [ ] write tests: pop-while-running keeps effects alive (streaming event after pop still mutates `liveChat`); idle pop tears down; complete-while-detached tears down; slot replacement persists + cancels the old chat; archive-the-slot-session tears down
-- [ ] run tests — must pass before task 3
+- [x] on pop (`.path(.popFrom)` / path-emptied): keep the slot untouched when `liveChat.isRunning`; otherwise `persistNow` + `.teardown` + `liveChat = nil`
+- [x] on `runningChanged(running: false)` (and error/interrupt completions) while no marker is in the path: flush persist then tear the slot down
+- [x] on open-different-session while the slot is occupied: `persistNow` + `.teardown` the old slot before filling the new one
+- [x] surface a `sessionArchived(id)` delegate from `SessionListFeature` and tear the slot down first when it matches the slot's session
+- [x] write tests: pop-while-running keeps effects alive (streaming event after pop still mutates `liveChat`); idle pop tears down; complete-while-detached tears down; slot replacement persists + cancels the old chat; archive-the-slot-session tears down
+- [x] run tests — must pass before task 3
 
 ### Task 3: Re-attach flow with the connect guard
 
@@ -221,11 +223,11 @@ struct BackgroundTaskClient {
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] add `ChatFeature.Action.reattached`: socket alive (`status == .ready` with a live session) → re-run the hydrate effect directly (no reconnect); socket dead → behave like `.foreground` (reset `hasRequestedSession`, `connect`)
-- [ ] `AppFeature`: re-opening the slot's session pushes the marker only and sends `.liveChat(.reattached)` (no new `ChatFeature.State`, no re-init losing live rows)
-- [ ] make `ChatView.task` re-attach-safe: appearance of an already-connected slot must not fire the unconditional `connect` (route the view's task through `.reattached` or gate `.task` on slot freshness)
-- [ ] write tests: reattach with a live socket does NOT cancel/redial (no `.gatewayClosed`, streaming continues) but does hydrate; reattach with a dead socket reconnects; re-open keeps accumulated detached rows
-- [ ] run tests — must pass before task 4
+- [x] add `ChatFeature.Action.reattached`: socket alive (`status == .ready` with a live session) → re-run the hydrate effect directly (no reconnect); socket dead → behave like `.foreground` (reset `hasRequestedSession`, `connect`)
+- [x] `AppFeature`: re-opening the slot's session pushes the marker only and sends `.liveChat(.reattached)` (no new `ChatFeature.State`, no re-init losing live rows)
+- [x] make `ChatView.task` re-attach-safe: appearance of an already-connected slot must not fire the unconditional `connect` (gated `.task` on slot freshness via a new internal `hasStarted` flag — first appearance connects, later appearances no-op and `.reattached` owns re-opens; `ChatView` unchanged)
+- [x] write tests: reattach with a live socket does NOT cancel/redial (no `.gatewayClosed`, streaming continues) but does hydrate; reattach with a dead socket reconnects; re-open keeps accumulated detached rows
+- [x] run tests — must pass before task 4
 
 ### Task 4: BackgroundTaskClient
 

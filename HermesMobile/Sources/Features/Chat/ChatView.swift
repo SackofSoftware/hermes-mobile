@@ -57,7 +57,8 @@ struct ChatView: View {
       Button("Cancel", role: .cancel) { store.send(.cancelRename) }
     }
     .task { store.send(.task) }
-    .onDisappear { store.send(.onDisappear) }
+    // View-only cleanup (mic/voice) — slot teardown is an `AppFeature` policy, not a view event.
+    .onDisappear { store.send(.viewDisappeared) }
     .sheet(item: toolDetailBinding) { row in
       if case let .tool(name, title, _, detail, durationS) = row.kind {
         ToolDetailSheet(name: name, title: title, detail: detail ?? ToolDetail(), durationS: durationS)

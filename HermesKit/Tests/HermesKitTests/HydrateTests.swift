@@ -131,7 +131,7 @@ struct HydrateTests {
     #expect(store.state.transcript[id: self.uuid(10)] == nil)
     // Activate's authoritative `running:false` clears the list glow for this session.
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Cold-resume usage preservation + stale-banner clearing
@@ -189,7 +189,7 @@ struct HydrateTests {
     #expect(store.state.usage == cachedUsage)
     #expect(store.state.errorBanner == nil)
     #expect(store.state.status == .ready)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func realProtocolErrorStillRaisesBanner() async {
@@ -211,7 +211,7 @@ struct HydrateTests {
       $0.errorBanner = "boom"
       $0.status = .reconnecting
     }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Offline keeps the cache + reconnecting status
@@ -308,7 +308,7 @@ struct HydrateTests {
     #expect(saved?.rows == [ChatRow(id: self.uuid(0), kind: .message(role: .assistant, text: "hello there", isComplete: true))])
     #expect(saved?.updatedAt == Date(timeIntervalSince1970: 123))
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func burstOfDeltasCoalescesIntoOnePersist() async {
@@ -343,7 +343,7 @@ struct HydrateTests {
     let saved = snapshotClient.loadSnapshot("stored123")
     #expect(saved?.rows.last?.copyText == "abc")
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Task 6 — turn-start anchor + timer continuity
@@ -398,7 +398,7 @@ struct HydrateTests {
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 8 }
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 9 }
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func hydrateRunningWithNoAnchorTicksFromZero() async {
@@ -432,7 +432,7 @@ struct HydrateTests {
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func hydrateNotRunningWithStaleAnchorFreezesAndDiscardsAnchor() async {
@@ -467,7 +467,7 @@ struct HydrateTests {
     // The stale anchor was discarded from the cache.
     #expect(snapshotClient.turnAnchor("stored123") == nil)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: #26 — preserve in-flight thinking + tool rows across foreground hydrate
@@ -528,7 +528,7 @@ struct HydrateTests {
     // Timer continuity: the preserved row's elapsed/reasoning did NOT reset; the tick resumes at 7.
     #expect(store.state.thinkingSeconds == 7)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func hydrateNotRunningWipesLiveThinkingAndToolRows() async {
@@ -569,7 +569,7 @@ struct HydrateTests {
     #expect(store.state.toolRowIDs.isEmpty)
     #expect(store.state.streamingRowID == nil)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func submitWritesAnchorAndCompleteClearsIt() async {
@@ -602,7 +602,7 @@ struct HydrateTests {
     await store.send(.gatewayEvent(.messageComplete(text: "done", usage: nil)))
     #expect(snapshotClient.turnAnchor("stored123") == nil)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Task 8 — background flush (`persistNow`)
@@ -722,7 +722,142 @@ struct HydrateTests {
       return false
     })
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
+  }
+
+  // MARK: Re-attach connect guard (keep-alive plan, Task 3)
+
+  // Re-opening a live slot must NOT cancel-and-redial a healthy socket — the dial gap would
+  // drop streamed events. `.reattached` with `status == .ready` hydrates directly against the
+  // live socket (zero `connect` calls) and the socket keeps folding deltas throughout.
+  @Test func reattachWithLiveSocketHydratesWithoutRedial() async {
+    let connectCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.liveSessionID = "live123"
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+    initial.isSending = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+      $0.hermesGateway.send = { @Sendable method, _ in
+        // The hydrate may fan out a follow-up (e.g. `session.usage`); only `session.resume`
+        // matters here — and crucially, NO `connect` redial happens (asserted below).
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([
+            .object(["id": .number(1), "role": .string("user"), "content": .string("prior question")]),
+          ]),
+          "running": .bool(true),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+          "inflight": .object(["assistant": .string("partial answer"), "streaming": .bool(true)]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.reattached)
+    await store.receive(\.activateResult.success)
+
+    // Hydrate landed (server authority) — but the healthy socket was never redialed.
+    #expect(connectCalls.value == 0)
+    #expect(store.state.model == "claude-opus-4-8")
+    #expect(store.state.isSending == true)
+    #expect(store.state.status == .ready)
+
+    // The live socket keeps streaming: the next delta appends to the seeded in-flight row
+    // (proof the fold never went through a `.gatewayClosed`/reconnect cycle).
+    await store.send(.gatewayEvent(.messageDelta(text: " continues")))
+    #expect(store.state.transcript.contains { row in
+      if case let .message(role, text, isComplete) = row.kind {
+        return role == .assistant && text == "partial answer continues" && !isComplete
+      }
+      return false
+    })
+
+    await store.send(.teardown)
+  }
+
+  // `.reattached` with a DEAD socket recovers exactly like `.foreground`: reset the hydrate
+  // guard and reconnect — the fresh `.ready` re-hydrates.
+  @Test func reattachWithDeadSocketReconnectsAndRehydrates() async {
+    let connectCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .reconnecting
+    // Stale-true (the dropped `.gatewayClosed` reset, same as the fast-foreground case) —
+    // reattach must reset it so the fresh `.ready` actually hydrates.
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { continuation in continuation.yield(.ready) }
+      }
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(false),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.reattached) {
+      $0.hasRequestedSession = false
+    }
+    await store.receive(\.gatewayEvent) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.success)
+    #expect(connectCalls.value == 1)
+    #expect(store.state.model == "claude-opus-4-8")
+
+    await store.send(.teardown)
+  }
+
+  // The view's `.task` fires on every appearance; once the slot has started (initial
+  // connect done), a re-appearance must be a strict no-op — `AppFeature`'s `.reattached`
+  // owns the re-open flow. Exhaustive: any effect or state change fails this.
+  @Test func taskAfterInitialConnectIsNoOp() async {
+    let connectCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+    }
+
+    await store.send(.task)
+    #expect(connectCalls.value == 0)
   }
 
   // MARK: Stable in-flight row identity across repeated hydrates (review finding #4)
@@ -799,7 +934,7 @@ struct HydrateTests {
       return false
     })
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Instant-paint + delta-before-activate race
@@ -863,6 +998,6 @@ struct HydrateTests {
     // No trace of the cached or stray rows.
     #expect(!store.state.transcript.contains { if case let .message(_, t, _) = $0.kind { return t.contains("stray") || t.contains("cached") }; return false })
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 }

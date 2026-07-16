@@ -154,7 +154,7 @@ struct ChatWindowingTests {
     #expect(store.state.windowStart == store.state.transcript.count - ChatFeature.State.initialWindow)
     #expect(store.state.visibleRows.last?.id == store.state.transcript.last?.id)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   /// A user who scrolled up (loaded older history) is NOT yanked back to the bottom when a new
@@ -174,7 +174,7 @@ struct ChatWindowingTests {
     #expect(store.state.windowStart == 0)
     #expect(store.state.hasMoreAbove == false)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Hydrate resets to the bottom window
@@ -207,7 +207,7 @@ struct ChatWindowingTests {
     #expect(store.state.visibleRows.last?.id == store.state.transcript.last?.id)
     #expect(store.state.hasMoreAbove)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   /// Even after scrolling up, a re-hydrate snaps the window back to the bottom.
@@ -237,6 +237,6 @@ struct ChatWindowingTests {
     await store.send(.activateResult(.success(response)))
     #expect(store.state.windowStart == ChatFeature.State.bottomWindowStart(count: store.state.transcript.count))
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 }

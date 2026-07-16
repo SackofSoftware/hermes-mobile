@@ -201,8 +201,8 @@ struct ChatReductionTests {
     }
   }
 
-  // Leaving the screen mid-turn cancels the live thinking timer (no leaked tick loop).
-  @Test func onDisappearCancelsThinkingTimer() async {
+  // Slot teardown mid-turn cancels the live thinking timer (no leaked tick loop).
+  @Test func teardownCancelsThinkingTimer() async {
     let clock = TestClock()
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
@@ -218,8 +218,8 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1))
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
-    // onDisappear cancels the loop; advancing further yields no more ticks.
-    await store.send(.onDisappear)
+    // Teardown cancels the loop; advancing further yields no more ticks.
+    await store.send(.teardown)
     await clock.advance(by: .seconds(5))
   }
 
@@ -267,7 +267,7 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1))
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
     await clock.advance(by: .seconds(3))
   }
 
@@ -302,7 +302,7 @@ struct ChatReductionTests {
       $0.thinkingRowID = uuid(1)
       $0.thinkingSeconds = 0
     }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
     await clock.advance(by: .seconds(3))
   }
 
@@ -364,7 +364,7 @@ struct ChatReductionTests {
       $0.reconnectAttempt = 1
     }
     #expect(store.state.transcript.isEmpty)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // A bare thinkingDelta arriving FIRST (no prior message.start) defensively creates the
@@ -551,7 +551,9 @@ struct ChatReductionTests {
       }
     }
 
-    await store.send(.task)
+    await store.send(.task) {
+      $0.hasStarted = true
+    }
     await store.receive(\.gatewayEvent) {
       $0.status = .ready
       $0.hasRequestedSession = true
@@ -565,7 +567,7 @@ struct ChatReductionTests {
     #expect(sent.value?["method"]?.stringValue == "session.create")
     #expect(sent.value?["params"] == .object([:]))
     #expect(sent.value?["params"]?["title"] == nil)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func createUnderCustomProfileThreadsProfileParam() async {
@@ -588,7 +590,9 @@ struct ChatReductionTests {
       }
     }
 
-    await store.send(.task)
+    await store.send(.task) {
+      $0.hasStarted = true
+    }
     await store.receive(\.gatewayEvent) {
       $0.status = .ready
       $0.hasRequestedSession = true
@@ -600,7 +604,7 @@ struct ChatReductionTests {
     }
     #expect(sent.value?["method"]?.stringValue == "session.create")
     #expect(sent.value?["params"] == .object(["profile": .string("work")]))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func defaultProfileNameThreadsNoProfileParam() async {
@@ -624,7 +628,9 @@ struct ChatReductionTests {
       }
     }
 
-    await store.send(.task)
+    await store.send(.task) {
+      $0.hasStarted = true
+    }
     await store.receive(\.gatewayEvent) {
       $0.status = .ready
       $0.hasRequestedSession = true
@@ -635,7 +641,7 @@ struct ChatReductionTests {
       $0.status = .ready
     }
     #expect(sent.value?["params"] == .object([:]))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func resumeUnderCustomProfileThreadsProfileParam() async {
@@ -683,7 +689,7 @@ struct ChatReductionTests {
     ]))
     // Activate's authoritative `running:false` clears the list glow for this session.
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func readyWithStoredIDHydratesViaResume() async {
@@ -732,7 +738,7 @@ struct ChatReductionTests {
     // Usage came from `info` — no fallback `session.usage` fetch.
     #expect(!methods.value.contains("session.usage"))
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func resumeWithNoUsageInResponseFallsBackToUsageFetch() async {
@@ -781,7 +787,7 @@ struct ChatReductionTests {
     #expect(methods.value.first == "session.resume")
     #expect(methods.value.contains("session.usage"))
     #expect(usageParams.value?["session_id"]?.stringValue == "live123")
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func resumeHydratesStoredTranscriptModelAndUsage() async {
@@ -834,7 +840,7 @@ struct ChatReductionTests {
     // Single resume call — no activate, no fallback dance.
     #expect(methods.value == ["session.resume"])
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func activateSeedsRunningInflightAndDeltaReusesSeededRow() async {
@@ -906,7 +912,7 @@ struct ChatReductionTests {
     }
     // user + assistant + thinking = 3 rows (no duplicate assistant from the delta).
     #expect(store.state.transcript.count == 3)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func unknownEventIsInertInTheFold() async {
@@ -992,7 +998,7 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1)) // first backoff = 2^0 = 1s
     await store.receive(\.reconnectTick)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: ws-ticket auth failure vs transient (gated reconnect)
@@ -1024,7 +1030,7 @@ struct ChatReductionTests {
     await store.send(.gatewayClosed)
     // No `.reconnectTick` is ever scheduled even after a long advance.
     await clock.advance(by: .seconds(60))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   /// A transient gated failure (the ticket mint failed → the stream just finishes, like a
@@ -1049,7 +1055,7 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1)) // first backoff = 2^0 = 1s
     await store.receive(\.reconnectTick)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Reconnect resilience — finalize a row that was mid-stream when the socket dropped
@@ -1083,7 +1089,7 @@ struct ChatReductionTests {
       $0.isSending = false
       $0.reconnectAttempt = 1
     }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Copy a row to the pasteboard

@@ -39,6 +39,12 @@ public struct ChatFeature {
     public var status: Status
     public var errorBanner: String?
     public var isSending: Bool
+    /// True while a turn is in flight — the same signal that powers the `runningChanged`
+    /// delegate (set on submit/`message.start`, cleared on complete/error/interrupt, and
+    /// reconciled from the authoritative `session.resume` `running` flag on hydrate).
+    /// The app-level slot policy reads this: a RUNNING chat keeps its slot (socket and
+    /// streaming effects) across a nav pop; an idle one is torn down.
+    public var isRunning: Bool { isSending }
     /// A blocking request from the agent (approval/clarify/secret). While set, the
     /// composer is disabled and a card is the focal point.
     public var pendingInteraction: PendingInteraction?
@@ -107,6 +113,12 @@ public struct ChatFeature {
     var toolRowIDs: [String: ChatRow.ID]
     var reconnectAttempt: Int
     var hasRequestedSession: Bool
+    /// Set by the first `.task` (the initial connect). The view's `.task` fires on EVERY
+    /// appearance — including re-appearing over a LIVE slot after a nav pop — and an
+    /// unconditional `connect` there would cancel-and-redial a healthy socket (the dial
+    /// gap drops streamed events). Once started, later appearances are routed by
+    /// `AppFeature` through `.reattached`, which guards the live socket.
+    var hasStarted: Bool
     /// Set when the gated session died (`.authExpired`): reconnect backoff is paused and the
     /// trailing `.gatewayClosed` (the finished stream) is ignored until re-auth resumes us.
     var awaitingReauth: Bool
@@ -150,6 +162,7 @@ public struct ChatFeature {
       self.toolRowIDs = [:]
       self.reconnectAttempt = 0
       self.hasRequestedSession = false
+      self.hasStarted = false
       self.awaitingReauth = false
       self.pendingInteraction = nil
       self.presentedTool = nil
@@ -235,7 +248,15 @@ public struct ChatFeature {
     case binding(BindingAction<State>)
     case delegate(Delegate)
     case task
-    case onDisappear
+    /// The chat VIEW left the screen. Releases view-session resources only (the mic /
+    /// voice recording) — the socket and streaming effects are owned by the app-level
+    /// live-chat slot and torn down separately via `.teardown` (an `AppFeature` policy).
+    case viewDisappeared
+    /// Full slot teardown (sent by `AppFeature`, never the view): cancel every
+    /// long-running effect — socket, reconnect backoff, voice, thinking ticker, debounced
+    /// persist — and release the mic. `AppFeature` flushes the snapshot (`.persistNow`)
+    /// before this where the pending debounce matters.
+    case teardown
     /// Scroll-up reached the top of the current window: reveal another `pageSize` of older
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
@@ -255,6 +276,13 @@ public struct ChatFeature {
     /// App returned to the foreground — reconnect the socket and re-`hydrate` (re-read
     /// running/inflight/usage) via the same unified path used by open/cold-launch.
     case foreground
+    /// The slot's marker was re-pushed over LIVE, surviving chat state (`AppFeature`'s
+    /// re-open policy): always re-hydrate (server authority; `applyActivate`'s #26 path
+    /// preserves a still-running turn's live thinking/tool rows), but do NOT
+    /// cancel-and-redial a healthy socket — the dial gap would drop streamed events.
+    /// Only a dead/dialing socket reconnects (then `.ready` re-hydrates, exactly like
+    /// `.foreground`).
+    case reattached
     case sessionResult(Result<SessionHandle, GatewayError>)
     /// Result of the `session.resume` hydration call — the server-authoritative
     /// re-hydration payload (messages + info + running + inflight). (The associated
@@ -360,9 +388,30 @@ public struct ChatFeature {
         // REST `loadHistory` call: the activate response carries `messages` + `info` +
         // `running` + `inflight`, and rebuilding the transcript wholesale from it is what
         // keeps model/usage/status correct on every re-open (the core state-sync fix).
+        //
+        // The view's `.task` fires on EVERY appearance — including re-appearing over a
+        // live slot after a nav pop. Only the slot's FIRST appearance performs the
+        // initial connect; re-opens are routed by `AppFeature` through `.reattached`,
+        // which must not cancel-and-redial a healthy socket.
+        guard !state.hasStarted else { return .none }
+        state.hasStarted = true
         return connect(state.connection)
 
-      case .onDisappear:
+      case .viewDisappeared:
+        // View-only cleanup: the screen left, but the slot (socket, streaming fold,
+        // thinking ticker, persist debounce) lives on — `AppFeature` decides teardown.
+        let wasRecording = state.recording.isBusy
+        state.recording = .idle
+        state.waveformLevels = []
+        state.recordingSeconds = 0
+        return .merge(
+          .cancel(id: CancelID.voiceLevels),
+          .cancel(id: CancelID.voiceTimer),
+          // Release the mic/session if we leave mid-recording.
+          wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
+        )
+
+      case .teardown:
         let wasRecording = state.recording.isBusy
         state.recording = .idle
         state.waveformLevels = []
@@ -514,6 +563,27 @@ public struct ChatFeature {
         // `guard !state.hasRequestedSession` below, so foreground would never re-hydrate.
         state.hasRequestedSession = false
         return connect(state.connection)
+
+      case .reattached:
+        // Re-opening the live slot's session from the list (the state and socket
+        // survived the pop). A dead/dialing socket recovers exactly like `.foreground`:
+        // reset the hydrate guard and reconnect — the fresh `.ready` re-hydrates.
+        guard state.status == .ready else {
+          state.hasRequestedSession = false
+          return connect(state.connection)
+        }
+        // Socket healthy: hydrate directly against it — no reconnect, so the live socket
+        // keeps streaming throughout (no event gap). `applyActivate` is the same
+        // server-authoritative path as `.ready`, with the #26 preservation of a
+        // still-running turn's live thinking/tool rows.
+        guard let sessionID = state.storedSessionID ?? state.liveSessionID else {
+          // Connected but the session id hasn't resolved yet (`session.create` still in
+          // flight on this same socket) — nothing to hydrate; the pending result lands
+          // on its own.
+          return .none
+        }
+        state.hasRequestedSession = true
+        return hydrate(sessionID: sessionID, profile: state.scopedProfile)
 
       case .composerSubmitted:
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }

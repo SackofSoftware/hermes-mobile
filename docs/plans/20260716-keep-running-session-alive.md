@@ -235,11 +235,11 @@ struct BackgroundTaskClient {
 - Create: `HermesKit/Sources/HermesKit/Clients/BackgroundTaskClient.swift`
 - Create: `HermesKit/Tests/HermesKitTests/BackgroundTaskClientTests.swift`
 
-- [ ] implement the `@DependencyClient` (`begin(name) -> AsyncStream<Void>` yielding once on early expiry; `end()`), `DependencyValues` registration
-- [ ] `#if canImport(UIKit)` liveValue wrapping `beginBackgroundTask`/`endBackgroundTask` with internal end-on-expiry bookkeeping; non-iOS `liveValue = testValue`
-- [ ] in-memory `testValue` with a test-drivable expiry trigger (continuation captured for tests), `AudioRecorderClient` pattern
-- [ ] write tests: begin/end bookkeeping; expiry yields exactly once; double-begin replaces the prior task
-- [ ] run tests — must pass before task 5
+- [x] implement the `@DependencyClient` (`begin(name) -> AsyncStream<Void>` yielding once on early expiry; `end()`), `DependencyValues` registration
+- [x] `#if canImport(UIKit)` liveValue wrapping `beginBackgroundTask`/`endBackgroundTask` with internal end-on-expiry bookkeeping; non-iOS `liveValue = testValue`
+- [x] in-memory `testValue` with a test-drivable expiry trigger (continuation captured for tests), `AudioRecorderClient` pattern
+- [x] write tests: begin/end bookkeeping; expiry yields exactly once; double-begin replaces the prior task
+- [x] run tests — must pass before task 5
 
 ### Task 5: Background grace policy in scenePhaseChanged
 
@@ -247,12 +247,12 @@ struct BackgroundTaskClient {
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] `.background` with `liveChat` running: `persistNow` + start the background task effect (cancellable `CancelID.backgroundGrace`), listening for expiry
-- [ ] on expiry while still backgrounded: final `persistNow`, cancel the socket only (`.teardownSocketOnly` — keep `liveChat` state in memory for #26 preservation), `end()` the task
-- [ ] `.active`: cancel the grace effect + `end()` the task; existing `.foreground` fan-out (now to `liveChat` directly, no top-of-path hunting) unchanged
-- [ ] `.background` with idle/no slot: `persistNow` only, no task
-- [ ] write tests (TestClock + fake BackgroundTaskClient): running → task begun + socket alive through the window; expiry → persist + socket cancelled + state retained; active-before-expiry → task ended, no socket cancel; idle → no task
-- [ ] run tests — must pass before task 6
+- [x] `.background` with `liveChat` running: `persistNow` + start the background task effect (cancellable `CancelID.backgroundGrace`), listening for expiry
+- [x] on expiry while still backgrounded: final `persistNow`, cancel the socket only (`.teardownSocketOnly` — keep `liveChat` state in memory for #26 preservation), `end()` the task
+- [x] `.active`: cancel the grace effect + `end()` the task; existing `.foreground` fan-out (now to `liveChat` directly, no top-of-path hunting) unchanged
+- [x] `.background` with idle/no slot: `persistNow` only, no task
+- [x] write tests (TestClock + fake BackgroundTaskClient): running → task begun + socket alive through the window; expiry → persist + socket cancelled + state retained; active-before-expiry → task ended, no socket cancel; idle → no task
+- [x] run tests — must pass before task 6
 
 ### Task 6: Push-tap routing dedup (closes #32)
 

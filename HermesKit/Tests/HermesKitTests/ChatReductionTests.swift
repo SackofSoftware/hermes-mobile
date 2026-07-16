@@ -223,6 +223,48 @@ struct ChatReductionTests {
     await clock.advance(by: .seconds(5))
   }
 
+  // Background-grace expiry: `.teardownSocketOnly` cancels the socket effect WITHOUT its
+  // trailing `.gatewayClosed` (so no backoff reconnect is scheduled while suspended) and
+  // leaves the in-flight turn state intact — live thinking row, pointers, `isSending` —
+  // for the #26-preserving foreground hydrate. Only the status flips to `.reconnecting`
+  // (the socket is genuinely gone, so a later `.reattached` redials instead of hydrating
+  // a dead socket).
+  @Test func teardownSocketOnlyKeepsInFlightStateAndSkipsBackoff() async {
+    let clock = TestClock()
+    let socketClosed = LockIsolated(false)
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        AsyncStream { continuation in
+          continuation.onTermination = { _ in socketClosed.setValue(true) }
+        }
+      }
+    }
+
+    await store.send(.task) { $0.hasStarted = true }
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+
+    await store.send(.teardownSocketOnly) {
+      $0.status = .reconnecting
+    }
+    // The socket effect terminated by CANCELLATION — the exhaustive store proves the
+    // trailing `.gatewayClosed` was dropped (no reconnect backoff, no in-flight finalize).
+    while !socketClosed.value { await Task.yield() }
+    #expect(store.state.isSending)
+    #expect(store.state.thinkingRowID == uuid(0))
+
+    // The thinking ticker deliberately stays (the hydrate's `reconcileTimer` owns it);
+    // full teardown cleans it up.
+    await store.send(.teardown)
+  }
+
   // Two back-to-back turns: a second message.start (with no intervening message.complete)
   // freezes/clears the first live row before creating the second, and the timer restarts
   // cleanly from 0 (cancelInFlight + reset) — no orphaned shimmering row, no double-ticking.

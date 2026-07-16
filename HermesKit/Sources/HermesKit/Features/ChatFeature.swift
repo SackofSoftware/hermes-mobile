@@ -257,6 +257,14 @@ public struct ChatFeature {
     /// persist — and release the mic. `AppFeature` flushes the snapshot (`.persistNow`)
     /// before this where the pending debounce matters.
     case teardown
+    /// Background-grace expiry (sent by `AppFeature`, never the view): the finite
+    /// background window ran out while still backgrounded — cancel the socket + reconnect
+    /// backoff CLEANLY but keep ALL chat state in memory (transcript, live thinking/tool
+    /// row pointers, composer draft), so the next `.foreground` reconnect re-hydrates with
+    /// the #26 live-row preservation intact. Status flips to `.reconnecting` (the socket
+    /// is genuinely gone), so a later `.reattached` reconnects instead of hydrating a
+    /// dead socket.
+    case teardownSocketOnly
     /// Scroll-up reached the top of the current window: reveal another `pageSize` of older
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
@@ -425,6 +433,20 @@ public struct ChatFeature {
           .cancel(id: CancelID.persist),
           // Release the mic/session if we leave mid-recording.
           wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
+        )
+
+      case .teardownSocketOnly:
+        // Cancelling the socket effect drops its trailing `await send(.gatewayClosed)`
+        // (TCA discards sends from a cancelled task), so no backoff reconnect is
+        // scheduled while suspended — `.foreground` owns the redial. Everything else
+        // (streaming fold pointers, thinking ticker, debounced persist) stays untouched:
+        // the state must survive intact for the foreground hydrate's #26 preservation of
+        // a still-running turn's live thinking/tool rows.
+        state.status = .reconnecting
+        state.hasRequestedSession = false
+        return .merge(
+          .cancel(id: CancelID.socket),
+          .cancel(id: CancelID.reconnect)
         )
 
       case .loadOlderRequested:

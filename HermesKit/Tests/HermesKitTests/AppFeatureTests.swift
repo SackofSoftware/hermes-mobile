@@ -946,6 +946,226 @@ struct AppFeatureTests {
     #expect(snapshotClient.loadSnapshot("s1")?.updatedAt == Date(timeIntervalSince1970: 7))
   }
 
+  // MARK: Background grace window (Task 5)
+
+  /// `.background` with a RUNNING turn begins the finite background window and leaves the
+  /// socket streaming: the snapshot flush lands, the grace task starts, and a gateway event
+  /// arriving while backgrounded still mutates the slot (nothing was torn down).
+  @Test func backgroundWhileRunningBeginsGraceAndKeepsSocketStreaming() async {
+    let background = BackgroundTaskClient.inMemory()
+    let socketClosed = LockIsolated(false)
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.backgroundTask = background.client
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        AsyncStream { continuation in
+          continuation.onTermination = { _ in socketClosed.setValue(true) }
+        }
+      }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    // Dial the slot's socket (first appearance).
+    await store.send(.liveChat(.task))
+
+    await store.send(.scenePhaseChanged(.background))
+    await store.receive(\.liveChat.persistNow)
+
+    // The grace task was begun...
+    while background.beginCount == 0 { await Task.yield() }
+    #expect(background.activeTaskName == "hermes.chat.background-grace")
+    // ...and the socket is untouched: a streaming delta still reduces into the slot.
+    #expect(socketClosed.value == false)
+    await store.send(.liveChat(.gatewayEvent(.messageDelta(text: "still streaming"))))
+    #expect(store.state.liveChat?.transcript.isEmpty == false)
+
+    // Cleanup: returning active cancels the grace listener + ends the task.
+    await store.send(.scenePhaseChanged(.active))
+    await store.send(.liveChat(.teardown))
+    await store.send(.home(.onDisappear))
+  }
+
+  /// The window expiring while still backgrounded flushes the snapshot one final time,
+  /// disconnects the socket cleanly (`.teardownSocketOnly` — cancelled, so no trailing
+  /// `.gatewayClosed` backoff), ends the task, and RETAINS the chat state in memory —
+  /// transcript, live thinking-row pointer, composer draft — so the foreground hydrate's
+  /// #26 preservation still applies.
+  @Test func graceExpiryDisconnectsSocketAndRetainsChatState() async {
+    let background = BackgroundTaskClient.inMemory()
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let socketClosed = LockIsolated(false)
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+    chat.model = "claude-opus-4-8"
+    chat.composerText = "unsent draft"
+    let thinkingID = UUID(uuidString: "00000000-0000-0000-0000-00000000AAAA")!
+    chat.transcript = [
+      ChatRow(id: thinkingID, kind: .thinking(
+        reasoning: "live reasoning", status: nil, elapsedSeconds: 3, isComplete: false
+      ))
+    ]
+    chat.thinkingRowID = thinkingID
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.backgroundTask = background.client
+      $0.chatSnapshot = snapshotClient
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        AsyncStream { continuation in
+          continuation.onTermination = { _ in socketClosed.setValue(true) }
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.liveChat(.task))
+    await store.send(.scenePhaseChanged(.background))
+    await store.receive(\.liveChat.persistNow)
+    while background.beginCount == 0 { await Task.yield() }
+
+    // iOS expires the window while still backgrounded.
+    background.expire()
+    await store.receive(\.backgroundGraceExpired)
+    await store.receive(\.liveChat.persistNow)
+    await store.receive(\.liveChat.teardownSocketOnly) {
+      $0.liveChat?.status = .reconnecting
+    }
+
+    // The socket effect was cancelled (stream terminated) with no `.gatewayClosed` backoff,
+    // the task was ended, and the chat state survived in memory.
+    while !socketClosed.value { await Task.yield() }
+    #expect(background.endCount == 1)
+    #expect(background.activeTaskName == nil)
+    #expect(store.state.liveChat != nil)
+    #expect(store.state.liveChat?.composerText == "unsent draft")
+    #expect(store.state.liveChat?.thinkingRowID == thinkingID)
+    #expect(store.state.liveChat?.transcript[id: thinkingID] != nil)
+    // The final flush landed before the disconnect.
+    #expect(snapshotClient.loadSnapshot("s1")?.model == "claude-opus-4-8")
+  }
+
+  /// Returning `.active` before the window expires ends the background task (and cancels
+  /// the expiry listener) WITHOUT the grace teardown — no socket-only disconnect fires, and
+  /// a stale expiry after the fact is a no-op. The existing `.foreground` fan-out runs
+  /// unchanged.
+  @Test func activeBeforeExpiryEndsGraceTaskWithoutSocketTeardown() async {
+    let background = BackgroundTaskClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.backgroundTask = background.client
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.scenePhaseChanged(.background))
+    await store.receive(\.liveChat.persistNow)
+    while background.beginCount == 0 { await Task.yield() }
+
+    await store.send(.scenePhaseChanged(.active))
+    await store.receive(\.liveChat.foreground)
+    await store.receive(\.home.pulledToRefresh)
+
+    // Task ended by `.active`; a stale expiry can no longer fire (nothing active).
+    while background.endCount == 0 { await Task.yield() }
+    #expect(background.activeTaskName == nil)
+    background.expire()
+    #expect(background.endCount == 1)
+    // No socket-only disconnect happened (it would have flipped status to `.reconnecting`).
+    #expect(store.state.liveChat?.status == .connecting)
+
+    await store.send(.liveChat(.teardown))
+    await store.send(.home(.onDisappear))
+  }
+
+  /// `.background` with an IDLE chat flushes only — no background task is begun (nothing to
+  /// keep alive, no battery burn).
+  @Test func backgroundWhileIdleStartsNoGraceTask() async {
+    let background = BackgroundTaskClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.backgroundTask = background.client
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.scenePhaseChanged(.background))
+    await store.receive(\.liveChat.persistNow)
+    #expect(background.beginCount == 0)
+  }
+
+  /// `.background` with no slot at all is a no-op (exhaustive: no state change, no effects —
+  /// in particular no background task).
+  @Test func backgroundWithNoSlotIsNoOp() async {
+    let background = BackgroundTaskClient.inMemory()
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.backgroundTask = background.client
+    }
+
+    await store.send(.scenePhaseChanged(.background))
+    #expect(background.beginCount == 0)
+  }
+
   // MARK: Push tap deep-link + foreground suppression + badge (C5)
 
   /// A push tap routes through the SAME `openSession` delegate path a list tap uses, opening

@@ -73,7 +73,9 @@ public struct AppFeature {
     case autoConnectFailed(ServerConnection)
     /// The app's scene phase changed (foreground/background) — observed at the app shell and
     /// fanned out: `.active` reconnects + re-hydrates the open chat and refreshes the list;
-    /// `.background`/`.inactive` flushes the open chat's snapshot + anchor immediately.
+    /// `.background`/`.inactive` flushes the open chat's snapshot + anchor immediately, and
+    /// `.background` with a RUNNING turn additionally requests a finite background window
+    /// (`BackgroundTaskClient`) so the socket keeps streaming ~30s past suspension.
     case scenePhaseChanged(ScenePhase)
     /// A push notification was tapped — deep-link to its session (same path as a list tap) and,
     /// for an approval, clear its pending-approval badge entry (the user is now viewing it).
@@ -91,16 +93,22 @@ public struct AppFeature {
     /// Internal: clear the slot after its `.teardown` ran (pop-to-list policy). Nil-ing the
     /// slot also auto-cancels any straggler child effects (`ifLet` semantics).
     case clearLiveChat
+    /// Internal: the finite background window (`BackgroundTaskClient`) expired while still
+    /// backgrounded — final flush, then disconnect the socket cleanly
+    /// (`.teardownSocketOnly`), keeping the chat state in memory for the #26-preserving
+    /// foreground re-hydrate.
+    case backgroundGraceExpired
     case reauth(PresentationAction<ReauthFeature.Action>)
   }
 
-  /// One id for the long-running incoming-tap observer.
-  private enum CancelID { case pushTaps }
+  /// Ids for the long-running incoming-tap observer and the background-grace listener.
+  private enum CancelID { case pushTaps, backgroundGrace }
 
   @Dependency(\.keychain) var keychain
   @Dependency(\.preferences) var preferences
   @Dependency(\.hermesREST) var rest
   @Dependency(\.push) var push
+  @Dependency(\.backgroundTask) var backgroundTask
 
   public init() {}
 
@@ -167,17 +175,57 @@ public struct AppFeature {
         // auto-restore the nav stack on cold launch — opening a session is enough.
         switch phase {
         case .active:
-          // Foreground: reconnect + re-hydrate (via `session.resume`) the live chat (re-reads
-          // running/inflight/usage) and refresh the list immediately (don't wait for the poll).
+          // Foreground: release the background-execution window (cancel the grace listener;
+          // `end()` is idempotent — a no-op when none is active), then reconnect + re-hydrate
+          // (via `session.resume`) the live chat (re-reads running/inflight/usage) and refresh
+          // the list immediately (don't wait for the poll).
           return .merge(
+            .cancel(id: CancelID.backgroundGrace),
+            .run { [backgroundTask] _ in await backgroundTask.end() },
             state.liveChat != nil ? .send(.liveChat(.foreground)) : .none,
             state.home != nil ? .send(.home(.pulledToRefresh)) : .none
           )
-        case .background, .inactive:
+        case .background:
           // Backgrounding: flush the live chat's snapshot + anchor IMMEDIATELY (don't rely on
           // the 1s debounce) so a process kill can't lose the latest paint or the timer anchor.
+          guard let chat = state.liveChat else { return .none }
+          let flush: Effect<Action> = .send(.liveChat(.persistNow))
+          // A RUNNING turn buys itself a finite background window (~30s): the socket simply
+          // keeps streaming, no `ChatFeature` changes. If iOS expires the window while still
+          // backgrounded, the listener fires `.backgroundGraceExpired` → final flush + clean
+          // socket-only disconnect (state stays in memory for the #26-preserving foreground
+          // hydrate); catch-up is then the existing push + `.foreground` reconnect. An idle
+          // chat starts NO task — nothing to keep alive, no battery burn.
+          guard chat.isRunning else { return flush }
+          return .merge(
+            flush,
+            .run { [backgroundTask] send in
+              for await _ in await backgroundTask.begin("hermes.chat.background-grace") {
+                await send(.backgroundGraceExpired)
+              }
+            }
+            .cancellable(id: CancelID.backgroundGrace, cancelInFlight: true)
+          )
+        case .inactive:
+          // Transient occlusion (app switcher, notification shade): flush only — the process
+          // isn't suspending yet, so no background window is needed.
           return state.liveChat != nil ? .send(.liveChat(.persistNow)) : .none
         }
+
+      case .backgroundGraceExpired:
+        // The background window ran out while still backgrounded. Final flush, then cancel
+        // the socket ONLY — `liveChat` stays in memory so the foreground re-hydrate can
+        // preserve the live thinking/tool rows (#26). `end()` is the mandatory bookkeeping
+        // call (the client already ended the task inside its expiration handler, so this is
+        // an idempotent no-op — kept explicit).
+        guard state.liveChat != nil else {
+          return .run { [backgroundTask] _ in await backgroundTask.end() }
+        }
+        return .concatenate(
+          .send(.liveChat(.persistNow)),
+          .send(.liveChat(.teardownSocketOnly)),
+          .run { [backgroundTask] _ in await backgroundTask.end() }
+        )
 
       case let .pushTapped(tap):
         // Deep-link a tapped push to its session via the SAME path a list tap uses, so taps and

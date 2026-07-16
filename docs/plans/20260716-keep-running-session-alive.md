@@ -267,11 +267,11 @@ struct BackgroundTaskClient {
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] pop during a streaming turn → return: no lost thinking/tool rows, timer continuous, no reconnect flash (manual sim run + reducer assertions)
-- [ ] all lifecycle rules from Solution Overview covered by a passing test each
-- [ ] run full suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] `tuist generate` + app build; run `make snapshot` — update hosts if the path shape broke them, confirm no visual diffs
-- [ ] verify no socket leak: teardown paths cancel `CancelID.socket` exactly once (instrument via test gateway client)
+- [x] pop during a streaming turn → return: no lost thinking/tool rows, timer continuous, no reconnect flash — reducer assertions: `popWhileRunningKeepsSlotAndKeepsStreaming` (strengthened: `messageStart` ticker + debounced persist keep firing across the pop, thinking row kept, fold alive) + `reopeningSlotSessionReattachesKeepingDetachedRows` / `reattachWithLiveSocketHydratesWithoutRedial` (zero redials = no reconnect flash). Manual sim run deferred to Post-Completion (not automatable here)
+- [x] all lifecycle rules from Solution Overview covered by a passing test each — audit: open-empty `openingSessionFillsSlotAndPushesMarker`/`creatingSessionFillsSlotWithNewChat`; open-different `openingAnotherSessionReplacesSlotAfterTeardown`; re-open `reopeningSlotSessionReattachesKeepingDetachedRows`; pop-running `popWhileRunningKeepsSlotAndKeepsStreaming`; pop-idle `popTearsDownAndClearsSlot`; end-while-detached `turnEndingWhileDetachedTearsDownSlot`; archive `archivingSlotSessionTearsDownSlot`; logout/identity `disconnectClearsLiveChatSlot`/`differentUserReauthPopsToListAndClearsIdentityPrefs`/`quitFromReauthFullyLogsOutToOnboarding`; sessionExpired `sessionExpiredPresentsReauthModalSeededFromChat`/`sessionExpiredWhileDetachedStillPresentsReauthModal`/`sameUserReauthResumesChatInPlace`
+- [x] run full suite: `script -q /dev/null swift test --package-path HermesKit` — 680 tests in 49 suites passed
+- [x] `tuist generate` + app build (xcodebuild, iOS Simulator — exit 0); `make snapshot` — TEST SUCCEEDED, no host changes needed, no visual diffs
+- [x] verify no socket leak: teardown paths cancel `CancelID.socket` exactly once — new instrumented tests `idlePopCancelsSocketExactlyOnce` + `slotReplacementCancelsOldSocketExactlyOnce` count gateway connects/stream terminations (old socket cancelled exactly once BEFORE the replacement dials, so `cancelInFlight` can't mask a missing teardown)
 
 ### Task 8: Update documentation and close out
 

@@ -289,6 +289,7 @@ struct AppFeatureTests {
     chat.liveSessionID = "live1"
     chat.isSending = true
 
+    let clock = TestClock()
     let store = TestStore(
       initialState: AppFeature.State(
         home: SessionListFeature.State(connection: connection),
@@ -299,8 +300,21 @@ struct AppFeatureTests {
       AppFeature()
     } withDependencies: {
       $0.uuid = .incrementing
-      $0.continuousClock = TestClock()
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
     }
+
+    // The turn's live thinking row + elapsed ticker start before the pop.
+    let thinkingID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+    await store.send(.liveChat(.gatewayEvent(.messageStart))) {
+      $0.liveChat?.transcript = [ChatRow(
+        id: thinkingID, kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)
+      )]
+      $0.liveChat?.thinkingRowID = thinkingID
+    }
+    await store.receive(\.liveChat.delegate.runningChanged)
+    await store.receive(\.home.setSessionRunning)
 
     // Exhaustive: the pop only empties the path — the running slot is untouched.
     await store.send(.path(.popFrom(id: store.state.path.ids.last!))) {
@@ -308,18 +322,130 @@ struct AppFeatureTests {
     }
     #expect(store.state.liveChat != nil)
 
-    // A streaming delta arriving after the pop still mutates the detached slot's transcript
-    // (the socket fold is slot-rooted, not screen-rooted).
-    let rowID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
-    await store.send(.liveChat(.gatewayEvent(.messageDelta(text: "still streaming")))) {
-      $0.liveChat?.transcript.append(ChatRow(
-        id: rowID, kind: .message(role: .assistant, text: "still streaming", isComplete: false)
-      ))
-      $0.liveChat?.streamingRowID = rowID
+    // The elapsed ticker keeps ticking while detached — the timer is continuous across the
+    // pop (no freeze, no restart from zero on re-open). The 1s advance also fires the
+    // debounced snapshot persist `messageStart`'s content change scheduled (same 1s window)
+    // — both effects living on after the pop is exactly the point.
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.liveChat.persistSnapshotTick)
+    await store.receive(\.liveChat.thinkingTick) {
+      $0.liveChat?.thinkingSeconds = 1
     }
-    // The delta's debounced persist is still pending — living proof the slot's effects
-    // survived the pop. Cancel it via an explicit app-policy teardown at test end.
+
+    // A streaming delta arriving after the pop still mutates the detached slot's transcript
+    // (the socket fold is slot-rooted, not screen-rooted) — the thinking row is not lost.
+    let assistantID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    await store.send(.liveChat(.gatewayEvent(.messageDelta(text: "still streaming")))) {
+      $0.liveChat?.transcript = [
+        ChatRow(id: assistantID, kind: .message(role: .assistant, text: "still streaming", isComplete: false)),
+        ChatRow(id: thinkingID, kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
+      $0.liveChat?.streamingRowID = assistantID
+    }
+    // The delta's debounced persist + the live ticker are still pending — living proof the
+    // slot's effects survived the pop. Cancel them via an explicit app-policy teardown.
     await store.send(.liveChat(.teardown))
+  }
+
+  /// Socket-leak guard (Task 7 acceptance): the idle-pop teardown path cancels the socket
+  /// effect (`CancelID.socket`) exactly once — one dial, one stream termination, nothing
+  /// left running and nothing double-cancelled. The gateway client is instrumented to count
+  /// connects and terminations.
+  @Test func idlePopCancelsSocketExactlyOnce() async {
+    let connectCount = LockIsolated(0)
+    let cancelCount = LockIsolated(0)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: ChatFeature.State(connection: connection, resumeStoredID: "s1")
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCount.withValue { $0 += 1 }
+        return AsyncStream { continuation in
+          continuation.onTermination = { _ in cancelCount.withValue { $0 += 1 } }
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    // First appearance dials exactly one socket.
+    await store.send(.liveChat(.task))
+    while connectCount.value == 0 { await Task.yield() }
+    #expect(connectCount.value == 1)
+    #expect(cancelCount.value == 0)
+
+    // The idle pop's teardown terminates that one stream (a leak would hang this wait).
+    await store.send(.path(.popFrom(id: store.state.path.ids.last!)))
+    await store.receive(\.liveChat.persistNow)
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat) {
+      $0.liveChat = nil
+    }
+    while cancelCount.value == 0 { await Task.yield() }
+    #expect(cancelCount.value == 1)
+    // The teardown never redialed.
+    #expect(connectCount.value == 1)
+  }
+
+  /// Socket-leak guard (Task 7 acceptance): replacing the slot cancels the OLD chat's socket
+  /// exactly once BEFORE the replacement dials its own — asserted before the new `.task` so
+  /// the fresh connect's `cancelInFlight` can't mask a missing teardown. The new socket then
+  /// stays alive until its own teardown.
+  @Test func slotReplacementCancelsOldSocketExactlyOnce() async {
+    let connectCount = LockIsolated(0)
+    let cancelCount = LockIsolated(0)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "old")]),
+        liveChat: ChatFeature.State(connection: connection, resumeStoredID: "old")
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCount.withValue { $0 += 1 }
+        return AsyncStream { continuation in
+          continuation.onTermination = { _ in cancelCount.withValue { $0 += 1 } }
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.liveChat(.task))
+    while connectCount.value == 0 { await Task.yield() }
+
+    // Opening a different session tears the old slot down first: its socket terminates
+    // exactly once, before any replacement dial.
+    await store.send(.home(.delegate(.openSession(Session(id: "new")))))
+    await store.receive(\.liveChat.persistNow)
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.fillLiveChat)
+    while cancelCount.value == 0 { await Task.yield() }
+    #expect(cancelCount.value == 1)
+    #expect(connectCount.value == 1)
+
+    // The replacement dials its own fresh stream; the count proves the old cancel didn't
+    // hit the new socket (position-scoped cancel IDs would otherwise cross-cancel).
+    await store.send(.liveChat(.task))
+    while connectCount.value == 1 { await Task.yield() }
+    #expect(connectCount.value == 2)
+    #expect(cancelCount.value == 1)
+
+    // And the new socket's own teardown is the second (and last) termination.
+    await store.send(.liveChat(.teardown))
+    while cancelCount.value == 1 { await Task.yield() }
+    #expect(cancelCount.value == 2)
   }
 
   /// A detached slot (user popped to the list) is torn down the moment its turn ends — the

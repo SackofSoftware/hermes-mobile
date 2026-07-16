@@ -60,6 +60,9 @@ struct ConnectionView: View {
         methodHint
       }
     }
+    // Auto-validate a pre-filled server URL (after logout / a failed launch auto-connect)
+    // so the user doesn't have to focus the field to unlock sign-in (#38).
+    .onAppear { store.send(.onAppear) }
   }
 
   /// Always-visible honesty note under the token field: what a token grants, where it's

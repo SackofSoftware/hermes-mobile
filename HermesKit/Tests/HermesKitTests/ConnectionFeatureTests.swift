@@ -92,6 +92,51 @@ struct ConnectionFeatureTests {
     await store.receive(\.checkServer) { $0.status = .invalidURL }
   }
 
+  // MARK: Auto-validation on appear (#38)
+
+  // Onboarding appears with a pre-filled URL (logout / failed launch auto-connect): the
+  // status check fires immediately — no focus/commit event needed — and the capability
+  // resolves so the sign-in step unlocks.
+  @Test func appearWithPrefilledURLAutoChecks() async {
+    let store = TestStore(
+      initialState: ConnectionFeature.State(serverURL: "http://mac.tailnet:9119")
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.status = { @Sendable _ in okStatus() }
+    }
+
+    await store.send(.onAppear)
+    await store.receive(\.checkServer) { $0.status = .checking }
+    await store.receive(\.serverStatusResponse) {
+      $0.capability = .tokenOnly
+      $0.status = .reachable(version: "0.16.0")
+    }
+  }
+
+  // First launch: nothing pre-filled, nothing to check — appear is a no-op.
+  @Test func appearWithEmptyURLDoesNotCheck() async {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "  ")) {
+      ConnectionFeature()
+    }
+    await store.send(.onAppear)
+  }
+
+  // A re-appear (popping back from the details screen) with a completed check must not
+  // re-fire and clobber the resolved status.
+  @Test func appearAfterCompletedCheckDoesNotRecheck() async {
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac.tailnet:9119",
+        capability: .tokenOnly,
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    }
+    await store.send(.onAppear)
+  }
+
   // MARK: Auto-validation (Task 2 — no Check button)
 
   @Test func editingURLResetsToIdleThenDebouncesAutoCheck() async {

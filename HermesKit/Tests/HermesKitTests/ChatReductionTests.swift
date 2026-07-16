@@ -232,7 +232,11 @@ struct ChatReductionTests {
   @Test func teardownSocketOnlyKeepsInFlightStateAndSkipsBackoff() async {
     let clock = TestClock()
     let socketClosed = LockIsolated(false)
-    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+    var initial = ChatFeature.State(connection: conn)
+    // Seed the hydrate guard as a `.ready` would have left it, so `.teardownSocketOnly`'s
+    // reset (the next `.ready` must genuinely re-hydrate) is observable below.
+    initial.hasRequestedSession = true
+    let store = TestStore(initialState: initial) {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
@@ -253,15 +257,56 @@ struct ChatReductionTests {
 
     await store.send(.teardownSocketOnly) {
       $0.status = .reconnecting
+      $0.hasRequestedSession = false
     }
     // The socket effect terminated by CANCELLATION — the exhaustive store proves the
     // trailing `.gatewayClosed` was dropped (no reconnect backoff, no in-flight finalize).
-    while !socketClosed.value { await Task.yield() }
+    await waitUntil { socketClosed.value }
     #expect(store.state.isSending)
     #expect(store.state.thinkingRowID == uuid(0))
 
     // The thinking ticker deliberately stays (the hydrate's `reconcileTimer` owns it);
     // full teardown cleans it up.
+    await store.send(.teardown)
+  }
+
+  // `.viewDisappeared` (the screen left — forwarded by `AppFeature.chatViewDisappeared`)
+  // releases only the VIEW-session resources: recording state reset + mic released. The
+  // slot's long-running effects are untouched — the thinking ticker (a stand-in for the
+  // socket/persist effects rooted alongside it) keeps firing after the view is gone.
+  @Test func viewDisappearedReleasesMicButKeepsSlotEffects() async {
+    let clock = TestClock()
+    let micCancelled = LockIsolated(false)
+    var initial = ChatFeature.State(connection: conn)
+    initial.recording = .recording
+    initial.waveformLevels = [0.4, 0.8]
+    initial.recordingSeconds = 7
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.audioRecorder.cancel = { micCancelled.setValue(true) }
+    }
+
+    // A turn is running: the live thinking row + elapsed ticker are slot-rooted effects.
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+
+    await store.send(.viewDisappeared) {
+      $0.recording = .idle
+      $0.waveformLevels = []
+      $0.recordingSeconds = 0
+    }
+    // The mic/recording session was released…
+    await waitUntil { micCancelled.value }
+    // …but the slot's effects survived the view: the ticker still fires.
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+
     await store.send(.teardown)
   }
 
@@ -571,6 +616,22 @@ struct ChatReductionTests {
     #expect(store.state.canSend == false)
     await store.send(.composerSubmitted)
     #expect(didSend.value == false)
+  }
+
+  // The visible send button becomes the interrupt button mid-turn, but a hardware-keyboard
+  // return still fires the TextField's `.onSubmit`. A submit while a turn streams must be a
+  // strict no-op — a second in-flight submit corrupts `isSending`, and if it later failed it
+  // would emit a spurious `runningChanged(false)` that tears down a detached slot whose
+  // first turn is still genuinely running. Exhaustive: any state change or effect fails this.
+  @Test func submitWhileSendingIsNoOp() async {
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    initial.composerText = "second message typed mid-turn"
+    initial.isSending = true
+    let store = TestStore(initialState: initial) { ChatFeature() }
+
+    #expect(initial.canSend == false)
+    await store.send(.composerSubmitted)
   }
 
   // MARK: Bootstrap (create on first ready)
@@ -1482,6 +1543,8 @@ struct ChatReductionTests {
       $0.isSending = false
       $0.attachments[0].uploadState = .failed("boom")
     }
+    // Client-side turn end → the slot-teardown/glow delegate fires (no server event follows).
+    await store.receive(\.delegate.runningChanged)
     #expect(store.state.composerText == "keep me") // input preserved for retry
     #expect(store.state.attachments.count == 1)
     #expect(methods.value == ["image.attach_bytes"]) // never reached prompt.submit
@@ -1514,6 +1577,8 @@ struct ChatReductionTests {
       $0.errorBanner = "This Hermes agent is too old to accept attachments. Update the agent to send files."
       $0.attachments[0].uploadState = .failed("Attachments not supported")
     }
+    // Client-side turn end → the slot-teardown/glow delegate fires (no server event follows).
+    await store.receive(\.delegate.runningChanged)
     #expect(methods.value == ["image.attach_bytes"]) // aborted before prompt.submit
     #expect(store.state.composerText == "hi") // input preserved
   }

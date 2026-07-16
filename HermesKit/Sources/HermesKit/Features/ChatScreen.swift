@@ -9,7 +9,10 @@ public struct ChatScreen {
   @ObservableState
   public struct State: Equatable {
     /// The session key this marker points at (`storedSessionID ?? liveSessionID` at push
-    /// time). `nil` for a brand-new chat whose id hasn't resolved yet.
+    /// time). `nil` for a brand-new chat whose id hasn't resolved yet — and NOT updated
+    /// when it does. Diagnostic/test-observability only: production routing always derives
+    /// the on-screen session from the slot (`AppFeature.State.currentViewingSessionID`),
+    /// never from this marker.
     public var sessionKey: String?
 
     public init(sessionKey: String? = nil) {

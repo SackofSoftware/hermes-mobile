@@ -114,17 +114,27 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   an `AppFeature`-owned **live-chat slot** (`liveChat: ChatFeature.State?` via `.ifLet`); the nav
   `path` holds only thin `ChatScreen` session-key markers, so popping destroys nothing. **Teardown
   is an `AppFeature` policy**, not a view event: idle pop / turn-end-while-detached / slot
-  replacement / archiving the slot's session / logout do `persistNow` + `.teardown`; a running
-  turn keeps streaming into the slot (list glow via `runningChanged`). Re-opening the slot's
-  session pushes the marker + `.reattached` — always hydrate, but **never cancel-and-redial a
-  healthy socket** (`connect` only when `status != .ready`; `ChatView.task` is gated by
-  `hasStarted`). The view's disappear action is `.viewDisappeared` (mic/voice cleanup only).
+  replacement / archiving the slot's session / logout run `teardownSlot` (`persistNow` →
+  `.teardown` → `.clearLiveChat` — the **nil-out is mandatory**: `ifLet` auto-cancel is the only
+  thing that reaches the un-ID'd one-shot RPC effects, so a replacement must route through it,
+  never just swap slot state); a running turn keeps streaming into the slot (list glow via
+  `runningChanged`). Re-opening the slot's session pushes the marker + `.reattached` — always
+  hydrate, but **never cancel-and-redial a healthy socket** (`.reattached` AND `.foreground`
+  `connect` only when `status != .ready`; `ChatView.task` is gated by `hasStarted`). The view's
+  disappearance is sent by the destination as **`AppFeature.chatViewDisappeared`** (never through
+  the child scope — a nil slot is guarded in the parent), which forwards `.viewDisappeared`
+  (mic/voice cleanup) and runs the idle-pop teardown only then, AFTER the pop animation — never
+  at `.popFrom` time (that would blank the outgoing screen).
 - **Backgrounding gets a ~30s grace** via `BackgroundTaskClient` (`begin(name) →
   AsyncStream<Void>` yielding once on early expiry; `#if canImport(UIKit)` liveValue wrapping
-  `beginBackgroundTask`, test-drivable expiry in `testValue`): `.background` with a running slot →
+  `beginBackgroundTask`, test-drivable expiry in `.inMemory()`): `.background` with a running slot →
   `persistNow` + begin (`CancelID.backgroundGrace`); expiry while still backgrounded → final
-  persist + `.teardownSocketOnly` (state stays in memory for the #26 foreground catch-up); `.active`
-  before expiry ends the task; idle/no-slot background = persist only, **no task, no battery burn**.
+  persist + `.teardownSocketOnly` (state stays in memory for the #26 foreground catch-up; the
+  client's expiration handler owns the `end()` bookkeeping); `.active` before expiry ends the
+  task, and a stale expiry racing `.active` is guarded to a no-op via the scene-phase flag
+  (`isSceneBackgrounded`); slot teardown releases the grace task early. An **idle slot**
+  backgrounds to persist-only and **no slot** is a no-op — either way **no task, no battery
+  burn**.
 - **Push-tap routing dedups against the slot** (#32) — `pushTapped` compares the pushed
   `session_id` to slot + path: matches slot with its marker on top → **no navigation** (in-place
   hydrate; badge bookkeeping still runs); matches slot from the list → push marker + `.reattached`;

@@ -28,6 +28,10 @@ public struct AppFeature {
     /// entry (and recomputes the badge). A small dedicated count — distinct from the list's
     /// per-session *unread* (`seenCounts`) concept, which tracks message deltas, not approvals.
     public var pendingApprovalSessionIDs: Set<String>
+    /// Whether the scene is currently backgrounded (set on `.background`, cleared on
+    /// `.active`). Guards `.backgroundGraceExpired`: an expiry whose send escaped just as
+    /// the user returned must not tear down the socket `.active` freshly redialed.
+    var isSceneBackgrounded = false
 
     public init(
       onboarding: ConnectionFeature.State = .init(),
@@ -54,7 +58,7 @@ public struct AppFeature {
     /// Drives foreground push suppression via `.onChange`.
     var currentViewingSessionID: String? {
       guard !path.isEmpty else { return nil }
-      return liveChat.flatMap { $0.storedSessionID ?? $0.liveSessionID }
+      return liveChat?.sessionKey
     }
   }
 
@@ -85,15 +89,25 @@ public struct AppFeature {
     case onboarding(ConnectionFeature.Action)
     case home(SessionListFeature.Action)
     case path(StackActionOf<ChatScreen>)
+    /// The pushed chat view finished leaving the screen (sent by the destination in
+    /// `AppView` — never through the child scope, so a nil slot can be guarded here
+    /// instead of tripping the `ifLet` nil-child warning). Forwards the view-session
+    /// cleanup (`.viewDisappeared`) and applies the pop-to-list teardown policy AFTER the
+    /// pop animation — tearing down at `.popFrom` time would blank the outgoing screen
+    /// mid-animation.
+    case chatViewDisappeared
     /// The live chat slot's actions — the chat is composed here (via `.ifLet`), NOT in the
     /// navigation path, so its effects survive pops.
     case liveChat(ChatFeature.Action)
     /// Internal: fill the live-chat slot with a fresh chat and (re)set its path marker.
     /// Used when opening while the slot is occupied — sequenced after the old slot's
-    /// `.teardown` so the outgoing chat's effects can't leak into the replacement.
+    /// `.teardown` AND `.clearLiveChat` (the nil-out is what cancels the outgoing chat's
+    /// un-ID'd one-shot RPC effects) so nothing can leak into the replacement.
     case fillLiveChat(ChatFeature.State)
-    /// Internal: clear the slot after its `.teardown` ran (pop-to-list policy). Nil-ing the
-    /// slot also auto-cancels any straggler child effects (`ifLet` semantics).
+    /// Internal: clear the slot after its `.teardown` ran (`teardownSlot`). Nil-ing the
+    /// slot makes `ifLet` cancel every remaining child effect — including one-shot RPCs
+    /// that carry no cancel ID. Does not touch the path (a replacement resets it in the
+    /// immediately-following `.fillLiveChat`).
     case clearLiveChat
     /// Internal: the finite background window (`BackgroundTaskClient`) expired while still
     /// backgrounded — final flush, then disconnect the socket cleanly
@@ -105,6 +119,11 @@ public struct AppFeature {
 
   /// Ids for the long-running incoming-tap observer and the background-grace listener.
   private enum CancelID { case pushTaps, backgroundGrace }
+
+  /// Name of the finite background task requested while a running turn is backgrounded
+  /// (shows up in OS background-task diagnostics). Tests re-type the literal on purpose —
+  /// an accidental rename should fail the suite, not silently follow the constant.
+  private static let backgroundGraceTaskName = "hermes.chat.background-grace"
 
   @Dependency(\.keychain) var keychain
   @Dependency(\.preferences) var preferences
@@ -178,9 +197,11 @@ public struct AppFeature {
         switch phase {
         case .active:
           // Foreground: release the background-execution window (cancel the grace listener;
-          // `end()` is idempotent — a no-op when none is active), then reconnect + re-hydrate
-          // (via `session.resume`) the live chat (re-reads running/inflight/usage) and refresh
-          // the list immediately (don't wait for the poll).
+          // `end()` is idempotent — a no-op when none is active), then re-hydrate the live
+          // chat via `.foreground` (which reconnects only if the socket died — a socket the
+          // grace window kept alive is reused, not redialed) and refresh the list
+          // immediately (don't wait for the poll).
+          state.isSceneBackgrounded = false
           return .merge(
             .cancel(id: CancelID.backgroundGrace),
             .run { [backgroundTask] _ in await backgroundTask.end() },
@@ -190,6 +211,7 @@ public struct AppFeature {
         case .background:
           // Backgrounding: flush the live chat's snapshot + anchor IMMEDIATELY (don't rely on
           // the 1s debounce) so a process kill can't lose the latest paint or the timer anchor.
+          state.isSceneBackgrounded = true
           guard let chat = state.liveChat else { return .none }
           let flush: Effect<Action> = .send(.liveChat(.persistNow))
           // A RUNNING turn buys itself a finite background window (~30s): the socket simply
@@ -202,7 +224,7 @@ public struct AppFeature {
           return .merge(
             flush,
             .run { [backgroundTask] send in
-              for await _ in await backgroundTask.begin("hermes.chat.background-grace") {
+              for await _ in await backgroundTask.begin(Self.backgroundGraceTaskName) {
                 await send(.backgroundGraceExpired)
               }
             }
@@ -217,16 +239,16 @@ public struct AppFeature {
       case .backgroundGraceExpired:
         // The background window ran out while still backgrounded. Final flush, then cancel
         // the socket ONLY — `liveChat` stays in memory so the foreground re-hydrate can
-        // preserve the live thinking/tool rows (#26). `end()` is the mandatory bookkeeping
-        // call (the client already ended the task inside its expiration handler, so this is
-        // an idempotent no-op — kept explicit).
-        guard state.liveChat != nil else {
-          return .run { [backgroundTask] _ in await backgroundTask.end() }
-        }
+        // preserve the live thinking/tool rows (#26). No explicit `end()` here: the client
+        // performed the mandatory end bookkeeping inside its expiration handler before
+        // yielding. Guards: an expiry whose send escaped just as `.active` cancelled the
+        // listener must be a no-op — `.active` already redialed, and tearing that fresh
+        // socket down would strand the chat with no reconnect scheduled. Likewise nothing
+        // to do when the slot was already torn down (e.g. the detached turn ended).
+        guard state.isSceneBackgrounded, state.liveChat != nil else { return .none }
         return .concatenate(
           .send(.liveChat(.persistNow)),
-          .send(.liveChat(.teardownSocketOnly)),
-          .run { [backgroundTask] _ in await backgroundTask.end() }
+          .send(.liveChat(.teardownSocketOnly))
         )
 
       case let .pushTapped(tap):
@@ -245,14 +267,12 @@ public struct AppFeature {
           // reflects the now-pending approval.
           return setBadge(state)
         }
-        // Matches the slot AND its marker is on the path (the chat is on screen) → NO
-        // navigation. Badge bookkeeping only: the user is now viewing it, so the pending
-        // entry clears (mark-then-clear nets zero); the content update arrives in place —
-        // the live socket is already streaming, and the tap's app activation fires the
-        // existing `.foreground` re-hydrate.
-        if let chat = state.liveChat,
-           (chat.storedSessionID ?? chat.liveSessionID) == tap.sessionID,
-           !state.path.isEmpty {
+        // The tapped session is the one ALREADY on screen (slot match + marker on the
+        // path) → NO navigation. Badge bookkeeping only: the user is now viewing it, so
+        // the pending entry clears (mark-then-clear nets zero); the content update arrives
+        // in place — the live socket is already streaming, and the tap's app activation
+        // fires the existing `.foreground` re-hydrate.
+        if state.currentViewingSessionID == tap.sessionID {
           state.pendingApprovalSessionIDs.remove(tap.sessionID)
           return setBadge(state)
         }
@@ -282,8 +302,10 @@ public struct AppFeature {
         // `ChatFeature.State` would discard the detached thinking/tool/streaming rows.
         // Push the marker back (the path is empty when coming from the list) and
         // re-attach: hydrate against the live socket, reconnecting only if it died.
-        if let chat = state.liveChat,
-           (chat.storedSessionID ?? chat.liveSessionID) == session.id {
+        if let chat = state.liveChat, chat.sessionKey == session.id {
+          // Defensive guard: the path is normally empty here (re-opens come from the list,
+          // and an on-screen match short-circuits in `pushTapped` before reaching this
+          // delegate) — but a double-delivered open must not stack a second marker.
           if state.path.isEmpty {
             state.path.append(ChatScreen.State(sessionKey: session.id))
           }
@@ -302,17 +324,10 @@ public struct AppFeature {
           fillLiveChat(chat, into: &state)
           return badge
         }
-        // Slot occupied (e.g. a push tap while a chat is open): flush the old chat's
-        // snapshot, tear it down FIRST so its socket/effects can't feed events into the
-        // replacement, then fill the slot.
-        return .merge(
-          badge,
-          .concatenate(
-            .send(.liveChat(.persistNow)),
-            .send(.liveChat(.teardown)),
-            .send(.fillLiveChat(chat))
-          )
-        )
+        // Slot occupied (e.g. a push tap while a chat is open): replace it — the old chat
+        // must be fully torn down (through the nil-out, so even its un-ID'd one-shot RPC
+        // effects are cancelled) before the new chat fills the slot.
+        return .merge(badge, teardownSlot(thenFill: chat))
 
       case let .home(.delegate(.createSession(initialComposerText))):
         guard let home = state.home else { return .none }
@@ -327,12 +342,9 @@ public struct AppFeature {
           fillLiveChat(chat, into: &state)
           return .none
         }
-        // Slot occupied: flush + tear the old chat down before filling (same rule as open).
-        return .concatenate(
-          .send(.liveChat(.persistNow)),
-          .send(.liveChat(.teardown)),
-          .send(.fillLiveChat(chat))
-        )
+        // Slot occupied: flush + fully tear the old chat down before filling (same rule
+        // as open — the replacement goes through the nil-out).
+        return teardownSlot(thenFill: chat)
 
       case let .fillLiveChat(chat):
         fillLiveChat(chat, into: &state)
@@ -345,23 +357,38 @@ public struct AppFeature {
         return .none
 
       case .path(.popFrom):
-        // Popped back to the session list. Keep-while-running policy: a RUNNING turn keeps
-        // its slot untouched — the socket streams on, rows accumulate detached, and the
-        // list's row glow tracks via `runningChanged` (whose `running: false` while
-        // detached tears the slot down below). An idle chat has nothing to keep alive —
-        // flush the snapshot, cancel everything, clear the slot.
+        // Popped back to the session list. Nothing to do at pop-START: the teardown policy
+        // runs on `.chatViewDisappeared` (below), once the pop animation has finished —
+        // clearing the slot here would blank the outgoing screen mid-animation and route
+        // the view's disappearance into a nil child.
+        return .none
+
+      case .chatViewDisappeared:
+        // The pushed chat view finished leaving the screen: the pop animation completed,
+        // or its marker was swapped by a slot replacement. Forward the view-session
+        // cleanup (mic/voice) to whatever chat owns the slot, then apply the pop policy:
+        // a RUNNING detached turn keeps its slot untouched — the socket streams on, rows
+        // accumulate, and the list's row glow tracks via `runningChanged` (whose
+        // `running: false` while detached tears the slot down below). An idle detached
+        // chat has nothing to keep alive — flush the snapshot, cancel everything, clear
+        // the slot. A non-empty path means the disappearance came from a slot replacement
+        // (the new chat is on screen) → cleanup only. No slot (logout/quit/teardown
+        // already cleared it) → no-op.
         guard let chat = state.liveChat else { return .none }
-        guard !chat.isRunning else { return .none }
-        return teardownSlot()
+        let cleanup: Effect<Action> = .send(.liveChat(.viewDisappeared))
+        guard state.path.isEmpty, !chat.isRunning else { return cleanup }
+        return .concatenate(cleanup, teardownSlot())
 
       case let .home(.delegate(.sessionArchived(id))):
         // The user archived a session from the list. If it's the slot's session (possibly
         // detached mid-turn), tear the live chat down FIRST — its socket must not keep
         // streaming into a session that's now archived. Any other session → nothing to do
         // (the list's optimistic archive handles itself).
-        guard let chat = state.liveChat,
-              (chat.storedSessionID ?? chat.liveSessionID) == id
-        else { return .none }
+        guard let chat = state.liveChat, chat.sessionKey == id else { return .none }
+        // Deliberate asymmetry: if the archive PATCH later FAILS, the list restores the
+        // row (optimistic rollback) but the slot stays torn down — re-opening simply
+        // resumes the session fresh. Resurrecting live slot state for a rare failure path
+        // isn't worth replaying the teardown.
         return teardownSlot()
 
       case .home(.delegate(.disconnect)):
@@ -451,15 +478,32 @@ public struct AppFeature {
     }
   }
 
-  /// The standard "slot is done" sequence (idle pop, detached turn completion, archived
-  /// session): flush the snapshot + turn anchor first (the debounced persist is about to be
-  /// cancelled), cancel every long-running chat effect, then clear the slot (`ifLet`
-  /// auto-cancels any stragglers on the nil-out).
-  private func teardownSlot() -> Effect<Action> {
-    .concatenate(
+  /// The standard "slot is done" sequence (idle view-disappearance, detached turn
+  /// completion, archived session, slot replacement): flush the snapshot + turn anchor
+  /// first (the debounced persist is about to be cancelled), cancel every long-running
+  /// chat effect, then clear the slot — the nil-out makes `ifLet` cancel ALL remaining
+  /// child effects, including the un-ID'd one-shot RPCs (hydrate, submit, rename …) whose
+  /// results must never reduce into a replacement chat. Passing `thenFill` replaces the
+  /// slot with a fresh chat right after the clear. Any background grace window is released
+  /// early in parallel (idempotent no-ops in the foreground) — a torn-down slot has
+  /// nothing left for the OS task to keep alive.
+  ///
+  /// The action chain is delivered atomically: `Effect.send` emits synchronously, so the
+  /// store drains persist → teardown → clear (→ fill) in one send loop — no user action
+  /// can interleave between the steps.
+  private func teardownSlot(thenFill replacement: ChatFeature.State? = nil) -> Effect<Action> {
+    var chain: [Effect<Action>] = [
       .send(.liveChat(.persistNow)),
       .send(.liveChat(.teardown)),
-      .send(.clearLiveChat)
+      .send(.clearLiveChat),
+    ]
+    if let replacement {
+      chain.append(.send(.fillLiveChat(replacement)))
+    }
+    return .merge(
+      .cancel(id: CancelID.backgroundGrace),
+      .run { [backgroundTask] _ in await backgroundTask.end() },
+      .concatenate(chain)
     )
   }
 
@@ -469,7 +513,7 @@ public struct AppFeature {
   private func fillLiveChat(_ chat: ChatFeature.State, into state: inout State) {
     state.liveChat = chat
     state.path.removeAll()
-    state.path.append(ChatScreen.State(sessionKey: chat.storedSessionID))
+    state.path.append(ChatScreen.State(sessionKey: chat.sessionKey))
   }
 
   /// Best-effort push cleanup on logout: unregister the last-known device token with the

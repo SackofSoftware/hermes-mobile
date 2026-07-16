@@ -199,7 +199,9 @@ struct AppFeatureTests {
   // MARK: - Live chat slot lifecycle (keep-alive plan, Tasks 1–2)
 
   /// Popping back to the list with an IDLE chat tears the slot down (nothing to keep
-  /// alive): flush the snapshot, cancel everything, clear the slot.
+  /// alive): flush the snapshot, cancel everything, clear the slot. The teardown is
+  /// deferred to `.chatViewDisappeared` (the view actually left — pop animation done);
+  /// `.popFrom` itself does nothing so the outgoing screen never blanks mid-animation.
   @Test func popTearsDownAndClearsSlot() async {
     let store = TestStore(
       initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
@@ -215,7 +217,13 @@ struct AppFeatureTests {
     await store.send(.home(.delegate(.openSession(session))))
     #expect(store.state.liveChat != nil)
 
+    // Pop-start: path empties, slot untouched (the screen is still animating away).
     await store.send(.path(.popFrom(id: store.state.path.ids.last!)))
+    #expect(store.state.liveChat != nil)
+
+    // The view finished disappearing → mic cleanup + the idle teardown sequence.
+    await store.send(.chatViewDisappeared)
+    await store.receive(\.liveChat.viewDisappeared)
     await store.receive(\.liveChat.persistNow)
     await store.receive(\.liveChat.teardown)
     await store.receive(\.clearLiveChat) {
@@ -249,6 +257,11 @@ struct AppFeatureTests {
     await store.send(.home(.delegate(.openSession(Session(id: "new", title: "New chat")))))
     await store.receive(\.liveChat.persistNow)
     await store.receive(\.liveChat.teardown)
+    // The replacement routes through the nil-out: `ifLet` cancels the outgoing chat's
+    // remaining (un-ID'd one-shot) effects before the new chat fills the slot.
+    await store.receive(\.clearLiveChat) {
+      $0.liveChat = nil
+    }
     await store.receive(\.fillLiveChat) {
       $0.liveChat = ChatFeature.State(
         connection: self.connection, resumeStoredID: "new", profileName: nil, title: "New chat"
@@ -322,6 +335,13 @@ struct AppFeatureTests {
     }
     #expect(store.state.liveChat != nil)
 
+    // The view finishing its pop animation (what the destination actually sends) forwards
+    // mic/voice cleanup only — a RUNNING detached slot is still not torn down (exhaustive:
+    // any teardown follow-up would fail here).
+    await store.send(.chatViewDisappeared)
+    await store.receive(\.liveChat.viewDisappeared)
+    #expect(store.state.liveChat != nil)
+
     // The elapsed ticker keeps ticking while detached — the timer is continuous across the
     // pop (no freeze, no restart from zero on re-open). The 1s advance also fires the
     // debounced snapshot persist `messageStart`'s content change scheduled (same 1s window)
@@ -377,19 +397,20 @@ struct AppFeatureTests {
 
     // First appearance dials exactly one socket.
     await store.send(.liveChat(.task))
-    while connectCount.value == 0 { await Task.yield() }
-    #expect(connectCount.value == 1)
+    await waitUntil { connectCount.value == 1 }
     #expect(cancelCount.value == 0)
 
-    // The idle pop's teardown terminates that one stream (a leak would hang this wait).
+    // The idle pop's teardown (deferred until the view disappeared) terminates that one
+    // stream (a leak would fail the bounded wait).
     await store.send(.path(.popFrom(id: store.state.path.ids.last!)))
+    await store.send(.chatViewDisappeared)
+    await store.receive(\.liveChat.viewDisappeared)
     await store.receive(\.liveChat.persistNow)
     await store.receive(\.liveChat.teardown)
     await store.receive(\.clearLiveChat) {
       $0.liveChat = nil
     }
-    while cancelCount.value == 0 { await Task.yield() }
-    #expect(cancelCount.value == 1)
+    await waitUntil { cancelCount.value == 1 }
     // The teardown never redialed.
     #expect(connectCount.value == 1)
   }
@@ -423,29 +444,86 @@ struct AppFeatureTests {
     store.exhaustivity = .off(showSkippedAssertions: false)
 
     await store.send(.liveChat(.task))
-    while connectCount.value == 0 { await Task.yield() }
+    await waitUntil { connectCount.value == 1 }
 
-    // Opening a different session tears the old slot down first: its socket terminates
-    // exactly once, before any replacement dial.
+    // Opening a different session tears the old slot down first (through the nil-out, so
+    // even un-ID'd one-shot effects are cancelled): its socket terminates exactly once,
+    // before any replacement dial.
     await store.send(.home(.delegate(.openSession(Session(id: "new")))))
     await store.receive(\.liveChat.persistNow)
     await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat)
     await store.receive(\.fillLiveChat)
-    while cancelCount.value == 0 { await Task.yield() }
-    #expect(cancelCount.value == 1)
+    await waitUntil { cancelCount.value == 1 }
     #expect(connectCount.value == 1)
 
     // The replacement dials its own fresh stream; the count proves the old cancel didn't
     // hit the new socket (position-scoped cancel IDs would otherwise cross-cancel).
     await store.send(.liveChat(.task))
-    while connectCount.value == 1 { await Task.yield() }
-    #expect(connectCount.value == 2)
+    await waitUntil { connectCount.value == 2 }
     #expect(cancelCount.value == 1)
 
     // And the new socket's own teardown is the second (and last) termination.
     await store.send(.liveChat(.teardown))
-    while cancelCount.value == 1 { await Task.yield() }
-    #expect(cancelCount.value == 2)
+    await waitUntil { cancelCount.value == 2 }
+  }
+
+  /// Replacement leak guard: an in-flight ONE-SHOT RPC effect of the outgoing chat (here a
+  /// `session.resume` hydrate — one-shots carry NO cancel ID, so `.teardown` alone can't
+  /// reach them) must be cancelled by the replacement's nil-out (`.clearLiveChat` →
+  /// `ifLet` auto-cancel). Were it leaked, its `.activateResult` would reduce into the
+  /// REPLACEMENT chat — overwriting the new chat's session ids and rebuilding its
+  /// transcript from the OLD session's history.
+  @Test func slotReplacementDropsInFlightHydrateOfOldChat() async {
+    let clock = TestClock()
+    var oldChat = ChatFeature.State(connection: connection, resumeStoredID: "old")
+    oldChat.status = .ready
+    oldChat.hasStarted = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "old")]),
+        liveChat: oldChat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        // A slow resume: still in flight when the slot is replaced.
+        try await clock.sleep(for: .seconds(5))
+        return .object([
+          "session_id": .string("old-live"),
+          "stored_session_id": .string("old"),
+          "messages": .array([
+            .object(["id": .number(1), "role": .string("user"), "content": .string("old history")]),
+          ]),
+          "running": .bool(false),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    // Kick off the old chat's hydrate (healthy socket → direct hydrate, no redial).
+    await store.send(.liveChat(.reattached))
+
+    // Replace the slot while that hydrate is still in flight.
+    await store.send(.home(.delegate(.openSession(Session(id: "new", title: "New chat")))))
+    await store.receive(\.fillLiveChat)
+    #expect(store.state.liveChat?.storedSessionID == "new")
+
+    // Let the old RPC's clock fire: its task was cancelled by the nil-out, so NO
+    // `.activateResult` may deliver into the replacement chat.
+    await clock.advance(by: .seconds(5))
+    await store.finish()
+    #expect(store.state.liveChat?.storedSessionID == "new")
+    #expect(store.state.liveChat?.liveSessionID == nil) // the old live id never leaked in
+    #expect(store.state.liveChat?.transcript.isEmpty == true) // nor the old history
   }
 
   /// A detached slot (user popped to the list) is torn down the moment its turn ends — the
@@ -494,6 +572,79 @@ struct AppFeatureTests {
     #expect(snapshotClient.loadSnapshot("s1")?.model == "claude-opus-4-8")
   }
 
+  /// A CLIENT-SIDE turn end must also tear a detached slot down: the submit RPC failing
+  /// (e.g. a 30s timeout after the user already popped to the list) means NO server event
+  /// will ever follow — without `promptSubmitFailed` emitting `runningChanged(false)`, the
+  /// idle detached chat would keep its socket, backoff, and persist effects forever.
+  @Test func promptFailureWhileDetachedTearsDownSlot() async {
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+    chat.model = "claude-opus-4-8"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, sessions: [Session(id: "s1", isActive: true)]
+        ),
+        // Empty path — the user popped while the submit RPC was still in flight.
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.chatSnapshot = snapshotClient
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    // The submit fails after the pop: client-side turn end → glow clears, slot torn down.
+    await store.send(.liveChat(.promptSubmitFailed(message: "request timed out: prompt.submit")))
+    await store.receive(\.liveChat.delegate.runningChanged)
+    await store.receive(\.home.setSessionRunning) {
+      $0.home?.sessions[id: "s1"]?.isActive = false
+    }
+    await store.receive(\.liveChat.persistNow)
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat) {
+      $0.liveChat = nil
+    }
+    // The snapshot flush landed before the slot cleared.
+    #expect(snapshotClient.loadSnapshot("s1")?.model == "claude-opus-4-8")
+  }
+
+  /// Same client-side turn end via the attachment path: a failed upload (no server event
+  /// will follow) must tear a detached slot down like `promptSubmitFailed` does.
+  @Test func attachmentFailureWhileDetachedTearsDownSlot() async {
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, sessions: [Session(id: "s1", isActive: true)]
+        ),
+        liveChat: chat // empty path — detached
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.liveChat(.attachmentUploadFailed(message: "boom")))
+    await store.receive(\.liveChat.delegate.runningChanged)
+    await store.receive(\.liveChat.persistNow)
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat) {
+      $0.liveChat = nil
+    }
+  }
+
   /// Archiving the slot's session from the list tears the (detached) slot down FIRST — its
   /// socket must not keep streaming into a now-archived session. Archiving a DIFFERENT
   /// session leaves the slot alone.
@@ -535,6 +686,42 @@ struct AppFeatureTests {
     await store.receive(\.clearLiveChat) {
       $0.liveChat = nil
     }
+  }
+
+  /// Archive of the slot's session whose PATCH then FAILS: the list restores the row
+  /// locally (optimistic rollback), but the slot deliberately STAYS torn down — the
+  /// teardown ran on the optimistic `sessionArchived` delegate, and resurrecting live
+  /// slot state for a rare failure path isn't worth replaying it; re-opening simply
+  /// resumes the session fresh. This pins that accepted behavior.
+  @Test func archiveFailureRestoresRowButSlotStaysDown() async {
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        // Empty path — the user is on the list (where archive lives).
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.archiveButtonTapped(id: "s1")))
+    await store.send(.home(.confirmationDialog(.presented(.confirmArchive(id: "s1")))))
+    // Optimistic: the slot is torn down FIRST (before the PATCH round-trips)…
+    await store.receive(\.home.delegate.sessionArchived)
+    await store.receive(\.clearLiveChat)
+    // …then the PATCH fails and the row is restored — but the slot stays down.
+    await store.receive(\.home.archiveFailed)
+    #expect(store.state.home?.sessions[id: "s1"] != nil)
+    #expect(store.state.liveChat == nil)
   }
 
   /// Re-opening the slot's OWN session from the list (tapping the glowing row of a detached
@@ -1045,12 +1232,17 @@ struct AppFeatureTests {
     #expect(snapshotClient.turnAnchor("s1") == Date(timeIntervalSince1970: 4242))
   }
 
-  // `.inactive` is treated like background (immediate flush) — no foreground reconnect.
+  // `.inactive` is a flush only — no foreground reconnect, and (unlike `.background`) NO
+  // grace task even mid-turn: a transient occlusion (app switcher, notification shade)
+  // isn't suspension.
   @Test func inactiveFlushesSnapshot() async {
+    let background = BackgroundTaskClient.inMemory()
     let snapshotClient = ChatSnapshotClient.inMemory()
     var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
     chat.storedSessionID = "s1"
     chat.liveSessionID = "live1"
+    // A RUNNING turn — the strongest case: even this must not begin a background task.
+    chat.isSending = true
 
     let store = TestStore(
       initialState: AppFeature.State(
@@ -1061,15 +1253,17 @@ struct AppFeatureTests {
     ) {
       AppFeature()
     } withDependencies: {
+      $0.backgroundTask = background.client
       $0.chatSnapshot = snapshotClient
       $0.date = .constant(Date(timeIntervalSince1970: 7))
     }
-    store.exhaustivity = .off(showSkippedAssertions: false)
 
+    // Exhaustive: the flush is the only follow-up — no grace listener effect.
     await store.send(.scenePhaseChanged(.inactive))
     await store.receive(\.liveChat.persistNow)
 
     #expect(snapshotClient.loadSnapshot("s1")?.updatedAt == Date(timeIntervalSince1970: 7))
+    #expect(background.beginCount == 0)
   }
 
   // MARK: Background grace window (Task 5)
@@ -1116,7 +1310,7 @@ struct AppFeatureTests {
     await store.receive(\.liveChat.persistNow)
 
     // The grace task was begun...
-    while background.beginCount == 0 { await Task.yield() }
+    await waitUntil { background.beginCount == 1 }
     #expect(background.activeTaskName == "hermes.chat.background-grace")
     // ...and the socket is untouched: a streaming delta still reduces into the slot.
     #expect(socketClosed.value == false)
@@ -1176,7 +1370,7 @@ struct AppFeatureTests {
     await store.send(.liveChat(.task))
     await store.send(.scenePhaseChanged(.background))
     await store.receive(\.liveChat.persistNow)
-    while background.beginCount == 0 { await Task.yield() }
+    await waitUntil { background.beginCount == 1 }
 
     // iOS expires the window while still backgrounded.
     background.expire()
@@ -1187,8 +1381,9 @@ struct AppFeatureTests {
     }
 
     // The socket effect was cancelled (stream terminated) with no `.gatewayClosed` backoff,
-    // the task was ended, and the chat state survived in memory.
-    while !socketClosed.value { await Task.yield() }
+    // the task was ended — by the CLIENT's mandatory expiry bookkeeping (the reducer sends
+    // no `end()` of its own on expiry) — and the chat state survived in memory.
+    await waitUntil { socketClosed.value }
     #expect(background.endCount == 1)
     #expect(background.activeTaskName == nil)
     #expect(store.state.liveChat != nil)
@@ -1231,14 +1426,14 @@ struct AppFeatureTests {
 
     await store.send(.scenePhaseChanged(.background))
     await store.receive(\.liveChat.persistNow)
-    while background.beginCount == 0 { await Task.yield() }
+    await waitUntil { background.beginCount == 1 }
 
     await store.send(.scenePhaseChanged(.active))
     await store.receive(\.liveChat.foreground)
     await store.receive(\.home.pulledToRefresh)
 
     // Task ended by `.active`; a stale expiry can no longer fire (nothing active).
-    while background.endCount == 0 { await Task.yield() }
+    await waitUntil { background.endCount == 1 }
     #expect(background.activeTaskName == nil)
     background.expire()
     #expect(background.endCount == 1)
@@ -1250,7 +1445,8 @@ struct AppFeatureTests {
   }
 
   /// `.background` with an IDLE chat flushes only — no background task is begun (nothing to
-  /// keep alive, no battery burn).
+  /// keep alive, no battery burn). Exhaustive: the flush is the ONLY follow-up, and a
+  /// leaked grace listener (a long-running effect) would fail the store's effect check.
   @Test func backgroundWhileIdleStartsNoGraceTask() async {
     let background = BackgroundTaskClient.inMemory()
     var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
@@ -1269,15 +1465,16 @@ struct AppFeatureTests {
       $0.chatSnapshot = .inMemory()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
     }
-    store.exhaustivity = .off(showSkippedAssertions: false)
 
-    await store.send(.scenePhaseChanged(.background))
+    await store.send(.scenePhaseChanged(.background)) {
+      $0.isSceneBackgrounded = true
+    }
     await store.receive(\.liveChat.persistNow)
     #expect(background.beginCount == 0)
   }
 
-  /// `.background` with no slot at all is a no-op (exhaustive: no state change, no effects —
-  /// in particular no background task).
+  /// `.background` with no slot at all only records the scene phase (exhaustive: no
+  /// effects — in particular no background task).
   @Test func backgroundWithNoSlotIsNoOp() async {
     let background = BackgroundTaskClient.inMemory()
     let store = TestStore(
@@ -1288,8 +1485,118 @@ struct AppFeatureTests {
       $0.backgroundTask = background.client
     }
 
-    await store.send(.scenePhaseChanged(.background))
+    await store.send(.scenePhaseChanged(.background)) {
+      $0.isSceneBackgrounded = true
+    }
     #expect(background.beginCount == 0)
+  }
+
+  /// A stray `.backgroundGraceExpired` racing `.active` (its send escaped the listener just
+  /// before the cancel landed) must be a strict no-op: `.active` already ran `.foreground`,
+  /// and a late `teardownSocketOnly` would kill the socket with no reconnect scheduled —
+  /// stranding the chat in `.reconnecting` until the next foreground.
+  @Test func staleGraceExpiryAfterActiveIsNoOp() async {
+    let background = BackgroundTaskClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.backgroundTask = background.client
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.scenePhaseChanged(.background))
+    await store.receive(\.liveChat.persistNow)
+    await waitUntil { background.beginCount == 1 }
+
+    // Return to the foreground: the socket redials via `.foreground`.
+    await store.send(.scenePhaseChanged(.active))
+    await store.receive(\.liveChat.foreground)
+    await store.receive(\.home.pulledToRefresh)
+
+    // The raced expiry delivers AFTER `.active` — the scene-phase guard drops it: no
+    // socket-only teardown (the status never flips to `.reconnecting`).
+    await store.send(.backgroundGraceExpired)
+    #expect(store.state.liveChat?.status != .reconnecting)
+
+    await store.send(.liveChat(.teardown))
+    await store.send(.home(.onDisappear))
+  }
+
+  /// `.backgroundGraceExpired` with no slot left (e.g. the detached turn already ended and
+  /// tore it down) is a strict no-op — nothing to flush or disconnect.
+  @Test func graceExpiryWithNoSlotIsNoOp() async {
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.scenePhaseChanged(.background)) {
+      $0.isSceneBackgrounded = true
+    }
+    // Exhaustive: no `.liveChat` sends, no effects.
+    await store.send(.backgroundGraceExpired)
+  }
+
+  /// A DETACHED turn ending during the grace window tears the slot down AND releases the
+  /// background task early — nothing is left for the OS window to keep alive, so the app
+  /// shouldn't stay awake for the rest of it. The cancelled listener also means a later
+  /// OS expiry can never deliver `.backgroundGraceExpired` into the empty slot.
+  @Test func detachedTurnEndDuringGraceReleasesTaskEarly() async {
+    let background = BackgroundTaskClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, sessions: [Session(id: "s1", isActive: true)]
+        ),
+        // Empty path — the turn streams detached while backgrounded.
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.backgroundTask = background.client
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.scenePhaseChanged(.background))
+    await store.receive(\.liveChat.persistNow)
+    await waitUntil { background.beginCount == 1 }
+
+    // The turn completes while detached + backgrounded → teardown + early task release.
+    await store.send(.liveChat(.delegate(.runningChanged(sessionID: "s1", running: false))))
+    await store.receive(\.clearLiveChat)
+    await waitUntil { background.endCount == 1 }
+    #expect(background.activeTaskName == nil)
+    #expect(store.state.liveChat == nil)
+
+    // A stale OS expiry is now a client-side no-op (the task already ended) and the
+    // cancelled listener can't deliver anything anyway.
+    background.expire()
+    #expect(background.endCount == 1)
   }
 
   // MARK: Push tap deep-link + foreground suppression + badge (C5)
@@ -1362,15 +1669,74 @@ struct AppFeatureTests {
     await store.finish()
     #expect(push.currentSession == "20260610_abc")
 
-    // Pop the chat (path empties) → current-viewing marker cleared (and, for now, the
-    // slot is torn down unconditionally — Task 2 adds the keep-while-running policy).
+    // Pop the chat (path empties) → current-viewing marker cleared immediately (the
+    // suppression follows the MARKER, not the slot); the idle teardown then runs once the
+    // view finished disappearing.
     await store.send(.path(.popFrom(id: store.state.path.ids.last!)))
-    // Drain the pop's follow-up actions (persistNow → teardown → clearLiveChat) so the
-    // asserted state reflects the completed teardown.
+    await store.finish()
+    #expect(push.currentSession == nil)
+    await store.send(.chatViewDisappeared)
+    // Drain the teardown follow-ups (viewDisappeared → persistNow → teardown → clear) so
+    // the asserted state reflects the completed teardown.
     await store.skipReceivedActions()
     await store.finish()
     #expect(push.currentSession == nil)
     #expect(store.state.liveChat == nil)
+  }
+
+  /// Push suppression while DETACHED (T2): popping to the list with a still-RUNNING slot
+  /// clears the currently-viewing session (pushes for it must present again — the user
+  /// isn't looking at it), and re-attaching restores it.
+  @Test func detachedSlotClearsCurrentViewingUntilReattached() async {
+    let push = PushClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.status = .ready
+    chat.hasRequestedSession = true
+    chat.hasStarted = true
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.push = push.client
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live1"),
+          "stored_session_id": .string("s1"),
+          "messages": .array([]),
+          "running": .bool(true),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    // Pop while running: slot kept, but the suppression marker clears — a push for "s1"
+    // must present while the user browses the list.
+    await store.send(.path(.popFrom(id: store.state.path.ids.last!)))
+    await store.finish()
+    #expect(store.state.liveChat != nil)
+    #expect(push.currentSession == nil)
+
+    // Re-attach from the list → the marker (and with it the suppression) is back.
+    await store.send(.home(.delegate(.openSession(Session(id: "s1")))))
+    await store.receive(\.liveChat.reattached)
+    await store.skipReceivedActions()
+    await waitUntil { push.currentSession == "s1" }
+
+    await store.send(.liveChat(.teardown))
   }
 
   /// An approval tap with no session list yet (can't open) bumps the pending-approval badge;
@@ -1530,6 +1896,7 @@ struct AppFeatureTests {
     await store.receive(\.home.delegate.openSession)
     await store.receive(\.liveChat.persistNow)
     await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat)
     await store.receive(\.fillLiveChat)
     // Path SET, not appended: exactly one marker, pointing at the new session.
     #expect(store.state.path.count == 1)

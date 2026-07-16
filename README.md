@@ -54,6 +54,8 @@ from your desk and still keep your agent moving.
   when the link drops. Reopening a session — after navigating away, backgrounding the app,
   or a cold relaunch — restores its live state: the right model, context usage, full
   tool/thinking history, and an in-progress turn that keeps streaming with its timer ticking.
+  A running turn even keeps its live connection while you browse the session list, and for a
+  short grace window after backgrounding — falling back to reconnect-and-restore beyond that.
 - **Get pinged when it needs you.** Opt in to push notifications and the agent can ping
   your phone — even when the app is closed — when it needs an approval, asks you to
   clarify, finishes a longer turn, or hits an error. This rides a three-part

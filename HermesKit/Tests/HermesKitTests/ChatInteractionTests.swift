@@ -317,6 +317,8 @@ struct ChatInteractionTests {
       $0.errorBanner = "Prompt failed: request timed out: prompt.submit"
       $0.isSending = false
     }
+    // Client-side turn end → the slot-teardown/glow delegate fires (no server event follows).
+    await store.receive(\.delegate.runningChanged)
   }
 
   struct PlainError: Error {}
@@ -342,6 +344,8 @@ struct ChatInteractionTests {
       $0.errorBanner = "Prompt failed: Connection lost."
       $0.isSending = false
     }
+    // Client-side turn end → the slot-teardown/glow delegate fires (no server event follows).
+    await store.receive(\.delegate.runningChanged)
   }
 
   // Interrupting mid-turn freezes the live thinking row (bakes the elapsed, isComplete=true)

@@ -107,11 +107,12 @@ enum DemoMode {
   }
 
   /// A chat scenario needs a home (so the nav stack has a root) plus one pushed chat:
-  /// the chat state fills the live-chat slot and the path holds its thin marker.
+  /// the chat state fills the live-chat slot and the path holds its thin marker, carrying
+  /// the chat's session key exactly like production's `fillLiveChat`.
   private static func chatScenario(_ chat: ChatFeature.State) -> AppFeature.State {
     AppFeature.State(
       home: sessionListState,
-      path: StackState([ChatScreen.State()]),
+      path: StackState([ChatScreen.State(sessionKey: chat.sessionKey)]),
       liveChat: chat
     )
   }

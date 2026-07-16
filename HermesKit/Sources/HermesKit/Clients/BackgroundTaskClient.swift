@@ -136,21 +136,36 @@ public extension BackgroundTaskClient {
   /// Owns the single active `UIBackgroundTaskIdentifier` and the mandatory bookkeeping:
   /// every begun task is ended exactly once — explicitly via `end()`, on replacement by a
   /// newer `begin`, or in the expiration handler (iOS kills apps that skip that call).
-  private final class LiveBackgroundTaskBox: @unchecked Sendable {
-    private let lock = NSLock()
+  ///
+  /// Synchronization is `@MainActor` isolation alone (no lock): `UIApplication` forces the
+  /// main actor on every path anyway — `begin`/`end` hop via the client's async closures,
+  /// and iOS invokes the expiration handler on the main thread (`assumeIsolated`) — so
+  /// actor isolation covers all state access. (The NSLock-only box pattern elsewhere —
+  /// `DebugLogClient.Buffer`, `PushClient.PushBox` — fits boxes with no main-actor
+  /// requirement; this one has one, so it uses the actor instead.)
+  @MainActor
+  private final class LiveBackgroundTaskBox {
     private var taskID: UIBackgroundTaskIdentifier = .invalid
     private var continuation: AsyncStream<Void>.Continuation?
+    /// Monotonic identity of the active task, bumped every time one is finished. The
+    /// expiration handler captures the generation of the task it was registered FOR and
+    /// no-ops unless it still matches — a stale handler (its task already ended or was
+    /// replaced) must never yield into, or end, a REPLACEMENT task's stream.
+    private var generation = 0
 
-    @MainActor
+    nonisolated init() {}
+
     func begin(name: String) -> AsyncStream<Void> {
       // Replace semantics: end any prior task first (its stream finishes without a yield).
       finishActive(expired: false)
       let (stream, continuation) = AsyncStream<Void>.makeStream()
+      let gen = generation
       let id = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
         // The expiration handler is invoked on the main thread; iOS mandates ending the
         // task synchronously here, after we let the policy layer react via the yield.
+        // Scoped to this task's generation so it can't finish a replacement's task.
         MainActor.assumeIsolated {
-          self?.finishActive(expired: true)
+          self?.finishActive(expired: true, ifGeneration: gen)
         }
       }
       guard id != .invalid else {
@@ -160,31 +175,27 @@ public extension BackgroundTaskClient {
         continuation.finish()
         return stream
       }
-      lock.withLock {
-        self.taskID = id
-        self.continuation = continuation
-      }
+      taskID = id
+      self.continuation = continuation
       return stream
     }
 
-    @MainActor
     func end() {
       finishActive(expired: false)
     }
 
-    @MainActor
-    private func finishActive(expired: Bool) {
-      let (id, continuation) = lock.withLock {
-        defer {
-          taskID = .invalid
-          self.continuation = nil
-        }
-        return (taskID, self.continuation)
-      }
-      if expired { continuation?.yield(()) }
-      continuation?.finish()
-      if id != .invalid {
-        UIApplication.shared.endBackgroundTask(id)
+    private func finishActive(expired: Bool, ifGeneration expected: Int? = nil) {
+      // A generation-scoped call (the expiration handler) is stale once the task it
+      // was registered for has been finished — the bump below invalidated it.
+      if let expected, expected != generation { return }
+      generation += 1
+      let finished = (id: taskID, continuation: continuation)
+      taskID = .invalid
+      continuation = nil
+      if expired { finished.continuation?.yield(()) }
+      finished.continuation?.finish()
+      if finished.id != .invalid {
+        UIApplication.shared.endBackgroundTask(finished.id)
       }
     }
   }

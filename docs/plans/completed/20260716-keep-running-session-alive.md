@@ -220,7 +220,9 @@ struct BackgroundTaskClient {
 **Files:**
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift` *(deviation: the plan
+  originally listed `ChatFeatureTests.swift`, which does not exist — the chat-side reattach
+  tests exercise the hydrate path and live in `HydrateTests.swift`)*
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
 - [x] add `ChatFeature.Action.reattached`: socket alive (`status == .ready` with a live session) → re-run the hydrate effect directly (no reconnect); socket dead → behave like `.foreground` (reset `hasRequestedSession`, `connect`)
@@ -286,9 +288,55 @@ struct BackgroundTaskClient {
 - Device test: background mid-turn < 30s → return: streaming never dropped (watch for the reconnect status flash — there should be none).
 - Device test: background > 30s → push arrives on completion; foreground → hydrate with preserved thinking/tool rows.
 - Device test: pop to list mid-turn, watch the row glow, re-open → live re-attach.
+- Device test: push tap for session B while session A's chat is open → B connects and
+  streams (whether SwiftUI re-fires `ChatView.task` for the replaced marker is a
+  view-runtime question the reducer tests can't answer).
+- Device test: idle pop transition — the outgoing chat screen stays rendered through the
+  whole pop animation (teardown is deferred to the view's disappearance; a blank outgoing
+  screen would mean the slot was cleared too early).
 - Battery sanity: idle backgrounding starts no background task (Xcode Energy gauge).
 
 **External follow-ups:**
 - Close #32 and #33 on GitHub after merge (#33 gets the decision write-up comment).
 - Server-side replay buffer for reasoning/tool events missed while disconnected remains
   an upstream gap (related: #30 re-surfacing pending approvals) — out of scope here.
+
+**#33 write-up (drafted in `/tmp/issue-33-writeup.md`; posted with the PR):**
+
+> Spike resolved — decision write-up.
+>
+> **Options considered**
+>
+> - **`beginBackgroundTask` (~30s grace)** — keeps the socket alive briefly after
+>   backgrounding, then flush + clean disconnect. Cheap, App Store-safe, covers the common
+>   "switch apps for a moment" case.
+> - **Background modes (audio/VoIP/processing)** — rejected: none legitimately apply to a
+>   chat client; misusing them is an App Store rejection risk and a battery cost.
+> - **`BGTaskScheduler` reconnect** — rejected: opportunistic wakeups give no real-time
+>   guarantee and add nothing over the existing push-notification + hydrate catch-up path
+>   we already have.
+>
+> **Decision: client-only, no hermes-agent changes**
+>
+> 1. **Live-chat-slot architecture** — the open chat's state moved from the navigation
+>    stack into an `AppFeature`-owned slot (`liveChat: ChatFeature.State?`); the nav path
+>    holds only thin session-id markers. Popping to the session list no longer cancels the
+>    socket: a running turn keeps streaming, thinking/tool rows accumulate, and re-opening
+>    re-attaches live (hydrate always; redial only if the socket is actually dead).
+>    Teardown is an explicit `AppFeature` policy (idle pop, turn end while detached, slot
+>    replacement, archive, logout).
+> 2. **~30s background grace** — a new `BackgroundTaskClient`
+>    (`UIApplication.beginBackgroundTask`) keeps the socket alive after `.background`; on
+>    expiry: final persist + socket-only teardown (state stays in memory), then the
+>    existing push + foreground reconnect/hydrate catch-up (with the #26 live-row
+>    preservation) takes over. Idle backgrounding starts no task.
+> 3. As part of the same routing work, push-tap handling now dedups against the slot —
+>    fixes #32 (tapping a push for the already-open session stacked a duplicate chat
+>    screen).
+>
+> Shipped in [PR link] (plan: `docs/plans/completed/20260716-keep-running-session-alive.md`).
+> Known remaining gap (upstream, out of scope): reasoning/tool events streamed while fully
+> disconnected are unrecoverable client-side — the server keeps no replay buffer
+> (related: #30).
+>
+> Closes #33; #32 is fixed by the same PR.

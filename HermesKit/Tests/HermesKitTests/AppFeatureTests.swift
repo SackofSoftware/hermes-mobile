@@ -1766,6 +1766,9 @@ struct AppFeatureTests {
     }
     await store.finish()
     #expect(push.badgeCount == 0)
+    // Badged-then-opened-later route (#30 workaround): the badge entry read before the
+    // clear threads the recovery hint into the freshly-filled slot.
+    #expect(store.state.liveChat?.expectsPendingApproval == true)
   }
 
   /// An approval tap that immediately opens its session nets to a zero badge (mark-then-clear).
@@ -1809,9 +1812,12 @@ struct AppFeatureTests {
     }
 
     // Exhaustive: any follow-up action (an `openSession`, a path mutation) would fail the
-    // test. The approval's mark-then-clear leaves the state byte-identical; only the badge
-    // side effect runs.
-    await store.send(.pushTapped(PushTap(sessionID: "s1", type: "approval")))
+    // test. The approval's mark-then-clear nets the badge set to zero; the only state change
+    // is the one-shot recovery hint armed on the slot (#30 workaround) — the tap's app
+    // activation fires the `.foreground` re-hydrate that consumes it.
+    await store.send(.pushTapped(PushTap(sessionID: "s1", type: "approval"))) {
+      $0.liveChat?.expectsPendingApproval = true
+    }
     await store.finish()
     #expect(store.state.path.count == 1)
     #expect(store.state.path.last?.sessionKey == "s1")
@@ -1822,6 +1828,30 @@ struct AppFeatureTests {
     await store.send(.pushTapped(PushTap(sessionID: "s1")))
     await store.finish()
     #expect(store.state.path.count == 1)
+  }
+
+  /// A non-approval tap for the on-screen session must NOT arm the recovery hint — recovery
+  /// is approval-typed taps only.
+  @Test func nonApprovalOnScreenTapSetsNoRecoveryHint() async {
+    let push = PushClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+
+    await store.send(.pushTapped(PushTap(sessionID: "s1", type: "complete")))
+    await store.finish()
+    #expect(store.state.liveChat?.expectsPendingApproval == false)
   }
 
   /// A tap matching the DETACHED slot's session (user popped to the list mid-turn) routes
@@ -1867,6 +1897,60 @@ struct AppFeatureTests {
     #expect(store.state.path.count == 1)
     #expect(store.state.path.last?.sessionKey == "s1")
     #expect(store.state.liveChat?.composerText == "unsent draft")
+    // Non-approval tap → no recovery hint on the re-attached slot.
+    #expect(store.state.liveChat?.expectsPendingApproval == false)
+
+    await store.send(.liveChat(.teardown))
+  }
+
+  /// An approval tap for the DETACHED slot's session threads the recovery hint through
+  /// `openSession` onto the re-attached slot (#30 workaround) — the follow-up hydrate can
+  /// synthesize the generic card if the turn is still running.
+  @Test func approvalTapForDetachedSlotThreadsRecoveryHint() async {
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.status = .ready
+    chat.hasRequestedSession = true
+    chat.hasStarted = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        // Empty path — the user is on the list; the slot streams detached.
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live1"),
+          "stored_session_id": .string("s1"),
+          "messages": .array([]),
+          "running": .bool(true),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.pushTapped(PushTap(sessionID: "s1", type: "approval")))
+    await store.receive(\.home.delegate.openSession)
+    await store.receive(\.liveChat.reattached)
+    await store.skipReceivedActions()
+    // The hint landed on the surviving slot state before the re-attach hydrate ran; the
+    // still-running resume consumed it and synthesized the generic recovered card.
+    #expect(
+      store.state.liveChat?.pendingInteraction
+        == .approval(ChatFeature.recoveredApprovalRequest())
+    )
+    #expect(store.state.liveChat?.expectsPendingApproval == false)
+    // Badge bookkeeping unchanged: tap marked, open cleared.
+    #expect(store.state.pendingApprovalSessionIDs.isEmpty)
 
     await store.send(.liveChat(.teardown))
   }
@@ -1902,6 +1986,51 @@ struct AppFeatureTests {
     #expect(store.state.path.count == 1)
     #expect(store.state.path.last?.sessionKey == "new")
     #expect(store.state.liveChat?.storedSessionID == "new")
+    // Non-approval tap → no recovery hint on the replacement slot.
+    #expect(store.state.liveChat?.expectsPendingApproval == false)
+  }
+
+  /// An approval tap for a DIFFERENT session (slot occupied) threads the recovery hint into
+  /// the fresh replacement `ChatFeature.State` — its first hydrate can synthesize the card.
+  @Test func approvalTapForDifferentSessionThreadsHintIntoReplacementSlot() async {
+    var liveChat = ChatFeature.State(connection: connection, resumeStoredID: "old")
+    liveChat.liveSessionID = "old-live"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "old")]),
+        liveChat: liveChat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "new", type: "approval")))
+    await store.receive(\.home.delegate.openSession)
+    await store.receive(\.fillLiveChat)
+    #expect(store.state.liveChat?.storedSessionID == "new")
+    #expect(store.state.liveChat?.expectsPendingApproval == true)
+    // Badge bookkeeping unchanged: mark-then-clear nets to empty on open.
+    #expect(store.state.pendingApprovalSessionIDs.isEmpty)
+  }
+
+  /// Opening an un-badged session from the list sets no recovery hint — only sessions marked
+  /// by an approval push are candidates for synthesis.
+  @Test func openingUnbadgedSessionSetsNoRecoveryHint() async {
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.delegate(.openSession(Session(id: "plain")))))
+    #expect(store.state.liveChat?.expectsPendingApproval == false)
   }
 
   /// Two distinct pending approvals → badge count 2; opening one → badge drops to 1.

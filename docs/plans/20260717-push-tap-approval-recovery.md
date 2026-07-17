@@ -224,21 +224,22 @@ Three pieces, all in HermesKit (views untouched):
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] `pushTapped` on-screen match: when `tap.isApproval`, set
+- [x] `pushTapped` on-screen match: when `tap.isApproval`, set
       `state.liveChat?.expectsPendingApproval = true` before the badge bookkeeping
       (nil slot guarded)
-- [ ] `openSession`: read `pendingApprovalSessionIDs.contains(session.id)` before
+- [x] `openSession`: read `pendingApprovalSessionIDs.contains(session.id)` before
       the existing `remove(session.id)`; when true, set the flag on the matched
       slot state (re-attach route) or on the fresh `ChatFeature.State` (fill /
       replace routes)
-- [ ] write TestStore tests: approval tap for the on-screen session sets the slot
+- [x] write TestStore tests: approval tap for the on-screen session sets the slot
       hint; approval tap from the list threads the hint through `openSession` into
-      the re-attached slot; approval tap for a different session threads it into
-      the replacement slot state
-- [ ] write TestStore tests (negative): non-approval tap sets no hint; opening an
+      the re-attached slot (asserted end-to-end: reattach hydrate synthesizes the
+      recovered card); approval tap for a different session threads it into the
+      replacement slot state (plus: badged-then-opened-later cold-launch route)
+- [x] write TestStore tests (negative): non-approval tap sets no hint; opening an
       un-badged session sets no hint; badge insert/clear + `setBadge` behavior
       unchanged
-- [ ] run `swift test --package-path HermesKit` — must pass before task 4
+- [x] run `swift test --package-path HermesKit` — must pass before task 4 (714 pass)
 
 ### Task 4: Snapshot the recovered approval card
 

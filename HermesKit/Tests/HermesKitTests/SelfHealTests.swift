@@ -277,16 +277,25 @@ struct SelfHealTests {
   }
 
   @Test func foregroundResumeDisconnectedDoesNotRecreate() async {
-    // Regression guard: a benign socket drop (`.disconnected`) must NOT recreate — it just goes
-    // reconnecting and keeps the stale id (the reconnect re-resumes it).
+    // Regression guard: a benign socket drop (`.disconnected`) must NOT recreate — it goes
+    // reconnecting (status only) and keeps the stale id. The redial belongs to the companion
+    // `.gatewayClosed` backoff (the teardown that resumed this RPC also finishes the event
+    // stream) — an immediate redial here would defeat the backoff.
+    let connectCalls = LockIsolated(0)
     let store = TestStore(initialState: healableState()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
     }
     await store.send(.activateResult(.failure(.disconnected))) {
       $0.status = .reconnecting
     }
     #expect(store.state.liveSessionID == "stale-live") // unchanged, no recreate
+    #expect(connectCalls.value == 0) // no immediate redial — `.gatewayClosed` owns it
+    await store.send(.teardown)
   }
 
   // MARK: session.title (rename) self-heal

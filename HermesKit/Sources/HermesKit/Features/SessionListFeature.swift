@@ -430,6 +430,10 @@ public struct SessionListFeature {
       /// but NOT sent — used by the push "Ask agent to install" flow so the user reviews + sends.
       case createSession(initialComposerText: String?)
       case disconnect
+      /// The user confirmed archiving this session (the optimistic removal + PATCH follow).
+      /// Emitted FIRST so the parent can tear the live-chat slot down when it matches — a
+      /// detached slot's socket must not keep streaming into a now-archived session.
+      case sessionArchived(id: Session.ID)
     }
   }
 
@@ -769,20 +773,26 @@ public struct SessionListFeature {
         // Cancel any in-flight fetch (list load OR search) too: one started before this
         // archive could land afterward and resurrect the row we just optimistically removed.
         let archiveProfile = state.scopedProfileName
-        return .merge(
-          .cancel(id: CancelID.fetch),
-          .run { [rest, preferences, connection = state.connection] send in
-            preferences.savePinnedIDs(pinnedIDs)
-            preferences.saveSeenCounts(seenCounts)
-            do {
-              try await rest.archive(connection, id, true, archiveProfile)
-              await send(.archiveSucceeded(id: id))
-            } catch {
-              await send(.archiveFailed(
-                id: id, session: session, index: index, pinIndex: pinIndex, seenCount: seenCount
-              ))
+        return .concatenate(
+          // Tell the parent FIRST (before the PATCH runs) so it can tear the live-chat slot
+          // down when this is the slot's session — the (possibly detached) socket must not
+          // keep streaming into a now-archived session.
+          .send(.delegate(.sessionArchived(id: id))),
+          .merge(
+            .cancel(id: CancelID.fetch),
+            .run { [rest, preferences, connection = state.connection] send in
+              preferences.savePinnedIDs(pinnedIDs)
+              preferences.saveSeenCounts(seenCounts)
+              do {
+                try await rest.archive(connection, id, true, archiveProfile)
+                await send(.archiveSucceeded(id: id))
+              } catch {
+                await send(.archiveFailed(
+                  id: id, session: session, index: index, pinIndex: pinIndex, seenCount: seenCount
+                ))
+              }
             }
-          }
+          )
         )
 
       case let .confirmationDialog(.presented(.confirmDeleteProfile(name))):

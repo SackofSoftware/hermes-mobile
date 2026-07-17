@@ -57,7 +57,10 @@ struct ChatView: View {
       Button("Cancel", role: .cancel) { store.send(.cancelRename) }
     }
     .task { store.send(.task) }
-    .onDisappear { store.send(.onDisappear) }
+    // NOTE: no `.onDisappear` here — disappearance is observed by the DESTINATION in
+    // `AppView` (`AppFeature.chatViewDisappeared`), which guards a nil slot and forwards
+    // the mic/voice cleanup (`.viewDisappeared`). Slot teardown is an `AppFeature` policy,
+    // not a view event.
     .sheet(item: toolDetailBinding) { row in
       if case let .tool(name, title, _, detail, durationS) = row.kind {
         ToolDetailSheet(name: name, title: title, detail: detail ?? ToolDetail(), durationS: durationS)

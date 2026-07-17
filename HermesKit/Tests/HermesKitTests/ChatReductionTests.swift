@@ -201,8 +201,8 @@ struct ChatReductionTests {
     }
   }
 
-  // Leaving the screen mid-turn cancels the live thinking timer (no leaked tick loop).
-  @Test func onDisappearCancelsThinkingTimer() async {
+  // Slot teardown mid-turn cancels the live thinking timer (no leaked tick loop).
+  @Test func teardownCancelsThinkingTimer() async {
     let clock = TestClock()
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
@@ -218,9 +218,96 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1))
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
-    // onDisappear cancels the loop; advancing further yields no more ticks.
-    await store.send(.onDisappear)
+    // Teardown cancels the loop; advancing further yields no more ticks.
+    await store.send(.teardown)
     await clock.advance(by: .seconds(5))
+  }
+
+  // Background-grace expiry: `.teardownSocketOnly` cancels the socket effect WITHOUT its
+  // trailing `.gatewayClosed` (so no backoff reconnect is scheduled while suspended) and
+  // leaves the in-flight turn state intact — live thinking row, pointers, `isSending` —
+  // for the #26-preserving foreground hydrate. Only the status flips to `.reconnecting`
+  // (the socket is genuinely gone, so a later `.reattached` redials instead of hydrating
+  // a dead socket).
+  @Test func teardownSocketOnlyKeepsInFlightStateAndSkipsBackoff() async {
+    let clock = TestClock()
+    let socketClosed = LockIsolated(false)
+    var initial = ChatFeature.State(connection: conn)
+    // Seed the hydrate guard as a `.ready` would have left it, so `.teardownSocketOnly`'s
+    // reset (the next `.ready` must genuinely re-hydrate) is observable below.
+    initial.hasRequestedSession = true
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        AsyncStream { continuation in
+          continuation.onTermination = { _ in socketClosed.setValue(true) }
+        }
+      }
+    }
+
+    await store.send(.task) { $0.hasStarted = true }
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+
+    await store.send(.teardownSocketOnly) {
+      $0.status = .reconnecting
+      $0.hasRequestedSession = false
+    }
+    // The socket effect terminated by CANCELLATION — the exhaustive store proves the
+    // trailing `.gatewayClosed` was dropped (no reconnect backoff, no in-flight finalize).
+    await waitUntil { socketClosed.value }
+    #expect(store.state.isSending)
+    #expect(store.state.thinkingRowID == uuid(0))
+
+    // The thinking ticker deliberately stays (the hydrate's `reconcileTimer` owns it);
+    // full teardown cleans it up.
+    await store.send(.teardown)
+  }
+
+  // `.viewDisappeared` (the screen left — forwarded by `AppFeature.chatViewDisappeared`)
+  // releases only the VIEW-session resources: recording state reset + mic released. The
+  // slot's long-running effects are untouched — the thinking ticker (a stand-in for the
+  // socket/persist effects rooted alongside it) keeps firing after the view is gone.
+  @Test func viewDisappearedReleasesMicButKeepsSlotEffects() async {
+    let clock = TestClock()
+    let micCancelled = LockIsolated(false)
+    var initial = ChatFeature.State(connection: conn)
+    initial.recording = .recording
+    initial.waveformLevels = [0.4, 0.8]
+    initial.recordingSeconds = 7
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.audioRecorder.cancel = { micCancelled.setValue(true) }
+    }
+
+    // A turn is running: the live thinking row + elapsed ticker are slot-rooted effects.
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+
+    await store.send(.viewDisappeared) {
+      $0.recording = .idle
+      $0.waveformLevels = []
+      $0.recordingSeconds = 0
+    }
+    // The mic/recording session was released…
+    await waitUntil { micCancelled.value }
+    // …but the slot's effects survived the view: the ticker still fires.
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
+
+    await store.send(.teardown)
   }
 
   // Two back-to-back turns: a second message.start (with no intervening message.complete)
@@ -267,7 +354,7 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1))
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
     await clock.advance(by: .seconds(3))
   }
 
@@ -302,7 +389,7 @@ struct ChatReductionTests {
       $0.thinkingRowID = uuid(1)
       $0.thinkingSeconds = 0
     }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
     await clock.advance(by: .seconds(3))
   }
 
@@ -364,7 +451,7 @@ struct ChatReductionTests {
       $0.reconnectAttempt = 1
     }
     #expect(store.state.transcript.isEmpty)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // A bare thinkingDelta arriving FIRST (no prior message.start) defensively creates the
@@ -531,6 +618,22 @@ struct ChatReductionTests {
     #expect(didSend.value == false)
   }
 
+  // The visible send button becomes the interrupt button mid-turn, but a hardware-keyboard
+  // return still fires the TextField's `.onSubmit`. A submit while a turn streams must be a
+  // strict no-op — a second in-flight submit corrupts `isSending`, and if it later failed it
+  // would emit a spurious `runningChanged(false)` that tears down a detached slot whose
+  // first turn is still genuinely running. Exhaustive: any state change or effect fails this.
+  @Test func submitWhileSendingIsNoOp() async {
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    initial.composerText = "second message typed mid-turn"
+    initial.isSending = true
+    let store = TestStore(initialState: initial) { ChatFeature() }
+
+    #expect(initial.canSend == false)
+    await store.send(.composerSubmitted)
+  }
+
   // MARK: Bootstrap (create on first ready)
 
   @Test func createsSessionOnFirstReady() async {
@@ -551,7 +654,9 @@ struct ChatReductionTests {
       }
     }
 
-    await store.send(.task)
+    await store.send(.task) {
+      $0.hasStarted = true
+    }
     await store.receive(\.gatewayEvent) {
       $0.status = .ready
       $0.hasRequestedSession = true
@@ -565,7 +670,7 @@ struct ChatReductionTests {
     #expect(sent.value?["method"]?.stringValue == "session.create")
     #expect(sent.value?["params"] == .object([:]))
     #expect(sent.value?["params"]?["title"] == nil)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func createUnderCustomProfileThreadsProfileParam() async {
@@ -588,7 +693,9 @@ struct ChatReductionTests {
       }
     }
 
-    await store.send(.task)
+    await store.send(.task) {
+      $0.hasStarted = true
+    }
     await store.receive(\.gatewayEvent) {
       $0.status = .ready
       $0.hasRequestedSession = true
@@ -600,7 +707,7 @@ struct ChatReductionTests {
     }
     #expect(sent.value?["method"]?.stringValue == "session.create")
     #expect(sent.value?["params"] == .object(["profile": .string("work")]))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func defaultProfileNameThreadsNoProfileParam() async {
@@ -624,7 +731,9 @@ struct ChatReductionTests {
       }
     }
 
-    await store.send(.task)
+    await store.send(.task) {
+      $0.hasStarted = true
+    }
     await store.receive(\.gatewayEvent) {
       $0.status = .ready
       $0.hasRequestedSession = true
@@ -635,7 +744,7 @@ struct ChatReductionTests {
       $0.status = .ready
     }
     #expect(sent.value?["params"] == .object([:]))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func resumeUnderCustomProfileThreadsProfileParam() async {
@@ -683,7 +792,7 @@ struct ChatReductionTests {
     ]))
     // Activate's authoritative `running:false` clears the list glow for this session.
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func readyWithStoredIDHydratesViaResume() async {
@@ -732,7 +841,7 @@ struct ChatReductionTests {
     // Usage came from `info` — no fallback `session.usage` fetch.
     #expect(!methods.value.contains("session.usage"))
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func resumeWithNoUsageInResponseFallsBackToUsageFetch() async {
@@ -781,7 +890,7 @@ struct ChatReductionTests {
     #expect(methods.value.first == "session.resume")
     #expect(methods.value.contains("session.usage"))
     #expect(usageParams.value?["session_id"]?.stringValue == "live123")
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func resumeHydratesStoredTranscriptModelAndUsage() async {
@@ -834,7 +943,7 @@ struct ChatReductionTests {
     // Single resume call — no activate, no fallback dance.
     #expect(methods.value == ["session.resume"])
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func activateSeedsRunningInflightAndDeltaReusesSeededRow() async {
@@ -906,7 +1015,7 @@ struct ChatReductionTests {
     }
     // user + assistant + thinking = 3 rows (no duplicate assistant from the delta).
     #expect(store.state.transcript.count == 3)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func unknownEventIsInertInTheFold() async {
@@ -992,7 +1101,7 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1)) // first backoff = 2^0 = 1s
     await store.receive(\.reconnectTick)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: ws-ticket auth failure vs transient (gated reconnect)
@@ -1024,7 +1133,7 @@ struct ChatReductionTests {
     await store.send(.gatewayClosed)
     // No `.reconnectTick` is ever scheduled even after a long advance.
     await clock.advance(by: .seconds(60))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   /// A transient gated failure (the ticket mint failed → the stream just finishes, like a
@@ -1049,7 +1158,7 @@ struct ChatReductionTests {
     }
     await clock.advance(by: .seconds(1)) // first backoff = 2^0 = 1s
     await store.receive(\.reconnectTick)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Reconnect resilience — finalize a row that was mid-stream when the socket dropped
@@ -1083,7 +1192,7 @@ struct ChatReductionTests {
       $0.isSending = false
       $0.reconnectAttempt = 1
     }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Copy a row to the pasteboard
@@ -1434,6 +1543,8 @@ struct ChatReductionTests {
       $0.isSending = false
       $0.attachments[0].uploadState = .failed("boom")
     }
+    // Client-side turn end → the slot-teardown/glow delegate fires (no server event follows).
+    await store.receive(\.delegate.runningChanged)
     #expect(store.state.composerText == "keep me") // input preserved for retry
     #expect(store.state.attachments.count == 1)
     #expect(methods.value == ["image.attach_bytes"]) // never reached prompt.submit
@@ -1466,6 +1577,8 @@ struct ChatReductionTests {
       $0.errorBanner = "This Hermes agent is too old to accept attachments. Update the agent to send files."
       $0.attachments[0].uploadState = .failed("Attachments not supported")
     }
+    // Client-side turn end → the slot-teardown/glow delegate fires (no server event follows).
+    await store.receive(\.delegate.runningChanged)
     #expect(methods.value == ["image.attach_bytes"]) // aborted before prompt.submit
     #expect(store.state.composerText == "hi") // input preserved
   }

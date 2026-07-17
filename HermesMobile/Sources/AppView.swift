@@ -27,8 +27,19 @@ struct AppView: View {
     if let homeStore = store.scope(state: \.home, action: \.home) {
       NavigationStack(path: $store.scope(state: \.path, action: \.path)) {
         SessionListView(store: homeStore)
-      } destination: { chatStore in
-        ChatView(store: chatStore)
+      } destination: { _ in
+        // The path holds only thin session-key markers — the REAL chat state lives in the
+        // app-level live-chat slot, so a running turn's socket survives pops. Defensive
+        // empty view if the slot is missing (e.g. after logout mid-pop).
+        if let chatStore = store.scope(state: \.liveChat, action: \.liveChat) {
+          ChatView(store: chatStore)
+            // The view's disappearance routes through the PARENT (never the scoped child
+            // store): `AppFeature.chatViewDisappeared` guards a nil slot (logout/quit may
+            // have cleared it while the screen was still animating away) and owns the
+            // idle-pop teardown policy — deferred here until the pop animation finished,
+            // so the outgoing screen stays rendered and no action hits an absent child.
+            .onDisappear { store.send(.chatViewDisappeared) }
+        }
       }
     } else if store.autoConnecting {
       ProgressView("Connecting…")

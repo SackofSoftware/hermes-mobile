@@ -25,7 +25,11 @@ approval/clarify requests).
 
 ```
 AppFeature                 // root nav + launch auto-connect; onboarding until connected;
-│                          //   presents ReauthFeature on .sessionExpired (identity-aware routing)
+│                          //   presents ReauthFeature on .sessionExpired (identity-aware routing);
+│                          //   owns the LIVE-CHAT SLOT (liveChat: ChatFeature.State? via .ifLet)
+│                          //   and a nav path of thin ChatScreen markers — slot teardown (idle
+│                          //   pop, detached turn end, replacement, archive, logout) is
+│                          //   AppFeature policy, never a view event
 ├─ ConnectionFeature       // auto-validating URL + capability-aware auth toggle (Password | Token)
 ├─ ReauthFeature           // re-auth modal: fixed URL, prefilled identity, password/token field;
 │                          //   same-user resume vs different-user switch vs Quit→onboarding
@@ -36,9 +40,13 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 │  ├─ SettingsFeature      // token mgmt, manual reconnect, debug log
 │  ├─ ArchivedSessionsFeature // archived list (?archived=only); restore + open delegate
 │  └─ AddProfileFeature    // create-then-PUT-soul; inline name validation + server-400 banner
-└─ ChatFeature             // owns the WS lifecycle + streaming reduction; also folds in
-                           //   approvals, clarify/sudo/secret, the tool-detail sheet,
-                           //   and the model/reasoning picker, reconnect
+├─ ChatScreen              // navigation-path marker ONLY (session key, no behavior) — pushing/
+│                          //   popping it never creates or destroys chat state
+└─ ChatFeature             // SLOT-rooted (composed via .ifLet, NOT a path element), so a running
+                           //   turn's socket + streaming effects survive nav pops; owns the WS
+                           //   lifecycle + streaming reduction; also folds in approvals,
+                           //   clarify/sudo/secret, the tool-detail sheet, the model/reasoning
+                           //   picker, reconnect
 ```
 
 ## Dependency clients
@@ -86,6 +94,13 @@ a `testValue`/`.inMemory()` variant):
   `testValue`, plus an `.inMemory()` variant. Pure helpers (hex encoding, the compile-time
   `apnsEnv`, payload parsing, foreground-suppression decision) live outside the guard so they
   are unit-tested on macOS.
+- **`BackgroundTaskClient`** — a finite background-execution window (~30s) wrapping
+  `UIApplication.beginBackgroundTask`/`endBackgroundTask`: `begin(name) → AsyncStream<Void>`
+  yields exactly once if iOS expires the window early (then finishes; a normal end finishes
+  without a yield), `end()` is idempotent. The client owns the mandatory end-on-expiry
+  bookkeeping (every begun task is ended exactly once — explicitly, by replacement, or inside
+  the generation-scoped expiration handler). `liveValue` is `#if canImport(UIKit)`-guarded
+  (no-op elsewhere); `.inMemory()` exposes a test-drivable `expire()` plus begin/end spies.
 - **`PasteboardClient`** — copy.
 - **`DebugLogClient`** — an event ring buffer for the in-app debug log.
 
@@ -257,10 +272,25 @@ response (`applyActivate`), in order:
    it.
 
 App lifecycle (`scenePhase`, observed in the SwiftUI shell and dispatched as
-`AppFeature.scenePhaseChanged`) routes `.active` into the open chat's `.foreground` (reconnect +
-re-hydrate via `session.resume`) plus a session-list refresh, and `.background`/`.inactive` into an immediate
-snapshot/anchor flush. The nav stack is **not** auto-restored on cold launch — opening a session
-is enough.
+`AppFeature.scenePhaseChanged`): `.active` ends any background grace task, then routes the live
+chat's `.foreground` (re-hydrate via `session.resume`; the socket reconnects **only if it isn't
+`.ready`** — a healthy one is never cancel-and-redialed) plus an immediate session-list refresh.
+`.inactive` (transient occlusion) is an immediate snapshot/anchor flush only. `.background`
+flushes too, and — when a turn is RUNNING — additionally begins a finite ~30s
+`BackgroundTaskClient` window so the socket simply keeps streaming past suspension. If iOS
+expires that window while still backgrounded: one final flush, then a clean socket-only
+disconnect (`.teardownSocketOnly`) that keeps the chat state in memory, so the next foreground
+hydrate re-attaches with the #26 live-row preservation; catch-up beyond that is the existing
+push + reconnect path. An idle chat backgrounds with no task (no battery burn), and a stale
+expiry that races `.active` is guarded to a no-op. The nav stack is **not** auto-restored on
+cold launch — opening a session is enough.
+
+Navigation shares the same keep-alive policy (#33): the open chat's state lives in the
+`AppFeature`-owned slot (`liveChat`), and the navigation path holds only thin `ChatScreen`
+session-key markers — popping to the list destroys nothing while a turn runs (the socket
+streams on detached, and re-opening re-attaches via `.reattached` without redialing a healthy
+socket); an idle chat is torn down only after the pop animation finishes (the destination's
+disappearance routes through `AppFeature.chatViewDisappeared`).
 
 The session-list **working glow** is driven event-driven by `ChatFeature.Delegate.runningChanged`
 (emitted on `message.start`/`complete`/`error` and from the `session.resume` `running` flag),

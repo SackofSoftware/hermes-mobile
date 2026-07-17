@@ -39,6 +39,12 @@ public struct ChatFeature {
     public var status: Status
     public var errorBanner: String?
     public var isSending: Bool
+    /// True while a turn is in flight — the same signal that powers the `runningChanged`
+    /// delegate (set on submit/`message.start`, cleared on complete/error/interrupt, and
+    /// reconciled from the authoritative `session.resume` `running` flag on hydrate).
+    /// The app-level slot policy reads this: a RUNNING chat keeps its slot (socket and
+    /// streaming effects) across a nav pop; an idle one is torn down.
+    public var isRunning: Bool { isSending }
     /// A blocking request from the agent (approval/clarify/secret). While set, the
     /// composer is disabled and a card is the focal point.
     public var pendingInteraction: PendingInteraction?
@@ -102,14 +108,32 @@ public struct ChatFeature {
     // Bookkeeping (internal).
     var liveSessionID: String?
     var storedSessionID: String?
+    /// The stable key this chat's session is addressed by (`storedSessionID ??
+    /// liveSessionID`) — what the parent's slot routing (push-tap dedup, re-open compare,
+    /// archive matching, push suppression) and the snapshot/anchor store key on. `nil`
+    /// until a brand-new chat's `session.create` resolves. Public (read-only) so the app
+    /// target can mirror `fillLiveChat`'s marker construction (demo mode).
+    public var sessionKey: String? { storedSessionID ?? liveSessionID }
     var streamingRowID: ChatRow.ID?
     var thinkingRowID: ChatRow.ID?
     var toolRowIDs: [String: ChatRow.ID]
     var reconnectAttempt: Int
     var hasRequestedSession: Bool
+    /// Set by the first `.task` (the initial connect). The view's `.task` fires on EVERY
+    /// appearance — including re-appearing over a LIVE slot after a nav pop — and an
+    /// unconditional `connect` there would cancel-and-redial a healthy socket (the dial
+    /// gap drops streamed events). Once started, later appearances are routed by
+    /// `AppFeature` through `.reattached`, which guards the live socket.
+    var hasStarted: Bool
     /// Set when the gated session died (`.authExpired`): reconnect backoff is paused and the
     /// trailing `.gatewayClosed` (the finished stream) is ignored until re-auth resumes us.
     var awaitingReauth: Bool
+    /// True while the single same-socket hydrate retry after a `.timedOut` failure is
+    /// outstanding. A timeout over a live-but-slow socket (huge history, busy gateway) is
+    /// indistinguishable from a HALF-OPEN one, so the first timeout retries `session.resume`
+    /// over the SAME socket; only a second consecutive timeout concludes half-open and
+    /// redials. Reset on hydrate success and at every fresh hydrate issuance.
+    var hydrateRetriedAfterTimeout: Bool
 
     public enum Status: Equatable, Sendable {
       case connecting
@@ -150,7 +174,9 @@ public struct ChatFeature {
       self.toolRowIDs = [:]
       self.reconnectAttempt = 0
       self.hasRequestedSession = false
+      self.hasStarted = false
       self.awaitingReauth = false
+      self.hydrateRetriedAfterTimeout = false
       self.pendingInteraction = nil
       self.presentedTool = nil
       self.model = nil
@@ -214,6 +240,12 @@ public struct ChatFeature {
       return hasContent
         && liveSessionID != nil
         && pendingInteraction == nil
+        // The visible send button becomes the interrupt button mid-turn, but a hardware-
+        // keyboard return still fires the TextField's `.onSubmit` — a second submit while a
+        // turn streams must be a no-op (it would corrupt `isSending` and, if it later
+        // failed, emit a spurious `runningChanged(false)` that tears down a detached slot
+        // whose first turn is still genuinely running).
+        && !isSending
     }
 
     /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
@@ -235,7 +267,25 @@ public struct ChatFeature {
     case binding(BindingAction<State>)
     case delegate(Delegate)
     case task
-    case onDisappear
+    /// The chat VIEW left the screen (forwarded by `AppFeature.chatViewDisappeared`, which
+    /// guards a nil slot — the view never sends into this scope directly). Releases
+    /// view-session resources only (the mic / voice recording) — the socket and streaming
+    /// effects are owned by the app-level live-chat slot and torn down separately via
+    /// `.teardown` (an `AppFeature` policy).
+    case viewDisappeared
+    /// Full slot teardown (sent by `AppFeature`, never the view): cancel every
+    /// long-running effect — socket, reconnect backoff, voice, thinking ticker, debounced
+    /// persist — and release the mic. `AppFeature` flushes the snapshot (`.persistNow`)
+    /// before this where the pending debounce matters.
+    case teardown
+    /// Background-grace expiry (sent by `AppFeature`, never the view): the finite
+    /// background window ran out while still backgrounded — cancel the socket + reconnect
+    /// backoff CLEANLY but keep ALL chat state in memory (transcript, live thinking/tool
+    /// row pointers, composer draft), so the next `.foreground` reconnect re-hydrates with
+    /// the #26 live-row preservation intact. Status flips to `.reconnecting` (the socket
+    /// is genuinely gone), so a later `.reattached` reconnects instead of hydrating a
+    /// dead socket.
+    case teardownSocketOnly
     /// Scroll-up reached the top of the current window: reveal another `pageSize` of older
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
@@ -252,9 +302,19 @@ public struct ChatFeature {
     /// (cancel the pending debounce, write now) and reaffirm the turn-start anchor while a
     /// turn is in flight, so a process kill doesn't lose the latest paint or timer anchor.
     case persistNow
-    /// App returned to the foreground — reconnect the socket and re-`hydrate` (re-read
-    /// running/inflight/usage) via the same unified path used by open/cold-launch.
+    /// App returned to the foreground — re-`hydrate` (re-read running/inflight/usage) via
+    /// the same unified path used by open/cold-launch, reconnecting the socket only if it
+    /// isn't `.ready` (a socket the background grace window kept alive must NOT be
+    /// cancel-and-redialed — the dial gap would drop streamed events). Shares its handler
+    /// with `.reattached`.
     case foreground
+    /// The slot's marker was re-pushed over LIVE, surviving chat state (`AppFeature`'s
+    /// re-open policy): always re-hydrate (server authority; `applyActivate`'s #26 path
+    /// preserves a still-running turn's live thinking/tool rows), but do NOT
+    /// cancel-and-redial a healthy socket — the dial gap would drop streamed events.
+    /// Only a dead/dialing socket reconnects (then `.ready` re-hydrates). Shares its
+    /// handler with `.foreground`.
+    case reattached
     case sessionResult(Result<SessionHandle, GatewayError>)
     /// Result of the `session.resume` hydration call — the server-authoritative
     /// re-hydration payload (messages + info + running + inflight). (The associated
@@ -324,7 +384,9 @@ public struct ChatFeature {
     }
   }
 
-  private enum CancelID { case socket, reconnect, copyFeedback, voiceLevels, voiceTimer, thinkingTimer, persist }
+  private enum CancelID {
+    case socket, reconnect, hydrate, copyFeedback, voiceLevels, voiceTimer, thinkingTimer, persist
+  }
 
   /// Debounce window for write-back so heavy streaming doesn't thrash SQLite.
   private static let persistDebounce: Duration = .seconds(1)
@@ -360,22 +422,48 @@ public struct ChatFeature {
         // REST `loadHistory` call: the activate response carries `messages` + `info` +
         // `running` + `inflight`, and rebuilding the transcript wholesale from it is what
         // keeps model/usage/status correct on every re-open (the core state-sync fix).
+        //
+        // The view's `.task` fires on EVERY appearance — including re-appearing over a
+        // live slot after a nav pop. Only the slot's FIRST appearance performs the
+        // initial connect; re-opens are routed by `AppFeature` through `.reattached`,
+        // which must not cancel-and-redial a healthy socket.
+        guard !state.hasStarted else { return .none }
+        state.hasStarted = true
         return connect(state.connection)
 
-      case .onDisappear:
-        let wasRecording = state.recording.isBusy
-        state.recording = .idle
-        state.waveformLevels = []
-        state.recordingSeconds = 0
+      case .viewDisappeared:
+        // View-only cleanup: the screen left, but the slot (socket, streaming fold,
+        // thinking ticker, persist debounce) lives on — `AppFeature` decides teardown.
+        return releaseVoiceResources(&state)
+
+      case .teardown:
+        return .merge(
+          releaseVoiceResources(&state),
+          .cancel(id: CancelID.socket),
+          .cancel(id: CancelID.reconnect),
+          .cancel(id: CancelID.hydrate),
+          .cancel(id: CancelID.thinkingTimer),
+          .cancel(id: CancelID.persist)
+        )
+
+      case .teardownSocketOnly:
+        // Cancelling the socket effect drops its trailing `await send(.gatewayClosed)`
+        // (TCA discards sends from a cancelled task), so no backoff reconnect is
+        // scheduled while suspended — `.foreground` owns the redial. Everything else
+        // (streaming fold pointers, thinking ticker, debounced persist) stays untouched:
+        // the state must survive intact for the foreground hydrate's #26 preservation of
+        // a still-running turn's live thinking/tool rows.
+        //
+        // Also cancel any pending hydrate: socket cancellation resumes its RPC with
+        // `.disconnected`, and a stale `.activateResult` reducing AFTER this deliberate
+        // teardown could otherwise act on a socket we just chose to drop (e.g. redial
+        // while backgrounded after grace expiry, wasting a single-use ws-ticket).
+        state.status = .reconnecting
+        state.hasRequestedSession = false
         return .merge(
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
-          .cancel(id: CancelID.voiceLevels),
-          .cancel(id: CancelID.voiceTimer),
-          .cancel(id: CancelID.thinkingTimer),
-          .cancel(id: CancelID.persist),
-          // Release the mic/session if we leave mid-recording.
-          wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
+          .cancel(id: CancelID.hydrate)
         )
 
       case .loadOlderRequested:
@@ -478,12 +566,48 @@ public struct ChatFeature {
         }
         // Offline / connection error: keep the cached instant-paint on screen (never blank
         // it) and show a subtle reconnecting status. The cached rows stay until a successful
-        // resume replaces them wholesale. A plain `.disconnected` (the socket dropped — e.g.
-        // lock/unlock) is already conveyed by the `.reconnecting` status, so we do NOT raise a
-        // banner for it (it would otherwise linger after reconnect); only a real protocol/server
-        // error gets a banner.
+        // resume replaces them wholesale.
         state.status = .reconnecting
-        if !error.isDisconnected { state.errorBanner = error.message }
+        // `.disconnected` is never the lone symptom: the connection teardown that resumed
+        // this RPC with `.disconnected` also finishes the event stream, so a companion
+        // `.gatewayClosed` — with its escalating backoff — follows on its own. Redialing
+        // here would defeat that backoff (a crash-looping server that drops on
+        // `session.resume` would reconnect in a zero-delay storm) and would be actively
+        // wrong when the socket effect was deliberately cancelled. Status-only; banner-less
+        // (a banner would linger past the reconnect).
+        if error.isDisconnected { return .none }
+        // The hydrate RPC `.timedOut` over a stale-`.ready` socket after suspension/NAT
+        // rebind: a HALF-OPEN socket may not surface `.gatewayClosed` for minutes, so we
+        // must schedule the redial OURSELVES rather than strand the chat in `.reconnecting`
+        // with no reconnect pending. Two guards keep this from killing a healthy socket:
+        // - during the re-auth pause do nothing (a redial would waste a single-use
+        //   ws-ticket; `.resumeAfterReauth` owns the reconnect), and
+        // - a timeout over a live-but-SLOW socket (huge history, busy gateway) is
+        //   indistinguishable from half-open, so the first timeout retries the hydrate once
+        //   over the SAME socket instead of killing a possibly-streaming connection; only a
+        //   second consecutive timeout concludes half-open and redials. (Trade-off: a truly
+        //   half-open socket takes two request timeouts before the redial — accepted, since
+        //   repeatedly killing a demonstrably-alive streaming socket mid-turn is worse.)
+        // `connect` is cancellable on `CancelID.socket` with `cancelInFlight: true`, so a
+        // concurrent `.gatewayClosed` backoff dial is safe (last dial wins); cancel any
+        // pending backoff tick so it can't later redial over the fresh socket. Reset
+        // `hasRequestedSession` so the fresh `.ready` actually re-hydrates. Banner-less —
+        // a timeout is a transport symptom, not a server verdict; only a real
+        // protocol/server error gets a banner.
+        if error.isTimedOut {
+          guard !state.awaitingReauth else { return .none }
+          if !state.hydrateRetriedAfterTimeout, let sessionID = state.sessionKey {
+            state.hydrateRetriedAfterTimeout = true
+            return hydrate(sessionID: sessionID, profile: state.scopedProfile)
+          }
+          state.hydrateRetriedAfterTimeout = false
+          state.hasRequestedSession = false
+          return .merge(
+            .cancel(id: CancelID.reconnect),
+            connect(state.connection)
+          )
+        }
+        state.errorBanner = error.message
         return .none
 
       case .persistSnapshotTick:
@@ -501,19 +625,37 @@ public struct ChatFeature {
           anchor
         )
 
-      case .foreground:
-        // App returned to the foreground: reconnect + re-`hydrate` via the same socket path
-        // used on open. A live socket is torn down on `.onDisappear`/background, so reconnect
-        // re-fires `.ready` → `hydrate`, re-reading the authoritative running/inflight/usage.
-        //
-        // Reset `hasRequestedSession` so the fresh `.ready` actually re-hydrates. On a fast
-        // background→foreground the prior socket may still be alive; `connect`'s
-        // `cancelInFlight` then cancels it mid-`for await`, and TCA drops the cancelled
-        // task's trailing `await send(.gatewayClosed)` — the only place that resets the flag.
-        // Without this reset the flag stays `true` and the new `.ready` short-circuits at the
-        // `guard !state.hasRequestedSession` below, so foreground would never re-hydrate.
-        state.hasRequestedSession = false
-        return connect(state.connection)
+      case .foreground, .reattached:
+        // Two re-attach entry points, one policy: the app returned to the foreground, or
+        // the slot's marker was re-pushed over live, surviving chat state. Always
+        // re-hydrate (server authority), but NEVER cancel-and-redial a HEALTHY socket —
+        // the dial gap drops streamed events, and within the background grace window the
+        // socket kept streaming precisely so foreground would not have to redial it.
+        guard state.status == .ready else {
+          // Dead/dialing socket (including after a grace-expiry `.teardownSocketOnly`):
+          // reconnect — the fresh `.ready` re-hydrates. Reset `hasRequestedSession` so
+          // that ready actually hydrates: on a fast background→foreground the prior
+          // socket is cancelled mid-`for await`, and TCA drops the cancelled task's
+          // trailing `await send(.gatewayClosed)` — the only other place that resets
+          // the flag.
+          state.hasRequestedSession = false
+          return connect(state.connection)
+        }
+        // Socket healthy: hydrate directly against it — no reconnect, so the live socket
+        // keeps streaming throughout (no event gap). A socket that silently died while
+        // suspended still self-heals: the hydrate RPC fails, the receive loop finishes →
+        // `.gatewayClosed` → backoff reconnect. `applyActivate` is the same
+        // server-authoritative path as `.ready`, with the #26 preservation of a
+        // still-running turn's live thinking/tool rows.
+        guard let sessionID = state.sessionKey else {
+          // Connected but the session id hasn't resolved yet (`session.create` still in
+          // flight on this same socket) — nothing to hydrate; the pending result lands
+          // on its own.
+          return .none
+        }
+        state.hasRequestedSession = true
+        state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
+        return hydrate(sessionID: sessionID, profile: state.scopedProfile)
 
       case .composerSubmitted:
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }
@@ -614,7 +756,12 @@ public struct ChatFeature {
         // `setTurnAnchor` paired with a clear, so anchors can't accumulate for sessions that
         // never produce a snapshot row (those aren't counted by the LRU sweep, which only
         // evicts `sessions` rows).
-        return clearTurnAnchor(state)
+        // This is also a CLIENT-SIDE turn end — no server event will ever follow — so emit
+        // `runningChanged(false)` like `.messageComplete`/`.error` do: a DETACHED slot kept
+        // alive only while running would otherwise leak forever (`AppFeature`'s teardown
+        // policy keys off this delegate). Harmless to the list glow (it only lights on
+        // `message.start`).
+        return .merge(clearTurnAnchor(state), runningChanged(false, state))
 
       case let .liveSessionIDRefreshed(liveSessionID, storedSessionID):
         // Self-heal landed a fresh runtime id (#17). Swap it in so subsequent RPCs target the
@@ -890,8 +1037,9 @@ public struct ChatFeature {
         for index in state.attachments.indices { state.attachments[index].uploadState = .failed(message) }
         // The attachment-submit path wrote the turn anchor; a failed upload never starts a
         // turn, so clear it — keeping every `setTurnAnchor` paired with a clear (mirrors
-        // `.promptSubmitFailed`).
-        return clearTurnAnchor(state)
+        // `.promptSubmitFailed`). Client-side turn end: also emit `runningChanged(false)` so
+        // a DETACHED slot waiting on the turn is torn down (no server event will follow).
+        return .merge(clearTurnAnchor(state), runningChanged(false, state))
 
       case .attachmentsUnsupportedDetected:
         // The agent is too old to accept uploads: hide the affordance for the session and
@@ -900,7 +1048,10 @@ public struct ChatFeature {
         state.isSending = false
         state.errorBanner = "This Hermes agent is too old to accept attachments. Update the agent to send files."
         for index in state.attachments.indices { state.attachments[index].uploadState = .failed("Attachments not supported") }
-        return .none
+        // Client-side turn end (the submit was aborted; no server event will follow): emit
+        // `runningChanged(false)` so a DETACHED slot waiting on the turn is torn down
+        // (mirrors `.promptSubmitFailed` / `.attachmentUploadFailed`).
+        return runningChanged(false, state)
 
       case let .toolTapped(id):
         guard let row = state.transcript[id: id], case .tool = row.kind else { return .none }
@@ -1023,6 +1174,7 @@ public struct ChatFeature {
       // No stored id → a fresh session: `session.create` (handle only). A stored id →
       // re-hydrate server-authoritatively via the unified `hydrate` path.
       if let stored = state.storedSessionID {
+        state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
         return hydrate(sessionID: stored, profile: state.scopedProfile)
       }
       return createSession(profile: state.scopedProfile)
@@ -1207,6 +1359,21 @@ public struct ChatFeature {
     state.isSending = false
   }
 
+  /// Shared voice cleanup for `.viewDisappeared` and `.teardown`: reset the recording UI
+  /// state, cancel the level/tick effects, and release the mic/session if we leave
+  /// mid-recording.
+  private func releaseVoiceResources(_ state: inout State) -> Effect<Action> {
+    let wasRecording = state.recording.isBusy
+    state.recording = .idle
+    state.waveformLevels = []
+    state.recordingSeconds = 0
+    return .merge(
+      .cancel(id: CancelID.voiceLevels),
+      .cancel(id: CancelID.voiceTimer),
+      wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
+    )
+  }
+
   /// 1s `continuousClock` loop that drives the live "Thinking" elapsed timer. Mirrors the
   /// voice-recording tick. Cancel any prior loop first so a fresh turn starts at 0.
   private func startThinkingTimer() -> Effect<Action> {
@@ -1366,6 +1533,11 @@ public struct ChatFeature {
         await send(.activateResult(.failure(.disconnected)))
       }
     }
+    // Only one hydrate may be outstanding, and a DELIBERATE socket teardown
+    // (`.teardownSocketOnly` / `.teardown`) cancels it so no stale `.activateResult`
+    // reduces afterwards (the socket cancellation would otherwise resume this RPC with
+    // `.disconnected`, e.g. redialing while backgrounded after grace expiry).
+    .cancellable(id: CancelID.hydrate, cancelInFlight: true)
   }
 
   /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,
@@ -1378,6 +1550,7 @@ public struct ChatFeature {
     state.liveSessionID = response.sessionID
     state.storedSessionID = response.storedSessionID ?? state.storedSessionID
     state.status = .ready
+    state.hydrateRetriedAfterTimeout = false // hydrate landed: the timeout-retry budget resets
     // A successful hydrate means we're connected — clear any stale connection banner.
     state.errorBanner = nil
 
@@ -1609,7 +1782,7 @@ public struct ChatFeature {
   /// store can't persist them even if we passed them through) — they can't be re-hydrated from
   /// the server and base64 blobs would bloat the cache.
   private func persistSnapshotNow(_ state: State) -> Effect<Action> {
-    guard let sessionID = state.storedSessionID ?? state.liveSessionID else { return .none }
+    guard let sessionID = state.sessionKey else { return .none }
     let snapshot = ChatSnapshot(
       model: state.model,
       reasoningEffort: state.reasoningEffort,
@@ -1628,7 +1801,7 @@ public struct ChatFeature {
   /// (`storedSessionID ?? liveSessionID`) so the anchor written on submit is read back by
   /// `hydrate` (which keys on the stored id) on the next open.
   private func anchorKey(_ state: State) -> String? {
-    state.storedSessionID ?? state.liveSessionID
+    state.sessionKey
   }
 
   /// Emit `delegate(.runningChanged)` for the session list so the row's working glow

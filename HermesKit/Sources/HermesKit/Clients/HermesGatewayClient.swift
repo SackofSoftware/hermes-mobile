@@ -69,6 +69,16 @@ public enum GatewayError: Error, Equatable, Sendable {
     return false
   }
 
+  /// True when a per-request RPC timeout fired (`timedOut`). Over a HALF-OPEN socket (e.g. a
+  /// stale connection after process suspension / NAT rebind) this is the first — and possibly
+  /// only — transport symptom for minutes: the receive loop may not finish (no `.gatewayClosed`)
+  /// even though nothing can get through. Callers should treat it as transport-shaped, like
+  /// `isDisconnected`, when deciding whether to redial.
+  public var isTimedOut: Bool {
+    if case .timedOut = self { return true }
+    return false
+  }
+
   /// True when the server rejected the request because the live runtime session id is stale
   /// (e.g. after a background→foreground the agent rebuilt/invalidated the in-memory session).
   /// `InboundFrame` keeps only the error message, so we match the server's stable

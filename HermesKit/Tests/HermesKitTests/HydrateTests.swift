@@ -131,7 +131,7 @@ struct HydrateTests {
     #expect(store.state.transcript[id: self.uuid(10)] == nil)
     // Activate's authoritative `running:false` clears the list glow for this session.
     await store.receive(\.delegate.runningChanged)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Cold-resume usage preservation + stale-banner clearing
@@ -189,7 +189,7 @@ struct HydrateTests {
     #expect(store.state.usage == cachedUsage)
     #expect(store.state.errorBanner == nil)
     #expect(store.state.status == .ready)
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func realProtocolErrorStillRaisesBanner() async {
@@ -211,7 +211,7 @@ struct HydrateTests {
       $0.errorBanner = "boom"
       $0.status = .reconnecting
     }
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Offline keeps the cache + reconnecting status
@@ -236,12 +236,17 @@ struct HydrateTests {
       ChatFeature.State(connection: conn, resumeStoredID: "stored123")
     }
 
+    let connectCalls = LockIsolated(0)
     let store = TestStore(initialState: initial) {
       ChatFeature()
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
       $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
       $0.hermesGateway.send = { @Sendable _, _ in throw GatewayError.disconnected }
     }
 
@@ -252,13 +257,62 @@ struct HydrateTests {
     await store.receive(\.activateResult.failure) {
       // A dropped socket is conveyed by the reconnecting status alone — no banner is raised
       // for `.disconnected` (it would otherwise linger after reconnect; see the lock/unlock
-      // regression). The cached paint stays put.
+      // regression). The cached paint stays put. STATUS-ONLY: the teardown that resumed the
+      // RPC with `.disconnected` also finishes the event stream, so the companion
+      // `.gatewayClosed` owns the redial (with backoff) — an immediate redial here would
+      // defeat it (zero-backoff storm against a crash-looping server).
       $0.status = .reconnecting
     }
     // Cache still on screen — never blanked.
     #expect(Array(store.state.transcript) == cachedRows)
     #expect(store.state.model == "claude-opus-4-8")
     #expect(store.state.usage == Usage(contextUsed: 7, contextMax: 200_000, contextPercent: 0))
+    // No immediate redial — `.gatewayClosed`'s backoff owns reconnecting after a drop.
+    #expect(connectCalls.value == 0)
+    await store.send(.teardown)
+  }
+
+  // A `.disconnected` hydrate failure must not disturb the reconnect machinery: the
+  // companion `.gatewayClosed` (the same teardown finishes the event stream) schedules the
+  // escalating backoff, and the failure reducing alongside it must neither cancel that
+  // pending tick nor dial its own zero-delay connect (ordering race on an ordinary drop:
+  // the failure can land after `.gatewayClosed`).
+  @Test func disconnectedHydrateFailureKeepsPendingReconnectBackoff() async {
+    let connectCalls = LockIsolated(0)
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.liveSessionID = "live123"
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+    }
+
+    // The socket died: the stream finished (backoff scheduled) AND the pending hydrate
+    // resumed `.disconnected` — in that order here (the racy interleaving from a real drop).
+    await store.send(.gatewayClosed) {
+      $0.status = .reconnecting
+      $0.hasRequestedSession = false
+      $0.reconnectAttempt = 1
+    }
+    await store.send(.activateResult(.failure(.disconnected)))
+    #expect(connectCalls.value == 0) // no zero-delay dial from the failure
+
+    // The backoff tick scheduled by `.gatewayClosed` survives and performs the one redial.
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.reconnectTick)
+    await waitUntil { connectCalls.value == 1 }
+
+    await store.send(.teardown)
   }
 
   // MARK: Debounced write-back
@@ -308,7 +362,7 @@ struct HydrateTests {
     #expect(saved?.rows == [ChatRow(id: self.uuid(0), kind: .message(role: .assistant, text: "hello there", isComplete: true))])
     #expect(saved?.updatedAt == Date(timeIntervalSince1970: 123))
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func burstOfDeltasCoalescesIntoOnePersist() async {
@@ -343,7 +397,7 @@ struct HydrateTests {
     let saved = snapshotClient.loadSnapshot("stored123")
     #expect(saved?.rows.last?.copyText == "abc")
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Task 6 — turn-start anchor + timer continuity
@@ -398,7 +452,7 @@ struct HydrateTests {
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 8 }
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 9 }
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func hydrateRunningWithNoAnchorTicksFromZero() async {
@@ -432,7 +486,7 @@ struct HydrateTests {
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 1 }
     await store.receive(\.thinkingTick) { $0.thinkingSeconds = 2 }
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func hydrateNotRunningWithStaleAnchorFreezesAndDiscardsAnchor() async {
@@ -467,7 +521,7 @@ struct HydrateTests {
     // The stale anchor was discarded from the cache.
     #expect(snapshotClient.turnAnchor("stored123") == nil)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: #26 — preserve in-flight thinking + tool rows across foreground hydrate
@@ -528,7 +582,7 @@ struct HydrateTests {
     // Timer continuity: the preserved row's elapsed/reasoning did NOT reset; the tick resumes at 7.
     #expect(store.state.thinkingSeconds == 7)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func hydrateNotRunningWipesLiveThinkingAndToolRows() async {
@@ -569,7 +623,7 @@ struct HydrateTests {
     #expect(store.state.toolRowIDs.isEmpty)
     #expect(store.state.streamingRowID == nil)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   @Test func submitWritesAnchorAndCompleteClearsIt() async {
@@ -602,7 +656,7 @@ struct HydrateTests {
     await store.send(.gatewayEvent(.messageComplete(text: "done", usage: nil)))
     #expect(snapshotClient.turnAnchor("stored123") == nil)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Task 8 — background flush (`persistNow`)
@@ -722,7 +776,366 @@ struct HydrateTests {
       return false
     })
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
+  }
+
+  // MARK: Re-attach connect guard (keep-alive plan, Task 3)
+
+  // Re-opening a live slot must NOT cancel-and-redial a healthy socket — the dial gap would
+  // drop streamed events. `.reattached` with `status == .ready` hydrates directly against the
+  // live socket (zero `connect` calls) and the socket keeps folding deltas throughout.
+  @Test func reattachWithLiveSocketHydratesWithoutRedial() async {
+    let connectCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.liveSessionID = "live123"
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+    initial.isSending = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+      $0.hermesGateway.send = { @Sendable method, _ in
+        // The hydrate may fan out a follow-up (e.g. `session.usage`); only `session.resume`
+        // matters here — and crucially, NO `connect` redial happens (asserted below).
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([
+            .object(["id": .number(1), "role": .string("user"), "content": .string("prior question")]),
+          ]),
+          "running": .bool(true),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+          "inflight": .object(["assistant": .string("partial answer"), "streaming": .bool(true)]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.reattached)
+    await store.receive(\.activateResult.success)
+
+    // Hydrate landed (server authority) — but the healthy socket was never redialed.
+    #expect(connectCalls.value == 0)
+    #expect(store.state.model == "claude-opus-4-8")
+    #expect(store.state.isSending == true)
+    #expect(store.state.status == .ready)
+
+    // The live socket keeps streaming: the next delta appends to the seeded in-flight row
+    // (proof the fold never went through a `.gatewayClosed`/reconnect cycle).
+    await store.send(.gatewayEvent(.messageDelta(text: " continues")))
+    #expect(store.state.transcript.contains { row in
+      if case let .message(role, text, isComplete) = row.kind {
+        return role == .assistant && text == "partial answer continues" && !isComplete
+      }
+      return false
+    })
+
+    await store.send(.teardown)
+  }
+
+  // `.reattached` with a DEAD socket recovers exactly like `.foreground`: reset the hydrate
+  // guard and reconnect — the fresh `.ready` re-hydrates.
+  @Test func reattachWithDeadSocketReconnectsAndRehydrates() async {
+    let connectCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .reconnecting
+    // Stale-true (the dropped `.gatewayClosed` reset, same as the fast-foreground case) —
+    // reattach must reset it so the fresh `.ready` actually hydrates.
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { continuation in continuation.yield(.ready) }
+      }
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(false),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.reattached) {
+      $0.hasRequestedSession = false
+    }
+    await store.receive(\.gatewayEvent) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.success)
+    #expect(connectCalls.value == 1)
+    #expect(store.state.model == "claude-opus-4-8")
+
+    await store.send(.teardown)
+  }
+
+  // `.foreground` shares `.reattached`'s connect guard: returning to the foreground INSIDE
+  // the background grace window (the socket kept streaming, `status == .ready`) must
+  // hydrate directly against the live socket — NOT cancel-and-redial the healthy
+  // connection the grace window just paid to keep alive (the dial gap drops events).
+  @Test func foregroundWithHealthySocketHydratesWithoutRedial() async {
+    let connectCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.liveSessionID = "live123"
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(false),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.foreground)
+    await store.receive(\.activateResult.success)
+
+    // Hydrate landed (server authority) — but the healthy socket was never redialed.
+    #expect(connectCalls.value == 0)
+    #expect(store.state.model == "claude-opus-4-8")
+    #expect(store.state.status == .ready)
+
+    await store.send(.teardown)
+  }
+
+  // Foregrounding an IDLE chat starts no background grace window, so after a suspension the
+  // status can be a stale `.ready` over a HALF-OPEN socket (NAT rebind): the hydrate RPC
+  // times out while `.gatewayClosed` may not fire for minutes. A single timeout is
+  // indistinguishable from a live-but-slow socket, so the first one retries the hydrate over
+  // the SAME socket; the SECOND consecutive timeout concludes half-open and the failure must
+  // schedule the redial ITSELF — not strand the chat in `.reconnecting` with no reconnect
+  // pending — and stays banner-less (transport-shaped, matching `.disconnected`).
+  @Test func hydrateTimeoutOverStaleReadySocketRedials() async {
+    let connectCalls = LockIsolated(0)
+    let resumeCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready // stale: the transport underneath is half-open
+    initial.liveSessionID = "live123"
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "session.resume" { resumeCalls.withValue { $0 += 1 } }
+        throw GatewayError.timedOut(method: method)
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.foreground)
+    // First timeout: retry once over the same (possibly just slow) socket — no redial yet.
+    await store.receive(\.activateResult.failure) {
+      $0.status = .reconnecting
+      $0.hydrateRetriedAfterTimeout = true
+    }
+    // Second consecutive silent timeout: half-open confirmed — redial ourselves.
+    await store.receive(\.activateResult.failure) {
+      $0.hydrateRetriedAfterTimeout = false
+      $0.hasRequestedSession = false // the fresh `.ready` must re-hydrate
+    }
+    await waitUntil { connectCalls.value == 1 }
+    #expect(resumeCalls.value == 2) // the original hydrate + one same-socket retry
+    #expect(store.state.errorBanner == nil) // transport-shaped: status conveys it, no banner
+
+    await store.send(.teardown)
+  }
+
+  // A `session.resume` that merely responds SLOWLY (>30s: huge history, busy gateway) over a
+  // socket that is alive must NOT be treated as half-open on the first timeout: the retry
+  // lands over the SAME socket (no redial), so a mid-turn stream is never killed by a slow
+  // hydrate.
+  @Test func slowHydrateTimeoutRetriesOverSameSocketWithoutRedial() async {
+    let connectCalls = LockIsolated(0)
+    let resumeCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.liveSessionID = "live123"
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        let attempt = resumeCalls.withValue { $0 += 1; return $0 }
+        // The first attempt "takes too long" (per-request timeout fires); the retry lands.
+        guard attempt > 1 else { throw GatewayError.timedOut(method: method) }
+        return .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([]),
+          "running": .bool(false),
+          "info": .object(["model": .string("claude-opus-4-8")]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.foreground)
+    await store.receive(\.activateResult.failure) {
+      $0.status = .reconnecting
+      $0.hydrateRetriedAfterTimeout = true
+    }
+    // The same-socket retry succeeds — server authority applied, retry budget reset.
+    await store.receive(\.activateResult.success) {
+      $0.status = .ready
+      $0.hydrateRetriedAfterTimeout = false
+    }
+    #expect(store.state.model == "claude-opus-4-8")
+    #expect(connectCalls.value == 0) // the live socket was never redialed
+    #expect(store.state.errorBanner == nil)
+
+    await store.send(.teardown)
+  }
+
+  // A hydrate failing `.timedOut` while the re-auth pause is up must do NOTHING: a redial
+  // would mint (and waste) a single-use ws-ticket against a dead gated session —
+  // `.resumeAfterReauth` owns the reconnect. Exhaustive: any effect fails this.
+  @Test func hydrateTimeoutDuringReauthPauseDoesNotRedial() async {
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .reconnecting // `.authExpired` already flipped it
+    initial.liveSessionID = "live123"
+    initial.hasStarted = true
+    initial.awaitingReauth = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    }
+
+    await store.send(.activateResult(.failure(.timedOut(method: "session.resume"))))
+  }
+
+  // A pending hydrate must die with a DELIBERATE socket-only teardown (background grace
+  // expiry): the socket cancellation resumes the RPC, and its stale `.activateResult` must
+  // NOT reduce afterwards — it would redial while the app is backgrounded, undoing the clean
+  // disconnect (and wasting a single-use ws-ticket in gated mode).
+  @Test func teardownSocketOnlyCancelsPendingHydrate() async {
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.liveSessionID = "live123"
+    initial.hasRequestedSession = true
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable _, _ in
+        // Hang until cancelled (the empty stream never yields; cancellation ends the
+        // iteration), then surface the drop the way the live client would.
+        for await _ in AsyncStream<Never> { _ in } {}
+        throw GatewayError.disconnected
+      }
+    }
+
+    await store.send(.foreground) // hydrate now in flight, hanging
+    await store.send(.teardownSocketOnly) {
+      $0.status = .reconnecting
+      $0.hasRequestedSession = false
+    }
+    // Exhaustive: if the cancelled hydrate's `.activateResult` still reduced (or the effect
+    // outlived the teardown), `finish()` would fail.
+    await store.finish()
+  }
+
+  // `.reattached` / `.foreground` with a healthy socket but a STILL-UNRESOLVED session id
+  // (`session.create` in flight on that same socket) is a strict no-op — the pending
+  // create lands on its own; hydrating (or redialing) here would race it. Exhaustive: any
+  // effect or state change fails this.
+  @Test func reattachReadyWithUnresolvedSessionIsNoOp() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.status = .ready
+    initial.hasStarted = true
+    initial.hasRequestedSession = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    }
+
+    await store.send(.reattached)
+    await store.send(.foreground)
+  }
+
+  // The view's `.task` fires on every appearance; once the slot has started (initial
+  // connect done), a re-appearance must be a strict no-op — `AppFeature`'s `.reattached`
+  // owns the re-open flow. Exhaustive: any effect or state change fails this.
+  @Test func taskAfterInitialConnectIsNoOp() async {
+    let connectCalls = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.status = .ready
+    initial.hasStarted = true
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        connectCalls.withValue { $0 += 1 }
+        return AsyncStream { _ in }
+      }
+    }
+
+    await store.send(.task)
+    #expect(connectCalls.value == 0)
   }
 
   // MARK: Stable in-flight row identity across repeated hydrates (review finding #4)
@@ -774,9 +1187,9 @@ struct HydrateTests {
     let firstIDs = store.state.transcript.ids
     let firstStreamingID = store.state.streamingRowID
 
-    // Second hydrate of the SAME running turn (e.g. a foreground/reconnect re-resume).
+    // Second hydrate of the SAME running turn (a foreground re-resume; the socket is
+    // healthy — `status == .ready` — so `.foreground` hydrates directly, no redial).
     await store.send(.foreground)
-    await store.receive(\.gatewayEvent)
     await store.receive(\.activateResult.success)
     let secondIDs = store.state.transcript.ids
 
@@ -799,7 +1212,7 @@ struct HydrateTests {
       return false
     })
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Instant-paint + delta-before-activate race
@@ -863,6 +1276,6 @@ struct HydrateTests {
     // No trace of the cached or stray rows.
     #expect(!store.state.transcript.contains { if case let .message(_, t, _) = $0.kind { return t.contains("stray") || t.contains("cached") }; return false })
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 }

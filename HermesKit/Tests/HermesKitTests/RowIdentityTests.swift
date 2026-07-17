@@ -110,7 +110,7 @@ struct RowIdentityTests {
       $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Planning", status: "Context: 12%", elapsedSeconds: 0, isComplete: false)
     }
     #expect(store.state.thinkingRowID == uuid(0))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: keepThinkingLast reordering preserves ids
@@ -137,7 +137,7 @@ struct RowIdentityTests {
     #expect(store.state.transcript.last?.id == uuid(0))
     #expect(store.state.transcript.first?.id == uuid(1))
     #expect(store.state.thinkingRowID == uuid(0))
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   // MARK: Live → deterministic reconciliation on hydrate
@@ -190,7 +190,7 @@ struct RowIdentityTests {
     // Exactly one row per logical message — no duplication.
     #expect(store.state.transcript.count == expected.count)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   /// Re-running `reconstructTranscript` over identical history yields byte-identical ids — the
@@ -242,7 +242,7 @@ struct RowIdentityTests {
     if let liveID { #expect(store.state.transcript[id: liveID] == nil) }
     #expect(store.state.transcript.count == 1)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 
   /// A reasoning-only turn (thinking text, no assistant message) keeps the thinking row id
@@ -280,6 +280,6 @@ struct RowIdentityTests {
     #expect(store.state.transcript[id: deterministicThinkingID] != nil)
     #expect(store.state.transcript[id: uuid(0)] == nil)
 
-    await store.send(.onDisappear)
+    await store.send(.teardown)
   }
 }

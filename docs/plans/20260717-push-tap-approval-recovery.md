@@ -296,10 +296,11 @@ Three pieces, all in HermesKit (views untouched):
 
 ### Task 6: Update documentation
 
-- [ ] add a CLAUDE.md conventions bullet: push-tap approval recovery (hint →
+- [x] add a CLAUDE.md conventions bullet: push-tap approval recovery (hint →
       hydrate-gated synthesis → resolved-count feedback; privacy rule untouched;
       composes with hermes-agent #30)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/` (deferred — orchestrator moves it
+      at run completion)
 
 ## Post-Completion
 

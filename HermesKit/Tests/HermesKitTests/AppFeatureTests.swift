@@ -1903,9 +1903,11 @@ struct AppFeatureTests {
     await store.send(.liveChat(.teardown))
   }
 
-  /// An approval tap for the DETACHED slot's session threads the recovery hint through
-  /// `openSession` onto the re-attached slot (#30 workaround) — the follow-up hydrate can
-  /// synthesize the generic card if the turn is still running.
+  /// The Overview flow end-to-end (#30 workaround): an approval push fired while the socket
+  /// was down on a still-running session; the tap threads the recovery hint through
+  /// `openSession` onto the re-attached slot, the hydrate synthesizes the generic card, and
+  /// approving it fires a session-scoped `approval.respond` (no `request_id`) whose
+  /// `{"resolved": n}` result feeds back honestly.
   @Test func approvalTapForDetachedSlotThreadsRecoveryHint() async {
     var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
     chat.liveSessionID = "live1"
@@ -1913,6 +1915,7 @@ struct AppFeatureTests {
     chat.hasRequestedSession = true
     chat.hasStarted = true
 
+    let respondParams = LockIsolated<JSONValue?>(nil)
     let store = TestStore(
       initialState: AppFeature.State(
         home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
@@ -1926,7 +1929,11 @@ struct AppFeatureTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.chatSnapshot = .inMemory()
-      $0.hermesGateway.send = { @Sendable method, _ in
+      $0.hermesGateway.send = { @Sendable method, params in
+        if method == "approval.respond" {
+          respondParams.setValue(params)
+          return .object(["resolved": .number(1)])
+        }
         guard method == "session.resume" else { return .object([:]) }
         return .object([
           "session_id": .string("live1"),
@@ -1951,6 +1958,21 @@ struct AppFeatureTests {
     #expect(store.state.liveChat?.expectsPendingApproval == false)
     // Badge bookkeeping unchanged: tap marked, open cleared.
     #expect(store.state.pendingApprovalSessionIDs.isEmpty)
+
+    // Approve the recovered card: the respond is session-queue-scoped (session_id + choice
+    // + all, NO request_id — the synthetic card never had one, by design), and the server's
+    // `resolved: 1` keeps the optimistic "Approved" row (no error, no re-patch).
+    await store.send(.liveChat(.respondToApproval(approve: true, all: false)))
+    await store.finish()
+    let params = respondParams.value
+    #expect(params?["session_id"] == .string("live1"))
+    #expect(params?["choice"] == .string("once"))
+    #expect(params?["all"] == .bool(false))
+    #expect(params?["request_id"] == nil)
+    #expect(store.state.liveChat?.pendingInteraction == nil)
+    #expect(store.state.liveChat?.errorBanner == nil)
+    let lastRow = store.state.liveChat?.transcript.last
+    #expect(lastRow?.kind == .status(kind: "approval", text: "Approved"))
 
     await store.send(.liveChat(.teardown))
   }

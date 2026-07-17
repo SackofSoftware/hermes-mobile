@@ -270,14 +270,29 @@ Three pieces, all in HermesKit (views untouched):
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] verify the Overview flow end-to-end in tests: approval push tap on a
+- [x] verify the Overview flow end-to-end in tests: approval push tap on a
       disconnected running session → hydrate → synthetic card → approve →
       `approval.respond` with session-scoped payload → resolved feedback
-- [ ] verify all edge cases in the Edge cases list have a covering test
-- [ ] run the full suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run snapshots: `make snapshot`
-- [ ] confirm zero behavior change for non-approval pushes and sessions without the
-      hint (existing tests unmodified except where new state is asserted)
+      (`approvalTapForDetachedSlotThreadsRecoveryHint` extended through the respond
+      tail: captured payload asserted session-scoped with NO `request_id`,
+      `resolved: 1` keeps the optimistic "Approved" row, no banner)
+- [x] verify all edge cases in the Edge cases list have a covering test (audited —
+      all seven covered: stopped-turn / real-interaction-present / real-event-
+      overwrite in `ChatReductionTests`; resolved-0 approve+deny + RPC-failure
+      banner in `ChatInteractionTests`; double-hydrate inside
+      `hydrateWithHintOnRunningTurnSynthesizesRecoveredCard`; non-approval-tap /
+      un-badged-open / no-hint negatives in `AppFeatureTests` +
+      `hydrateWithoutHintSynthesizesNothing`; no new gaps found)
+- [x] run the full suite: `script -q /dev/null swift test --package-path HermesKit`
+      (714 tests in 49 suites, all pass)
+- [x] run snapshots: `make snapshot` (all approval-card cases pass; only the 4
+      known pre-existing iOS-26.2 baseline-drift failures noted in Task 4 remain —
+      verified identical on clean main, out of scope)
+- [x] confirm zero behavior change for non-approval pushes and sessions without the
+      hint (existing tests unmodified except where new state is asserted — diff vs
+      main shows the only touched existing test is
+      `pushTapForOnScreenSessionDoesNotNavigate`, which now additionally asserts
+      the hint; all approval payload/vocabulary tests byte-unchanged)
 
 ### Task 6: Update documentation
 

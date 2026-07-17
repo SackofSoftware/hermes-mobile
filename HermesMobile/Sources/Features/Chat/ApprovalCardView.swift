@@ -19,6 +19,9 @@ struct ApprovalCardView: View {
         Text(detail)
           .font(.footnote)
           .foregroundStyle(.secondary)
+          // Wrap instead of truncating — the recovered-approval card (#30 workaround)
+          // carries a multi-line detail and no command, so the copy must stay readable.
+          .fixedSize(horizontal: false, vertical: true)
           .frame(maxWidth: .infinity, alignment: .leading)
       }
 
@@ -31,8 +34,13 @@ struct ApprovalCardView: View {
           .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 8))
       }
 
-      Toggle("Approve all in this session", isOn: $approveAll)
-        .font(.footnote)
+      // Hidden on the push-tap-recovered card (#30 workaround): with no command and no
+      // pattern to show, "Approve all" would whitelist an unseen danger pattern for the
+      // whole session — a blind single approve is the most the recovery copy covers.
+      if request.offersSessionApproval {
+        Toggle("Approve all in this session", isOn: $approveAll)
+          .font(.footnote)
+      }
 
       HStack(spacing: 12) {
         Button(role: .destructive, action: onDeny) {

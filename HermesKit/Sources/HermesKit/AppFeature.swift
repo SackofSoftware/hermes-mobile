@@ -274,6 +274,17 @@ public struct AppFeature {
         // fires the existing `.foreground` re-hydrate.
         if state.currentViewingSessionID == tap.sessionID {
           state.pendingApprovalSessionIDs.remove(tap.sessionID)
+          // Approval-recovery hint (#30 workaround): the socket may have been down when the
+          // `approval.request` fired, so arm the one-shot hint AND drive the consuming
+          // hydrate ourselves — the tap's scene activation is delivered independently of
+          // this action, so a `.foreground` that reduced BEFORE the tap (or never fires)
+          // would otherwise leave the hint armed for an arbitrary later hydrate.
+          // `.foreground` is idempotent: it never cancel-and-redials a healthy socket,
+          // just re-hydrates. Nil slot guarded (the hint is meaningless without one).
+          if tap.isApproval, state.liveChat != nil {
+            state.liveChat?.expectsPendingApproval = true
+            return .merge(setBadge(state), .send(.liveChat(.foreground)))
+          }
           return setBadge(state)
         }
         // Otherwise share the SAME `openSession` flow a list tap uses: a detached slot match
@@ -292,6 +303,12 @@ public struct AppFeature {
 
       case let .home(.delegate(.openSession(session))):
         guard let home = state.home else { return .none }
+        // Approval-recovery hint (#30 workaround): a badged session (approval push tapped or
+        // received) may have missed the real `approval.request` while detached — read the flag
+        // BEFORE clearing the badge entry so the hydrating chat can synthesize a generic card
+        // when the turn is still running. Covers tap→open, slot replacement, and a badged
+        // session opened later from the list.
+        let expectsApproval = state.pendingApprovalSessionIDs.contains(session.id)
         // Opening a session clears its pending-approval badge entry (the user is now viewing it).
         // The current-viewing marker is updated by the `.onChange(of: currentViewingSessionID)`
         // modifier below (one source of truth for nav-derived state).
@@ -303,6 +320,9 @@ public struct AppFeature {
         // Push the marker back (the path is empty when coming from the list) and
         // re-attach: hydrate against the live socket, reconnecting only if it died.
         if let chat = state.liveChat, chat.sessionKey == session.id {
+          if expectsApproval {
+            state.liveChat?.expectsPendingApproval = true
+          }
           // Defensive guard: the path is normally empty here (re-opens come from the list,
           // and an on-screen match short-circuits in `pushTapped` before reaching this
           // delegate) — but a double-delivered open must not stack a second marker.
@@ -314,12 +334,13 @@ public struct AppFeature {
         // `resolvedTitle` keeps the server's "Untitled" placeholder out of the header
         // (and the rename pre-fill); a real title arrives via `session.info` on resume.
         // Carry the active profile so resume/history scope to the right `state.db`.
-        let chat = ChatFeature.State(
+        var chat = ChatFeature.State(
           connection: home.connection,
           resumeStoredID: session.id,
           profileName: home.scopedProfileName,
           title: session.resolvedTitle
         )
+        chat.expectsPendingApproval = expectsApproval
         guard state.liveChat != nil else {
           fillLiveChat(chat, into: &state)
           return badge

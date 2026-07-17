@@ -48,6 +48,16 @@ public struct ChatFeature {
     /// A blocking request from the agent (approval/clarify/secret). While set, the
     /// composer is disabled and a card is the focal point.
     public var pendingInteraction: PendingInteraction?
+    /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
+    /// #30: an `approval.request` that fired while the socket was down is gone — the
+    /// server does not re-surface pending approvals on `session.resume`). Set by
+    /// `AppFeature` when an approval-typed push tap puts this session's chat on screen;
+    /// consumed (reset to `false`) by the next hydrate, which synthesizes a generic
+    /// command-less approval card when the turn is still `running` and no real blocking
+    /// request arrived over the socket. Transient: deliberately NOT persisted in
+    /// `ChatSnapshotClient` (a snapshot repaint must never resurrect a card), and cleared
+    /// by a real `.approvalRequest` (the real event wins — no later re-synthesis).
+    public var expectsPendingApproval: Bool
     /// The tool/skill row whose detail sheet is open, if any (Task 4).
     public var presentedTool: ChatRow?
     /// Current model + reasoning effort (from `session.info`), shown in the composer chip.
@@ -178,6 +188,7 @@ public struct ChatFeature {
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
       self.pendingInteraction = nil
+      self.expectsPendingApproval = false
       self.presentedTool = nil
       self.model = nil
       self.reasoningEffort = nil
@@ -330,6 +341,14 @@ public struct ChatFeature {
     case liveSessionIDRefreshed(liveSessionID: String, storedSessionID: String?)
     case interruptTapped
     case respondToApproval(approve: Bool, all: Bool)
+    /// Outcome of the awaited `approval.respond` RPC. `resolved` carries the server's
+    /// `{"resolved": n}` count — `0` means the per-session queue was already empty (the
+    /// approval was handled elsewhere), so the optimistic "Approved"/"Denied" status row
+    /// at `rowID` is patched to say so. `nil` means the RPC threw → user-facing banner.
+    /// The effect feeds back only those two actionable outcomes: a `resolved >= 1` or
+    /// missing-key (older agent, lenient decode) success sends nothing — the optimistic
+    /// row is already correct.
+    case approvalRespondResult(rowID: ChatRow.ID, resolved: Int?)
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
@@ -792,8 +811,13 @@ public struct ChatFeature {
               let sessionID = state.liveSessionID
         else { return .none }
         state.pendingInteraction = nil
+        // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
+        // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
+        // not make a later, unrelated hydrate synthesize a phantom card.
+        state.expectsPendingApproval = false
+        let rowID = uuid()
         state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
+          ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
         )
         // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
         // just this command; "session" persists the pattern for the rest of the session
@@ -801,13 +825,44 @@ public struct ChatFeature {
         // server's per-session queue, so NO `request_id` is sent (unlike clarify/secret);
         // `all` maps to `resolve_all` to clear any other queued approvals at once.
         let choice = approve ? (all ? "session" : "once") : "deny"
-        return .run { [gateway] _ in
-          _ = try? await gateway.send("approval.respond", .object([
-            "session_id": .string(sessionID),
-            "choice": .string(choice),
-            "all": .bool(all),
-          ]))
+        return .run { [gateway] send in
+          do {
+            let result = try await gateway.send("approval.respond", .object([
+              "session_id": .string(sessionID),
+              "choice": .string(choice),
+              "all": .bool(all),
+            ]))
+            // The server answers `{"resolved": n}` — the count of queue entries this
+            // respond resolved. `0` means the queue was already empty (handled on another
+            // client, or a recovered-card blind respond after the fact), so the optimistic
+            // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
+            // treated as success — decode leniently, only actionable outcomes feed back.
+            if result["resolved"]?.intValue == 0 {
+              await send(.approvalRespondResult(rowID: rowID, resolved: 0))
+            }
+          } catch {
+            await send(.approvalRespondResult(rowID: rowID, resolved: nil))
+          }
         }
+
+      case let .approvalRespondResult(rowID, resolved):
+        switch resolved {
+        case .some(0):
+          // Nothing was resolved server-side (verified no-op) — the approval was already
+          // handled elsewhere. Patch the optimistic status row honestly; the next hydrate
+          // replaces it wholesale with deterministic ids anyway (server wins), and a row
+          // already replaced by such a hydrate is a silent nil-lookup no-op.
+          state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
+        case .none:
+          // The RPC threw — the card is already dismissed, so surface the failure instead
+          // of silently swallowing it (never a false "Approved").
+          state.errorBanner = "Failed to send the approval response."
+        default:
+          // Defensive only: the effect never feeds back a resolved >= 1 (the optimistic
+          // "Approved"/"Denied" row is already correct, no action needed).
+          break
+        }
+        return .none
 
       case let .respondToClarify(answer):
         guard case let .clarify(request) = state.pendingInteraction,
@@ -1225,6 +1280,12 @@ public struct ChatFeature {
       keepThinkingLast(into: &state)
       freezeThinking(into: &state)
       state.isSending = false
+      // A turn can never legitimately COMPLETE with an approval still queued (the server
+      // blocks on the queue), so a standing approval card here is stale — most visibly a
+      // push-tap-recovered card (#30 workaround) whose approval was answered on another
+      // client, letting the turn run to completion. Drop it (and the armed hint) so the
+      // finished chat isn't stuck behind a phantom card locking the composer.
+      clearStaleApproval(into: &state)
       // Turn ended — drop the anchor so a later hydrate doesn't resurrect a phantom timer,
       // and tell the list to clear this session's working glow immediately.
       return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
@@ -1285,6 +1346,9 @@ public struct ChatFeature {
       state.errorBanner = message
       state.isSending = false
       freezeThinking(into: &state)
+      // Same staleness rule as `message.complete`: an errored turn is over, so any
+      // standing approval card (real or recovered) and the recovery hint are moot.
+      clearStaleApproval(into: &state)
       // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
       // and clear the list's working glow for this session immediately.
       return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
@@ -1305,7 +1369,10 @@ public struct ChatFeature {
     case let .approvalRequest(request):
       // Nice-to-have skipped: the thinking timer keeps running while a blocking card is the
       // focus rather than pausing — simpler reducer, and wall-clock still reflects the turn.
+      // The real event overwrites any push-tap-synthesized card unconditionally and clears
+      // the recovery hint so a later hydrate can't re-synthesize (#30 workaround).
       state.pendingInteraction = .approval(request)
+      state.expectsPendingApproval = false
       return .none
 
     case let .clarifyRequest(request):
@@ -1343,6 +1410,20 @@ public struct ChatFeature {
       state.transcript.append(ChatRow(id: id, kind: .message(role: .assistant, text: text, isComplete: false)))
       state.streamingRowID = id
     }
+  }
+
+  /// Drop a standing approval card + the push-tap recovery hint when the turn is known
+  /// to be over (turn-end events, or a hydrate reporting `running == false`). The server
+  /// never ends a turn with an approval still queued, so a card outliving its turn is
+  /// stale by definition — answered on another client (the mainline recovered-card
+  /// false-positive path, #30 workaround) or timed out. Scoped to `.approval` only:
+  /// clarify/secret are request-id-keyed and out of this workaround's scope. NOT called
+  /// on socket drop (`finalizeInFlight`) — the turn may still be running server-side.
+  private func clearStaleApproval(into state: inout State) {
+    if case .approval = state.pendingInteraction {
+      state.pendingInteraction = nil
+    }
+    state.expectsPendingApproval = false
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the
@@ -1540,6 +1621,19 @@ public struct ChatFeature {
     .cancellable(id: CancelID.hydrate, cancelInFlight: true)
   }
 
+  /// The synthetic approval request the push-tap recovery path synthesizes (#30
+  /// workaround): the real `approval.request` fired while the socket was down and its
+  /// payload is unrecoverable (the push deliberately carries no content per the
+  /// generic-body privacy rule), so the recovered card is command-less with honest copy.
+  /// `ApprovalCardView` already renders a `command == nil` request (detail-only card);
+  /// no `isSynthesized` marker exists anywhere — the card is distinguished only by its
+  /// content, and `approval.respond` works identically (approvals have no `request_id`).
+  public static let recoveredApprovalRequest = ApprovalRequest(
+    command: nil,
+    detail: "The agent is waiting for approval of a command, but the details couldn't "
+      + "be recovered after reconnecting. Approve only if you know what it's doing."
+  )
+
   /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,
   /// `applyRuntimeInfo` (model/reasoning/usage), drive the working indicator from the
   /// authoritative `running` flag, rebuild the transcript wholesale from `messages`
@@ -1569,6 +1663,29 @@ public struct ChatFeature {
     // Working indicator from the authoritative `running` flag.
     let running = response.running ?? false
     state.isSending = running
+
+    // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
+    // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
+    // the single synthesis point. Synthesize the generic card only when the authoritative
+    // `running` says the agent is still blocked AND the socket didn't already deliver a
+    // real blocking request. Not running → the approval resolved/denied/timed out while
+    // we were detached → drop silently (no phantom card). Consuming the hint first means
+    // a double hydrate of the same running turn can't synthesize twice.
+    if state.expectsPendingApproval {
+      state.expectsPendingApproval = false
+      if running, state.pendingInteraction == nil {
+        state.pendingInteraction = .approval(Self.recoveredApprovalRequest)
+      }
+    }
+    // The inverse staleness rule: the authoritative "not running" means no approval can
+    // be pending server-side (the server never ends a turn with one queued), so a card
+    // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
+    // answered on another client while the socket was down and the turn ended — must be
+    // dropped, or it would sit over a finished transcript locking the composer. (The
+    // helper's hint-clear is a no-op here: the block above already consumed it.)
+    if !running {
+      clearStaleApproval(into: &state)
+    }
 
     // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the
     // client's own live thinking + tool rows are not in the server payload (`SessionInflight`

@@ -139,6 +139,29 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   `session_id` to slot + path: matches slot with its marker on top → **no navigation** (in-place
   hydrate; badge bookkeeping still runs); matches slot from the list → push marker + `.reattached`;
   different session → replace slot + **SET** the path to the single new marker (never stack).
+- **Push-tap approval recovery** (hermes-agent #30 workaround) — a lost `approval.request`
+  (socket down when it fired) is recovered from the approval push tap: `AppFeature` arms a
+  one-shot `expectsPendingApproval` hint on the target `ChatFeature.State` (via the
+  `pendingApprovalSessionIDs` badge set / #32 tap routing — on-screen slot, reattach, replace,
+  and badged-then-opened-later all covered; the **on-screen arm also drives its own
+  `.liveChat(.foreground)` hydrate** — never rely on the tap's scene activation racing through
+  the store); hydrate (`applyActivate`) **consumes** the hint and synthesizes a generic
+  `ChatFeature.recoveredApprovalRequest` card (`command: nil` + honest recovery `detail`)
+  **only when the authoritative `running` is true and no real `pendingInteraction` arrived** —
+  a stopped turn drops it silently (no phantom card). **Staleness is symmetric**: turn-end
+  (`message.complete`/`error`) and a `running == false` hydrate clear any standing `.approval`
+  card + the hint (a card must never outlive its turn and lock the composer), and answering any
+  approval clears the hint too. A real `approval.request` always overwrites the synthetic card
+  AND clears the hint. This works because approvals have **no `request_id`** —
+  `approval.respond` resolves a per-session FIFO, and the `{"resolved": n}` result surfaces the
+  outcome: `0` → patch the optimistic status row to "Already handled elsewhere" (blind respond
+  on an empty queue is a verified server no-op); RPC failure → `errorBanner` (no swallowed
+  `try?`). The **"Approve all in this session" toggle is content-gated**
+  (`ApprovalRequest.offersSessionApproval`): hidden on the command-less/pattern-less recovered
+  card — a blind approve must not whitelist an unseen danger pattern session-wide. **No
+  push-payload change** — the generic-body privacy rule stands; composes with #30 (a
+  re-surfaced real event just replaces the generic card). Clarify recovery is out of scope
+  (needs the real event's `request_id`).
 - **Session-list working glow is event-driven** via `ChatFeature.Delegate.runningChanged`
   (emitted on `message.start`/`complete`/`error` and the `session.resume` `running` flag),
   routed by `AppFeature` to `SessionListFeature` for an instant row-glow patch; the poll is only

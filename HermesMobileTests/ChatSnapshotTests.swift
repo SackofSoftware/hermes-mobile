@@ -135,6 +135,18 @@ final class ChatSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  /// Push-tap approval recovery (hermes-agent #30 workaround): the synthetic request has
+  /// no command — only the recovery-copy detail — so the card must lay out command-less.
+  func testApprovalCard_recovered() {
+    let view = ApprovalCardView(
+      request: ChatFeature.recoveredApprovalRequest,
+      onApprove: { _ in },
+      onDeny: {}
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
   // MARK: Clarify / secret cards
 
   func testClarifyCard_choices() {

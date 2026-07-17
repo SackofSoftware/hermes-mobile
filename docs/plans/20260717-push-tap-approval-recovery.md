@@ -200,21 +200,23 @@ Three pieces, all in HermesKit (views untouched):
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`
 
-- [ ] add action `.approvalRespondResult(rowID: ChatRow.ID, approve: Bool,
+- [x] add action `.approvalRespondResult(rowID: ChatRow.ID, approve: Bool,
       resolved: Int?)`
-- [ ] in `.respondToApproval`: capture the optimistic status row's id; replace the
+- [x] in `.respondToApproval`: capture the optimistic status row's id; replace the
       fire-and-forget effect with one that awaits
       `gateway.send("approval.respond", …)`, parses `result["resolved"]`, and sends
-      `.approvalRespondResult` (`resolved: nil` on throw)
-- [ ] handle `.approvalRespondResult`: `resolved == 0` → patch the captured row's
+      `.approvalRespondResult` (`resolved: nil` on throw; the effect sends only
+      actionable outcomes — resolved == 0 or throw — so a resolved ≥ 1 / missing-key
+      success stays action-free and existing tests pass unchanged)
+- [x] handle `.approvalRespondResult`: `resolved == 0` → patch the captured row's
       status text to "Already handled elsewhere"; `resolved: nil` → set
-      `errorBanner` ("Failed to send the approval response"); `resolved >= 1` →
+      `errorBanner` ("Failed to send the approval response."); `resolved >= 1` →
       no-op (optimistic row already correct)
-- [ ] write TestStore tests: resolved ≥ 1 keeps "Approved"/"Denied"; resolved == 0
+- [x] write TestStore tests: resolved ≥ 1 keeps "Approved"/"Denied"; resolved == 0
       patches the row; RPC failure sets `errorBanner`
-- [ ] verify the choice vocabulary and no-`request_id` payload are byte-identical
+- [x] verify the choice vocabulary and no-`request_id` payload are byte-identical
       to today (existing tests keep passing unchanged)
-- [ ] run `swift test --package-path HermesKit` — must pass before task 3
+- [x] run `swift test --package-path HermesKit` — must pass before task 3 (710 pass)
 
 ### Task 3: Thread the approval hint from AppFeature push-tap/open routing
 

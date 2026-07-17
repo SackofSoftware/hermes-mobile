@@ -341,6 +341,11 @@ public struct ChatFeature {
     case liveSessionIDRefreshed(liveSessionID: String, storedSessionID: String?)
     case interruptTapped
     case respondToApproval(approve: Bool, all: Bool)
+    /// Outcome of the awaited `approval.respond` RPC. `resolved` carries the server's
+    /// `{"resolved": n}` count — `0` means the per-session queue was already empty (the
+    /// approval was handled elsewhere), so the optimistic "Approved"/"Denied" status row
+    /// at `rowID` is patched to say so. `nil` means the RPC threw → user-facing banner.
+    case approvalRespondResult(rowID: ChatRow.ID, approve: Bool, resolved: Int?)
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
@@ -803,8 +808,9 @@ public struct ChatFeature {
               let sessionID = state.liveSessionID
         else { return .none }
         state.pendingInteraction = nil
+        let rowID = uuid()
         state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
+          ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
         )
         // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
         // just this command; "session" persists the pattern for the rest of the session
@@ -812,13 +818,41 @@ public struct ChatFeature {
         // server's per-session queue, so NO `request_id` is sent (unlike clarify/secret);
         // `all` maps to `resolve_all` to clear any other queued approvals at once.
         let choice = approve ? (all ? "session" : "once") : "deny"
-        return .run { [gateway] _ in
-          _ = try? await gateway.send("approval.respond", .object([
-            "session_id": .string(sessionID),
-            "choice": .string(choice),
-            "all": .bool(all),
-          ]))
+        return .run { [gateway] send in
+          do {
+            let result = try await gateway.send("approval.respond", .object([
+              "session_id": .string(sessionID),
+              "choice": .string(choice),
+              "all": .bool(all),
+            ]))
+            // The server answers `{"resolved": n}` — the count of queue entries this
+            // respond resolved. `0` means the queue was already empty (handled on another
+            // client, or a recovered-card blind respond after the fact), so the optimistic
+            // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
+            // treated as success — decode leniently, only actionable outcomes feed back.
+            if result["resolved"]?.intValue == 0 {
+              await send(.approvalRespondResult(rowID: rowID, approve: approve, resolved: 0))
+            }
+          } catch {
+            await send(.approvalRespondResult(rowID: rowID, approve: approve, resolved: nil))
+          }
         }
+
+      case let .approvalRespondResult(rowID, _, resolved):
+        switch resolved {
+        case .some(0):
+          // Nothing was resolved server-side (verified no-op) — the approval was already
+          // handled elsewhere. Patch the optimistic status row honestly; the next hydrate
+          // replaces it wholesale with deterministic ids anyway (server wins).
+          state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
+        case .none:
+          // The RPC threw — the card is already dismissed, so surface the failure instead
+          // of silently swallowing it (never a false "Approved").
+          state.errorBanner = "Failed to send the approval response."
+        default:
+          break // resolved >= 1 — the optimistic "Approved"/"Denied" row is already correct
+        }
+        return .none
 
       case let .respondToClarify(answer):
         guard case let .clarify(request) = state.pendingInteraction,

@@ -34,8 +34,13 @@ struct ApprovalCardView: View {
           .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 8))
       }
 
-      Toggle("Approve all in this session", isOn: $approveAll)
-        .font(.footnote)
+      // Hidden on the push-tap-recovered card (#30 workaround): with no command and no
+      // pattern to show, "Approve all" would whitelist an unseen danger pattern for the
+      // whole session — a blind single approve is the most the recovery copy covers.
+      if request.offersSessionApproval {
+        Toggle("Approve all in this session", isOn: $approveAll)
+          .font(.footnote)
+      }
 
       HStack(spacing: 12) {
         Button(role: .destructive, action: onDeny) {

@@ -302,6 +302,24 @@ Three pieces, all in HermesKit (views untouched):
 - [x] move this plan to `docs/plans/completed/` (deferred — orchestrator moves it
       at run completion)
 
+### ➕ Review hardening (post-Task-6 code review)
+
+- [x] a synthesized (or real) approval card must never outlive its turn: turn-end events
+      (`message.complete` / `error`) and a `running == false` hydrate now clear a standing
+      `.approval` `pendingInteraction` + the hint (`clearStaleApproval`); tests
+      `hydrateOfStoppedTurnClearsStaleApprovalCard`, `turnCompleteClearsStaleApprovalCardAndHint`,
+      `turnErrorClearsStaleApprovalCardAndHint`
+- [x] the on-screen push-tap arm now drives its own consuming `.liveChat(.foreground)` hydrate
+      (no reliance on the tap's scene activation racing the store); `.respondToApproval` also
+      clears the hint; tests `approvalTapForOnScreenSessionHydratesRecoveredCard`,
+      `hydrateFailureKeepsHintArmedForTheRetry`
+- [x] "Approve all in this session" is hidden on the recovered card via the content-derived
+      `ApprovalRequest.offersSessionApproval` (a blind approve must not whitelist an unseen
+      pattern session-wide); recovered-card snapshot baseline re-recorded (targeted)
+- [x] dropped the dead `approve` payload from `.approvalRespondResult`; `recoveredApprovalRequest`
+      is now a `static let`; fixed the doc comment that had attached to the wrong declaration;
+      added the absent-row resolved-0 no-op test; README "Approve from anywhere" bullet extended
+
 ## Post-Completion
 
 **Manual verification:**

@@ -49,7 +49,10 @@ from your desk and still keep your agent moving.
 - **Copy what you need.** Copy a whole message, or just a single code block with a
   one-tap button and a green-check confirmation.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
-  and `sudo`/`secret` prompts the moment they arrive.
+  and `sudo`/`secret` prompts the moment they arrive. Even if the app was offline when
+  an approval fired, tapping its push notification still surfaces an approve/deny card
+  (generic, since no command content ever transits the push gateway) — with honest
+  "already handled elsewhere" feedback if it was resolved on another client.
 - **Stays connected.** Automatic reconnect with backoff and a clear connection banner
   when the link drops. Reopening a session — after navigating away, backgrounding the app,
   or a cold relaunch — restores its live state: the right model, context usage, full

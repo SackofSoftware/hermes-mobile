@@ -345,7 +345,10 @@ public struct ChatFeature {
     /// `{"resolved": n}` count — `0` means the per-session queue was already empty (the
     /// approval was handled elsewhere), so the optimistic "Approved"/"Denied" status row
     /// at `rowID` is patched to say so. `nil` means the RPC threw → user-facing banner.
-    case approvalRespondResult(rowID: ChatRow.ID, approve: Bool, resolved: Int?)
+    /// The effect feeds back only those two actionable outcomes: a `resolved >= 1` or
+    /// missing-key (older agent, lenient decode) success sends nothing — the optimistic
+    /// row is already correct.
+    case approvalRespondResult(rowID: ChatRow.ID, resolved: Int?)
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
@@ -808,6 +811,10 @@ public struct ChatFeature {
               let sessionID = state.liveSessionID
         else { return .none }
         state.pendingInteraction = nil
+        // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
+        // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
+        // not make a later, unrelated hydrate synthesize a phantom card.
+        state.expectsPendingApproval = false
         let rowID = uuid()
         state.transcript.append(
           ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
@@ -831,26 +838,29 @@ public struct ChatFeature {
             // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
             // treated as success — decode leniently, only actionable outcomes feed back.
             if result["resolved"]?.intValue == 0 {
-              await send(.approvalRespondResult(rowID: rowID, approve: approve, resolved: 0))
+              await send(.approvalRespondResult(rowID: rowID, resolved: 0))
             }
           } catch {
-            await send(.approvalRespondResult(rowID: rowID, approve: approve, resolved: nil))
+            await send(.approvalRespondResult(rowID: rowID, resolved: nil))
           }
         }
 
-      case let .approvalRespondResult(rowID, _, resolved):
+      case let .approvalRespondResult(rowID, resolved):
         switch resolved {
         case .some(0):
           // Nothing was resolved server-side (verified no-op) — the approval was already
           // handled elsewhere. Patch the optimistic status row honestly; the next hydrate
-          // replaces it wholesale with deterministic ids anyway (server wins).
+          // replaces it wholesale with deterministic ids anyway (server wins), and a row
+          // already replaced by such a hydrate is a silent nil-lookup no-op.
           state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
         case .none:
           // The RPC threw — the card is already dismissed, so surface the failure instead
           // of silently swallowing it (never a false "Approved").
           state.errorBanner = "Failed to send the approval response."
         default:
-          break // resolved >= 1 — the optimistic "Approved"/"Denied" row is already correct
+          // Defensive only: the effect never feeds back a resolved >= 1 (the optimistic
+          // "Approved"/"Denied" row is already correct, no action needed).
+          break
         }
         return .none
 
@@ -1270,6 +1280,12 @@ public struct ChatFeature {
       keepThinkingLast(into: &state)
       freezeThinking(into: &state)
       state.isSending = false
+      // A turn can never legitimately COMPLETE with an approval still queued (the server
+      // blocks on the queue), so a standing approval card here is stale — most visibly a
+      // push-tap-recovered card (#30 workaround) whose approval was answered on another
+      // client, letting the turn run to completion. Drop it (and the armed hint) so the
+      // finished chat isn't stuck behind a phantom card locking the composer.
+      clearStaleApproval(into: &state)
       // Turn ended — drop the anchor so a later hydrate doesn't resurrect a phantom timer,
       // and tell the list to clear this session's working glow immediately.
       return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
@@ -1330,6 +1346,9 @@ public struct ChatFeature {
       state.errorBanner = message
       state.isSending = false
       freezeThinking(into: &state)
+      // Same staleness rule as `message.complete`: an errored turn is over, so any
+      // standing approval card (real or recovered) and the recovery hint are moot.
+      clearStaleApproval(into: &state)
       // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
       // and clear the list's working glow for this session immediately.
       return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
@@ -1391,6 +1410,20 @@ public struct ChatFeature {
       state.transcript.append(ChatRow(id: id, kind: .message(role: .assistant, text: text, isComplete: false)))
       state.streamingRowID = id
     }
+  }
+
+  /// Drop a standing approval card + the push-tap recovery hint when the turn is known
+  /// to be over (turn-end events, or a hydrate reporting `running == false`). The server
+  /// never ends a turn with an approval still queued, so a card outliving its turn is
+  /// stale by definition — answered on another client (the mainline recovered-card
+  /// false-positive path, #30 workaround) or timed out. Scoped to `.approval` only:
+  /// clarify/secret are request-id-keyed and out of this workaround's scope. NOT called
+  /// on socket drop (`finalizeInFlight`) — the turn may still be running server-side.
+  private func clearStaleApproval(into state: inout State) {
+    if case .approval = state.pendingInteraction {
+      state.pendingInteraction = nil
+    }
+    state.expectsPendingApproval = false
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the
@@ -1588,12 +1621,6 @@ public struct ChatFeature {
     .cancellable(id: CancelID.hydrate, cancelInFlight: true)
   }
 
-  /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,
-  /// `applyRuntimeInfo` (model/reasoning/usage), drive the working indicator from the
-  /// authoritative `running` flag, rebuild the transcript wholesale from `messages`
-  /// (server wins — no merge/dedup), then seed the in-flight turn. When `inflight.streaming`
-  /// is set we seed an assistant streaming row eagerly and point `streamingRowID` at it so
-  /// the next `message.delta` appends to it instead of lazily creating a duplicate.
   /// The synthetic approval request the push-tap recovery path synthesizes (#30
   /// workaround): the real `approval.request` fired while the socket was down and its
   /// payload is unrecoverable (the push deliberately carries no content per the
@@ -1601,14 +1628,18 @@ public struct ChatFeature {
   /// `ApprovalCardView` already renders a `command == nil` request (detail-only card);
   /// no `isSynthesized` marker exists anywhere — the card is distinguished only by its
   /// content, and `approval.respond` works identically (approvals have no `request_id`).
-  public static func recoveredApprovalRequest() -> ApprovalRequest {
-    ApprovalRequest(
-      command: nil,
-      detail: "The agent is waiting for approval of a command, but the details couldn't "
-        + "be recovered after reconnecting. Approve only if you know what it's doing."
-    )
-  }
+  public static let recoveredApprovalRequest = ApprovalRequest(
+    command: nil,
+    detail: "The agent is waiting for approval of a command, but the details couldn't "
+      + "be recovered after reconnecting. Approve only if you know what it's doing."
+  )
 
+  /// Apply a server-authoritative `ActivateResponse` into state: bind the live/stored ids,
+  /// `applyRuntimeInfo` (model/reasoning/usage), drive the working indicator from the
+  /// authoritative `running` flag, rebuild the transcript wholesale from `messages`
+  /// (server wins — no merge/dedup), then seed the in-flight turn. When `inflight.streaming`
+  /// is set we seed an assistant streaming row eagerly and point `streamingRowID` at it so
+  /// the next `message.delta` appends to it instead of lazily creating a duplicate.
   private func applyActivate(_ response: ActivateResponse, into state: inout State) -> Effect<Action> {
     state.liveSessionID = response.sessionID
     state.storedSessionID = response.storedSessionID ?? state.storedSessionID
@@ -1643,8 +1674,17 @@ public struct ChatFeature {
     if state.expectsPendingApproval {
       state.expectsPendingApproval = false
       if running, state.pendingInteraction == nil {
-        state.pendingInteraction = .approval(Self.recoveredApprovalRequest())
+        state.pendingInteraction = .approval(Self.recoveredApprovalRequest)
       }
+    }
+    // The inverse staleness rule: the authoritative "not running" means no approval can
+    // be pending server-side (the server never ends a turn with one queued), so a card
+    // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
+    // answered on another client while the socket was down and the turn ended — must be
+    // dropped, or it would sit over a finished transcript locking the composer. (The
+    // helper's hint-clear is a no-op here: the block above already consumed it.)
+    if !running {
+      clearStaleApproval(into: &state)
     }
 
     // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the

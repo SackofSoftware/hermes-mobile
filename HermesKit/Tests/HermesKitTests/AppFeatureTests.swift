@@ -1791,9 +1791,9 @@ struct AppFeatureTests {
   }
 
   /// A tap for the session that is ALREADY on screen (slot match + marker in the path) must
-  /// not navigate at all (#32) — no `openSession`, no duplicate marker, no slot re-init. An
-  /// approval tap still runs its badge bookkeeping (mark-then-clear nets zero: the user is
-  /// viewing the session).
+  /// not navigate at all (#32) — no `openSession`, no duplicate marker, no slot re-init.
+  /// (The approval variant additionally arms + consumes the recovery hint — covered by
+  /// `approvalTapForOnScreenSessionHydratesRecoveredCard`.)
   @Test func pushTapForOnScreenSessionDoesNotNavigate() async {
     let push = PushClient.inMemory()
     var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
@@ -1812,22 +1812,73 @@ struct AppFeatureTests {
     }
 
     // Exhaustive: any follow-up action (an `openSession`, a path mutation) would fail the
-    // test. The approval's mark-then-clear nets the badge set to zero; the only state change
-    // is the one-shot recovery hint armed on the slot (#30 workaround) — the tap's app
-    // activation fires the `.foreground` re-hydrate that consumes it.
+    // test — a plain tap for the on-screen session is a pure no-nav no-op.
+    await store.send(.pushTapped(PushTap(sessionID: "s1")))
+    await store.finish()
+    #expect(store.state.path.count == 1)
+    #expect(store.state.path.last?.sessionKey == "s1")
+    #expect(store.state.liveChat?.storedSessionID == "s1")
+  }
+
+  /// An approval tap for the ON-SCREEN session arms the one-shot recovery hint AND directly
+  /// drives the consuming `.foreground` hydrate (#30 workaround) — never relying on the
+  /// tap's scene activation racing a scene-phase `.foreground` through the store, which
+  /// could leave the hint armed indefinitely for an arbitrary later hydrate. Still no
+  /// navigation, and the approval's mark-then-clear badge bookkeeping nets zero.
+  @Test func approvalTapForOnScreenSessionHydratesRecoveredCard() async {
+    let push = PushClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.status = .ready
+    chat.hasRequestedSession = true
+    chat.hasStarted = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live1"),
+          "stored_session_id": .string("s1"),
+          "messages": .array([]),
+          "running": .bool(true),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
     await store.send(.pushTapped(PushTap(sessionID: "s1", type: "approval"))) {
       $0.liveChat?.expectsPendingApproval = true
+      $0.pendingApprovalSessionIDs = []
     }
-    await store.finish()
+    // The arming action itself guarantees the consuming hydrate — the still-running
+    // resume consumes the hint and synthesizes the generic recovered card in place.
+    await store.receive(\.liveChat.foreground)
+    await store.skipReceivedActions()
+    #expect(
+      store.state.liveChat?.pendingInteraction
+        == .approval(ChatFeature.recoveredApprovalRequest)
+    )
+    #expect(store.state.liveChat?.expectsPendingApproval == false)
+    // No navigation: single marker, same slot.
     #expect(store.state.path.count == 1)
     #expect(store.state.path.last?.sessionKey == "s1")
     #expect(store.state.liveChat?.storedSessionID == "s1")
     #expect(push.badgeCount == 0)
 
-    // A plain (non-approval) tap for the on-screen session is equally a no-nav no-op.
-    await store.send(.pushTapped(PushTap(sessionID: "s1")))
-    await store.finish()
-    #expect(store.state.path.count == 1)
+    await store.send(.liveChat(.teardown))
   }
 
   /// A non-approval tap for the on-screen session must NOT arm the recovery hint — recovery
@@ -1953,7 +2004,7 @@ struct AppFeatureTests {
     // still-running resume consumed it and synthesized the generic recovered card.
     #expect(
       store.state.liveChat?.pendingInteraction
-        == .approval(ChatFeature.recoveredApprovalRequest())
+        == .approval(ChatFeature.recoveredApprovalRequest)
     )
     #expect(store.state.liveChat?.expectsPendingApproval == false)
     // Badge bookkeeping unchanged: tap marked, open cleared.

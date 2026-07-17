@@ -273,14 +273,18 @@ public struct AppFeature {
         // in place — the live socket is already streaming, and the tap's app activation
         // fires the existing `.foreground` re-hydrate.
         if state.currentViewingSessionID == tap.sessionID {
-          // Approval-recovery hint (#30 workaround): the socket may have been down when the
-          // `approval.request` fired, so arm the one-shot hint — the tap's `.foreground`
-          // re-hydrate synthesizes a generic card if the turn is still running and no real
-          // request arrived. Nil slot is guarded by the optional chain.
-          if tap.isApproval {
-            state.liveChat?.expectsPendingApproval = true
-          }
           state.pendingApprovalSessionIDs.remove(tap.sessionID)
+          // Approval-recovery hint (#30 workaround): the socket may have been down when the
+          // `approval.request` fired, so arm the one-shot hint AND drive the consuming
+          // hydrate ourselves — the tap's scene activation is delivered independently of
+          // this action, so a `.foreground` that reduced BEFORE the tap (or never fires)
+          // would otherwise leave the hint armed for an arbitrary later hydrate.
+          // `.foreground` is idempotent: it never cancel-and-redials a healthy socket,
+          // just re-hydrates. Nil slot guarded (the hint is meaningless without one).
+          if tap.isApproval, state.liveChat != nil {
+            state.liveChat?.expectsPendingApproval = true
+            return .merge(setBadge(state), .send(.liveChat(.foreground)))
+          }
           return setBadge(state)
         }
         // Otherwise share the SAME `openSession` flow a list tap uses: a detached slot match

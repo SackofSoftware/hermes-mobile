@@ -1613,7 +1613,8 @@ struct ChatReductionTests {
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.chatSnapshot = .inMemory()
       // Only `approval.respond` is sent here (hydrates are driven by direct
-      // `.activateResult` sends); the resolved count is ignored until Task 2.
+      // `.activateResult` sends); `resolved: 1` is a clean success — no feedback action
+      // fires, the optimistic "Approved"/"Denied" row stands.
       $0.hermesGateway.send = { @Sendable _, _ in .object(["resolved": .number(1)]) }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
@@ -1629,7 +1630,7 @@ struct ChatReductionTests {
     let store = recoveryStore(initial)
 
     await store.send(.activateResult(.success(activateResponse(running: true))))
-    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest()))
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
     #expect(store.state.expectsPendingApproval == false)
     // The synthetic card is command-less by design (the push carries no content).
     if case let .approval(request) = store.state.pendingInteraction {
@@ -1696,7 +1697,7 @@ struct ChatReductionTests {
     // synthetic card unconditionally AND clears the hint so a later hydrate of the
     // still-running turn cannot re-synthesize over the real details.
     var initial = ChatFeature.State(connection: conn)
-    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest())
+    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
     initial.expectsPendingApproval = true // a second tap re-armed the hint meanwhile
     let real = ApprovalRequest(command: "sudo reboot", detail: "Reboots the host", patternKey: "sudo")
     let store = recoveryStore(initial)
@@ -1709,6 +1710,80 @@ struct ChatReductionTests {
     // A follow-up hydrate of the same running turn: the real card stands (no re-synthesis).
     await store.send(.activateResult(.success(activateResponse(running: true))))
     #expect(store.state.pendingInteraction == .approval(real))
+    #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
+
+  @Test func hydrateOfStoppedTurnClearsStaleApprovalCard() async {
+    // Card synthesized on an earlier hydrate, user backgrounded without answering, the
+    // approval was handled elsewhere and the turn ENDED while the socket was down: the
+    // next hydrate's authoritative `running == false` must drop the stale card (the
+    // server never ends a turn with an approval queued) — never leave a phantom card
+    // locking the composer over a finished transcript.
+    var initial = ChatFeature.State(connection: conn)
+    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
+    let store = recoveryStore(initial)
+
+    await store.send(.activateResult(.success(activateResponse(running: false))))
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.isSending == false)
+
+    await store.send(.teardown)
+  }
+
+  @Test func turnCompleteClearsStaleApprovalCardAndHint() async {
+    // The mainline recovered-card false positive: the approval was answered on another
+    // client, so the turn kept running (card synthesized), then COMPLETED over the live
+    // socket. The turn-end event must drop the card (and any re-armed hint) so the
+    // finished chat isn't stuck behind it.
+    var initial = ChatFeature.State(connection: conn)
+    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
+    initial.expectsPendingApproval = true // a second tap re-armed the hint meanwhile
+    initial.isSending = true
+    initial.liveSessionID = "live123"
+    initial.composerText = "next prompt"
+    let store = recoveryStore(initial)
+    #expect(store.state.canSend == false) // blocked while the (stale) card stands
+
+    await store.send(.gatewayEvent(.messageComplete(text: "done", usage: nil)))
+    await store.skipReceivedActions()
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.expectsPendingApproval == false)
+    #expect(store.state.isSending == false)
+    #expect(store.state.canSend) // composer unblocked
+
+    await store.send(.teardown)
+  }
+
+  @Test func turnErrorClearsStaleApprovalCardAndHint() async {
+    // Same staleness rule when the turn ends in error.
+    var initial = ChatFeature.State(connection: conn)
+    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest)
+    initial.expectsPendingApproval = true
+    initial.isSending = true
+    let store = recoveryStore(initial)
+
+    await store.send(.gatewayEvent(.error(message: "boom")))
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
+
+  @Test func hydrateFailureKeepsHintArmedForTheRetry() async {
+    // A failed hydrate (offline blip) must NOT consume the hint — recovery would die on
+    // the first flaky resume. The follow-up successful hydrate of the still-running turn
+    // consumes it and synthesizes the card.
+    var initial = ChatFeature.State(connection: conn)
+    initial.expectsPendingApproval = true
+    let store = recoveryStore(initial)
+
+    await store.send(.activateResult(.failure(.disconnected)))
+    #expect(store.state.expectsPendingApproval == true)
+
+    await store.send(.activateResult(.success(activateResponse(running: true))))
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
     #expect(store.state.expectsPendingApproval == false)
 
     await store.send(.teardown)

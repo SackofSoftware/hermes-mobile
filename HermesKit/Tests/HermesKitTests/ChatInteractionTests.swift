@@ -36,6 +36,9 @@ struct ChatInteractionTests {
     let sent = LockIsolated<JSONValue?>(nil)
     var initial = readyState()
     initial.pendingInteraction = .approval(request)
+    // A lingering recovery hint (#30 workaround) is mooted by answering ANY approval —
+    // it must not prime a later, unrelated hydrate to synthesize a phantom card.
+    initial.expectsPendingApproval = true
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable method, params in
@@ -46,6 +49,7 @@ struct ChatInteractionTests {
 
     await store.send(.respondToApproval(approve: true, all: false)) {
       $0.pendingInteraction = nil
+      $0.expectsPendingApproval = false
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
     }
     await store.finish()
@@ -132,23 +136,16 @@ struct ChatInteractionTests {
     #expect(store.state.errorBanner == nil) // not an error — just honest feedback
   }
 
-  @Test func denyResolvedZeroPatchesRowToAlreadyHandled() async {
-    var initial = readyState()
-    initial.pendingInteraction = .approval(request)
-    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
-      $0.uuid = .incrementing
-      $0.hermesGateway.send = { @Sendable _, _ in
-        .object(["resolved": .number(0)])
-      }
-    }
+  // The acknowledged race: a hydrate replaced the transcript wholesale (deterministic
+  // ids, server wins) before the resolved-0 feedback landed, so the optimistic row id no
+  // longer exists. The patch must be a silent no-op — never a crash, never an append.
+  @Test func approvalRespondResultForAbsentRowIsANoOp() async {
+    let store = TestStore(initialState: readyState()) { ChatFeature() }
 
-    await store.send(.respondToApproval(approve: false, all: false)) {
-      $0.pendingInteraction = nil
-      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Denied"))]
-    }
-    await store.receive(\.approvalRespondResult) {
-      $0.transcript[id: self.uuid(0)]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
-    }
+    // Exhaustive store, empty trailing closure: any state mutation would fail the test.
+    await store.send(.approvalRespondResult(rowID: uuid(99), resolved: 0))
+    #expect(store.state.transcript.isEmpty)
+    #expect(store.state.errorBanner == nil)
   }
 
   // RPC failure → the card is already dismissed, so the failure surfaces as a banner
@@ -173,6 +170,18 @@ struct ChatInteractionTests {
     // The row is untouched — whether the turn continues server-side is unknowable
     // offline; the banner is the honest signal.
     #expect(store.state.transcript[id: uuid(0)]?.kind == .status(kind: "approval", text: "Approved"))
+  }
+
+  // The "Approve all in this session" escalation is offered only when the card has real
+  // content (a command or a danger pattern) — the push-tap-recovered request (#30
+  // workaround) has neither, so a blind approve must not whitelist an unseen pattern.
+  @Test func offersSessionApprovalIsContentDerived() {
+    #expect(ChatFeature.recoveredApprovalRequest.offersSessionApproval == false)
+    #expect(ApprovalRequest(detail: "detail only").offersSessionApproval == false)
+    #expect(ApprovalRequest(command: "", patternKey: "").offersSessionApproval == false)
+    #expect(ApprovalRequest(command: "rm -rf /tmp/x").offersSessionApproval)
+    #expect(ApprovalRequest(patternKey: "rm").offersSessionApproval)
+    #expect(ApprovalRequest(patternKeys: ["rm"]).offersSessionApproval)
   }
 
   // MARK: Model / reasoning picker (Task 7)

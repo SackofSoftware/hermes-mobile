@@ -139,7 +139,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
   /// no command — only the recovery-copy detail — so the card must lay out command-less.
   func testApprovalCard_recovered() {
     let view = ApprovalCardView(
-      request: ChatFeature.recoveredApprovalRequest(),
+      request: ChatFeature.recoveredApprovalRequest,
       onApprove: { _ in },
       onDeny: {}
     )

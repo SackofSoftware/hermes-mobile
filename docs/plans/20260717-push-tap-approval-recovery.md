@@ -245,12 +245,28 @@ Three pieces, all in HermesKit (views untouched):
 
 **Files:**
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift`
+- Modify: `HermesMobile/Sources/Features/Chat/ApprovalCardView.swift` (➕ discovered)
 
-- [ ] add a snapshot case rendering `ApprovalCardView` (or the chat screen) with
+- [x] add a snapshot case rendering `ApprovalCardView` (or the chat screen) with
       the synthetic `ApprovalRequest` (nil command, recovery detail) — verifies the
-      command-less card lays out correctly
-- [ ] record via `make snapshot-record`, then assert via `make snapshot`
-- [ ] run `make snapshot` — must pass before task 5
+      command-less card lays out correctly (`testApprovalCard_recovered`, rendered
+      from the real `ChatFeature.recoveredApprovalRequest()`)
+- ➕ [x] fix `ApprovalCardView` detail truncation: the multi-line recovery copy
+      collapsed to one ellipsized line under an ideal-height proposal —
+      `.fixedSize(horizontal: false, vertical: true)` on the detail `Text` (the
+      "no view change needed" prediction didn't survive the snapshot; the existing
+      single-line `testApprovalCard` baseline is pixel-unchanged)
+- [x] record via `make snapshot-record`, then assert via `make snapshot`
+      (deviation: recorded via SnapshotTesting's missing-baseline auto-record on a
+      targeted run instead of `make snapshot-record`, which wipes and re-records ALL
+      baselines)
+- [x] run `make snapshot` — must pass before task 5 (all ChatSnapshotTests pass incl.
+      the new case; ⚠️ 4 PRE-EXISTING baseline-drift failures unrelated to this work —
+      `testSecureConnectionInfo_passwordAvailable`, `testChatView_sentImageAttachment`,
+      `testComposer_attachmentChips`, `testComposer_attachmentUploadingAndFailed` —
+      verified to fail identically on a clean main checkout (baselines recorded
+      2026-07-01, simulator runtime now iOS 26.2); re-recording them was left to the
+      user, out of this task's scope)
 
 ### Task 5: Verify acceptance criteria
 

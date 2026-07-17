@@ -19,6 +19,9 @@ struct ApprovalCardView: View {
         Text(detail)
           .font(.footnote)
           .foregroundStyle(.secondary)
+          // Wrap instead of truncating — the recovered-approval card (#30 workaround)
+          // carries a multi-line detail and no command, so the copy must stay readable.
+          .fixedSize(horizontal: false, vertical: true)
           .frame(maxWidth: .infinity, alignment: .leading)
       }
 

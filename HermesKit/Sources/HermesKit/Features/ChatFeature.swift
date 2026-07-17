@@ -48,6 +48,16 @@ public struct ChatFeature {
     /// A blocking request from the agent (approval/clarify/secret). While set, the
     /// composer is disabled and a card is the focal point.
     public var pendingInteraction: PendingInteraction?
+    /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
+    /// #30: an `approval.request` that fired while the socket was down is gone — the
+    /// server does not re-surface pending approvals on `session.resume`). Set by
+    /// `AppFeature` when an approval-typed push tap puts this session's chat on screen;
+    /// consumed (reset to `false`) by the next hydrate, which synthesizes a generic
+    /// command-less approval card when the turn is still `running` and no real blocking
+    /// request arrived over the socket. Transient: deliberately NOT persisted in
+    /// `ChatSnapshotClient` (a snapshot repaint must never resurrect a card), and cleared
+    /// by a real `.approvalRequest` (the real event wins — no later re-synthesis).
+    public var expectsPendingApproval: Bool
     /// The tool/skill row whose detail sheet is open, if any (Task 4).
     public var presentedTool: ChatRow?
     /// Current model + reasoning effort (from `session.info`), shown in the composer chip.
@@ -178,6 +188,7 @@ public struct ChatFeature {
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
       self.pendingInteraction = nil
+      self.expectsPendingApproval = false
       self.presentedTool = nil
       self.model = nil
       self.reasoningEffort = nil
@@ -1305,7 +1316,10 @@ public struct ChatFeature {
     case let .approvalRequest(request):
       // Nice-to-have skipped: the thinking timer keeps running while a blocking card is the
       // focus rather than pausing — simpler reducer, and wall-clock still reflects the turn.
+      // The real event overwrites any push-tap-synthesized card unconditionally and clears
+      // the recovery hint so a later hydrate can't re-synthesize (#30 workaround).
       state.pendingInteraction = .approval(request)
+      state.expectsPendingApproval = false
       return .none
 
     case let .clarifyRequest(request):
@@ -1546,6 +1560,21 @@ public struct ChatFeature {
   /// (server wins — no merge/dedup), then seed the in-flight turn. When `inflight.streaming`
   /// is set we seed an assistant streaming row eagerly and point `streamingRowID` at it so
   /// the next `message.delta` appends to it instead of lazily creating a duplicate.
+  /// The synthetic approval request the push-tap recovery path synthesizes (#30
+  /// workaround): the real `approval.request` fired while the socket was down and its
+  /// payload is unrecoverable (the push deliberately carries no content per the
+  /// generic-body privacy rule), so the recovered card is command-less with honest copy.
+  /// `ApprovalCardView` already renders a `command == nil` request (detail-only card);
+  /// no `isSynthesized` marker exists anywhere — the card is distinguished only by its
+  /// content, and `approval.respond` works identically (approvals have no `request_id`).
+  public static func recoveredApprovalRequest() -> ApprovalRequest {
+    ApprovalRequest(
+      command: nil,
+      detail: "The agent is waiting for approval of a command, but the details couldn't "
+        + "be recovered after reconnecting. Approve only if you know what it's doing."
+    )
+  }
+
   private func applyActivate(_ response: ActivateResponse, into state: inout State) -> Effect<Action> {
     state.liveSessionID = response.sessionID
     state.storedSessionID = response.storedSessionID ?? state.storedSessionID
@@ -1569,6 +1598,20 @@ public struct ChatFeature {
     // Working indicator from the authoritative `running` flag.
     let running = response.running ?? false
     state.isSending = running
+
+    // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
+    // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
+    // the single synthesis point. Synthesize the generic card only when the authoritative
+    // `running` says the agent is still blocked AND the socket didn't already deliver a
+    // real blocking request. Not running → the approval resolved/denied/timed out while
+    // we were detached → drop silently (no phantom card). Consuming the hint first means
+    // a double hydrate of the same running turn can't synthesize twice.
+    if state.expectsPendingApproval {
+      state.expectsPendingApproval = false
+      if running, state.pendingInteraction == nil {
+        state.pendingInteraction = .approval(Self.recoveredApprovalRequest())
+      }
+    }
 
     // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the
     // client's own live thinking + tool rows are not in the server payload (`SessionInflight`

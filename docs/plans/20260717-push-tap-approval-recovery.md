@@ -176,21 +176,23 @@ Three pieces, all in HermesKit (views untouched):
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] add `expectsPendingApproval: Bool` to `ChatFeature.State` (default `false`,
+- [x] add `expectsPendingApproval: Bool` to `ChatFeature.State` (default `false`,
       documented as the push-tap approval-recovery hint, #30 workaround)
-- [ ] add a `static func recoveredApprovalRequest() -> ApprovalRequest` (or a
+- [x] add a `static func recoveredApprovalRequest() -> ApprovalRequest` (or a
       constant) carrying the `command: nil` + recovery-copy `detail`
-- [ ] in `applyHydration`, after `running` is computed: consume the hint
+- [x] in `applyHydration`, after `running` is computed: consume the hint
       (`expectsPendingApproval = false`); when it was set AND `running` AND
       `pendingInteraction == nil`, set `pendingInteraction = .approval(recovered…)`
-- [ ] in `.approvalRequest`, also clear `expectsPendingApproval` (real event wins,
+      (the hydrate-apply function is named `applyActivate` in the codebase)
+- [x] in `.approvalRequest`, also clear `expectsPendingApproval` (real event wins,
       no later re-synthesis)
-- [ ] write TestStore tests: hint + running + no interaction → synthetic card set,
+- [x] write TestStore tests: hint + running + no interaction → synthetic card set,
       hint consumed
-- [ ] write TestStore tests (negative): hint + not-running → no card; hint +
+- [x] write TestStore tests (negative): hint + not-running → no card; hint +
       interaction already present → untouched; no hint → no card; real
       `.approvalRequest` after synthesis overwrites and clears the hint
-- [ ] run `swift test --package-path HermesKit` — must pass before task 2
+      (plus: double hydrate after respond → no re-synthesis)
+- [x] run `swift test --package-path HermesKit` — must pass before task 2 (707 pass)
 
 ### Task 2: Parse the `approval.respond` resolved count and surface the outcome
 

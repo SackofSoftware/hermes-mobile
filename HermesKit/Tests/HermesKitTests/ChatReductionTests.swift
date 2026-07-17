@@ -1582,4 +1582,135 @@ struct ChatReductionTests {
     #expect(methods.value == ["image.attach_bytes"]) // aborted before prompt.submit
     #expect(store.state.composerText == "hi") // input preserved
   }
+
+  // MARK: Push-tap approval recovery (#30 workaround)
+
+  /// A minimal activate response for the recovery tests: no messages/inflight, usage
+  /// present (so `applyActivate` skips the on-demand usage fetch) and the given `running`.
+  private func activateResponse(running: Bool) -> ActivateResponse {
+    ActivateResponse(
+      sessionID: "live123",
+      storedSessionID: "stored123",
+      messages: [],
+      info: SessionInfo(
+        model: "claude-opus-4-8",
+        usage: Usage(contextUsed: 1, contextMax: 200_000, contextPercent: 0)
+      ),
+      running: running
+    )
+  }
+
+  /// A TestStore over a chat whose hydrate is driven by direct `.activateResult` sends —
+  /// the same reduction path (`applyActivate`) all open/foreground/reattach routes funnel
+  /// through. Non-exhaustive: these tests assert the interaction/hint state, not the
+  /// timer/persist bookkeeping already covered by `HydrateTests`.
+  private func recoveryStore(_ initial: ChatFeature.State) -> TestStoreOf<ChatFeature> {
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      // Only `approval.respond` is sent here (hydrates are driven by direct
+      // `.activateResult` sends); the resolved count is ignored until Task 2.
+      $0.hermesGateway.send = { @Sendable _, _ in .object(["resolved": .number(1)]) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+    return store
+  }
+
+  @Test func hydrateWithHintOnRunningTurnSynthesizesRecoveredCard() async {
+    // The approval push fired while the socket was down; the tap set the hint. Hydrate
+    // reports the turn still running and no real request arrived → the generic
+    // command-less card is synthesized and the one-shot hint is consumed.
+    var initial = ChatFeature.State(connection: conn)
+    initial.expectsPendingApproval = true
+    let store = recoveryStore(initial)
+
+    await store.send(.activateResult(.success(activateResponse(running: true))))
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest()))
+    #expect(store.state.expectsPendingApproval == false)
+    // The synthetic card is command-less by design (the push carries no content).
+    if case let .approval(request) = store.state.pendingInteraction {
+      #expect(request.command == nil)
+      #expect(request.detail?.isEmpty == false)
+    }
+
+    // Double hydrate of the same running turn: the hint was consumed on the first pass,
+    // so after the user answers the card a re-hydrate must NOT re-synthesize it.
+    await store.send(.respondToApproval(approve: true, all: false))
+    #expect(store.state.pendingInteraction == nil)
+    await store.send(.activateResult(.success(activateResponse(running: true))))
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
+
+  @Test func hydrateWithHintOnStoppedTurnSynthesizesNothing() async {
+    // The approval resolved / timed out / the turn finished while we were detached:
+    // `running == false` → no phantom card, hint still consumed.
+    var initial = ChatFeature.State(connection: conn)
+    initial.expectsPendingApproval = true
+    let store = recoveryStore(initial)
+
+    await store.send(.activateResult(.success(activateResponse(running: false))))
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
+
+  @Test func hydrateWithHintLeavesRealInteractionUntouched() async {
+    // The socket already delivered a real blocking request before the hydrate landed —
+    // the hint must not clobber it with the generic card (it is consumed silently).
+    let real = ApprovalRequest(command: "rm -rf /tmp/x", detail: "Removes files", patternKey: "rm")
+    var initial = ChatFeature.State(connection: conn)
+    initial.expectsPendingApproval = true
+    initial.pendingInteraction = .approval(real)
+    let store = recoveryStore(initial)
+
+    await store.send(.activateResult(.success(activateResponse(running: true))))
+    #expect(store.state.pendingInteraction == .approval(real))
+    #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
+
+  @Test func hydrateWithoutHintSynthesizesNothing() async {
+    // Zero behavior change for sessions never touched by an approval push: a plain
+    // hydrate of a running turn sets no card.
+    let store = recoveryStore(ChatFeature.State(connection: conn))
+
+    await store.send(.activateResult(.success(activateResponse(running: true))))
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
+
+  @Test func realApprovalRequestOverwritesSyntheticCardAndClearsHint() async {
+    // hermes-agent #30 composes with this workaround: when the real event does arrive
+    // (e.g. the agent learns to re-surface pending approvals), it overwrites the
+    // synthetic card unconditionally AND clears the hint so a later hydrate of the
+    // still-running turn cannot re-synthesize over the real details.
+    var initial = ChatFeature.State(connection: conn)
+    initial.pendingInteraction = .approval(ChatFeature.recoveredApprovalRequest())
+    initial.expectsPendingApproval = true // a second tap re-armed the hint meanwhile
+    let real = ApprovalRequest(command: "sudo reboot", detail: "Reboots the host", patternKey: "sudo")
+    let store = recoveryStore(initial)
+
+    await store.send(.gatewayEvent(.approvalRequest(real))) {
+      $0.pendingInteraction = .approval(real)
+      $0.expectsPendingApproval = false
+    }
+
+    // A follow-up hydrate of the same running turn: the real card stands (no re-synthesis).
+    await store.send(.activateResult(.success(activateResponse(running: true))))
+    #expect(store.state.pendingInteraction == .approval(real))
+    #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
 }

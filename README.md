@@ -24,11 +24,11 @@ keeps running on your machine; the phone is a window into it — so you can step
 from your desk and still keep your agent moving.
 
 - **Connect once.** Enter your server URL and sign in the way your agent is configured:
-  a static token (loopback/`--insecure`), or a username and password when the server
-  runs gated auth. The app detects which methods the server offers and shows the right
-  fields. Credentials live in the iOS Keychain and the app auto-logs-in on launch; if a
-  gated session expires while you're using it, a quick re-auth prompt gets you back in
-  without losing your place.
+  a username and password when the server runs gated auth (the recommended setup), or a
+  static token (loopback/`--insecure`). The app detects which methods the server offers
+  and shows the right fields. Credentials live in the iOS Keychain and the app
+  auto-logs-in on launch; if a gated session expires while you're using it, a quick
+  re-auth prompt gets you back in without losing your place.
 - **Find any session.** Browse sessions grouped by workspace, search across all of
   them, pin the ones you care about, rename or archive them, and resume or start a
   new one.
@@ -73,16 +73,36 @@ from your desk and still keep your agent moving.
 You'll need macOS with **Xcode 26+**, **Tuist** (`brew install tuist`), and a running
 Hermes Agent reachable from your Mac.
 
-**1. Expose Hermes to your network.** On the Hermes machine, bind to all interfaces
-and set a stable token. The trust boundary is your private network (e.g. Tailscale):
+**1. Expose Hermes to your network.** On the Hermes machine, run this in a terminal to
+add your credentials to `~/.hermes/.env` — edit the username and password first (most
+special characters are fine in the password — but the agent's .env parser treats a few
+specially: avoid `${…}`, quotes around the whole value, and `#` after a space; the secret
+is generated for you and keeps you signed in across agent restarts; running the `echo`
+line in a shell matters — Hermes reads `.env` without shell expansion, so a pasted
+`$(openssl …)` would become a literal secret):
 
 ```sh
-hermes ... --host 0.0.0.0 --insecure
-export HERMES_DASHBOARD_SESSION_TOKEN=<your-stable-secret>
+cat >> ~/.hermes/.env <<'EOF'
+HERMES_DASHBOARD_BASIC_AUTH_USERNAME=you
+HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=…
+EOF
+echo "HERMES_DASHBOARD_BASIC_AUTH_SECRET=$(openssl rand -base64 32)" >> ~/.hermes/.env
 ```
 
-> ⚠️ `--insecure` exposes the dashboard with only token auth — do this **only** behind
-> a private VPN like Tailscale, never on the open internet.
+Then launch the dashboard so other devices can reach it — password login switches on
+automatically as soon as the dashboard is reachable beyond the machine itself
+(a non-loopback bind without `--insecure`):
+
+```sh
+hermes dashboard --host 0.0.0.0 --port 9119 --no-open
+```
+
+> ⚠️ Password login is meant for trusted networks and VPNs only. The trust boundary is
+> your private network (e.g. Tailscale) — never port-forward the dashboard to the open
+> internet.
+
+The app's built-in **Set Up Your Agent** guide (on the sign-in screen) walks you
+through this same recipe with copyable commands.
 
 **2. Build and run the app:**
 
@@ -91,9 +111,33 @@ make run        # builds and launches on a simulator — no signing needed
 ```
 
 **3. Connect.** Open the app and enter your server URL (e.g.
-`http://<tailnet-host>:9119`). If your agent runs with `--insecure` (above), pick
-**Token** and paste the secret from step 1. If it runs gated auth, pick **Password** and
-enter your username and password. That's it — you're in.
+`http://<tailnet-host>:9119`), pick **Password**, and sign in with the username and
+password from step 1. That's it — you're in.
+
+<details>
+<summary><strong>Last resort: token mode</strong> (fully trusted networks only)</summary>
+
+A session token is a master key to your agent: anyone holding it can act as you —
+indefinitely. Only on a network where every device is one you've explicitly added,
+you can skip the password gate by binding with auth disabled and a stable token —
+generate and export the token first (the dashboard reads it once at launch; the
+`echo` prints the token so you can paste it into the app), then launch:
+
+```sh
+export HERMES_DASHBOARD_SESSION_TOKEN=$(openssl rand -hex 32)
+echo "$HERMES_DASHBOARD_SESSION_TOKEN"
+hermes dashboard --host 0.0.0.0 --insecure
+```
+
+Then pick **Token** in the app and paste the printed token. Recent Hermes releases
+ignore `--insecure` and always require a login beyond the machine itself — if the
+dashboard refuses to start or still asks you to sign in, use the password setup above.
+Never expose `--insecure` to the public internet.
+
+</details>
+
+For the full web-dashboard reference (hashed passwords, more auth providers), see the
+[Hermes dashboard docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard).
 
 To run on a physical device, see [`docs/development.md`](docs/development.md).
 

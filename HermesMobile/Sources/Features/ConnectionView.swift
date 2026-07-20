@@ -7,9 +7,22 @@ import SwiftUI
 struct ConnectionView: View {
   @Bindable var store: StoreOf<ConnectionFeature>
   @FocusState private var urlFocused: Bool
+  /// Presents the "Set Up Your Agent" guide sheet. Pure view state (display-only) —
+  /// deliberately kept out of `ConnectionFeature`, matching the context-pill precedent.
+  @State private var showsSetupGuide = false
 
   var body: some View {
     Form {
+      // Entry point (a): unmissable top row for first-timers — this screen's beta job is
+      // half "log in", half "teach setup".
+      Section {
+        Button {
+          showsSetupGuide = true
+        } label: {
+          Label("How to prepare your Hermes agent", systemImage: "info.circle")
+        }
+      }
+
       Section {
         TextField("http://host:9119", text: $store.serverURL)
           .keyboardType(.URL)
@@ -63,10 +76,13 @@ struct ConnectionView: View {
     // Auto-validate a pre-filled server URL (after logout / a failed launch auto-connect)
     // so the user doesn't have to focus the field to unlock sign-in (#38).
     .onAppear { store.send(.onAppear) }
+    .sheet(isPresented: $showsSetupGuide) {
+      AgentSetupGuideView()
+    }
   }
 
   /// Always-visible honesty note under the token field: what a token grants, where it's
-  /// safe, and a push to the details screen. Static copy + one nav link (no logic).
+  /// safe, and a button opening the setup guide sheet. Static copy + one button.
   @ViewBuilder
   private var tokenDisclaimer: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -78,12 +94,14 @@ struct ConnectionView: View {
       }
       .font(.footnote)
 
-      NavigationLink {
-        SecureConnectionInfoView(passwordAvailable: store.isPasswordEnabled)
+      // Entry point (c): opens the same guide sheet the top row does.
+      Button {
+        showsSetupGuide = true
       } label: {
         Text("Learn how to connect securely")
           .font(.footnote)
       }
+      .buttonStyle(.borderless)
     }
     .padding(.vertical, 2)
   }
@@ -115,11 +133,17 @@ struct ConnectionView: View {
       Label("Enter a valid server URL.", systemImage: "exclamationmark.triangle")
         .foregroundStyle(.red)
     case .unreachable:
-      Label("Couldn’t reach the server.", systemImage: "xmark.octagon")
-        .foregroundStyle(.red)
+      VStack(alignment: .leading, spacing: 6) {
+        Label("Couldn’t reach the server.", systemImage: "xmark.octagon")
+          .foregroundStyle(.red)
+        setupHelpLink
+      }
     case .notHermes:
-      Label("Reachable, but doesn’t look like Hermes.", systemImage: "questionmark.diamond")
-        .foregroundStyle(.orange)
+      VStack(alignment: .leading, spacing: 6) {
+        Label("Reachable, but doesn’t look like Hermes.", systemImage: "questionmark.diamond")
+          .foregroundStyle(.orange)
+        setupHelpLink
+      }
     case let .reachable(version):
       Label("Reachable — Hermes \(version ?? "?")", systemImage: "checkmark.circle")
         .foregroundStyle(.green)
@@ -135,6 +159,17 @@ struct ConnectionView: View {
       Label(message, systemImage: "exclamationmark.triangle")
         .foregroundStyle(.red)
     }
+  }
+
+  /// Entry point (b): contextual help for the stuck moment — only shown when the server
+  /// can't be reached or doesn't look like Hermes (auth failures mean the user is past
+  /// setup, so those statuses don't get it).
+  private var setupHelpLink: some View {
+    Button("Need help setting up your agent?") {
+      showsSetupGuide = true
+    }
+    .buttonStyle(.borderless)
+    .font(.footnote)
   }
 }
 

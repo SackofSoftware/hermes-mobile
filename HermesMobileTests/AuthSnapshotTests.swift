@@ -7,20 +7,20 @@ import XCTest
 @testable import HermesMobile
 
 /// Snapshot coverage for the capability-aware auth screen (Password / Token segments,
-/// token disclaimer, the "How to connect securely" details screen, capability-disabled
-/// segment states) and the re-auth sheet (password vs token variants). Mirrors the host /
-/// setup pattern in `ConnectionSnapshotTests` / `AddProfileSnapshotTests`: dark traits,
-/// `deviceImage()` whole-screen render. Views wrap in a `NavigationStack` so the token
-/// disclaimer's `NavigationLink` (and the re-auth sheet's own `NavigationStack`) compose.
+/// token disclaimer, the "Set Up Your Agent" guide sheet, capability-disabled segment
+/// states) and the re-auth sheet (password vs token variants). Mirrors the host / setup
+/// pattern in `ConnectionSnapshotTests` / `AddProfileSnapshotTests`: dark traits,
+/// `deviceImage()` whole-screen render. Views wrap in a `NavigationStack` (the re-auth
+/// sheet and the guide bring their own).
 final class AuthSnapshotTests: SnapshotTestCase {
   /// A tall fixed-size whole-screen render (device width, extra-tall height) so a long
   /// scrolling `Form` is captured in full rather than clipped at the device fold. Same dark
   /// traits + key-window compositing as `deviceImage()`.
-  private func tallImage<V: SwiftUI.View>() -> Snapshotting<V, UIImage> {
+  private func tallImage<V: SwiftUI.View>(height: CGFloat = 1400) -> Snapshotting<V, UIImage> {
     .image(
       drawHierarchyInKeyWindow: true,
       perceptualPrecision: 0.98,
-      layout: .fixed(width: device.size!.width, height: 1400),
+      layout: .fixed(width: device.size!.width, height: height),
       traits: UITraitCollection(userInterfaceStyle: .dark)
     )
   }
@@ -69,7 +69,7 @@ final class AuthSnapshotTests: SnapshotTestCase {
     )
   }
 
-  // MARK: - Token disclaimer + details screen
+  // MARK: - Token disclaimer
 
   /// The token disclaimer in context on a token-only server: the inline honesty note and
   /// the "This server only supports token sign-in." hint footer.
@@ -88,25 +88,28 @@ final class AuthSnapshotTests: SnapshotTestCase {
     )
   }
 
-  /// "How to connect securely" details screen — password NOT available (token-only):
-  /// the WHY/HOW copy + Tailscale link, no password nudge section. Rendered into a tall,
-  /// fixed canvas (wider/taller than the device fold) so the *whole* scrollable form is
-  /// captured — the password-nudge section that distinguishes the two variants lives at the
-  /// very bottom and would otherwise fall below the device fold.
-  func testSecureConnectionInfo_passwordUnavailable() {
+  // MARK: - Agent setup guide sheet
+
+  /// The "Set Up Your Agent" guide sheet in its default state: hero + the four numbered
+  /// password-first setup cards, the Tailscale link row, the no-port-forward warning, the
+  /// COLLAPSED "Advanced: token mode" disclosure, and the docs footer link. Tall fixed
+  /// canvas so the whole scrollable stack is captured.
+  func testAgentSetupGuide_collapsed() {
     assertSnapshot(
-      of: NavigationStack { SecureConnectionInfoView(passwordAvailable: false) },
-      as: tallImage()
+      of: AgentSetupGuideView(),
+      as: tallImage(height: 2050)
     )
   }
 
-  /// "How to connect securely" details screen — password available: adds the nudge-back
-  /// section recommending Password sign-in (the bottom-most section). Tall render so that
-  /// section is visible and the baseline differs from the token-only variant.
-  func testSecureConnectionInfo_passwordAvailable() {
+  /// Same guide with the "Advanced: token mode" disclosure expanded (seeded via the init
+  /// flag): master-key warning, `--insecure` + token-export command cards, trust-boundary
+  /// note. Extra-tall canvas so the expanded section fits below the main recipe.
+  func testAgentSetupGuide_advancedExpanded() {
     assertSnapshot(
-      of: NavigationStack { SecureConnectionInfoView(passwordAvailable: true) },
-      as: tallImage()
+      of: AgentSetupGuideView(advancedExpanded: true),
+      // 2700pt is the practical ceiling: at @3x that is 8100px, just under the 8192px
+      // Metal texture limit — 2800pt recorded a blank image.
+      as: tallImage(height: 2700)
     )
   }
 

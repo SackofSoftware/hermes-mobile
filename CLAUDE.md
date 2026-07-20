@@ -93,6 +93,12 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   normalized-username compare: same user → dismiss + reconnect; different user → pop to list +
   reload + clear identity-scoped prefs; Quit → full logout → onboarding. Foreground reconnect
   shares the same `connect` (re-mints the ticket) — see #18 (state-sync).
+- **The login screen's single connection-help surface is the `AgentSetupGuideView` sheet**
+  (password-first setup recipe; `--insecure` + token demoted to a collapsed "Advanced"
+  disclosure). Three entry points — top form row, `.unreachable`/`.notHermes` failure
+  footer, token-disclaimer link — all toggle one local `@State` (presentation stays out
+  of the reducer). It **replaced** the token-first `SecureConnectionInfoView`; keep the
+  README quick-start and the sheet's commands verbatim-identical.
 - **Session re-hydration is server-authoritative** via one unified `hydrate(sessionID)`
   (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.resume`
   (NOT `session.activate` — that is live-only and 404s any stored session opened from the list;

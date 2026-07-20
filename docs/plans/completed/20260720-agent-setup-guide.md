@@ -128,6 +128,17 @@ Content (in order):
 7. **Footer link** — "Full setup guide" →
    `https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard`.
 
+> **Superseded in review** (items 2 and 6 above are the original sketch, kept for
+> history): the shipped `.env` recipe is a quoted-heredoc append for
+> `USERNAME`/`PASSWORD` plus a separate shell `echo` line for the `SECRET` —
+> `$(openssl …)` does **not** expand inside `.env` (Hermes parses it without a
+> shell), so the secret must be generated in-shell; and the shipped token card
+> puts `export HERMES_DASHBOARD_SESSION_TOKEN=$(openssl rand -hex 32)` +
+> `echo "$HERMES_DASHBOARD_SESSION_TOKEN"` **before** the `--insecure` launch
+> (the dashboard reads the token once at startup), with no literal `…`
+> placeholder. See the review iterations in the progress log; the in-app view
+> and README carry the final, verbatim-identical commands.
+
 **Entry points** (all set the same `@State private var showsSetupGuide` in
 `ConnectionView`; **no toolbar button** — deliberate, decided in brainstorm):
 
@@ -170,23 +181,30 @@ Content (in order):
 - Create: `HermesMobile/Sources/Features/AgentSetupGuideView.swift`
 - Modify: `HermesMobileTests/AuthSnapshotTests.swift`
 
-- [ ] Create `AgentSetupGuideView.swift`: `NavigationStack` + `ScrollView` card
+- [x] Create `AgentSetupGuideView.swift`: `NavigationStack` + `ScrollView` card
       stack, inline title "Set Up Your Agent", Close toolbar button; move the
       building blocks (`card`, `calloutCard`, `cardHeader`, `stepRow`,
       `CommandCard`) over from `SecureConnectionInfoView` (file-private in the new
       file; the old file is deleted in Task 2)
-- [ ] Implement content sections 1–5 (hero, login env-vars card, dashboard
+- [x] Implement content sections 1–5 (hero, login env-vars card, dashboard
       command card, Tailscale/LAN/no-port-forward cards, verify-with-curl card)
       exactly per Solution Overview copy
-- [ ] Implement section 6 (collapsed `DisclosureGroup` "Advanced: token mode"
+- [x] Implement section 6 (collapsed `DisclosureGroup` "Advanced: token mode"
       with the reframed last-resort copy + two command cards) and section 7
       (external "Full setup guide" `Link`)
-- [ ] Add `#Preview`; run `tuist generate` so the app target picks up the file;
+- [x] Add `#Preview`; run `tuist generate` so the app target picks up the file;
       build the app target to confirm it compiles
-- [ ] Write snapshot test(s) for `AgentSetupGuideView` in
+- [x] Write snapshot test(s) for `AgentSetupGuideView` in
       `AuthSnapshotTests.swift` (collapsed; expanded variant only if reachable
-      without adding API); record via `make snapshot-record`
-- [ ] Run `make snapshot` — must pass before Task 2
+      without adding API — `init(advancedExpanded:)` seeds the `@State`); recorded
+      targeted (only the two new tests) rather than `make snapshot-record`, which
+      wipes and re-records every baseline
+- [x] Run `make snapshot` — must pass before Task 2
+- ➕ ⚠️ [x] Three attachment snapshots (`testChatView_sentImageAttachment`,
+      `testComposer_attachmentChips`, `testComposer_attachmentUploadingAndFailed`)
+      were failing on clean `main` too (simulator-runtime drift, unrelated to this
+      work) — re-recorded them on the canonical iPhone 17 Pro / iOS 26.2 simulator
+      so the suite gate is meaningful for the remaining tasks
 
 ### Task 2: Wire entry points in `ConnectionView`, delete `SecureConnectionInfoView`
 
@@ -196,57 +214,58 @@ Content (in order):
 - Modify: `HermesMobileTests/AuthSnapshotTests.swift`
 - Modify: `HermesMobileTests/ConnectionSnapshotTests.swift`
 
-- [ ] Add `@State private var showsSetupGuide = false` +
+- [x] Add `@State private var showsSetupGuide = false` +
       `.sheet(isPresented:)` presenting `AgentSetupGuideView()` to `ConnectionView`
-- [ ] Add entry point (a): top form `Section` with the full-width
+- [x] Add entry point (a): top form `Section` with the full-width
       `Label("How to prepare your Hermes agent", systemImage: "info.circle")`
       button row, above the Server section
-- [ ] Add entry point (b): help `Button` ("Need help setting up your agent?")
+- [x] Add entry point (b): help `Button` ("Need help setting up your agent?")
       appended in `statusFooter` for `.unreachable` and `.notHermes` only
-- [ ] Convert entry point (c): token-disclaimer `NavigationLink` →
+- [x] Convert entry point (c): token-disclaimer `NavigationLink` →
       `Button("Learn how to connect securely")` toggling the same sheet; delete
       `SecureConnectionInfoView.swift`; run `tuist generate`; build
-- [ ] Update tests: delete the two `testSecureConnectionInfo_*` snapshot tests
+- [x] Update tests: delete the two `testSecureConnectionInfo_*` snapshot tests
       (+ their `__Snapshots__` PNGs); add an `.unreachable` failure-footer
       variant to `ConnectionSnapshotTests`; re-record changed `ConnectionView`
-      snapshots (`make snapshot-record`)
-- [ ] Run `make snapshot` and `make test` — must pass before Task 3
+      snapshots (targeted — deleted the 8 affected baselines and re-ran only
+      those tests, not the baseline-wiping `make snapshot-record`)
+- [x] Run `make snapshot` and `make test` — must pass before Task 3
 
 ### Task 3: Reconcile README quick-start to password-first
 
 **Files:**
 - Modify: `README.md`
 
-- [ ] Rewrite Quick start step 1 to the password-first recipe: env vars in
+- [x] Rewrite Quick start step 1 to the password-first recipe: env vars in
       `~/.hermes/.env` (`USERNAME` / `PASSWORD` / `SECRET`), then
       `hermes dashboard --host 0.0.0.0 --port 9119 --no-open`, noting the auth
       gate engages automatically on a non-loopback bind
-- [ ] Rewrite step 3 (Connect) to lead with **Password**; demote
+- [x] Rewrite step 3 (Connect) to lead with **Password**; demote
       `--insecure` + `HERMES_DASHBOARD_SESSION_TOKEN` to a clearly-labeled
       last-resort aside for fully trusted networks (fixing the old
       `hermes ...` wording); keep the Tailscale trust-boundary warning
-- [ ] Add the full web-dashboard docs link
+- [x] Add the full web-dashboard docs link
       (`https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard`)
-- [ ] Proofread that README and in-app guide copy agree on commands verbatim
+- [x] Proofread that README and in-app guide copy agree on commands verbatim
       (docs change only — no code/tests; suite already green from Task 2)
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] Verify all Overview requirements: guide sheet with all 7 sections; three
+- [x] Verify all Overview requirements: guide sheet with all 7 sections; three
       entry points (top row, failure footer, token link) all opening it; no
       toolbar button; `SecureConnectionInfoView` gone; README password-first
-- [ ] Verify edge cases: footer link absent for `.idle` / auth-failure statuses;
+- [x] Verify edge cases: footer link absent for `.idle` / auth-failure statuses;
       copy buttons copy the exact commands; external links resolve
-- [ ] Run full suites: `make test` (HermesKit) and `make snapshot` — all green
-- [ ] Build the app (`make run` or equivalent) to confirm the generated project
+- [x] Run full suites: `make test` (HermesKit) and `make snapshot` — all green
+- [x] Build the app (`make run` or equivalent) to confirm the generated project
       compiles clean after the file add/delete
 
 ### Task 5: [Final] Update documentation
 
-- [ ] Update `CLAUDE.md` conventions if warranted (e.g. note the setup-guide
+- [x] Update `CLAUDE.md` conventions if warranted (e.g. note the setup-guide
       sheet as the single connection-help surface, replacing
       `SecureConnectionInfoView`)
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

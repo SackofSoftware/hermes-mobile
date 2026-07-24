@@ -103,11 +103,17 @@ public struct ChatFeature {
     /// (`attachLiveSessionID != nil`) holds only the create's row-less `session_key`, so
     /// a grandchild branched from it would stamp that never-materializing key as its
     /// parent (the slot replacement tears the never-prompted middle branch down for the
-    /// server to reap, so its row never lands) and render flat forever. No turn may be
-    /// streaming and no other branch RPC may be in flight. The view mirrors this; the
+    /// server to reap, so its row never lands) and render flat forever. A standing
+    /// `branchSeed` also blocks branching even when `attachLiveSessionID` has already
+    /// been nilled by an interrupted seed replay (socket blip mid-reap-recovery,
+    /// c35fd59): the seed keeps `storedSessionID` pointing at the OLD, now-dead session
+    /// id for the several seconds until the replay's fresh `session.create` lands, so a
+    /// branch stamped from it during that window would dangle the same way. No turn may
+    /// be streaming and no other branch RPC may be in flight. The view mirrors this; the
     /// reducer re-guards it.
     public var canBranch: Bool {
-      storedSessionID != nil && attachLiveSessionID == nil && !isSending && !isBranching
+      storedSessionID != nil && attachLiveSessionID == nil && branchSeed == nil
+        && !isSending && !isBranching
     }
 
     /// A branch's client-held reconstruction seed (#34): the assistant text seeded into
@@ -1115,9 +1121,15 @@ public struct ChatFeature {
         // UNPERSISTED branch (`attachLiveSessionID != nil`) holds only the row-less
         // `session_key`; branching from it would dangle the grandchild's parent link
         // forever (the slot replacement tears the never-prompted middle branch down for
-        // the server to reap, so its row never lands). The view disables the button via
-        // `canBranch`; a race still gets honest feedback, not a silent no-op.
-        guard let parentID = state.storedSessionID, state.attachLiveSessionID == nil else {
+        // the server to reap, so its row never lands). A standing `branchSeed` is the
+        // same hazard even once `attachLiveSessionID` has been nilled by an interrupted
+        // reap-recovery replay — `storedSessionID` still points at the dead pre-reap
+        // session for several seconds until the replay's fresh create lands. The view
+        // disables the button via `canBranch`; a race still gets honest feedback, not a
+        // silent no-op.
+        guard let parentID = state.storedSessionID, state.attachLiveSessionID == nil,
+              state.branchSeed == nil
+        else {
           state.errorBanner = "This chat can’t be branched yet."
           return .none
         }

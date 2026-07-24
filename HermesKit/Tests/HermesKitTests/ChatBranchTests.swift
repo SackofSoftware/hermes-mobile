@@ -699,6 +699,9 @@ struct ChatBranchTests {
     var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
     initial.attachLiveSessionID = "branch-live"
     initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    initial.transcript = [
+      ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "seeded answer", isComplete: true))
+    ]
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -721,6 +724,18 @@ struct ChatBranchTests {
     #expect(calls.value == ["session.create"])
     #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
     #expect(store.state.errorBanner == nil)
+    // `attachLiveSessionID` is nil and `storedSessionID` is still standing (from the
+    // OLD, now-dead pre-reap session) throughout this window — a standing `branchSeed`
+    // must still block branching, or a grandchild would stamp the dead id as its parent
+    // and dangle forever once the replay's fresh `session.create` lands (the finding
+    // this test guards against).
+    #expect(store.state.storedSessionID == "branch-stored")
+    #expect(store.state.canBranch == false)
+    await store.send(.branchFromMessage(id: uuid(0))) {
+      $0.errorBanner = "This chat can’t be branched yet."
+    }
+    // The guard fired before any RPC — no stray branch create chased the dead socket.
+    #expect(calls.value == ["session.create"])
   }
 
   /// The full interrupted-replay sequence: replay create dies with the socket, the

@@ -194,25 +194,43 @@ public struct ChatFeature {
     /// create. A replay interrupted by transport (disconnect/timeout — no server
     /// verdict) REFUNDS the budget so the post-reconnect hydrate can replay again.
     var hasReplayedBranchSeed: Bool
-    /// One-shot guard (review finding 1): before ever discarding a branch's real history
-    /// via a bare seed replay, try `session.resume` ONCE against the branch's PERSISTED
-    /// `storedSessionID` (server calls it `session_key`) — NOT the live `attachLiveSessionID`
-    /// `session.activate` just answered "not found" for. The server persists the DB row
-    /// in `prompt.submit` (`_ensure_session_db_row` + `_persist_branch_seed`) BEFORE
-    /// `message.start` reaches the client, and the row's primary key is `session_key`
-    /// (`session.create`'s `stored_session_id`) — a DIFFERENT value from the live runtime
-    /// `session_id` `attachLiveSessionID` holds (review iteration 2 finding a: probing by
-    /// the live id always 404s even when the row exists, defeating this guard entirely).
-    /// `session.activate` is live-only (no DB fallback) and 404s regardless;
-    /// `session.resume` DOES fall back to the DB by `session_key`, so it recovers the
-    /// persisted branch without losing the real turn. Only a not-found from the PROBE
-    /// proves the branch is truly unpersisted. Reset alongside `hasReplayedBranchSeed`
-    /// (`applyActivate`, `message.start`, a re-armed replay success) AND refunded on a
-    /// transient/cancelled probe failure (`.disconnected`/`.notConnected`/`.timedOut` —
-    /// review iteration 2 finding b: spending the budget on a transient failure let a
-    /// later not-found skip the probe and replay the seed over a persisted turn) — only a
-    /// genuine server rejection keeps the budget permanently spent.
-    var hasProbedBranchResume: Bool
+    /// STRUCTURAL INVARIANT (2026-07-24 review, replacing a one-shot `hasProbedBranchResume`
+    /// spend/refund flag): before ever discarding a branch's real history via a bare seed
+    /// replay, `.activateResult(.failure)` probes `session.resume` against the branch's
+    /// PERSISTED `storedSessionID` (server calls it `session_key`) — NOT the live
+    /// `attachLiveSessionID` `session.activate` just answered "not found" for. The server
+    /// persists the DB row in `prompt.submit` (`_ensure_session_db_row` +
+    /// `_persist_branch_seed`) BEFORE `message.start` reaches the client, under
+    /// `session_key` (`session.create`'s `stored_session_id`) — a DIFFERENT value from the
+    /// live runtime `session_id` `attachLiveSessionID` holds (probing by the live id always
+    /// 404s even when the row exists). `session.activate` is live-only (no DB fallback) and
+    /// 404s regardless; `session.resume` DOES fall back to the DB by `session_key`, so it
+    /// recovers the persisted branch without losing the real turn.
+    ///
+    /// There is deliberately NO budget field here anymore: the probe is a read-only
+    /// `session.resume`, safe to re-issue on EVERY not-found as long as this hydrate
+    /// hasn't already replayed the seed (`!hasReplayedBranchSeed` alone gates it). The old
+    /// `hasProbedBranchResume` flag was spent BEFORE the probe effect fired and only
+    /// refunded from inside `.branchResumeProbeResult(.failure)` — so a cancelled probe
+    /// (superseded by `.foreground`/`.reattached`/`.teardownSocketOnly`, all sharing
+    /// `CancelID.hydrate`; TCA drops a cancelled task's trailing `send`) or a non-not-found
+    /// server rejection (session cap, internal error, malformed payload) left the budget
+    /// permanently spent with no result ever landing to refund it — silently arming a LATER
+    /// not-found to skip the probe and replay the bare seed over what could be a persisted
+    /// turn. Removing the budget removes the bug class: ONLY a genuine not-found returned
+    /// BY THE PROBE ITSELF (`.branchResumeProbeResult(.failure)` falling through to
+    /// `handleActivateFailure`'s `error.isSessionNotFound` branch) is positive evidence the
+    /// row is absent and may replay the seed; every other probe outcome — cancelled,
+    /// `.disconnected`/`.notConnected`/`.timedOut`, or any other server error — re-arms
+    /// (status-only / self-redial) so the next `.ready`/`.foreground`/`.reattached` retries
+    /// the probe from scratch. A probe success is treated exactly like `message.start`
+    /// (clears `attachLiveSessionID`/`branchSeed`, hydrates wholesale via the normal path).
+    ///
+    /// The companion half of the fix lives in `canSend`: the stale `liveSessionID` a
+    /// hydrate just 404'd on is nilled the INSTANT the probe decision is made — before the
+    /// probe's result is even awaited — so a concurrent submit can't race this recovery
+    /// with its own independent self-heal `session.create` (two live sessions born from one
+    /// seed, the typed message landing in the untracked one).
     /// The PARENT side of a branch in flight: the seed stashed at `.branchFromMessage`
     /// and handed to `Delegate.branchCreated` on success (so the replacement chat can
     /// carry it as `branchSeed`). Distinct from `branchSeed`, which lives on the CHILD.
@@ -281,7 +299,6 @@ public struct ChatFeature {
       self.attachLiveSessionID = nil
       self.branchSeed = nil
       self.hasReplayedBranchSeed = false
-      self.hasProbedBranchResume = false
       self.pendingBranchSeed = nil
       self.streamingRowID = nil
       self.thinkingRowID = nil
@@ -354,6 +371,12 @@ public struct ChatFeature {
       let hasContent = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         || !attachments.isEmpty
       return hasContent
+        // `liveSessionID` is `nil` both before the first successful attach/hydrate AND
+        // for the whole duration of a branch reap-recovery probe/replay (2026-07-24
+        // review, finding 1) — `.activateResult(.failure)` nils it the instant a
+        // not-found starts the recovery, before the probe's result is even awaited, so a
+        // concurrent submit can't race the reducer's own recovery with an independent
+        // self-heal `session.create` (two live sessions born from one seed).
         && liveSessionID != nil
         && pendingInteraction == nil
         // The visible send button becomes the interrupt button mid-turn, but a hardware-
@@ -721,30 +744,30 @@ public struct ChatFeature {
         return applyActivate(response, into: &state)
 
       case let .activateResult(.failure(error)):
-        // Review finding 1: before ever assuming an unpersisted branch was never
-        // prompted, probe once. `session.activate` (attach-by-live-id) is live-only —
-        // no DB fallback — so its "not found" does NOT prove the branch has no
+        // Structural fix (2026-07-24 review) — see the `hasReplayedBranchSeed`/probe doc
+        // comment on `State` for the full invariant. Before ever assuming an unpersisted
+        // branch was never prompted, probe once PER NOT-FOUND EVENT (no spend/refund
+        // budget — see the State doc comment): `session.activate` (attach-by-live-id) is
+        // live-only — no DB fallback — so its "not found" does NOT prove the branch has no
         // history: the server persists the DB row in `prompt.submit`
         // (`_ensure_session_db_row` + `_persist_branch_seed`) BEFORE `message.start`
         // reaches the client, under the row's PERSISTED key (`storedSessionID`, the
         // server's `session_key` / `session.create`'s `stored_session_id`) — a DIFFERENT
         // value from the live `attachLiveSessionID` (`session.create`'s `session_id`)
-        // `session.activate` just 404'd on. Review iteration 2 finding a: probing with
-        // `attachLiveSessionID` always 404s (the DB row is keyed by `session_key`, never
-        // by the runtime `session_id`), fully defeating this guard. A socket drop/server
-        // restart landing in that window would otherwise fall straight into the
-        // seed-replay below and discard a real, already-persisted turn. `session.resume`
-        // DOES fall back to the DB by `session_key`, so try it ONCE, by `storedSessionID`,
-        // first — only a not-found from the PROBE proves the branch is truly unpersisted.
-        // Gated on `!hasReplayedBranchSeed` (once a replay this hydrate has already
-        // established there's nothing to find, re-probing the fresh replayed session is
-        // pointless) and `!hasProbedBranchResume` (one probe per hydrate, mirrors the
-        // replay budget — refunded on a transient probe failure, see
-        // `.branchResumeProbeResult(.failure)` below).
+        // `session.activate` just 404'd on (probing with `attachLiveSessionID` always
+        // 404s, fully defeating this guard). `session.resume` DOES fall back to the DB by
+        // `session_key`, so try it, by `storedSessionID`, first — only a not-found from
+        // the PROBE proves the branch is truly unpersisted. Gated only on
+        // `!hasReplayedBranchSeed` (once a replay this hydrate has already established
+        // there's nothing to find, re-probing the fresh replayed session is pointless —
+        // its own not-found falls straight through to the degrade below).
         if error.isSessionNotFound, state.attachLiveSessionID != nil,
-           let storedID = state.storedSessionID,
-           !state.hasReplayedBranchSeed, !state.hasProbedBranchResume {
-          state.hasProbedBranchResume = true
+           let storedID = state.storedSessionID, !state.hasReplayedBranchSeed {
+          // The stale live id this hydrate just 404'd on is no longer trustworthy — nil
+          // it NOW (before the probe's result is even awaited) so `canSend` blocks a
+          // concurrent submit's own independent self-heal from racing this recovery with
+          // a second, untracked `session.create`.
+          state.liveSessionID = nil
           return probeBranchResume(sessionID: storedID, profile: state.scopedProfile)
         }
         return handleActivateFailure(error, into: &state)
@@ -757,32 +780,24 @@ public struct ChatFeature {
         state.attachLiveSessionID = nil
         state.branchSeed = nil
         state.hasReplayedBranchSeed = false
-        state.hasProbedBranchResume = false
         return applyActivate(response, into: &state)
 
       case let .branchResumeProbeResult(.failure(error)):
-        // Review iteration 2 finding b: a transport-shaped interruption (socket drop /
-        // deliberate teardown while the probe was in flight) is no server verdict — the
-        // probe never actually asked the DB. Spending the budget here would let the
-        // post-reconnect `.activateResult` not-found skip the probe entirely and replay
-        // the seed over a possibly-persisted turn. Mirrors `.branchReplayResult(.failure)`:
-        // refund `hasProbedBranchResume` on `.disconnected`/`.notConnected`/`.timedOut` so
-        // a later not-found re-probes; only a genuine rejection (a real not-found, or any
-        // other server error) keeps the budget spent and falls through to the SAME
-        // not-found/degrade/reconnect handling a plain `session.activate`/`session.resume`
-        // failure gets.
+        // Structural fix (2026-07-24 review): there is no budget to refund here (see the
+        // `State` doc comment) — a transport-shaped interruption (socket drop / deliberate
+        // teardown while the probe was in flight, or a cancellation from a superseding
+        // `.foreground`/`.reattached`/`.teardownSocketOnly`) is simply no server verdict,
+        // so it re-arms status-only; the next not-found re-probes from scratch (nothing
+        // was ever spent). Mirrors `.branchReplayResult(.failure)`'s transport handling.
         if error.isDisconnected || error == .notConnected {
-          state.hasProbedBranchResume = false
           state.status = .reconnecting
           // The companion `.gatewayClosed` owns the backoff redial — don't stack one.
           return .none
         }
         if error.isTimedOut {
           // A HALF-OPEN socket may never surface `.gatewayClosed` — schedule the redial
-          // ourselves so the chat isn't stranded in `.reconnecting` with the probe budget
-          // refunded but nothing driving the retry; the fresh `.ready` re-hydrates and,
-          // on a repeat not-found, re-probes.
-          state.hasProbedBranchResume = false
+          // ourselves so the chat isn't stranded in `.reconnecting`; the fresh `.ready`
+          // re-hydrates and, on a repeat not-found, re-probes.
           state.status = .reconnecting
           guard !state.awaitingReauth else { return .none }
           state.hasRequestedSession = false
@@ -791,6 +806,14 @@ public struct ChatFeature {
             connect(state.connection)
           )
         }
+        // A genuine rejection: either the positive evidence a real not-found provides
+        // (falls through to `handleActivateFailure`'s `error.isSessionNotFound` seed-replay
+        // branch — the ONLY place the seed is ever replayed) or some other server error
+        // (session cap, internal error, malformed payload) that is NOT proof of absence and
+        // so does NOT replay — it surfaces via `errorBanner` there instead, leaving the
+        // seed/attach bookkeeping standing for the next retry. Either way, nothing here
+        // needs a budget to protect: a non-not-found error simply isn't matched by the
+        // replay branch's `error.isSessionNotFound` gate.
         return handleActivateFailure(error, into: &state)
 
       case .persistSnapshotTick:
@@ -1557,7 +1580,6 @@ public struct ChatFeature {
       state.attachLiveSessionID = nil
       state.branchSeed = nil
       state.hasReplayedBranchSeed = false
-      state.hasProbedBranchResume = false // and the resume-probe budget (review finding 1)
       // Defensive: a second message.start without an intervening message.complete would
       // otherwise orphan the prior live thinking row (shimmering forever). Freeze/clear it
       // first (idempotent; removes the row if it carried no reasoning/status) before
@@ -2056,7 +2078,6 @@ public struct ChatFeature {
     state.status = .ready
     state.hydrateRetriedAfterTimeout = false // hydrate landed: the timeout-retry budget resets
     state.hasReplayedBranchSeed = false // and so does the branch seed-replay budget (#34)
-    state.hasProbedBranchResume = false // and the resume-probe budget (review finding 1)
     // A successful hydrate means we're connected — clear any stale connection banner.
     state.errorBanner = nil
 

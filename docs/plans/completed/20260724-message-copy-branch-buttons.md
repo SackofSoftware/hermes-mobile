@@ -385,6 +385,55 @@ confirmed — the probe fix itself had two history-loss regressions):
   not-found → seed-replay test extended to confirm exactly one replay after a confirming
   probe not-found. `swift test --package-path HermesKit` green before commit.
 
+Iteration 8 (external codex final pass, 3 MAJOR findings, all confirmed — the iteration-7
+probe fix's own spend/refund bookkeeping was still leaky; fixed with a structural
+inversion instead of a fourth patch):
+
+- **CONFIRMED — `canSend` stayed true while a branch recovery (probe or replay) was
+  outstanding.** `liveSessionID` was only nilled inside the eventual seed-replay/degrade
+  branches of `handleActivateFailure`, never at the moment the PROBE decision itself was
+  made. After at least one prior successful attach (so `liveSessionID` held a real,
+  now-stale value), a subsequent not-found kicked off the probe/replay recovery while
+  `liveSessionID` stood untouched — `canSend` (`liveSessionID != nil`) stayed true, so a
+  prompt submitted in that window ran `composerSubmitted`'s own INDEPENDENT self-heal
+  (`withSessionHeal` → a bare/seeded `session.create`), racing the reducer's own recovery:
+  two live sessions born from one seed, with the typed message landing in whichever one
+  the reducer wasn't tracking. Fix: `.activateResult(.failure)` now nils `liveSessionID`
+  the INSTANT the probe-decision branch is taken — before the probe's result is even
+  awaited — so `canSend` blocks the composer for the entire recovery window.
+- **CONFIRMED — the probe budget (`hasProbedBranchResume`) was spent BEFORE the probe
+  effect fired, so a superseding hydrate that cancelled it left the budget permanently
+  spent with no refund.** `.foreground`/`.reattached`/`.teardownSocketOnly` all cancel
+  `CancelID.hydrate` (shared by the probe), and TCA drops a cancelled task's trailing
+  `send` — so `.branchResumeProbeResult` never arrives to run the refund logic that lived
+  ONLY inside that action's `.failure` case. A later not-found then skipped the probe gate
+  entirely and replayed the bare seed over what could be persisted history.
+- **CONFIRMED — a probe failure that is NOT a genuine "session not found" (session cap
+  4090, an internal 5000, a malformed payload) also left the budget permanently spent**,
+  since only `.disconnected`/`.notConnected`/`.timedOut` refunded it; none of these
+  failure modes prove the row is absent, yet the next not-found would skip re-probing and
+  replay anyway.
+- **Fix — structural inversion, not a fourth patch.** Removed `hasProbedBranchResume`
+  entirely. The probe is a read-only `session.resume`, safe to re-issue on EVERY not-found
+  as long as `!hasReplayedBranchSeed` (the only remaining gate); ONLY a genuine not-found
+  returned BY THE PROBE ITSELF is treated as positive evidence of absence and falls through
+  to the seed-replay branch. Every other probe outcome — cancelled, transient, or any
+  other server error — simply re-arms (status-only / self-redial on timeout) with nothing
+  to leak, so the next `.ready`/`.foreground`/`.reattached` retries the whole recovery from
+  the top. This closes the bug class rather than patching the latest leak: there is no
+  budget left to spend on the wrong path.
+- Tests (`ChatBranchTests.swift`): `sendBlockedWhileBranchRecoveryProbeOutstanding`
+  (finding 1 — `canSend`/no independent self-heal race while a probe is outstanding);
+  `cancelledProbeReProbesInsteadOfReplayingSeed` (finding 2 — a probe cancelled by
+  `.teardownSocketOnly` is silently dropped, and the next not-found still re-probes rather
+  than replaying); `probeNonNotFoundServerErrorNeverReplaysAndReProbesLater` (finding 3 —
+  a 4090-shaped rejection never replays and a later not-found still re-probes);
+  `transientProbeFailureReArmsForReProbe` (renamed from the iteration-7
+  `...RefundsBudgetForReProbe` — same disconnected-probe → re-probe scenario, now proven
+  without any budget flag); every other existing probe/replay test updated for the removed
+  field. `swift test --package-path HermesKit` green (792 tests) before commit;
+  `Package.resolved` churn from the test run reverted before commit.
+
 ## Post-Completion
 
 **Manual verification:**

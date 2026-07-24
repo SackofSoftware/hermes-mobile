@@ -102,25 +102,38 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   **replays the SEEDED create from the client-held `branchSeed`** (one replay per hydrate via
   `hasReplayedBranchSeed`; the heal keeps attach-by-live-id mode), rebuilding context + nesting.
   **Before ever replaying the seed, a hydrate not-found from `session.activate` probes
-  `session.resume` ONCE, by the branch's PERSISTED `storedSessionID`** (`hasProbedBranchResume`,
-  one-shot like the replay budget): the server persists the branch's DB row in `prompt.submit`
-  (`_ensure_session_db_row`/`_persist_branch_seed`) **before** `message.start` reaches the
-  client, under the row's primary key `session_key` (`session.create`'s `stored_session_id`,
-  i.e. mobile's `storedSessionID`) — a **DIFFERENT** value from the live runtime `session_id`
-  (`attachLiveSessionID`) `session.activate` just 404'd on (review iteration 2 finding a:
-  probing with the live id always 404s even when the row exists, fully defeating the probe —
-  fixed by probing with `storedSessionID`). A socket drop/server restart landing in that
-  window would otherwise land straight in the seed-replay path and DISCARD a real,
+  `session.resume`, by the branch's PERSISTED `storedSessionID`**: the server persists the
+  branch's DB row in `prompt.submit` (`_ensure_session_db_row`/`_persist_branch_seed`)
+  **before** `message.start` reaches the client, under the row's primary key `session_key`
+  (`session.create`'s `stored_session_id`, i.e. mobile's `storedSessionID`) — a **DIFFERENT**
+  value from the live runtime `session_id` (`attachLiveSessionID`) `session.activate` just
+  404'd on (probing with the live id always 404s even when the row exists, fully defeating the
+  probe — fixed by probing with `storedSessionID`). A socket drop/server restart landing in
+  that window would otherwise land straight in the seed-replay path and DISCARD a real,
   already-persisted turn. `session.activate` is live-only (no DB fallback) and 404s regardless
   of a persisted row; `session.resume` DOES fall back to the DB by `session_key`. A probe
   success is treated exactly like `message.start` (clears `attachLiveSessionID`/`branchSeed`,
-  hydrates wholesale via the normal path); only a not-found from the probe itself proves the
-  branch is truly unpersisted and falls through to the seed replay below. **A
-  transport-interrupted probe (`.disconnected`/`.notConnected`/`.timedOut`) REFUNDS
-  `hasProbedBranchResume`** (mirrors the replay budget's own transient refund; timeout redials
-  itself) so a later not-found re-probes instead of skipping straight to a seed replay over a
-  possibly-persisted turn (review iteration 2 finding b) — only a genuine rejection keeps the
-  probe budget permanently spent.
+  hydrates wholesale via the normal path).
+  **STRUCTURAL INVARIANT (2026-07-24 review — replaced a one-shot spend/refund
+  `hasProbedBranchResume` flag that leaked its "spent" bit both on effect cancellation and on
+  non-not-found probe failures, either of which let a LATER not-found skip the probe entirely
+  and replay the bare seed over possibly-persisted history): there is no probe budget to spend
+  or refund.** The probe is read-only and safe to re-issue on EVERY not-found as long as this
+  hydrate hasn't already replayed the seed (`!hasReplayedBranchSeed` alone gates it). ONLY a
+  genuine not-found returned **by the probe itself** is positive evidence the row is absent and
+  falls through to the seed-replay branch; a probe **cancelled** by a superseding
+  `.foreground`/`.reattached`/`.teardownSocketOnly` (all share `CancelID.hydrate`; TCA drops a
+  cancelled task's trailing `send`, so no result ever lands for that attempt), a **transient**
+  failure (`.disconnected`/`.notConnected`/`.timedOut`, self-redialing on timeout), or **any
+  other non-not-found server error** (session cap, internal error, malformed payload — none of
+  which prove absence) all simply re-arm status-only, so the next `.ready`/`.foreground`/
+  `.reattached` retries the probe from scratch — never assuming absence without the probe's own
+  affirmative verdict. The companion half of the fix is in `canSend`: **the stale
+  `liveSessionID` a hydrate just 404'd on is nilled the INSTANT the probe decision is made** —
+  before the probe's result is even awaited — so a prompt submitted mid-recovery can't race the
+  reducer's own recovery with its own independent self-heal `session.create`
+  (`withSessionHeal`), which would otherwise birth two live sessions from one seed with the
+  typed message landing in the untracked one.
   **Recovery keys on the DURABLE `branchSeed`, never the transient `attachLiveSessionID`** (the
   replay trigger consumes the attach redirect before its create resolves, so an interrupted
   replay must still recover on the next hydrate/`.ready`); a **transport-interrupted replay

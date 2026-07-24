@@ -434,14 +434,13 @@ struct ChatBranchTests {
 
     // Finding-1 probe first — `session.resume` by the branch's STORED id (never the
     // live `attachLiveSessionID` `session.activate` just 404'd on — review iteration 2
-    // finding a), before ever discarding real history. The attach bookkeeping is
-    // untouched until the probe answers.
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
+    // finding a), before ever discarding real history. `liveSessionID` was already nil
+    // (a fresh unpersisted branch never attached yet), so the recovery-start nil is a
+    // no-op here; `sendBlockedWhileBranchRecoveryProbeOutstanding` covers the case where
+    // it actually changes.
+    await store.send(.activateResult(.failure(.server("session not found"))))
     await store.receive(\.branchResumeProbeResult.failure) {
       $0.status = .reconnecting
-      $0.liveSessionID = nil
       $0.attachLiveSessionID = nil
       $0.hasRequestedSession = true
       $0.hasReplayedBranchSeed = true
@@ -456,7 +455,6 @@ struct ChatBranchTests {
     await store.receive(\.activateResult.success) {
       $0.status = .ready
       $0.hasReplayedBranchSeed = false // attach landed: the replay budget resets
-      $0.hasProbedBranchResume = false // and the probe budget with it
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
       $0.transcript = [ChatRow(
@@ -508,12 +506,9 @@ struct ChatBranchTests {
       }
     }
 
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
+    await store.send(.activateResult(.failure(.server("session not found"))))
     await store.receive(\.branchResumeProbeResult.failure) {
       $0.status = .reconnecting
-      $0.liveSessionID = nil
       $0.attachLiveSessionID = nil
       $0.hasRequestedSession = true
       $0.hasReplayedBranchSeed = true
@@ -576,13 +571,10 @@ struct ChatBranchTests {
       }
     }
 
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
+    await store.send(.activateResult(.failure(.server("session not found"))))
     await store.receive(\.branchResumeProbeResult.failure) {
       $0.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
       $0.status = .reconnecting
-      $0.liveSessionID = nil
       $0.attachLiveSessionID = nil
       $0.hasRequestedSession = true
     }
@@ -741,15 +733,12 @@ struct ChatBranchTests {
 
     // Finding-1 probe first — `session.resume` by the STORED id — and the dead socket
     // takes THAT down instead of ever reaching a seeded replay create.
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
-    // Review iteration 2 finding b: the probe itself reached no server verdict, so its
-    // budget is REFUNDED (not spent) — a later not-found must re-probe, never skip
-    // straight to a seed replay over a possibly-persisted turn.
+    await store.send(.activateResult(.failure(.server("session not found"))))
+    // Structural fix: there is no budget to refund — a transient probe failure simply
+    // re-arms status-only, so a later not-found re-probes, never skipping straight to a
+    // seed replay over a possibly-persisted turn.
     await store.receive(\.branchResumeProbeResult.failure) {
       $0.status = .reconnecting
-      $0.hasProbedBranchResume = false
     }
     // ONLY the interrupted probe hit the wire — no replay AND no bare create chased the
     // dead socket, and the seed survives for the post-reconnect hydrate to rebuild from.
@@ -822,14 +811,14 @@ struct ChatBranchTests {
 
     // Finding-1 probe first — `session.resume` by the branch's STORED id `storedSessionID`
     // (never the live id `session.activate` 404'd on) — confirms the branch truly has no
-    // row before the seed replay ever fires.
+    // row before the seed replay ever fires. `liveSessionID` was already live-bound
+    // ("branch-live") before this — the recovery-start nil (finding 1) fires here.
     await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
+      $0.liveSessionID = nil
     }
     // The probe's own not-found triggers the replay; the socket dies under IT.
     await store.receive(\.branchResumeProbeResult.failure) {
       $0.status = .reconnecting
-      $0.liveSessionID = nil
       $0.attachLiveSessionID = nil
       $0.hasRequestedSession = true
       $0.hasReplayedBranchSeed = true
@@ -863,7 +852,6 @@ struct ChatBranchTests {
     await store.receive(\.activateResult.success) {
       $0.status = .ready
       $0.hasReplayedBranchSeed = false
-      $0.hasProbedBranchResume = false
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
       $0.transcript = [ChatRow(
@@ -915,12 +903,9 @@ struct ChatBranchTests {
       }
     }
 
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
+    await store.send(.activateResult(.failure(.server("session not found"))))
     await store.receive(\.branchResumeProbeResult.failure) {
       $0.status = .reconnecting
-      $0.liveSessionID = nil
       $0.attachLiveSessionID = nil
       $0.hasRequestedSession = true
       $0.hasReplayedBranchSeed = true
@@ -1080,15 +1065,12 @@ struct ChatBranchTests {
       }
     }
 
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
+    await store.send(.activateResult(.failure(.server("session not found"))))
     await store.receive(\.branchResumeProbeResult.success) {
       // Treated exactly like `message.start` clearing the unpersisted-branch bookkeeping.
       $0.attachLiveSessionID = nil
       $0.branchSeed = nil
       $0.hasReplayedBranchSeed = false
-      $0.hasProbedBranchResume = false
       $0.liveSessionID = "branch-live-2"
       $0.storedSessionID = "branch-stored"
       $0.status = .ready
@@ -1118,14 +1100,15 @@ struct ChatBranchTests {
     await store.send(.teardown)
   }
 
-  /// Review iteration 2 finding b: a transport-shaped probe failure (the probe itself
-  /// dies mid-flight, never reaching a server verdict) must REFUND `hasProbedBranchResume`
-  /// — spending it here would let a LATER not-found skip the probe gate entirely and
-  /// replay the bare seed over what could be a persisted turn, exactly the history-loss
-  /// bug the probe exists to prevent. Drives a full disconnect → reconnect → second
-  /// not-found sequence and asserts the second not-found RE-PROBES (never jumps straight
-  /// to `session.create`).
-  @Test func transientProbeFailureRefundsBudgetForReProbe() async {
+  /// Structural fix (2026-07-24 review, finding 2): a transport-shaped probe failure (the
+  /// probe itself dies mid-flight, never reaching a server verdict) must NOT let a LATER
+  /// not-found skip straight to a bare/seeded `session.create` — exactly the history-loss
+  /// bug the probe exists to prevent. Unlike the old spend/refund `hasProbedBranchResume`
+  /// flag (which needed an explicit refund line the cancellation case skipped entirely),
+  /// there is now no budget to leak: the probe is simply re-issued on every not-found.
+  /// Drives a full disconnect → reconnect → second not-found sequence and asserts the
+  /// second not-found RE-PROBES (never jumps straight to `session.create`).
+  @Test func transientProbeFailureReArmsForReProbe() async {
     let calls = LockIsolated<[(method: String, params: JSONValue)]>([])
     let probeCount = LockIsolated(0)
     var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
@@ -1138,15 +1121,15 @@ struct ChatBranchTests {
       $0.hermesGateway.send = { @Sendable method, params in
         calls.withValue { $0.append((method, params)) }
         guard method == "session.resume" else {
-          Issue.record("unexpected \(method) — a refunded probe budget must re-probe, never replay")
+          Issue.record("unexpected \(method) — a re-armed probe must re-probe, never replay")
           return .object([:])
         }
         let n = probeCount.withValue { $0 += 1; return $0 }
         if n == 1 {
           throw GatewayError.disconnected // the probe itself is interrupted, no verdict
         }
-        // The RE-probe (budget refunded) finds the real persisted row — a first prompt
-        // landed server-side while the socket was down.
+        // The RE-probe finds the real persisted row — a first prompt landed server-side
+        // while the socket was down.
         return .object([
           "session_id": .string("branch-live-2"),
           "session_key": .string("branch-stored"),
@@ -1165,27 +1148,21 @@ struct ChatBranchTests {
     }
 
     // First not-found: the probe fires (by the STORED id) and dies transiently.
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
+    await store.send(.activateResult(.failure(.server("session not found"))))
     await store.receive(\.branchResumeProbeResult.failure) {
       $0.status = .reconnecting
-      $0.hasProbedBranchResume = false // REFUNDED — no server verdict was ever reached
     }
     #expect(calls.value.map(\.method) == ["session.resume"])
     #expect(calls.value[0].params["session_id"]?.stringValue == "branch-stored")
     #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
 
-    // A second not-found (post-reconnect) — the refunded budget re-probes instead of
-    // skipping straight to a bare/seeded `session.create` and risking discarded history.
-    await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
-    }
+    // A second not-found (post-reconnect) — re-probes instead of skipping straight to a
+    // bare/seeded `session.create` and risking discarded history.
+    await store.send(.activateResult(.failure(.server("session not found"))))
     await store.receive(\.branchResumeProbeResult.success) {
       $0.attachLiveSessionID = nil
       $0.branchSeed = nil
       $0.hasReplayedBranchSeed = false
-      $0.hasProbedBranchResume = false
       $0.liveSessionID = "branch-live-2"
       $0.storedSessionID = "branch-stored"
       $0.status = .ready
@@ -1207,38 +1184,148 @@ struct ChatBranchTests {
     await store.send(.teardown)
   }
 
-  /// A probe `.timedOut` may be the ONLY symptom of a half-open socket (no
-  /// `.gatewayClosed` for minutes) — mirrors `replayTimeoutKeepsSeedAndRedials`: refund
-  /// the probe budget, keep the seed, and redial ourselves so the chat isn't stranded in
-  /// `.reconnecting` with the budget spent and no reconnect pending.
-  @Test func probeTimeoutRefundsBudgetAndRedials() async {
-    let continuation = LockIsolated<AsyncStream<GatewayEvent>.Continuation?>(nil)
-    let dialed = LockIsolated(false)
+  /// Structural fix (finding 3): a probe failure that is NOT a genuine "session not
+  /// found" — a session cap (4090), an internal error (5000), a malformed payload — is
+  /// NOT proof the branch's DB row is absent, so it must never replay the seed (only
+  /// `handleActivateFailure`'s `error.isSessionNotFound` branch ever replays). It falls
+  /// through to the generic error-banner path instead, leaving every piece of branch
+  /// bookkeeping standing so a LATER not-found still re-probes rather than ever assuming
+  /// absence from a non-not-found rejection.
+  @Test func probeNonNotFoundServerErrorNeverReplaysAndReProbesLater() async {
+    let probeCount = LockIsolated(0)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.attachLiveSessionID = "branch-live"
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else {
+          // The eventual replay after the SECOND (genuine) not-found — not the focus of
+          // this test, just needs to resolve so the store doesn't hang.
+          return .object([
+            "session_id": .string("fresh-live"), "stored_session_id": .string("fresh-stored"),
+          ])
+        }
+        let n = probeCount.withValue { $0 += 1; return $0 }
+        if n == 1 {
+          // A real server rejection that is NOT proof of absence — e.g. the session cap
+          // or an internal error. Neither confirms the branch's DB row is gone.
+          throw GatewayError.server("4090 session cap exceeded")
+        }
+        throw GatewayError.server("session not found") // the later re-probe's genuine verdict
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.activateResult(.failure(.server("session not found"))))
+    await store.receive(\.branchResumeProbeResult.failure) {
+      // Falls through to the generic error-banner path in `handleActivateFailure` — NOT
+      // the seed-replay branch (gated on `error.isSessionNotFound`, and 4090 isn't).
+      $0.status = .reconnecting
+      $0.errorBanner = "4090 session cap exceeded"
+    }
+    #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
+    #expect(store.state.hasReplayedBranchSeed == false) // never replayed
+    #expect(probeCount.value == 1)
+
+    // A LATER not-found must still re-probe — no leftover "spent" state from the earlier
+    // non-not-found failure to skip it. (This second not-found happens to be genuine and
+    // triggers the normal seed replay — already covered end-to-end elsewhere; the point
+    // here is only that the re-probe itself fires.)
+    await store.send(.activateResult(.failure(.server("session not found"))))
+    await store.receive(\.branchResumeProbeResult.failure) {
+      $0.status = .reconnecting
+      $0.attachLiveSessionID = nil
+      $0.hasRequestedSession = true
+      $0.hasReplayedBranchSeed = true
+    }
+    #expect(probeCount.value == 2) // re-probed, never skipped straight to replay
+    await store.send(.teardown)
+  }
+
+  /// Structural fix (finding 2): a probe CANCELLED by a superseding hydrate
+  /// (`.foreground`/`.reattached`/`.teardownSocketOnly` all share `CancelID.hydrate` —
+  /// TCA drops a cancelled task's trailing `send`, so no `.branchResumeProbeResult` ever
+  /// arrives for the cancelled attempt) must not leave any "spent" state behind either —
+  /// the next not-found still re-probes rather than skipping straight to a destructive
+  /// seed replay over what could be persisted history.
+  @Test func cancelledProbeReProbesInsteadOfReplayingSeed() async {
+    let activateCalls = LockIsolated(0)
+    let probeCalls = LockIsolated(0)
     var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
     initial.attachLiveSessionID = "branch-live"
     initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.hermesGateway.send = { @Sendable method, _ in
-        throw GatewayError.timedOut(method: method) // the probe itself times out
-      }
-      $0.hermesGateway.connect = { @Sendable _, _ in
-        dialed.setValue(true)
-        let (stream, cont) = AsyncStream<GatewayEvent>.makeStream()
-        continuation.setValue(cont) // hold the socket open — the fresh `.ready` is live's
-        return stream
+        switch method {
+        case "session.activate":
+          activateCalls.withValue { $0 += 1 }
+          throw GatewayError.server("session not found") // reaped again on every attach
+        case "session.resume":
+          let n = probeCalls.withValue { $0 += 1; return $0 }
+          if n == 1 {
+            // Never reaches a server verdict — about to be cancelled by a superseding
+            // `.teardownSocketOnly` (mirrors `.foreground`/`.reattached` superseding the
+            // same `CancelID.hydrate`).
+            try await Task.sleep(for: .seconds(3600))
+            return .object([:])
+          }
+          throw GatewayError.server("session not found") // the RE-probe's genuine verdict
+        default:
+          return .object([:])
+        }
       }
     }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.activateResult(.failure(.server("session not found"))))
+    // The probe (call 1) is asleep, outstanding. Cancel it via a superseding
+    // teardownSocketOnly — no `.branchResumeProbeResult` for it will ever arrive.
+    await store.send(.teardownSocketOnly)
+    // Reconnect and hit not-found again (the attach 404s on every call in this mock).
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.failure)
+    // STRUCTURAL PROOF: even though the first probe's result was silently dropped by
+    // cancellation (no flag to protect), the recovery re-probes — it does NOT skip
+    // straight to a destructive seed replay. Had it skipped, `probeCalls` would still
+    // read 1 and the next receive would be `.branchReplayResult`, not another probe.
+    await store.receive(\.branchResumeProbeResult.failure)
+    #expect(probeCalls.value == 2)
+    #expect(store.state.branchSeed != nil) // not yet destructively replayed
+    await store.send(.teardown)
+  }
+
+  /// Structural fix (finding 1): `canSend` must be false for the ENTIRE probe/replay
+  /// window, not just before the first attach — a stale `liveSessionID` from a PRIOR
+  /// successful attach must be nilled the instant recovery starts, or a concurrent submit
+  /// would race the reducer's own recovery with its own independent self-heal
+  /// `session.create` (composerSubmitted's `withSessionHeal`), producing two live
+  /// sessions from one seed with the typed message landing in the untracked one.
+  @Test func sendBlockedWhileBranchRecoveryProbeOutstanding() async {
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.liveSessionID = "branch-live" // a PRIOR successful attach, not the fresh-branch nil case
+    initial.attachLiveSessionID = "branch-live"
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    initial.composerText = "are you still there"
+    let submitFired = LockIsolated(false)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "prompt.submit" { submitFired.setValue(true) }
+        throw GatewayError.server("session not found")
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
 
     await store.send(.activateResult(.failure(.server("session not found")))) {
-      $0.hasProbedBranchResume = true
+      $0.liveSessionID = nil
     }
-    await store.receive(\.branchResumeProbeResult.failure) {
-      $0.hasProbedBranchResume = false
-      $0.status = .reconnecting
-      $0.hasRequestedSession = false
-    }
-    #expect(dialed.value)
-    #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
+    // canSend is false the instant recovery starts — even though the probe hasn't
+    // resolved yet — because the stale live id was nilled synchronously.
+    #expect(store.state.canSend == false)
+    await store.send(.composerSubmitted) // must no-op: canSend gates it
+    #expect(submitFired.value == false) // no independent self-heal RPC ever raced the probe
     await store.send(.teardown)
   }
 

@@ -259,10 +259,10 @@ Files involved:
 
 ### Task 10: [Final] Update documentation
 
-- [ ] add the message-action-row + branch conventions to `CLAUDE.md` (branch = desktop-parity `session.create` seed; list nesting is display-only client-side flatten)
-- [ ] update `README.md` feature list if it enumerates chat features
-- [ ] close the loop on issue #34 (comment with what shipped)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] add the message-action-row + branch conventions to `CLAUDE.md` (branch = desktop-parity `session.create` seed; list nesting is display-only client-side flatten)
+- [x] update `README.md` feature list if it enumerates chat features (added a "Branch a reply into a new chat" bullet after the copy bullet)
+- [x] issue #34 closed via PR (comment deferred to the PR)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

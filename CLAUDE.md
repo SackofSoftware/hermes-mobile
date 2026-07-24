@@ -74,6 +74,23 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   degrades to prose), rendered in `MarkdownText` (headings → scaled bold, blockquote → indented bar,
   table → `Grid`). **Only USER messages have a bubble** — assistant / tool / thinking rows render
   bubble-less plain content, and the assistant Markdown is fully selectable (`.textSelection`).
+- **Completed assistant messages get a `MessageActionBar`** (#34): **copy** reuses `.copyRow` with
+  checkmark feedback via the shared `copyWithFeedback`/`rowCopyToken` mechanism (row-scoped token,
+  1.5s clock expiry, `cancelInFlight`); **branch** is desktop parity — no branch RPC exists, so
+  `.branchFromMessage` fires a one-shot `session.create` seeded with ONLY the selected assistant
+  message (`messages`) + `parent_session_id` (**no `title`** — server auto-titles on first submit),
+  guarded (turn not running, non-empty text, `isBranching` double-fire), then
+  `Delegate.branchCreated` routes through the existing `AppFeature` `openSession`
+  slot-replacement flow + a list refetch. Old agents silently ignore the seed params (no `-32601`)
+  → plain empty chat; no capability gate. No optimistic list row — a branch has no DB row until
+  its first prompt.
+- **Session-list branch nesting is display-only** (#34): `parent_session_id` decodes leniently
+  from REST onto `Session.parentSessionID`; pure `flattenSessionsWithBranches` (desktop
+  algorithm — sibling recency sort, group-recency lift, recursion, cycle-safe, trailing sweep)
+  runs per rendered lane (pinned / workspace / chronological) after the cron partition, emitting
+  `└─`/`├─` stems. Orphans (parent absent from the lane) de-nest — never hidden; the Pinned lane
+  keeps pin order (a pinned branch de-nests there); search / archived / cron stay flat. Row
+  identity and swipe/context affordances are unchanged.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
 - **Auth has two regimes**, modeled by `AuthSession` (`.token` | `.cookie(CookieSession)`) so
   the REST/Gateway clients adapt transport without scattering regime checks. **Token mode**

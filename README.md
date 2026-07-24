@@ -48,6 +48,10 @@ from your desk and still keep your agent moving.
   breakdown of input/output split, compactions, and estimated cost.
 - **Copy what you need.** Copy a whole message, or just a single code block with a
   one-tap button and a green-check confirmation.
+- **Branch a reply into a new chat.** Every finished assistant message has a branch
+  button that starts a fresh session seeded with just that message — explore a tangent
+  without derailing the original conversation. Branches show nested under their parent
+  in the session list, desktop-style.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
   and `sudo`/`secret` prompts the moment they arrive. Even if the app was offline when
   an approval fired, tapping its push notification still surfaces an approve/deny card

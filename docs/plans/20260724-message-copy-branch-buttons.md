@@ -196,10 +196,10 @@ Files involved:
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 - Modify: `HermesMobileTests/` (session list snapshot tests)
 
-- [ ] render the stem as a monospaced caption in quaternary/tertiary color + leading indent on stemmed rows (row content, swipe actions, context menu unchanged)
-- [ ] run `tuist generate` if any new source file was added
-- [ ] write/update snapshot tests: list with one parent + two branch children (stems `├─`, `└─`); re-record intentionally changed list snapshots
-- [ ] run `make snapshot` + full `swift test` - must pass before task 5
+- [x] render the stem as a monospaced caption in quaternary/tertiary color + leading indent on stemmed rows (row content, swipe actions, context menu unchanged)
+- [x] run `tuist generate` if any new source file was added (no new source file — existing files only, workspace already generated)
+- [x] write/update snapshot tests: list with one parent + two branch children (stems `├─`, `└─`); re-record intentionally changed list snapshots (no existing snapshots changed — the stem wrapper is layout-neutral for stem-less rows; only the new baseline was recorded)
+- [x] run `make snapshot` + full `swift test` - must pass before task 5
 
 ### Task 5: Row-copy checkmark feedback in ChatFeature
 

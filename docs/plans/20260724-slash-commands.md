@@ -281,14 +281,21 @@ deterministic row ID (never random, never derived from mutable text).
   `ChatRow.Kind` + the FNV-1a discriminator live)
 - Modify: `HermesKit/Tests/HermesKitTests/` (the existing row-ID test file)
 
-- [ ] add `ChatRow.Kind.commandOutput(String)` with its own stable
+- [x] add `ChatRow.Kind.commandOutput(String)` with its own stable
       kind-discriminator token for the deterministic ID (extend every exhaustive
       `switch` the compiler flags)
-- [ ] write tests: commandOutput row IDs are deterministic across rebuilds and
+- [x] write tests: commandOutput row IDs are deterministic across rebuilds and
       distinct from other kinds at the same ordinal
-- [ ] write test: `reconstructTranscript` output is unaffected (server history never
+- [x] write test: `reconstructTranscript` output is unaffected (server history never
       contains commandOutput; wholesale replace drops local ones — desktop parity)
-- [ ] run `swift test --package-path HermesKit` — must pass before task 6
+- [x] run `swift test --package-path HermesKit` — must pass before task 6
+- ➕ the app target's exhaustive `rowView` switch (`ChatView.swift`) was extended in
+  this task too (bubble-less dimmed monospaced selectable render) so the app keeps
+  compiling between tasks 5 and 8; Task 8 snapshot-tests that render
+- ➕ row-ID tests span the existing suites by concern: determinism/distinctness +
+  reconstruction guard in `TranscriptReconstructionTests.swift` (including the
+  collision sweep widened to 5 discriminators), the wholesale-replace drop in
+  `RowIdentityTests.swift`, and `copyText` in `ChatRowCopyTests.swift`
 
 ### Task 6: slash.exec pipeline in composerSubmitted
 

@@ -188,6 +188,13 @@ struct ChatView: View {
       )
     case let .status(_, text):
       Text(text).font(.caption).foregroundStyle(.secondary)
+    case let .commandOutput(text):
+      // Ephemeral slash-command output (#36): bubble-less, dimmed, monospaced, selectable.
+      Text(text)
+        .font(.system(.callout, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
   }
 

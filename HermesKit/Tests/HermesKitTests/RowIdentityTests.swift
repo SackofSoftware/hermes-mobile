@@ -205,6 +205,62 @@ struct RowIdentityTests {
     #expect(first.map(\.id) == second.map(\.id))
   }
 
+  /// A local `.commandOutput` row (#36 — ephemeral slash-command output, desktop parity) is
+  /// dropped by the wholesale hydrate replace: server history never contains it, so after
+  /// `session.resume` the transcript equals the server's reconstruction exactly.
+  @Test func hydrateWholesaleReplaceDropsLocalCommandOutputRows() async {
+    let serverMessages = [
+      SessionMessage(id: 1, role: "user", content: "ping"),
+      SessionMessage(id: 2, role: "assistant", content: "pong"),
+    ]
+    // Seed a local command-output row (as the slash pipeline would append it) into the
+    // initial transcript, then hydrate.
+    let commandRowID = ChatRow.deterministicID(
+      sequenceIndex: 99, role: nil, kindDiscriminator: "commandOutput"
+    )
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    var initial = withDependencies {
+      $0.chatSnapshot = snapshotClient
+    } operation: {
+      ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    }
+    initial.transcript = [
+      ChatRow(id: commandRowID, kind: .commandOutput(text: "compressed 12 messages"))
+    ]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object([
+          "session_id": .string("live123"),
+          "stored_session_id": .string("stored123"),
+          "messages": .array([
+            .object(["id": .number(1), "role": .string("user"), "content": .string("ping")]),
+            .object(["id": .number(2), "role": .string("assistant"), "content": .string("pong")]),
+          ]),
+          "running": .bool(false),
+        ])
+      }
+    }
+    store.exhaustivity = .off
+    #expect(store.state.transcript[id: commandRowID] != nil)
+
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.success)
+
+    // Server wins wholesale: the local command-output row is gone, transcript matches the
+    // server reconstruction byte-for-byte.
+    #expect(store.state.transcript[id: commandRowID] == nil)
+    #expect(Array(store.state.transcript) == reconstructTranscript(serverMessages))
+    #expect(store.state.transcript.allSatisfy { $0.kind.discriminator != "commandOutput" })
+
+    await store.send(.teardown)
+  }
+
   // MARK: Edge cases
 
   /// `message.complete` with no preceding deltas (a non-streamed reply) materialises the

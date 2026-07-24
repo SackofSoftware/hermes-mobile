@@ -147,22 +147,28 @@
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 
-- [ ] write failing TestStore test: cold-launch order — `.pushTapped(tap)` with
+- [x] write failing TestStore test: cold-launch order — `.pushTapped(tap)` with
       `home == nil` stashes the tap (badge bookkeeping unchanged), then
       `.autoConnectSucceeded` clears the stash and replays into
       `.home(.delegate(.openSession))` with the placeholder `Session(id:)`
-- [ ] write failing TestStore test: same replay through
+- [x] write failing TestStore test: same replay through
       `.onboarding(.delegate(.connected))` (auto-connect-failed → manual login path)
-- [ ] write failing TestStore test: approval tap pre-home — badge set on the drop,
+- [x] write failing TestStore test: approval tap pre-home — badge set on the drop,
       replay arms `expectsPendingApproval` through the normal open flow and nets the
       badge entry to zero
-- [ ] write test (existing behavior guard): warm-path `.pushTapped` with `home` present
+- [x] write test (existing behavior guard): warm-path `.pushTapped` with `home` present
       never touches `pendingPushTap`; `.autoConnectSucceeded` without a stash emits no
       replay
-- [ ] add `pendingPushTap` to `AppFeature.State`; stash in the `home == nil` branch;
+- [x] add `pendingPushTap` to `AppFeature.State`; stash in the `home == nil` branch;
       consume + re-send `.pushTapped` from `.autoConnectSucceeded` and
       `.onboarding(.delegate(.connected))`
-- [ ] run tests — must pass before task 4
+- [x] run tests — must pass before task 4
+- ➕ reworked two existing tests that pinned the old "dropped tap stays badged until
+  manually opened" behavior: `approvalBadgeSetsWhenUnopenedAndClearsOnView` →
+  `approvalBadgeClearsAndThreadsHintWhenOpenedFromList` (the #30 badged-then-opened-later
+  route, now seeded via initial state since a replay auto-opens the stashed tap);
+  `multiplePendingApprovalsSetBadgeThenClearOne` now covers last-wins stashing (only the
+  newest pre-home tap replays; the older one stays badged until opened from the list)
 
 ### Task 4: Verify acceptance criteria
 

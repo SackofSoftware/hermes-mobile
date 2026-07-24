@@ -1739,28 +1739,24 @@ struct AppFeatureTests {
     await store.send(.liveChat(.teardown))
   }
 
-  /// An approval tap with no session list yet (can't open) bumps the pending-approval badge;
-  /// then opening that session clears it back to zero.
-  @Test func approvalBadgeSetsWhenUnopenedAndClearsOnView() async {
+  /// A pending approval badge whose tap couldn't open its session (and wasn't the one the
+  /// cold-launch replay opened — e.g. the older of two pre-home taps, #46 last-wins) clears
+  /// when the session is opened later from the LIST, and the entry read before the clear
+  /// threads the recovery hint into the freshly-filled slot (#30 badged-then-opened-later).
+  @Test func approvalBadgeClearsAndThreadsHintWhenOpenedFromList() async {
     let push = PushClient.inMemory()
-    // Onboarding (no home) — the tap can't open a session, so the badge reflects the pending approval.
-    let store = TestStore(initialState: AppFeature.State()) {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        pendingApprovalSessionIDs: ["s-approve"]
+      )
+    ) {
       AppFeature()
     } withDependencies: {
       $0.push = push.client
     }
     store.exhaustivity = .off
 
-    await store.send(.pushTapped(PushTap(sessionID: "s-approve", type: "approval"))) {
-      $0.pendingApprovalSessionIDs = ["s-approve"]
-    }
-    await store.finish()
-    #expect(push.badgeCount == 1) // badge shows the pending approval
-
-    // Now sign in and open that session → badge clears.
-    await store.send(.autoConnectSucceeded(connection)) {
-      $0.home = SessionListFeature.State(connection: self.connection)
-    }
     await store.send(.home(.delegate(.openSession(Session(id: "s-approve"))))) {
       $0.pendingApprovalSessionIDs = []
     }
@@ -2106,7 +2102,9 @@ struct AppFeatureTests {
     #expect(store.state.liveChat?.expectsPendingApproval == false)
   }
 
-  /// Two distinct pending approvals → badge count 2; opening one → badge drops to 1.
+  /// Two distinct pending approvals → badge count 2. Only the LAST pre-home tap is stashed
+  /// for the cold-launch replay (#46, last-wins): sign-in auto-opens "s-two" (badge → 1);
+  /// the still-badged "s-one" then clears when opened from the list (badge → 0).
   @Test func multiplePendingApprovalsSetBadgeThenClearOne() async {
     let push = PushClient.inMemory()
     // Onboarding (no home) so the approval taps can't open and just accumulate as pending.
@@ -2114,26 +2112,162 @@ struct AppFeatureTests {
       AppFeature()
     } withDependencies: {
       $0.push = push.client
+      $0.chatSnapshot = .inMemory()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
     }
     store.exhaustivity = .off
 
     await store.send(.pushTapped(PushTap(sessionID: "s-one", type: "approval"))) {
       $0.pendingApprovalSessionIDs = ["s-one"]
+      $0.pendingPushTap = PushTap(sessionID: "s-one", type: "approval")
     }
     await store.send(.pushTapped(PushTap(sessionID: "s-two", type: "approval"))) {
       $0.pendingApprovalSessionIDs = ["s-one", "s-two"]
+      // Last-wins: a newer pre-home tap replaces the stash — only one tap replays.
+      $0.pendingPushTap = PushTap(sessionID: "s-two", type: "approval")
     }
     await store.finish()
     #expect(push.badgeCount == 2) // two pending approvals
 
-    // Sign in and open one of them → badge drops to the remaining pending count.
+    // Sign in → the stashed LAST tap replays and opens s-two; its entry clears.
     await store.send(.autoConnectSucceeded(connection)) {
       $0.home = SessionListFeature.State(connection: self.connection)
+      $0.pendingPushTap = nil
     }
-    await store.send(.home(.delegate(.openSession(Session(id: "s-one"))))) {
-      $0.pendingApprovalSessionIDs = ["s-two"]
+    await store.receive(\.pushTapped)
+    await store.receive(\.home.delegate.openSession) {
+      $0.pendingApprovalSessionIDs = ["s-one"]
     }
     await store.finish()
     #expect(push.badgeCount == 1)
+    #expect(store.state.liveChat?.storedSessionID == "s-two")
+
+    // Open the remaining badged session from the list → badge drops to zero (the occupied
+    // slot is replaced through the standard teardown-then-fill).
+    await store.send(.home(.delegate(.openSession(Session(id: "s-one"))))) {
+      $0.pendingApprovalSessionIDs = []
+    }
+    await store.skipReceivedActions()
+    await store.finish()
+    #expect(push.badgeCount == 0)
+    #expect(store.state.liveChat?.storedSessionID == "s-one")
+  }
+
+  // MARK: Cold-launch push-tap replay (#46)
+
+  /// Cold launch: the tap arrives while auto-connect is still probing (`home == nil`) — it
+  /// must be STASHED, then replayed through the one `.pushTapped` routing path the moment
+  /// `.autoConnectSucceeded` creates the list, opening the never-seen session via the
+  /// placeholder `Session(id:)` fallback.
+  @Test func coldLaunchTapStashedThenReplayedOnAutoConnect() async {
+    let store = TestStore(initialState: AppFeature.State(autoConnecting: true)) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    // Pre-home tap: stash only — nothing to navigate yet.
+    await store.send(.pushTapped(PushTap(sessionID: "20260724_cron"))) {
+      $0.pendingPushTap = PushTap(sessionID: "20260724_cron")
+    }
+    #expect(store.state.liveChat == nil)
+    #expect(store.state.path.isEmpty)
+
+    // The list arriving consumes the stash and replays the tap through normal routing.
+    await store.send(.autoConnectSucceeded(connection)) {
+      $0.autoConnecting = false
+      $0.home = SessionListFeature.State(connection: self.connection)
+      $0.pendingPushTap = nil
+    }
+    await store.receive(\.pushTapped)
+    await store.receive(\.home.delegate.openSession)
+    // The placeholder `Session(id:)` fallback resumed the never-seen session.
+    #expect(store.state.liveChat?.storedSessionID == "20260724_cron")
+    #expect(store.state.path.last?.sessionKey == "20260724_cron")
+  }
+
+  /// Auto-connect FAILED → the user lands on onboarding; the stashed tap must survive to a
+  /// manual login (`.onboarding(.delegate(.connected))`) and replay then.
+  @Test func coldLaunchTapReplayedAfterManualLogin() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "s-manual"))) {
+      $0.pendingPushTap = PushTap(sessionID: "s-manual")
+    }
+    await store.send(.onboarding(.delegate(.connected(connection)))) {
+      $0.home = SessionListFeature.State(connection: self.connection)
+      $0.pendingPushTap = nil
+    }
+    await store.receive(\.pushTapped)
+    await store.receive(\.home.delegate.openSession)
+    #expect(store.state.liveChat?.storedSessionID == "s-manual")
+    #expect(store.state.path.last?.sessionKey == "s-manual")
+  }
+
+  /// An approval tap dropped pre-home badges the session (it can't open yet); the replay
+  /// then opens it through the normal flow — arming the recovery hint (#30) — and the
+  /// open's mark-then-clear badge bookkeeping nets the entry back to zero.
+  @Test func coldLaunchApprovalTapReplaysArmingHintAndNetsBadgeZero() async {
+    let push = PushClient.inMemory()
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+    }
+    store.exhaustivity = .off
+
+    // Dropped approval tap: badged + stashed.
+    await store.send(.pushTapped(PushTap(sessionID: "s-approve", type: "approval"))) {
+      $0.pendingApprovalSessionIDs = ["s-approve"]
+      $0.pendingPushTap = PushTap(sessionID: "s-approve", type: "approval")
+    }
+    await store.finish()
+    #expect(push.badgeCount == 1)
+
+    // The replay re-runs the (idempotent) badge insert, then the open clears it — net zero.
+    await store.send(.autoConnectSucceeded(connection)) {
+      $0.home = SessionListFeature.State(connection: self.connection)
+      $0.pendingPushTap = nil
+    }
+    await store.receive(\.pushTapped)
+    await store.receive(\.home.delegate.openSession) {
+      $0.pendingApprovalSessionIDs = []
+    }
+    await store.finish()
+    #expect(push.badgeCount == 0)
+    // The badge entry read before the clear armed the recovery hint on the fresh slot (#30).
+    #expect(store.state.liveChat?.expectsPendingApproval == true)
+    #expect(store.state.liveChat?.storedSessionID == "s-approve")
+  }
+
+  /// Existing-behavior guard: a warm tap (list present) routes immediately and never
+  /// touches the stash.
+  @Test func warmTapNeverTouchesPendingStash() async {
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pushTapped(PushTap(sessionID: "s-warm")))
+    await store.receive(\.home.delegate.openSession)
+    #expect(store.state.pendingPushTap == nil)
+    #expect(store.state.liveChat?.storedSessionID == "s-warm")
+  }
+
+  /// Existing-behavior guard: `.autoConnectSucceeded` with no stash emits no replay
+  /// (exhaustive — a stray `.pushTapped` follow-up would fail this send).
+  @Test func autoConnectWithoutStashEmitsNoReplay() async {
+    let store = TestStore(initialState: AppFeature.State(autoConnecting: true)) {
+      AppFeature()
+    }
+
+    await store.send(.autoConnectSucceeded(connection)) {
+      $0.autoConnecting = false
+      $0.home = SessionListFeature.State(connection: self.connection)
+    }
   }
 }

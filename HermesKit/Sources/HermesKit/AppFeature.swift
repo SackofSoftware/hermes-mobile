@@ -32,6 +32,11 @@ public struct AppFeature {
     /// `.active`). Guards `.backgroundGraceExpired`: an expiry whose send escaped just as
     /// the user returned must not tear down the socket `.active` freshly redialed.
     var isSceneBackgrounded = false
+    /// A push tap that arrived before the session list existed (cold launch — #46): the
+    /// routing in `.pushTapped` can't open anything without `home`, so the tap is stashed
+    /// here and replayed once `.autoConnectSucceeded` / a manual login creates the list.
+    /// Process-lifetime only (never persisted) — the race it covers is intra-launch.
+    var pendingPushTap: PushTap?
 
     public init(
       onboarding: ConnectionFeature.State = .init(),
@@ -177,7 +182,7 @@ public struct AppFeature {
       case let .autoConnectSucceeded(connection):
         state.autoConnecting = false
         state.home = SessionListFeature.State(connection: connection)
-        return .none
+        return replayPendingPushTap(&state)
 
       case let .autoConnectFailed(connection):
         // Stored creds didn't validate (expired token / dead cookies / server moved) — fall
@@ -263,8 +268,10 @@ public struct AppFeature {
           state.pendingApprovalSessionIDs.insert(tap.sessionID)
         }
         guard state.home != nil else {
-          // No session list yet (e.g. cold launch still on onboarding) — can't open; the badge
-          // reflects the now-pending approval.
+          // No session list yet (cold launch still auto-connecting or on onboarding) — can't
+          // open. Stash the tap for replay once the list exists (#46); the badge reflects
+          // the now-pending approval either way.
+          state.pendingPushTap = tap
           return setBadge(state)
         }
         // The tapped session is the one ALREADY on screen (slot match + marker on the
@@ -299,7 +306,9 @@ public struct AppFeature {
 
       case let .onboarding(.delegate(.connected(connection))):
         state.home = SessionListFeature.State(connection: connection)
-        return .none
+        // Auto-connect failure falls back to onboarding, so a manual login must also replay
+        // a stashed cold-launch tap (#46).
+        return replayPendingPushTap(&state)
 
       case let .home(.delegate(.openSession(session))):
         guard let home = state.home else { return .none }
@@ -526,6 +535,17 @@ public struct AppFeature {
       .run { [backgroundTask] _ in await backgroundTask.end() },
       .concatenate(chain)
     )
+  }
+
+  /// Consume the cold-launch tap stash (#46): a tap dropped while `home` was nil is
+  /// replayed through the normal `.pushTapped` routing the moment the list exists — slot
+  /// compare, #32 dedup, and approval-hint arming all reuse the one code path (duplicating
+  /// any of it here would drift). No stash → no effect. The replayed approval badge insert
+  /// is idempotent (`Set` insert; the open then clears it, netting zero like a warm tap).
+  private func replayPendingPushTap(_ state: inout State) -> Effect<Action> {
+    guard let tap = state.pendingPushTap else { return .none }
+    state.pendingPushTap = nil
+    return .send(.pushTapped(tap))
   }
 
   /// Fill the live-chat slot and (re)set the navigation path to that chat's single marker.

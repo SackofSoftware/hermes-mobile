@@ -174,10 +174,10 @@ Files involved:
 - Create: `HermesKit/Sources/HermesKit/Models/SessionBranchTree.swift`
 - Create: `HermesKit/Tests/HermesKitTests/SessionBranchTreeTests.swift`
 
-- [ ] implement `flattenSessionsWithBranches(_ sessions: [Session]) -> [SessionBranchEntry]` mirroring the desktop algorithm (children grouped by `parentSessionID`, sibling recency sort, group-recency lift, recursive nesting, `└─`/`├─` stems, trailing sweep)
-- [ ] handle orphans (parent absent from slice → de-nest, no stem) and self/cycle references safely
-- [ ] write tests: nested ordering, last-vs-middle sibling stems, branch-of-branch, orphan de-nest, cycle safety, empty/flat input passthrough, group recency lift
-- [ ] run tests - must pass before task 3
+- [x] implement `flattenSessionsWithBranches(_ sessions: [Session]) -> [SessionBranchEntry]` mirroring the desktop algorithm (children grouped by `parentSessionID`, sibling recency sort, group-recency lift, recursive nesting, `└─`/`├─` stems, trailing sweep)
+- [x] handle orphans (parent absent from slice → de-nest, no stem) and self/cycle references safely
+- [x] write tests: nested ordering, last-vs-middle sibling stems, branch-of-branch, orphan de-nest, cycle safety, empty/flat input passthrough, group recency lift
+- [x] run tests - must pass before task 3
 
 ### Task 3: SessionListFeature emits stemmed entries per lane
 

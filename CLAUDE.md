@@ -157,6 +157,12 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   (`sortTopLevelByRecency: false`; a pinned branch nests only when its parent is also pinned,
   otherwise it de-nests); search / archived / cron stay flat. Row identity and swipe/context
   affordances are unchanged.
+- **`review.summary` is a LIVE-ONLY event** (#47) — the agent's background self-improvement
+  review emits it to the session's own socket (per-session `_emit`, not a global broadcast) but
+  never writes it to session history, so a hydrate wipes the row (accepted until an upstream
+  hermes-agent change persists it). Decoded to `.reviewSummary`, folded into a bubble-less
+  `.status(kind: ChatRow.Kind.reviewStatusKind)` row rendered at footnote size (selectable);
+  blank (empty/whitespace-only) text is dropped.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
 - **Auth has two regimes**, modeled by `AuthSession` (`.token` | `.cookie(CookieSession)`) so
   the REST/Gateway clients adapt transport without scattering regime checks. **Token mode**
@@ -314,8 +320,20 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - **Destructive actions** use TCA `ConfirmationDialogState` (`@Presents`) so the
   confirm/cancel flow is driven by state and unit-testable.
 - **List-row affordances**: pin/unpin and archive are offered via both `.swipeActions`
-  and a long-press `.contextMenu` on the row (mirrors the desktop). Animations (the glow)
-  respect reduce-motion.
+  and a long-press `.contextMenu` on the row (mirrors the desktop); Copy ID is
+  context-menu-only. Animations (the glow) respect reduce-motion.
+- **Transient confirmation toasts live in the reducer** — a per-copy token
+  (`copiedIDToastToken: Int?`, **not** a `Bool`: `nil` hides it, every copy bumps it, so a
+  re-copy while it's already up is still an observable change) + a `cancelInFlight`
+  `continuousClock` dwell effect sending an expiry action (never a view-local `Task.sleep`, so
+  it's `TestClock`-drivable), duplicated per feature rather than hoisted into a shared toast
+  feature. The session-id copy is rendered by `CopiedToastView` (its message is hardcoded —
+  give a second toast its own view or parameterize this one); attach its
+  `.overlay(alignment: .bottom)` where nothing can swallow it — **before** a bottom
+  `.safeAreaInset` (list), on the `transcript` rather than the outer `VStack` (chat). It
+  **announces EVERY copy to VoiceOver** off the token (focus never moves to a transient
+  overlay, so it's the only confirmation channel). The dwell constant is
+  `copiedFeedbackDuration` in every feature that has one.
 - **Gate UI by server capability, not assumptions** — e.g. reasoning effort is shown only
   when `model.options` capabilities say the selected model supports it (`?? true` on
   unknown). Mirror the desktop's behaviour where one exists; check the Hermes source.
@@ -362,11 +380,30 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   requested on the sessions-list appearance** (right after login), per the product decision — NOT
   first launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
   canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload
-  parse, foreground-suppression) outside the guard. **All four triggers fire via real plugin
-  hooks** (CLI + gateway): approval (`pre_approval_request`), turn-complete (`post_llm_call`,
-  gated to ~>10s turns via a `pre_llm_call` start anchor), error (`on_session_end`, genuine
-  failures only — not success/interrupt), and clarify (`pre_tool_call` filtered to the `clarify`
-  tool, fired before the user is prompted — not duration-gated).
+  parse, foreground-suppression) — and `PushBridge` itself (Foundation-only: `NSLock` +
+  `AsyncStream`) — outside the guard so the stream/buffer behavior is macOS-tested. **All four
+  triggers fire via real plugin hooks** (CLI + gateway): approval (`pre_approval_request`),
+  turn-complete (`post_llm_call`, gated to ~>10s turns via a `pre_llm_call` start anchor),
+  error (`on_session_end`, genuine failures only — not success/interrupt), and clarify
+  (`pre_tool_call` filtered to the `clarify` tool, fired before the user is prompted — not
+  duration-gated). **Cold-launch taps replay**
+  (#46) — a launch-from-push tap is dropped at two independent points unless both are covered:
+  `PushBridge` buffers a tap that fires with no **live** `tapStream()` subscriber and the first
+  subscriber drains it **consume-once** (cleared after delivery — a stale tap must not
+  re-navigate a later re-subscriber, unlike the idempotent `lastToken` replay; terminated
+  continuations are pruned via `onTermination`, so a cancelled observer can't strand a dead
+  entry that defeats the `isEmpty` buffer gate); and a tap arriving before `state.home` exists
+  is stashed in `AppFeature.State.pendingPushTap` (single stash, last-wins; process-lifetime,
+  cleared on logout, badge bookkeeping unchanged) and re-sent as `.pushTapped` when `home`
+  is created (`.autoConnectSucceeded` AND the manual-login `.onboarding(.delegate(.connected))`)
+  — always replay through the one #32 routing path (slot dedup, approval-hint arming,
+  placeholder `Session(id:)` + `session.resume`), never call `openSession` directly. The stash
+  records the persisted server URL at stash time and a login to a **different** server drops it
+  (scrubbing its badge entry) instead of replaying — resuming a foreign session id would trip
+  the resume self-heal into creating a spurious empty chat; an unknown origin (logged out, no
+  stored URL) replays unverified. Home creation seeds the persisted profile selection
+  (`makeHomeState`) so the replayed open resumes under the right profile — the replay fires
+  before the list's `.task` prefs reload.
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky
@@ -390,6 +427,10 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - Snapshot tests: `make snapshot` (assert) / `make snapshot-record` (re-record). They
   render real views and **catch view regressions reducer tests can't** — re-record when
   UI changes intentionally. Row timestamps are pinned for determinism.
+  **`make snapshot-record` `rm -rf`s the whole `__Snapshots__` dir** and re-records every
+  baseline — use it only for a deliberate global re-render. To add ONE new snapshot test,
+  run `make snapshot` **twice**: the first run finds no baseline, records it and fails by
+  design; the second asserts clean. That keeps the commit to the single new PNG.
 
 ## Gotchas
 

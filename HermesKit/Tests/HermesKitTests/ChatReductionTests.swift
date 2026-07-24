@@ -1026,6 +1026,127 @@ struct ChatReductionTests {
     await store.send(.gatewayEvent(.unknown(type: "tool.progress", raw: .object([:]))))
   }
 
+  // MARK: Review summary (#47) — live-only system row
+
+  @Test func reviewSummaryAppendsStatusRowVerbatim() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    // The wire text (💾 prefix included) lands verbatim in a bubble-less status row.
+    await store.send(.gatewayEvent(.reviewSummary(text: "💾 Self-improvement review: tightened the search prompt."))) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .status(kind: "review", text: "💾 Self-improvement review: tightened the search prompt."))
+      ]
+    }
+  }
+
+  @Test func blankReviewSummaryIsDroppedWithoutPersist() async {
+    // Session ids are set so the persist gate at the `.gatewayEvent` wrapper is live: if a
+    // blank summary counted as persist-relevant, the exhaustive TestStore would fail on the
+    // scheduled (never-completed) debounce effect. Proves the fold no-op schedules nothing.
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.status = .ready
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    }
+    // A payload with no visible text must not render a blank caption row — neither empty
+    // nor whitespace-only (a whitespace row would paint as an invisible line).
+    await store.send(.gatewayEvent(.reviewSummary(text: "")))
+    await store.send(.gatewayEvent(.reviewSummary(text: " \n\t ")))
+  }
+
+  @Test func reviewSummaryMidTurnInterleavesWithStreamingAndKeepsThinkingLast() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    // The turn is actively streaming when the summary lands: the first delta creates the
+    // in-flight assistant row (above the pinned thinking row).
+    await store.send(.gatewayEvent(.messageDelta(text: "Sure, "))) {
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Sure, ", isComplete: false)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
+      $0.streamingRowID = uuid(1)
+    }
+    // A summary arriving mid-turn slots in BELOW the partial assistant row and above the
+    // pinned live thinking row: [assistant][summary][thinking].
+    await store.send(.gatewayEvent(.reviewSummary(text: "💾 Self-improvement review: noted."))) {
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Sure, ", isComplete: false)),
+        ChatRow(id: uuid(2), kind: .status(kind: "review", text: "💾 Self-improvement review: noted.")),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
+    }
+    #expect(store.state.transcript.last?.id == uuid(0))
+    // Later deltas keep mutating the SAME streaming row in place, above the summary — the
+    // summary must not capture or reorder the stream.
+    await store.send(.gatewayEvent(.messageDelta(text: "here goes."))) {
+      $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Sure, here goes.", isComplete: false)
+    }
+    #expect(store.state.transcript.map(\.id) == [uuid(1), uuid(2), uuid(0)])
+    // Turn ends: the empty thinking row is removed; the answer + summary stay in order.
+    await store.send(.gatewayEvent(.messageComplete(text: "Sure, here goes.", usage: nil))) {
+      $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Sure, here goes.", isComplete: true)
+      $0.transcript.remove(id: self.uuid(0))
+      $0.thinkingRowID = nil
+      $0.streamingRowID = nil
+      $0.isSending = false
+    }
+    #expect(store.state.transcript.map(\.id) == [uuid(1), uuid(2)])
+  }
+
+  @Test func reviewSummaryTriggersSnapshotPersist() async {
+    // The appended row must reach the snapshot cache (same debounced write-back as other
+    // transcript-changing events) so the next open paints it instantly.
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.status = .ready
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(Date(timeIntervalSince1970: 123))
+      $0.chatSnapshot = snapshotClient
+    }
+
+    await store.send(.gatewayEvent(.reviewSummary(text: "💾 Self-improvement review: done."))) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .status(kind: "review", text: "💾 Self-improvement review: done."))
+      ]
+    }
+    // Nothing persisted yet (still inside the debounce window).
+    #expect(snapshotClient.loadSnapshot("stored123") == nil)
+
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.persistSnapshotTick)
+
+    let saved = snapshotClient.loadSnapshot("stored123")
+    #expect(saved?.rows == [
+      ChatRow(id: self.uuid(0), kind: .status(kind: "review", text: "💾 Self-improvement review: done."))
+    ])
+
+    await store.send(.teardown)
+  }
+
   @Test func sessionInfoUpdatesModelAndReasoningChip() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()

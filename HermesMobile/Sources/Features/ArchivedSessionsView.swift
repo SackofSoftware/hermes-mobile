@@ -29,6 +29,9 @@ struct ArchivedSessionsView: View {
         }
         .contextMenu {
           restoreButton(session)
+          Button("Copy ID", systemImage: "doc.on.doc") {
+            store.send(.copyIDButtonTapped(id: session.id))
+          }
         }
       }
     }
@@ -38,6 +41,9 @@ struct ArchivedSessionsView: View {
       if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
         ContentUnavailableView("No archived sessions", systemImage: "archivebox")
       }
+    }
+    .overlay(alignment: .bottom) {
+      CopiedToastView(token: store.copiedIDToastToken)
     }
     .navigationTitle("Archived")
     .navigationBarTitleDisplayMode(.inline)

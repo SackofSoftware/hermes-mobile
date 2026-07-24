@@ -228,6 +228,11 @@ public extension PushClient {
     /// Push a device token into the `register()` stream as if APNs delivered it.
     public func emit(token: String) { box.emit(token: token) }
     /// Push a tap into the `incomingTaps()` stream as if the user tapped a notification.
+    /// Taps are delivered LIVE-ONLY: unlike the production `PushBridge`, the double does
+    /// no launch-race buffering, so a tap emitted with no active subscriber is silently
+    /// dropped — deterministic for tests (subscribe first, then emit). To exercise the
+    /// cold-launch buffer itself, inject a real `PushBridge` behind a `PushClient`
+    /// instead (see `coldLaunchTapBufferedInBridgeReplaysThroughTaskObserver`).
     public func emit(tap: PushTap) { box.emit(tap: tap) }
     /// Change the granted result the next `requestAuthorization()` returns.
     public func setAuthorized(_ granted: Bool) { box.setAuthorized(granted) }
@@ -246,6 +251,134 @@ public extension PushClient {
   }
 }
 
+// MARK: - App-delegate bridge (process-wide hub)
+
+/// Process-wide hub the app-delegate bridge (C2) feeds tokens/taps into, fanned out to
+/// every `register()` / `incomingTaps()` consumer. Lives here so the bridge has no logic
+/// of its own — it just calls `tokenReceived` / `tapReceived`. Uses only Foundation
+/// (`NSLock`, `AsyncStream`) + the pure `PushClient` helpers, so it sits OUTSIDE the
+/// UIKit guard and its stream/buffering behavior is unit-tested on macOS (`swift test`).
+public final class PushBridge: @unchecked Sendable {
+  public static let shared = PushBridge()
+
+  private let lock = NSLock()
+  /// Live subscribers, keyed per-subscription so `onTermination` can prune the exact
+  /// continuation when its consumer goes away (the reducer's `.task` observer is
+  /// cancelled and re-subscribed — `cancelInFlight` — leaving a gap where a tap must
+  /// buffer, not vanish into a dead continuation). Pruning keeps the dictionaries from
+  /// accreting dead entries; on the tap side `tapReceived` additionally inspects each
+  /// yield's RESULT, so even a terminated-but-not-yet-pruned continuation (its
+  /// `onTermination` still racing for this lock) can't swallow a tap.
+  private var tokenContinuations: [UUID: AsyncStream<String>.Continuation] = [:]
+  private var tapContinuations: [UUID: AsyncStream<PushTap>.Continuation] = [:]
+  private var lastToken: String?
+  /// The last tap no live subscriber accepted (a launch-from-push fires the app
+  /// delegate's `didReceive` before the reducer's `.task` subscribes — #46). Unlike
+  /// `lastToken` (idempotent, replayed to every late subscriber), a tap is consume-once:
+  /// the first `tapStream()` subscriber drains it, so a stale tap never re-navigates a
+  /// later re-subscriber. A tap delivered to at least one live continuation is never
+  /// cached — buffering exists only for the launch race.
+  private var pendingTap: PushTap?
+  /// The session the user is currently viewing, set by the reducer (via
+  /// `PushClient.setCurrentSession`) on chat open/close. Read by `willPresent` to decide
+  /// foreground suppression — kept here so the app delegate carries no state of its own.
+  private var currentSessionID: String?
+
+  /// Internal (not `private`) so unit tests can create isolated instances; production
+  /// code goes through `shared`.
+  init() {}
+
+  /// Update the currently-viewing session (reducer → `PushClient.setCurrentSession`).
+  public func setCurrentSession(_ sessionID: String?) {
+    lock.withLock { currentSessionID = sessionID }
+  }
+
+  /// Decide whether a foreground push should present its banner, given the session it
+  /// targets. Suppresses (returns `false`) when the user is already viewing that session.
+  /// Called by the app delegate's `willPresent`; the actual rule is the pure
+  /// `PushClient.shouldPresentForeground`.
+  public func shouldPresentForeground(for payload: [AnyHashable: Any]) -> Bool {
+    let incoming = PushClient.sessionID(fromPayload: payload)
+    let viewing = lock.withLock { currentSessionID }
+    return PushClient.shouldPresentForeground(
+      incomingSessionID: incoming, currentlyViewingSessionID: viewing
+    )
+  }
+
+  func tokenStream() -> AsyncStream<String> {
+    AsyncStream { continuation in
+      let id = UUID()
+      lock.withLock {
+        tokenContinuations[id] = continuation
+        // Re-deliver the most recent token so a late subscriber still registers. Yielded
+        // inside the lock so a concurrent rotation can't slot a newer token in front.
+        if let cached = lastToken { continuation.yield(cached) }
+      }
+      // Prune on consumer termination (cancellation/dealloc) so dead continuations never
+      // accumulate. Registered after insertion — a stream that already terminated invokes
+      // the handler immediately, so the entry is removed either way.
+      continuation.onTermination = { [weak self] _ in
+        guard let self else { return }
+        self.lock.withLock { _ = self.tokenContinuations.removeValue(forKey: id) }
+      }
+    }
+  }
+
+  func tapStream() -> AsyncStream<PushTap> {
+    AsyncStream { continuation in
+      let id = UUID()
+      lock.withLock {
+        tapContinuations[id] = continuation
+        // Deliver the tap that raced ahead of subscription (launch-from-push), exactly
+        // once. Yielded INSIDE the lock: a `tapReceived` on another thread must not slot
+        // a newer tap in front of the buffered one — for taps, delivery order is the
+        // contract (the consumer's last-wins routing navigates to the final tap).
+        if let buffered = pendingTap {
+          pendingTap = nil
+          continuation.yield(buffered)
+        }
+      }
+      // Prune on consumer termination so `tapContinuations.isEmpty` keeps meaning "no
+      // LIVE subscriber" — the buffer must re-engage after the observer goes away (the
+      // reducer's `.task` re-fire cancels the old effect before the replacement
+      // subscribes; a tap landing in that gap has to buffer, not no-op into a dead
+      // continuation).
+      continuation.onTermination = { [weak self] _ in
+        guard let self else { return }
+        self.lock.withLock { _ = self.tapContinuations.removeValue(forKey: id) }
+      }
+    }
+  }
+
+  /// Called by the app delegate on `didRegisterForRemoteNotificationsWithDeviceToken`.
+  public func tokenReceived(_ data: Data) {
+    let hex = PushClient.hexToken(from: data)
+    lock.withLock {
+      lastToken = hex
+      for continuation in tokenContinuations.values { continuation.yield(hex) }
+    }
+  }
+
+  /// Called by the app delegate on a notification tap (`didReceive`). When no live
+  /// subscriber ACCEPTS the tap, it is buffered for the next `tapStream()` subscriber.
+  /// Acceptance is judged per-yield, not by `tapContinuations.isEmpty`: a consumer
+  /// cancelled on another thread can leave its already-terminated continuation in the
+  /// dictionary while its `onTermination` prune waits for this lock — yielding to it
+  /// returns `.terminated` and delivers nothing, so the tap must fall back to the
+  /// buffer instead of vanishing. Yields happen inside the lock so two rapid taps
+  /// can't be observed out of order.
+  public func tapReceived(_ payload: [AnyHashable: Any]) {
+    guard let tap = PushClient.tap(fromPayload: payload) else { return }
+    lock.withLock {
+      var delivered = false
+      for continuation in tapContinuations.values {
+        if case .enqueued = continuation.yield(tap) { delivered = true }
+      }
+      if !delivered { pendingTap = tap }
+    }
+  }
+}
+
 // MARK: - Live (iOS only)
 
 // `UNUserNotificationCenter`/`UIApplication.registerForRemoteNotifications` are iOS-only;
@@ -255,75 +388,6 @@ public extension PushClient {
 #if canImport(UIKit)
   import UIKit
   import UserNotifications
-
-  /// Process-wide hub the app-delegate bridge (C2) feeds tokens/taps into, fanned out to
-  /// every `register()` / `incomingTaps()` consumer. Lives here so the bridge has no logic
-  /// of its own — it just calls `tokenReceived` / `tapReceived`.
-  public final class PushBridge: @unchecked Sendable {
-    public static let shared = PushBridge()
-
-    private let lock = NSLock()
-    private var tokenContinuations: [AsyncStream<String>.Continuation] = []
-    private var tapContinuations: [AsyncStream<PushTap>.Continuation] = []
-    private var lastToken: String?
-    /// The session the user is currently viewing, set by the reducer (via
-    /// `PushClient.setCurrentSession`) on chat open/close. Read by `willPresent` to decide
-    /// foreground suppression — kept here so the app delegate carries no state of its own.
-    private var currentSessionID: String?
-
-    private init() {}
-
-    /// Update the currently-viewing session (reducer → `PushClient.setCurrentSession`).
-    public func setCurrentSession(_ sessionID: String?) {
-      lock.withLock { currentSessionID = sessionID }
-    }
-
-    /// Decide whether a foreground push should present its banner, given the session it
-    /// targets. Suppresses (returns `false`) when the user is already viewing that session.
-    /// Called by the app delegate's `willPresent`; the actual rule is the pure
-    /// `PushClient.shouldPresentForeground`.
-    public func shouldPresentForeground(for payload: [AnyHashable: Any]) -> Bool {
-      let incoming = PushClient.sessionID(fromPayload: payload)
-      let viewing = lock.withLock { currentSessionID }
-      return PushClient.shouldPresentForeground(
-        incomingSessionID: incoming, currentlyViewingSessionID: viewing
-      )
-    }
-
-    func tokenStream() -> AsyncStream<String> {
-      AsyncStream { continuation in
-        let cached: String? = lock.withLock {
-          tokenContinuations.append(continuation)
-          return lastToken
-        }
-        // Re-deliver the most recent token so a late subscriber still registers.
-        if let cached { continuation.yield(cached) }
-      }
-    }
-
-    func tapStream() -> AsyncStream<PushTap> {
-      AsyncStream { continuation in
-        lock.withLock { tapContinuations.append(continuation) }
-      }
-    }
-
-    /// Called by the app delegate on `didRegisterForRemoteNotificationsWithDeviceToken`.
-    public func tokenReceived(_ data: Data) {
-      let hex = PushClient.hexToken(from: data)
-      let continuations: [AsyncStream<String>.Continuation] = lock.withLock {
-        lastToken = hex
-        return tokenContinuations
-      }
-      for continuation in continuations { continuation.yield(hex) }
-    }
-
-    /// Called by the app delegate on a notification tap (`didReceive`).
-    public func tapReceived(_ payload: [AnyHashable: Any]) {
-      guard let tap = PushClient.tap(fromPayload: payload) else { return }
-      let continuations = lock.withLock { tapContinuations }
-      for continuation in continuations { continuation.yield(tap) }
-    }
-  }
 
   extension PushClient {
     public static var liveValue: PushClient {

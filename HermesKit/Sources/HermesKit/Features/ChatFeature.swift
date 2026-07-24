@@ -75,6 +75,12 @@ public struct ChatFeature {
     /// message row (`ChatFeature.rowCopyToken(_:)`, #34) — for the transient "copied"
     /// checkmark. Cleared by a clock-driven effect; the latest copy owns the feedback.
     public var recentlyCopiedToken: String?
+    /// Non-`nil` while the transient "Session ID copied" toast is showing. Purely transient
+    /// confirmation state: raised by a copy, cleared by the timed expiry. It's a counter
+    /// rather than a `Bool` so a re-copy while the toast is already up is still an
+    /// observable change — that's what re-announces the copy to VoiceOver (a `Bool` would
+    /// stay `true` and the announcement would be swallowed).
+    public var copiedIDToastToken: Int?
     /// Voice-input recording lifecycle (#7).
     public var recording: RecordingState
     /// Rolling window of normalized (0...1) mic amplitudes driving the recording waveform.
@@ -317,6 +323,7 @@ public struct ChatFeature {
       self.modelPicker = nil
       self.renameDraft = nil
       self.recentlyCopiedToken = nil
+      self.copiedIDToastToken = nil
       self.recording = .idle
       self.waveformLevels = []
       self.recordingSeconds = 0
@@ -504,6 +511,11 @@ public struct ChatFeature {
     /// truly has no row (failure, falls through to the existing not-found/degrade
     /// handling).
     case branchResumeProbeResult(Result<ActivateResponse, GatewayError>)
+    /// Put this chat's session id (`sessionKey`) on the pasteboard and raise the transient
+    /// confirmation toast. A no-op before the session resolves (`sessionKey == nil`).
+    case copySessionIDTapped
+    /// The copy toast's dwell time elapsed — hide it.
+    case copiedIDToastExpired
     // Voice input (#7)
     case voiceButtonTapped
     case recordingPermission(Bool)
@@ -575,11 +587,16 @@ public struct ChatFeature {
   }
 
   private enum CancelID {
-    case socket, reconnect, hydrate, copyFeedback, voiceLevels, voiceTimer, thinkingTimer, persist
+    case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer,
+         thinkingTimer, persist
   }
 
   /// Debounce window for write-back so heavy streaming doesn't thrash SQLite.
   private static let persistDebounce: Duration = .seconds(1)
+
+  /// How long a copy confirmation stays up. Shared by the code-block checkmark and the
+  /// "Session ID copied" toast so the two can't visually desync.
+  static let copiedFeedbackDuration: Duration = .seconds(1.5)
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
@@ -1242,6 +1259,26 @@ public struct ChatFeature {
         state.branchSeed = nil
         return createSession(profile: state.scopedProfile)
 
+      case .copySessionIDTapped:
+        // No session yet (brand-new chat before `session.create` resolves) — nothing to
+        // copy, and no toast to promise one.
+        guard let sessionID = state.sessionKey else { return .none }
+        state.copiedIDToastToken = (state.copiedIDToastToken ?? 0) + 1
+        // Copy now; hide the confirmation after a beat. A second copy while the toast is
+        // up restarts the dwell (cancelInFlight) so the latest copy owns the countdown.
+        return .merge(
+          .run { [pasteboard] _ in pasteboard.copy(sessionID) },
+          .run { [clock] send in
+            try await clock.sleep(for: Self.copiedFeedbackDuration)
+            await send(.copiedIDToastExpired)
+          }
+          .cancellable(id: CancelID.copyIDToast, cancelInFlight: true)
+        )
+
+      case .copiedIDToastExpired:
+        state.copiedIDToastToken = nil
+        return .none
+
       // MARK: Voice input (#7)
 
       case .voiceButtonTapped:
@@ -1733,6 +1770,17 @@ public struct ChatFeature {
       if let model = info.model?.nonEmpty { state.model = model }
       if let effort = info.reasoningEffort?.nonEmpty { state.reasoningEffort = effort }
       if let u = info.usage { state.usage = u }
+      return .none
+
+    case let .reviewSummary(text):
+      // Live-only self-improvement review summary (#47): render as a bubble-less system
+      // line, verbatim (the 💾 prefix arrives on the wire). Ephemeral by design — the
+      // event never lands in session history, so the next hydrate replaces it wholesale.
+      guard Self.hasRenderableReviewText(text) else { return .none }
+      state.transcript.append(
+        ChatRow(id: uuid(), kind: .status(kind: ChatRow.Kind.reviewStatusKind, text: text))
+      )
+      keepThinkingLast(into: &state)
       return .none
 
     case .unknown:
@@ -2416,10 +2464,21 @@ public struct ChatFeature {
          .thinkingDelta, .reasoningAvailable, .statusUpdate,
          .toolStart, .toolComplete, .sessionInfo:
       return true
+    case let .reviewSummary(text):
+      // Blank text is dropped by the fold with zero state change — don't schedule a
+      // pointless snapshot write for it.
+      return Self.hasRenderableReviewText(text)
     case .ready, .error, .authExpired, .approvalRequest, .clarifyRequest,
          .sudoRequest, .secretRequest, .unknown:
       return false
     }
+  }
+
+  /// Whether a `review.summary` payload has visible content. Whitespace-only text would
+  /// render a blank status row, so the fold (drop the row) and `persistRelevant` (skip the
+  /// snapshot write for a no-op fold) share this one check and can't drift.
+  private static func hasRenderableReviewText(_ text: String) -> Bool {
+    text.trimmedNonEmpty != nil
   }
 
   /// Debounced write-back trigger: coalesces a burst of streaming deltas into a single

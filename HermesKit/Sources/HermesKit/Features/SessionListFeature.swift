@@ -93,6 +93,12 @@ public struct SessionListFeature {
     /// Job ids whose trigger/pause/resume RPC is IN FLIGHT. Transient double-fire guard
     /// (mirrors `archivingIDs`): added when the POST starts, removed on success/failure.
     public var cronActionInFlightIDs: Set<String>
+    /// Non-`nil` while the transient "Session ID copied" toast is showing. Purely transient
+    /// confirmation state: raised by a copy, cleared by the timed expiry. It's a counter
+    /// rather than a `Bool` so a re-copy while the toast is already up is still an
+    /// observable change — that's what re-announces the copy to VoiceOver (a `Bool` would
+    /// stay `true` and the announcement would be swallowed).
+    public var copiedIDToastToken: Int?
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
     @Presents public var addProfile: AddProfileFeature.State?
@@ -100,6 +106,14 @@ public struct SessionListFeature {
 
     /// The default profile name — never renamable/deletable, and the implicit fallback.
     public static let defaultProfileName = "default"
+
+    /// The device-local persisted profile selection, falling back to
+    /// `defaultProfileName`. The ONE fallback rule, shared by the list's `.task` prefs
+    /// reload and `AppFeature.makeHomeState`'s creation-time seeding (#46) — change it
+    /// here and both sites follow.
+    static func persistedProfileName(_ preferences: PreferencesClient) -> String {
+      preferences.loadSelectedProfileID() ?? defaultProfileName
+    }
 
     /// Collapsed groups show at most this many rows before a "Show more".
     public static let collapsedLimit = 5
@@ -130,6 +144,7 @@ public struct SessionListFeature {
       cronJobsSupported: Bool = true,
       expandedCronJobID: String? = nil,
       cronActionInFlightIDs: Set<String> = [],
+      copiedIDToastToken: Int? = nil,
       settings: SettingsFeature.State? = nil,
       addProfile: AddProfileFeature.State? = nil
     ) {
@@ -158,6 +173,7 @@ public struct SessionListFeature {
       self.cronJobsSupported = cronJobsSupported
       self.expandedCronJobID = expandedCronJobID
       self.cronActionInFlightIDs = cronActionInFlightIDs
+      self.copiedIDToastToken = copiedIDToastToken
       self.settings = settings
       self.addProfile = addProfile
     }
@@ -333,6 +349,10 @@ public struct SessionListFeature {
     case newSessionButtonTapped
     case pinSession(id: Session.ID)
     case unpinSession(id: Session.ID)
+    /// Put a row's session id on the pasteboard and raise the transient confirmation toast.
+    case copyIDButtonTapped(id: Session.ID)
+    /// The copy toast's dwell time elapsed — hide it.
+    case copiedIDToastExpired
     case toggleGroupExpansion(groupID: String)
     /// Switch the list grouping (workspace/chronological) and persist the choice.
     case setGroupingMode(SessionGroupingMode)
@@ -465,10 +485,14 @@ public struct SessionListFeature {
   // One id for BOTH the list fetch and the search fetch: any new fetch (list refresh, poll,
   // or search) cancels the previous in-flight one, so a late list response can't overwrite
   // active search results (and vice versa). `poll` is the separate timer loop.
-  private enum CancelID { case fetch, poll, pushTokens }
+  private enum CancelID { case fetch, poll, pushTokens, copyIDToast }
 
   /// How often the list auto-refreshes while visible, to keep `isActive` (working glow) fresh.
   private static let pollInterval: Duration = .seconds(10)
+
+  /// How long a copy confirmation (the "Session ID copied" toast) stays up before
+  /// auto-dismissing. Same name/value in every feature that confirms a copy.
+  static let copiedFeedbackDuration: Duration = .seconds(1.5)
 
   @Dependency(\.hermesREST) var rest
   @Dependency(\.hermesProfiles) var profiles
@@ -476,6 +500,7 @@ public struct SessionListFeature {
   @Dependency(\.date.now) var now
   @Dependency(\.preferences) var preferences
   @Dependency(\.push) var push
+  @Dependency(\.pasteboard) var pasteboard
 
   public init() {}
 
@@ -487,8 +512,7 @@ public struct SessionListFeature {
         // Refresh "now", reload persisted prefs (incl. the device-local selected profile),
         // probe the profiles capability, and start the auto-poll loop.
         reloadPrefs(&state)
-        state.selectedProfileName =
-          preferences.loadSelectedProfileID() ?? Self.State.defaultProfileName
+        state.selectedProfileName = Self.State.persistedProfileName(preferences)
         state.isLoading = true
         return .merge(
           .run { [profiles, connection = state.connection] send in
@@ -751,6 +775,23 @@ public struct SessionListFeature {
       case let .unpinSession(id):
         state.pinnedIDs.removeAll { $0 == id }
         return persistPinnedIDs(state.pinnedIDs)
+
+      case let .copyIDButtonTapped(id):
+        state.copiedIDToastToken = (state.copiedIDToastToken ?? 0) + 1
+        // Copy now; hide the confirmation after a beat. A second copy while the toast is
+        // up restarts the dwell (cancelInFlight) so the latest copy owns the countdown.
+        return .merge(
+          .run { [pasteboard] _ in pasteboard.copy(id) },
+          .run { [clock] send in
+            try await clock.sleep(for: Self.copiedFeedbackDuration)
+            await send(.copiedIDToastExpired)
+          }
+          .cancellable(id: CancelID.copyIDToast, cancelInFlight: true)
+        )
+
+      case .copiedIDToastExpired:
+        state.copiedIDToastToken = nil
+        return .none
 
       case let .setGroupingMode(mode):
         guard state.groupingMode != mode else { return .none }

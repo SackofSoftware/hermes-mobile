@@ -189,6 +189,54 @@ struct ArchivedSessionsFeatureTests {
     #expect(restored.value == .some(nil))
   }
 
+  // MARK: Copy session ID (transient toast)
+
+  // Like the session list, the reducer copies the tapped id verbatim (no `state.sessions`
+  // lookup — the id comes from a rendered row), so no fixture is seeded.
+  @Test func copyIDPutsSessionIDOnPasteboardAndAutoDismissesToast() async {
+    let copied = LockIsolated<String?>(nil)
+    let clock = TestClock()
+    let store = TestStore(initialState: ArchivedSessionsFeature.State(connection: connection)) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyIDButtonTapped(id: "a")) { $0.copiedIDToastToken = 1 }
+
+    await clock.advance(by: .seconds(1.5))
+    await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
+    // Asserted after the effects have been drained — `send` alone doesn't guarantee the
+    // merged copy effect has run.
+    #expect(copied.value == "a")
+  }
+
+  @Test func recopyingWhileToastVisibleRestartsTheDwellTimer() async {
+    let copied = LockIsolated<[String]>([])
+    let clock = TestClock()
+    let state = ArchivedSessionsFeature.State(connection: connection)
+    let store = TestStore(initialState: state) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.withValue { $0.append(text) } }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyIDButtonTapped(id: "a")) { $0.copiedIDToastToken = 1 }
+    await clock.advance(by: .seconds(1)) // first dwell is 2/3 elapsed…
+    // …a second copy cancels it (cancelInFlight) so the toast does NOT dismiss early. The
+    // token bumps even though the toast never hid — that bump is what the view turns into
+    // a second VoiceOver announcement.
+    await store.send(.copyIDButtonTapped(id: "b")) { $0.copiedIDToastToken = 2 }
+    await clock.advance(by: .seconds(1)) // past the first timer's deadline — still visible
+    #expect(store.state.copiedIDToastToken == 2)
+
+    await clock.advance(by: .seconds(0.5)) // completes the restarted dwell
+    await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
+    #expect(copied.value == ["a", "b"])
+  }
+
   @Test func tappingSessionEmitsOpenDelegate() async {
     let session = Session(id: "a", title: "Old")
     var state = ArchivedSessionsFeature.State(connection: connection)

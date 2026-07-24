@@ -11,7 +11,12 @@ struct ChatView: View {
   var body: some View {
     VStack(spacing: 0) {
       connectionBanner
+      // The toast overlays the transcript (not the whole screen) so it floats just above
+      // the composer instead of covering it.
       transcript
+        .overlay(alignment: .bottom) {
+          CopiedToastView(token: store.copiedIDToastToken)
+        }
       footer
       pendingCard
       Divider()
@@ -44,8 +49,14 @@ struct ChatView: View {
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
         Menu {
-          Button("Rename") { store.send(.renameButtonTapped) }
+          // Icons on every item — a `Menu` reserves the glyph gutter as soon as one item
+          // has an image, so a bare "Rename" would sit in a blank column.
+          Button("Rename", systemImage: "pencil") { store.send(.renameButtonTapped) }
             .disabled(!store.canRename)
+          // `sessionKey` is `storedSessionID ?? liveSessionID` — nil only before a session
+          // exists at all (a brand-new chat that hasn't been created yet).
+          Button("Copy ID", systemImage: "doc.on.doc") { store.send(.copySessionIDTapped) }
+            .disabled(store.sessionKey == nil)
         } label: {
           Image(systemName: "ellipsis.circle")
         }
@@ -202,8 +213,18 @@ struct ChatView: View {
         elapsedSeconds: elapsedSeconds,
         isComplete: isComplete
       )
-    case let .status(_, text):
-      Text(text).font(.caption).foregroundStyle(.secondary)
+    case let .status(kind, text):
+      // Review summaries (#47) are multi-sentence system lines — render them a step
+      // larger (`.footnote`) and selectable so they stay readable/copyable. Other
+      // status kinds ("approval", "clarify", …) keep the terse caption styling.
+      if kind == ChatRow.Kind.reviewStatusKind {
+        Text(text)
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+          .textSelection(.enabled)
+      } else {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+      }
     }
   }
 

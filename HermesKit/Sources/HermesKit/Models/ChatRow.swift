@@ -49,6 +49,12 @@ public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
     /// A transient status line (e.g. "searching…"); `kind` is an open string.
     case status(kind: String, text: String)
 
+    /// The `kind` token for self-improvement review-summary rows (#47) — the one status
+    /// kind the VIEW branches on (footnote + selectable rendering in `ChatView`). The
+    /// producer (`ChatFeature`) and the app-target consumer share this constant so the
+    /// cross-module contract can't drift between two string literals.
+    public static let reviewStatusKind = "review"
+
     /// A stable, role-agnostic token per case (NOT its mutable payload). The **single source**
     /// for the row-identity discriminator — `ChatRow.kindDiscriminator` and
     /// `reconstructTranscript` both read this so the value can never drift between them.

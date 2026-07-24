@@ -172,18 +172,20 @@
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify both drop sites from issue #46 are closed (bridge buffer + reducer replay)
-- [ ] verify edge cases: tap for the session already in the slot after replay (slot-match
+- [x] verify both drop sites from issue #46 are closed (bridge buffer + reducer replay)
+- [x] verify edge cases: tap for the session already in the slot after replay (slot-match
       short-circuit still applies — replay goes through the same `.pushTapped` case);
       non-approval tap replay; approval badge netting
-- [ ] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] confirm no view changes → snapshot suite untouched, no re-record needed
+- [x] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
+      (741 tests in 49 suites passed)
+- [x] confirm no view changes → snapshot suite untouched, no re-record needed
+      (diff vs main touches only `HermesKit/Sources`, `HermesKit/Tests`, and this plan)
 
 ### Task 5: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` push-notifications bullet: note the cold-launch tap replay
+- [x] update `CLAUDE.md` push-notifications bullet: note the cold-launch tap replay
       (bridge consume-once buffer + `pendingPushTap` reducer stash)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — no checkboxes, informational only*

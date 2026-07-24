@@ -289,7 +289,16 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   hooks** (CLI + gateway): approval (`pre_approval_request`), turn-complete (`post_llm_call`,
   gated to ~>10s turns via a `pre_llm_call` start anchor), error (`on_session_end`, genuine
   failures only — not success/interrupt), and clarify (`pre_tool_call` filtered to the `clarify`
-  tool, fired before the user is prompted — not duration-gated).
+  tool, fired before the user is prompted — not duration-gated). **Cold-launch taps replay**
+  (#46) — a launch-from-push tap is dropped at two independent points unless both are covered:
+  `PushBridge` buffers a tap that fires with no `tapStream()` subscriber and the first
+  subscriber drains it **consume-once** (cleared after delivery — a stale tap must not
+  re-navigate a later re-subscriber, unlike the idempotent `lastToken` replay); and a tap
+  arriving before `state.home` exists is stashed in `AppFeature.State.pendingPushTap`
+  (process-lifetime, badge bookkeeping unchanged) and re-sent as `.pushTapped` when `home`
+  is created (`.autoConnectSucceeded` AND the manual-login `.onboarding(.delegate(.connected))`)
+  — always replay through the one #32 routing path (slot dedup, approval-hint arming,
+  placeholder `Session(id:)` + `session.resume`), never call `openSession` directly.
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky

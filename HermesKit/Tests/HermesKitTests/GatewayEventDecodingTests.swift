@@ -130,6 +130,27 @@ import Testing
     #expect(f == .event(sessionID: "s", .secretRequest(SecretPrompt(requestID: "r4", prompt: "API key?"))))
   }
 
+  // MARK: Review summary (issue #47 — live-only broadcast, never in history)
+
+  @Test func reviewSummaryDecodesTextVerbatim() throws {
+    // Wire shape verified against tui_gateway/server.py: text already carries the 💾 prefix.
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"8680ce37","payload":{"text":"💾 Self-improvement review: tightened the retry loop."}}}"#)
+    #expect(f == .event(
+      sessionID: "8680ce37",
+      .reviewSummary(text: "💾 Self-improvement review: tightened the retry loop.")
+    ))
+  }
+
+  @Test func reviewSummaryWithoutTextDecodesToEmptyString() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"s","payload":{}}}"#)
+    #expect(f == .event(sessionID: "s", .reviewSummary(text: "")))
+  }
+
+  @Test func reviewSummaryWithoutPayloadDecodesToEmptyString() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"s"}}"#)
+    #expect(f == .event(sessionID: "s", .reviewSummary(text: "")))
+  }
+
   // MARK: Forward-compatibility
 
   @Test func unknownEventTypeDecodesToUnknownAndNeverThrows() throws {

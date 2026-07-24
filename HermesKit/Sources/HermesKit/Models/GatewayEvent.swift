@@ -22,6 +22,10 @@ public enum GatewayEvent: Equatable, Sendable {
   case sudoRequest(SecretPrompt)
   case secretRequest(SecretPrompt)
   case error(message: String)
+  /// Live-only broadcast from the agent's background self-improvement review
+  /// (`review.summary`, issue #47). Never written to session history, so a hydrate
+  /// (`session.resume`) cannot return it — the rendered row is ephemeral by design.
+  case reviewSummary(text: String)
   /// Synthetic (client-side, never on the wire): the gated `ws-ticket` mint returned `401`,
   /// meaning the cookie session is fully dead. The reducer routes this to re-auth instead of
   /// reconnect backoff. Distinct from `.error` (recoverable) and a socket drop (transient).
@@ -84,6 +88,8 @@ public enum GatewayEvent: Equatable, Sendable {
       else { self = .unknown(type: type, raw: p) }
     case "error":
       self = .error(message: p["message"]?.stringValue ?? "")
+    case "review.summary":
+      self = .reviewSummary(text: p["text"]?.stringValue ?? "")
     default:
       self = .unknown(type: type, raw: p)
     }

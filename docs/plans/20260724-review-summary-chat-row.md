@@ -103,11 +103,13 @@ GitHub issue: #47
 - Modify: `HermesKit/Sources/HermesKit/Models/GatewayEvent.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/GatewayEventDecodingTests.swift`
 
-- [ ] add `case reviewSummary(text: String)` to `GatewayEvent`
-- [ ] decode `"review.summary"` in `init(type:payload:)` → `.reviewSummary(text: p["text"]?.stringValue ?? "")`
-- [ ] write test: full frame with `session_id` + payload text decodes to `.reviewSummary` (text verbatim, 💾 prefix intact)
-- [ ] write tests: missing/absent `text` → empty string; unrelated unknown types still decode to `.unknown`
-- [ ] run `swift test --package-path HermesKit` — must pass before task 2
+- [x] add `case reviewSummary(text: String)` to `GatewayEvent`
+- [x] decode `"review.summary"` in `init(type:payload:)` → `.reviewSummary(text: p["text"]?.stringValue ?? "")`
+- [x] write test: full frame with `session_id` + payload text decodes to `.reviewSummary` (text verbatim, 💾 prefix intact)
+- [x] write tests: missing/absent `text` → empty string; unrelated unknown types still decode to `.unknown` (existing `unknownEventTypeDecodesToUnknownAndNeverThrows` still passes)
+- [x] run `swift test --package-path HermesKit` — must pass before task 2 (723 tests pass)
+- [x] ➕ handle the new case in `GatewayLogEntry` (`eventType` → `"review.summary"`, `debugSummary` → truncated text) — exhaustive switches
+- [x] ➕ add compile-only stubs in `ChatFeature` (`.reviewSummary` → `.none`; `persistRelevant` → `false`) — replaced with the real fold in Task 2
 
 ### Task 2: Fold `.reviewSummary` into a `.status` transcript row in ChatFeature
 

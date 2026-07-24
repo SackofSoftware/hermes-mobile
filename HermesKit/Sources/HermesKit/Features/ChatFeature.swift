@@ -1395,6 +1395,10 @@ public struct ChatFeature {
       if let u = info.usage { state.usage = u }
       return .none
 
+    case .reviewSummary:
+      // Handled in Task 2 (fold into a `.status(kind: "review")` transcript row).
+      return .none
+
     case .unknown:
       return .none
     }
@@ -1877,7 +1881,8 @@ public struct ChatFeature {
          .toolStart, .toolComplete, .sessionInfo:
       return true
     case .ready, .error, .authExpired, .approvalRequest, .clarifyRequest,
-         .sudoRequest, .secretRequest, .unknown:
+         .sudoRequest, .secretRequest, .reviewSummary, .unknown:
+      // `.reviewSummary` moves to the persist list in Task 2 (it appends a transcript row).
       return false
     }
   }

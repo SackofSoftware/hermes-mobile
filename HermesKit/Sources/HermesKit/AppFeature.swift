@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import Foundation
 
 /// Root feature: onboarding until connected, then a session list that pushes chat
 /// screens. Wires the child features together via their delegate actions.
@@ -34,9 +35,25 @@ public struct AppFeature {
     var isSceneBackgrounded = false
     /// A push tap that arrived before the session list existed (cold launch — #46): the
     /// routing in `.pushTapped` can't open anything without `home`, so the tap is stashed
-    /// here and replayed once `.autoConnectSucceeded` / a manual login creates the list.
-    /// Process-lifetime only (never persisted) — the race it covers is intra-launch.
+    /// here (single stash, last-wins) and replayed once `.autoConnectSucceeded` / a manual
+    /// login creates the list. Process-lifetime only (never persisted) — the race it
+    /// covers is intra-launch — and cleared on logout (the stash dies with the identity).
     var pendingPushTap: PushTap?
+    /// The server the stashed tap belongs to: the persisted server URL at stash time (the
+    /// agent whose push plugin this device registered with). Guards the replay — a login
+    /// that targets a DIFFERENT server drops the stash instead of resuming a foreign
+    /// session id there (the resume self-heal would silently create a spurious empty
+    /// chat). `nil` when no URL was stored at stash time (fully logged out); the replay
+    /// then proceeds unverified — the plan's logged-out → login → open flow, accepted
+    /// because pushes only come from a server this device registered with.
+    ///
+    /// This is the best identity available CLIENT-SIDE, not proof of origin: the push
+    /// payload carries no server identity (the generic-body privacy rule forbids adding
+    /// one), so a push from a STALE registration on a previous server — logout's
+    /// unregister is best-effort — is stamped with the CURRENT pref and replays here.
+    /// Accepted corner: the worst outcome is the same spurious-empty-chat the self-heal
+    /// produces for any unknown id, and logout's unregister keeps the window narrow.
+    var pendingPushTapServerURL: URL?
 
     public init(
       onboarding: ConnectionFeature.State = .init(),
@@ -181,7 +198,7 @@ public struct AppFeature {
 
       case let .autoConnectSucceeded(connection):
         state.autoConnecting = false
-        state.home = SessionListFeature.State(connection: connection)
+        state.home = makeHomeState(connection: connection)
         return replayPendingPushTap(&state)
 
       case let .autoConnectFailed(connection):
@@ -269,9 +286,12 @@ public struct AppFeature {
         }
         guard state.home != nil else {
           // No session list yet (cold launch still auto-connecting or on onboarding) — can't
-          // open. Stash the tap for replay once the list exists (#46); the badge reflects
-          // the now-pending approval either way.
+          // open. Stash the tap for replay once the list exists (#46), remembering which
+          // server it belongs to (the stored URL — the agent this device's push
+          // registration points at) so a login to a DIFFERENT server drops it instead of
+          // replaying; the badge reflects the now-pending approval either way.
           state.pendingPushTap = tap
+          state.pendingPushTapServerURL = preferences.loadServerURL().flatMap(parseServerURL)
           return setBadge(state)
         }
         // The tapped session is the one ALREADY on screen (slot match + marker on the
@@ -305,7 +325,7 @@ public struct AppFeature {
         return .send(.home(.delegate(.openSession(session))))
 
       case let .onboarding(.delegate(.connected(connection))):
-        state.home = SessionListFeature.State(connection: connection)
+        state.home = makeHomeState(connection: connection)
         // Auto-connect failure falls back to onboarding, so a manual login must also replay
         // a stashed cold-launch tap (#46).
         return replayPendingPushTap(&state)
@@ -423,13 +443,20 @@ public struct AppFeature {
 
       case .home(.delegate(.disconnect)):
         // Token cleared in Settings → tear down and return to onboarding. Nil-ing the slot
-        // auto-cancels its effects (socket included).
+        // auto-cancels its effects (socket included). The tap stash is structurally nil
+        // here (home existed, so any stash was consumed at creation) — cleared
+        // defensively: the stash dies with the identity. The pending-approval badge set
+        // dies with it too (entries reference sessions on the server just left — they'd
+        // leak a stale icon badge into the next login), so reset the badge to zero.
         let connection = state.home?.connection
         state.path = .init()
         state.liveChat = nil
         state.home = nil
         state.onboarding = .init()
-        return unregisterPushOnLogout(connection: connection)
+        state.pendingPushTap = nil
+        state.pendingPushTapServerURL = nil
+        state.pendingApprovalSessionIDs = []
+        return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
 
       case .liveChat(.delegate(.sessionExpired)):
         // The live (gated) session died — attached or detached, the slot is the one chat.
@@ -447,14 +474,22 @@ public struct AppFeature {
           return .send(.liveChat(.resumeAfterReauth(connection)))
         }
         // Different user signed in → drop everything identity-scoped and force a fresh list.
+        // (`makeHomeState` reads the profile pref AFTER the clear, so it seeds defaults.)
+        // The approval badge set + tap stash are identity-scoped too — the old user's
+        // pending approvals must not badge (or replay into) the new user's list.
         preferences.clearIdentityScopedPrefs()
         state.path = .init()
         state.liveChat = nil
-        state.home = SessionListFeature.State(connection: connection)
-        return .none
+        state.pendingPushTap = nil
+        state.pendingPushTapServerURL = nil
+        state.pendingApprovalSessionIDs = []
+        state.home = makeHomeState(connection: connection)
+        return setBadge(state)
 
       case .reauth(.presented(.delegate(.quit))):
         // "Quit to start" → full logout (Keychain session + every pref) → onboarding.
+        // The tap stash and the approval badge set die with the identity (same clears
+        // as `.disconnect`, through the other logout path); badge reset to zero.
         let connection = state.home?.connection ?? state.liveChat?.connection
         try? keychain.deleteSession()
         preferences.clearServerURL()
@@ -465,7 +500,10 @@ public struct AppFeature {
         state.liveChat = nil
         state.home = nil
         state.onboarding = .init()
-        return unregisterPushOnLogout(connection: connection)
+        state.pendingPushTap = nil
+        state.pendingPushTapServerURL = nil
+        state.pendingApprovalSessionIDs = []
+        return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
 
       case let .liveChat(.delegate(.runningChanged(sessionID, running))):
         // Route the live chat's authoritative working-state change to the session list so its
@@ -537,15 +575,69 @@ public struct AppFeature {
     )
   }
 
+  /// Build a fresh session-list state, seeding the device-local persisted profile
+  /// selection (normally reloaded later, in the list view's `.task`). Seeding at creation
+  /// matters for work that runs BEFORE the list appears — the cold-launch push-tap replay
+  /// (#46) opens a chat synchronously here, and an unseeded `scopedProfileName` would
+  /// resume the session UNSCOPED (wrong `state.db` on a non-default profile →
+  /// "session not found" → the self-heal recreates a spurious empty chat under
+  /// "default"). A persisted non-default name implies the agent supported profiles when
+  /// it was selected (prefs are wiped on logout, bounding staleness); the list's
+  /// capability probe still corrects `profilesSupported` right after. A profile
+  /// deleted/renamed server-side since selection is the accepted corner: the scoped
+  /// resume fails exactly as a warm list-tap under the same stale pref would — parity
+  /// with the warm path is the contract, and the rare stale-profile miss is a far
+  /// smaller surface than the unscoped-resume misroute this seeding fixes (which hit
+  /// EVERY cold-launch replay on a non-default profile).
+  private func makeHomeState(connection: ServerConnection) -> SessionListFeature.State {
+    let persisted = SessionListFeature.State.persistedProfileName(preferences)
+    return SessionListFeature.State(
+      connection: connection,
+      selectedProfileName: persisted,
+      profilesSupported: persisted != SessionListFeature.State.defaultProfileName
+    )
+  }
+
   /// Consume the cold-launch tap stash (#46): a tap dropped while `home` was nil is
   /// replayed through the normal `.pushTapped` routing the moment the list exists — slot
   /// compare, #32 dedup, and approval-hint arming all reuse the one code path (duplicating
   /// any of it here would drift). No stash → no effect. The replayed approval badge insert
   /// is idempotent (`Set` insert; the open then clears it, netting zero like a warm tap).
+  ///
+  /// Cross-server guard: a stash whose recorded origin differs from the server just
+  /// connected to is DROPPED, not replayed — resuming a foreign session id would trip the
+  /// "session not found" self-heal into creating a spurious empty chat. Dropping also
+  /// scrubs EVERY pending-approval badge entry, not just the stashed tap's: the stash is
+  /// last-wins, but every pre-home tap was stamped with the same origin (the persisted
+  /// URL is constant across the pre-home window, and each identity teardown clears the
+  /// set), so earlier badged approvals are equally foreign — they can never be viewed
+  /// here (a foreign session never appears in this server's list, and opening is the
+  /// only other clear path), and would otherwise stick for the process lifetime. An
+  /// unknown origin (`nil` — no stored URL at stash time) replays unverified; see
+  /// `pendingPushTapServerURL`.
   private func replayPendingPushTap(_ state: inout State) -> Effect<Action> {
     guard let tap = state.pendingPushTap else { return .none }
+    let origin = state.pendingPushTapServerURL
     state.pendingPushTap = nil
+    state.pendingPushTapServerURL = nil
+    if let origin, let connected = state.home?.connection.baseURL,
+       !Self.isSameServer(origin, connected) {
+      guard !state.pendingApprovalSessionIDs.isEmpty else { return .none }
+      state.pendingApprovalSessionIDs.removeAll()
+      return setBadge(state)
+    }
     return .send(.pushTapped(tap))
+  }
+
+  /// Server identity for the stash guard: scheme + host (both case-insensitive per
+  /// RFC 3986, so lowercased) + literal port — path/trailing-slash/casing variations of
+  /// the same server must not drop a legitimate replay. Default-port drift
+  /// (`http://host` vs `http://host:80`) is accepted as a mismatch: both URLs come from
+  /// the same persisted-string pipeline, so they only diverge across a genuine re-login.
+  private static func isSameServer(_ a: URL, _ b: URL) -> Bool {
+    a.scheme?.lowercased() == b.scheme?.lowercased()
+      && a.host?.lowercased() == b.host?.lowercased()
+      && a.port == b.port
   }
 
   /// Fill the live-chat slot and (re)set the navigation path to that chat's single marker.

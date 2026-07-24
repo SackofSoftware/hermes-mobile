@@ -150,17 +150,44 @@ struct PushClientTests {
 
   // MARK: PushBridge token stream (outside the UIKit guard → testable on macOS)
 
+  /// Collect up to `count` values from `stream`, bailing out after `timeout` with an
+  /// EMPTY array (partial values are discarded — the tests only ever compare complete
+  /// arrays). A regression (a value never delivered) then FAILS the array comparison
+  /// instead of hanging the whole suite on an `iterator.next()` that never resolves.
+  private func collect<Value: Sendable>(
+    _ count: Int,
+    from stream: AsyncStream<Value>,
+    timeout: Duration = .seconds(2)
+  ) async -> [Value] {
+    await withTaskGroup(of: [Value]?.self) { group in
+      group.addTask {
+        var values: [Value] = []
+        for await value in stream {
+          values.append(value)
+          if values.count == count { break }
+        }
+        return values
+      }
+      group.addTask {
+        try? await Task.sleep(for: timeout)
+        return nil
+      }
+      // First finisher wins: the collector (complete) or the timeout (partial → `[]`).
+      let winner = await group.next() ?? nil
+      group.cancelAll()
+      return winner ?? []
+    }
+  }
+
   @Test func bridgeTokenStreamReplaysLastTokenToLateSubscriber() async {
     let bridge = PushBridge()
     // Token arrives BEFORE anyone subscribes (the launch race)…
     bridge.tokenReceived(Data([0xde, 0xad, 0xbe, 0xef]))
-    // …then the late subscriber still gets the cached token.
+    // …the late subscriber still gets the cached token first, then live rotations. The
+    // rotation doubles as a sentinel: a broken replay yields ["0ff0"], not a hang.
     let stream = bridge.tokenStream()
-    var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == "deadbeef")
-    // And a live subscriber keeps receiving subsequent tokens.
     bridge.tokenReceived(Data([0x0f, 0xf0]))
-    #expect(await iterator.next() == "0ff0")
+    #expect(await collect(2, from: stream) == ["deadbeef", "0ff0"])
   }
 
   // MARK: PushBridge tap buffering (cold-launch race, #46)
@@ -169,10 +196,15 @@ struct PushClientTests {
     let bridge = PushBridge()
     // Tap arrives BEFORE anyone subscribes (launch-from-push race)…
     bridge.tapReceived(["session_id": "s1", "type": "approval"])
-    // …then the first subscriber still receives the buffered tap.
+    // …then the first subscriber receives the buffered tap FIRST, ahead of any live
+    // follow-up (order is the contract — the consumer's last-wins routing must end on
+    // the newest tap). The follow-up doubles as the no-hang sentinel.
     let stream = bridge.tapStream()
-    var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == PushTap(sessionID: "s1", type: "approval"))
+    bridge.tapReceived(["session_id": "sentinel"])
+    #expect(await collect(2, from: stream) == [
+      PushTap(sessionID: "s1", type: "approval"),
+      PushTap(sessionID: "sentinel"),
+    ])
   }
 
   @Test func bridgeTapBufferIsConsumeOnce() async {
@@ -180,40 +212,71 @@ struct PushClientTests {
     bridge.tapReceived(["session_id": "s1"])
     // The first subscriber drains the buffer…
     let firstStream = bridge.tapStream()
-    var first = firstStream.makeAsyncIterator()
-    #expect(await first.next() == PushTap(sessionID: "s1"))
     // …so a later second subscriber must NOT see the stale tap again (re-yielding it
     // would re-navigate). Its first value is the next live tap, used as a sentinel.
     let secondStream = bridge.tapStream()
-    var second = secondStream.makeAsyncIterator()
     bridge.tapReceived(["session_id": "s2"])
-    #expect(await second.next() == PushTap(sessionID: "s2"))
+    #expect(await collect(2, from: firstStream) == [
+      PushTap(sessionID: "s1"), PushTap(sessionID: "s2"),
+    ])
+    #expect(await collect(1, from: secondStream) == [PushTap(sessionID: "s2")])
+  }
+
+  @Test func bridgeTapBufferKeepsOnlyTheNewestTap() async {
+    let bridge = PushBridge()
+    // Two taps land before anyone subscribes → the buffer is last-wins (a single stale
+    // navigation replay; the older tap must never arrive).
+    bridge.tapReceived(["session_id": "s1"])
+    bridge.tapReceived(["session_id": "s2"])
+    let stream = bridge.tapStream()
+    bridge.tapReceived(["session_id": "sentinel"])
+    // The sentinel occupying slot 2 proves "s1" was dropped, not merely delayed.
+    #expect(await collect(2, from: stream) == [
+      PushTap(sessionID: "s2"), PushTap(sessionID: "sentinel"),
+    ])
   }
 
   @Test func bridgeTapDeliveredLiveIsNotBuffered() async {
     let bridge = PushBridge()
     // A live subscriber receives the tap directly…
     let liveStream = bridge.tapStream()
-    var live = liveStream.makeAsyncIterator()
     bridge.tapReceived(["session_id": "s1"])
-    #expect(await live.next() == PushTap(sessionID: "s1"))
     // …and because it was delivered, it is NOT cached: a new subscriber gets nothing
     // buffered — its first value is the next live tap (sentinel), never the old one.
     let lateStream = bridge.tapStream()
-    var late = lateStream.makeAsyncIterator()
     bridge.tapReceived(["session_id": "s2"])
-    #expect(await late.next() == PushTap(sessionID: "s2"))
+    #expect(await collect(2, from: liveStream) == [
+      PushTap(sessionID: "s1"), PushTap(sessionID: "s2"),
+    ])
+    #expect(await collect(1, from: lateStream) == [PushTap(sessionID: "s2")])
   }
 
   @Test func bridgeTapReachesAllLiveSubscribers() async {
     let bridge = PushBridge()
     let streamA = bridge.tapStream()
     let streamB = bridge.tapStream()
-    var a = streamA.makeAsyncIterator()
-    var b = streamB.makeAsyncIterator()
     bridge.tapReceived(["session_id": "s1", "type": "complete"])
     let expected = PushTap(sessionID: "s1", type: "complete")
-    #expect(await a.next() == expected)
-    #expect(await b.next() == expected)
+    #expect(await collect(1, from: streamA) == [expected])
+    #expect(await collect(1, from: streamB) == [expected])
+  }
+
+  /// A subscriber that has TERMINATED (the reducer's `.task` observer being cancelled and
+  /// restarted) must not defeat the buffer: without `onTermination` pruning, its dead
+  /// continuation would keep `tapContinuations` non-empty forever, so a tap landing in
+  /// the re-subscribe gap would be yielded into the void instead of buffered (#46's drop,
+  /// resurrected in a narrower window).
+  @Test func bridgeTapBufferReengagesAfterSubscriberTermination() async {
+    let bridge = PushBridge()
+    // A subscriber comes and goes. Dropping the stream deallocates its storage, which
+    // fires the continuation's termination synchronously → the bridge prunes it.
+    var stream: AsyncStream<PushTap>? = bridge.tapStream()
+    _ = stream
+    stream = nil
+    // No LIVE subscriber remains → this tap must be buffered, not fanned out to the
+    // dead continuation.
+    bridge.tapReceived(["session_id": "s1"])
+    let revived = bridge.tapStream()
+    #expect(await collect(1, from: revived) == [PushTap(sessionID: "s1")])
   }
 }

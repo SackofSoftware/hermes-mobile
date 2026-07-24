@@ -101,6 +101,14 @@ public struct SessionListFeature {
     /// The default profile name — never renamable/deletable, and the implicit fallback.
     public static let defaultProfileName = "default"
 
+    /// The device-local persisted profile selection, falling back to
+    /// `defaultProfileName`. The ONE fallback rule, shared by the list's `.task` prefs
+    /// reload and `AppFeature.makeHomeState`'s creation-time seeding (#46) — change it
+    /// here and both sites follow.
+    static func persistedProfileName(_ preferences: PreferencesClient) -> String {
+      preferences.loadSelectedProfileID() ?? defaultProfileName
+    }
+
     /// Collapsed groups show at most this many rows before a "Show more".
     public static let collapsedLimit = 5
 
@@ -462,8 +470,7 @@ public struct SessionListFeature {
         // Refresh "now", reload persisted prefs (incl. the device-local selected profile),
         // probe the profiles capability, and start the auto-poll loop.
         reloadPrefs(&state)
-        state.selectedProfileName =
-          preferences.loadSelectedProfileID() ?? Self.State.defaultProfileName
+        state.selectedProfileName = Self.State.persistedProfileName(preferences)
         state.isLoading = true
         return .merge(
           .run { [profiles, connection = state.connection] send in

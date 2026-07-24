@@ -228,6 +228,11 @@ public extension PushClient {
     /// Push a device token into the `register()` stream as if APNs delivered it.
     public func emit(token: String) { box.emit(token: token) }
     /// Push a tap into the `incomingTaps()` stream as if the user tapped a notification.
+    /// Taps are delivered LIVE-ONLY: unlike the production `PushBridge`, the double does
+    /// no launch-race buffering, so a tap emitted with no active subscriber is silently
+    /// dropped — deterministic for tests (subscribe first, then emit). To exercise the
+    /// cold-launch buffer itself, inject a real `PushBridge` behind a `PushClient`
+    /// instead (see `coldLaunchTapBufferedInBridgeReplaysThroughTaskObserver`).
     public func emit(tap: PushTap) { box.emit(tap: tap) }
     /// Change the granted result the next `requestAuthorization()` returns.
     public func setAuthorized(_ granted: Bool) { box.setAuthorized(granted) }
@@ -257,10 +262,17 @@ public final class PushBridge: @unchecked Sendable {
   public static let shared = PushBridge()
 
   private let lock = NSLock()
-  private var tokenContinuations: [AsyncStream<String>.Continuation] = []
-  private var tapContinuations: [AsyncStream<PushTap>.Continuation] = []
+  /// Live subscribers, keyed per-subscription so `onTermination` can prune the exact
+  /// continuation when its consumer goes away (the reducer's `.task` observer is
+  /// cancelled and re-subscribed — `cancelInFlight` — leaving a gap where a tap must
+  /// buffer, not vanish into a dead continuation). Pruning keeps the dictionaries from
+  /// accreting dead entries; on the tap side `tapReceived` additionally inspects each
+  /// yield's RESULT, so even a terminated-but-not-yet-pruned continuation (its
+  /// `onTermination` still racing for this lock) can't swallow a tap.
+  private var tokenContinuations: [UUID: AsyncStream<String>.Continuation] = [:]
+  private var tapContinuations: [UUID: AsyncStream<PushTap>.Continuation] = [:]
   private var lastToken: String?
-  /// The last tap that arrived with zero subscribers (a launch-from-push fires the app
+  /// The last tap no live subscriber accepted (a launch-from-push fires the app
   /// delegate's `didReceive` before the reducer's `.task` subscribes — #46). Unlike
   /// `lastToken` (idempotent, replayed to every late subscriber), a tap is consume-once:
   /// the first `tapStream()` subscriber drains it, so a stale tap never re-navigates a
@@ -295,46 +307,75 @@ public final class PushBridge: @unchecked Sendable {
 
   func tokenStream() -> AsyncStream<String> {
     AsyncStream { continuation in
-      let cached: String? = lock.withLock {
-        tokenContinuations.append(continuation)
-        return lastToken
+      let id = UUID()
+      lock.withLock {
+        tokenContinuations[id] = continuation
+        // Re-deliver the most recent token so a late subscriber still registers. Yielded
+        // inside the lock so a concurrent rotation can't slot a newer token in front.
+        if let cached = lastToken { continuation.yield(cached) }
       }
-      // Re-deliver the most recent token so a late subscriber still registers.
-      if let cached { continuation.yield(cached) }
+      // Prune on consumer termination (cancellation/dealloc) so dead continuations never
+      // accumulate. Registered after insertion — a stream that already terminated invokes
+      // the handler immediately, so the entry is removed either way.
+      continuation.onTermination = { [weak self] _ in
+        guard let self else { return }
+        self.lock.withLock { _ = self.tokenContinuations.removeValue(forKey: id) }
+      }
     }
   }
 
   func tapStream() -> AsyncStream<PushTap> {
     AsyncStream { continuation in
-      let buffered: PushTap? = lock.withLock {
-        tapContinuations.append(continuation)
-        defer { pendingTap = nil }
-        return pendingTap
+      let id = UUID()
+      lock.withLock {
+        tapContinuations[id] = continuation
+        // Deliver the tap that raced ahead of subscription (launch-from-push), exactly
+        // once. Yielded INSIDE the lock: a `tapReceived` on another thread must not slot
+        // a newer tap in front of the buffered one — for taps, delivery order is the
+        // contract (the consumer's last-wins routing navigates to the final tap).
+        if let buffered = pendingTap {
+          pendingTap = nil
+          continuation.yield(buffered)
+        }
       }
-      // Deliver the tap that raced ahead of subscription (launch-from-push), exactly once.
-      if let buffered { continuation.yield(buffered) }
+      // Prune on consumer termination so `tapContinuations.isEmpty` keeps meaning "no
+      // LIVE subscriber" — the buffer must re-engage after the observer goes away (the
+      // reducer's `.task` re-fire cancels the old effect before the replacement
+      // subscribes; a tap landing in that gap has to buffer, not no-op into a dead
+      // continuation).
+      continuation.onTermination = { [weak self] _ in
+        guard let self else { return }
+        self.lock.withLock { _ = self.tapContinuations.removeValue(forKey: id) }
+      }
     }
   }
 
   /// Called by the app delegate on `didRegisterForRemoteNotificationsWithDeviceToken`.
   public func tokenReceived(_ data: Data) {
     let hex = PushClient.hexToken(from: data)
-    let continuations: [AsyncStream<String>.Continuation] = lock.withLock {
+    lock.withLock {
       lastToken = hex
-      return tokenContinuations
+      for continuation in tokenContinuations.values { continuation.yield(hex) }
     }
-    for continuation in continuations { continuation.yield(hex) }
   }
 
-  /// Called by the app delegate on a notification tap (`didReceive`). With no subscriber
-  /// yet (cold launch), the tap is buffered for the first `tapStream()` subscriber.
+  /// Called by the app delegate on a notification tap (`didReceive`). When no live
+  /// subscriber ACCEPTS the tap, it is buffered for the next `tapStream()` subscriber.
+  /// Acceptance is judged per-yield, not by `tapContinuations.isEmpty`: a consumer
+  /// cancelled on another thread can leave its already-terminated continuation in the
+  /// dictionary while its `onTermination` prune waits for this lock — yielding to it
+  /// returns `.terminated` and delivers nothing, so the tap must fall back to the
+  /// buffer instead of vanishing. Yields happen inside the lock so two rapid taps
+  /// can't be observed out of order.
   public func tapReceived(_ payload: [AnyHashable: Any]) {
     guard let tap = PushClient.tap(fromPayload: payload) else { return }
-    let continuations: [AsyncStream<PushTap>.Continuation] = lock.withLock {
-      if tapContinuations.isEmpty { pendingTap = tap }
-      return tapContinuations
+    lock.withLock {
+      var delivered = false
+      for continuation in tapContinuations.values {
+        if case .enqueued = continuation.yield(tap) { delivered = true }
+      }
+      if !delivered { pendingTap = tap }
     }
-    for continuation in continuations { continuation.yield(tap) }
   }
 }
 

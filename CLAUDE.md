@@ -285,20 +285,30 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   requested on the sessions-list appearance** (right after login), per the product decision — NOT
   first launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
   canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload
-  parse, foreground-suppression) outside the guard. **All four triggers fire via real plugin
-  hooks** (CLI + gateway): approval (`pre_approval_request`), turn-complete (`post_llm_call`,
-  gated to ~>10s turns via a `pre_llm_call` start anchor), error (`on_session_end`, genuine
-  failures only — not success/interrupt), and clarify (`pre_tool_call` filtered to the `clarify`
-  tool, fired before the user is prompted — not duration-gated). **Cold-launch taps replay**
+  parse, foreground-suppression) — and `PushBridge` itself (Foundation-only: `NSLock` +
+  `AsyncStream`) — outside the guard so the stream/buffer behavior is macOS-tested. **All four
+  triggers fire via real plugin hooks** (CLI + gateway): approval (`pre_approval_request`),
+  turn-complete (`post_llm_call`, gated to ~>10s turns via a `pre_llm_call` start anchor),
+  error (`on_session_end`, genuine failures only — not success/interrupt), and clarify
+  (`pre_tool_call` filtered to the `clarify` tool, fired before the user is prompted — not
+  duration-gated). **Cold-launch taps replay**
   (#46) — a launch-from-push tap is dropped at two independent points unless both are covered:
-  `PushBridge` buffers a tap that fires with no `tapStream()` subscriber and the first
+  `PushBridge` buffers a tap that fires with no **live** `tapStream()` subscriber and the first
   subscriber drains it **consume-once** (cleared after delivery — a stale tap must not
-  re-navigate a later re-subscriber, unlike the idempotent `lastToken` replay); and a tap
-  arriving before `state.home` exists is stashed in `AppFeature.State.pendingPushTap`
-  (process-lifetime, badge bookkeeping unchanged) and re-sent as `.pushTapped` when `home`
+  re-navigate a later re-subscriber, unlike the idempotent `lastToken` replay; terminated
+  continuations are pruned via `onTermination`, so a cancelled observer can't strand a dead
+  entry that defeats the `isEmpty` buffer gate); and a tap arriving before `state.home` exists
+  is stashed in `AppFeature.State.pendingPushTap` (single stash, last-wins; process-lifetime,
+  cleared on logout, badge bookkeeping unchanged) and re-sent as `.pushTapped` when `home`
   is created (`.autoConnectSucceeded` AND the manual-login `.onboarding(.delegate(.connected))`)
   — always replay through the one #32 routing path (slot dedup, approval-hint arming,
-  placeholder `Session(id:)` + `session.resume`), never call `openSession` directly.
+  placeholder `Session(id:)` + `session.resume`), never call `openSession` directly. The stash
+  records the persisted server URL at stash time and a login to a **different** server drops it
+  (scrubbing its badge entry) instead of replaying — resuming a foreign session id would trip
+  the resume self-heal into creating a spurious empty chat; an unknown origin (logged out, no
+  stored URL) replays unverified. Home creation seeds the persisted profile selection
+  (`makeHomeState`) so the replayed open resumes under the right profile — the replay fires
+  before the list's `.task` prefs reload.
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky

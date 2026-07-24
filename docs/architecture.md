@@ -88,12 +88,16 @@ a `testValue`/`.inMemory()` variant):
 - **`PushClient`** — push notifications: `requestAuthorization`/`authorizationStatus`,
   device-token registration as an `AsyncStream<String>` (lowercase-hex, re-emits on OS token
   rotation), an `incomingTaps()` stream of `PushTap` values (carrying `session_id` + optional
-  `type`), and badge control (`setBadgeCount`). The `liveValue` is iOS-only-guarded
+  `type`; a tap that fires before any subscriber — launch-from-push, #46 — is buffered in
+  `PushBridge`, last-wins, and drained consume-once by the first subscriber), and badge
+  control (`setBadgeCount`). The `liveValue` is iOS-only-guarded
   (`#if canImport(UIKit)` over `UNUserNotificationCenter` + `registerForRemoteNotifications`,
-  fed by a process-wide `PushBridge` from the app-delegate adapter); the non-iOS fallback is
+  fed by the process-wide `PushBridge` from the app-delegate adapter); the non-iOS fallback is
   `testValue`, plus an `.inMemory()` variant. Pure helpers (hex encoding, the compile-time
-  `apnsEnv`, payload parsing, foreground-suppression decision) live outside the guard so they
-  are unit-tested on macOS.
+  `apnsEnv`, payload parsing, foreground-suppression decision) **and `PushBridge` itself**
+  (Foundation-only: `NSLock` + `AsyncStream`, with `onTermination`-pruned subscriber lists so
+  a cancelled observer can't strand a dead continuation and defeat the tap buffer) live
+  outside the guard so they are unit-tested on macOS.
 - **`BackgroundTaskClient`** — a finite background-execution window (~30s) wrapping
   `UIApplication.beginBackgroundTask`/`endBackgroundTask`: `begin(name) → AsyncStream<Void>`
   yields exactly once if iOS expires the window early (then finishes; a normal end finishes

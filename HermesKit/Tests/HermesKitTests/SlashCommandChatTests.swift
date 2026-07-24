@@ -14,10 +14,10 @@ import Testing
 ///
 /// Task 6: the `slash.exec` pipeline in `composerSubmitted` — a typed `/cmd` with a loaded
 /// catalog echoes a user row and executes through the gateway's slash pipeline (never
-/// `prompt.submit`), appends the ephemeral `commandOutput` row, then fires the runtime-only
-/// refresh (`session.resume` → `applyRuntimeInfo`, transcript untouched). Backward-compat
-/// guard: nil catalog / `commandsUnsupported` / staged attachments all take today's plain
-/// path byte-identical.
+/// `prompt.submit`), appends the ephemeral `commandOutput` row, then fires the full
+/// server-authoritative refresh (`session.resume` → `applyActivate`, carrying the ephemeral
+/// output rows across the wholesale replace). Backward-compat guard: nil catalog /
+/// `commandsUnsupported` / staged attachments all take today's plain path byte-identical.
 ///
 /// Task 7: the `command.dispatch` fallback when `slash.exec` rejects the command — typed
 /// directives decoded leniently: `exec`/`plugin` → output row, `alias` → single-hop

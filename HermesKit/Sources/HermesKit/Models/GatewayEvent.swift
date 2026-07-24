@@ -251,8 +251,10 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
   public var cwd: String?
   public var profileName: String?
   public var usage: Usage?
-  /// The session's live title — applied by the post-slash runtime-only refresh so
-  /// `/title x` updates the open chat's nav title immediately (#36).
+  /// The session's live title. Deliberately read in ONE place: the post-slash
+  /// server-authoritative refresh (`.slashHistoryRefreshed`) applies it on top of
+  /// `applyActivate`'s runtime info so `/title x` updates the open chat's nav title
+  /// immediately. Normal hydrates intentionally leave the title untouched (#36).
   public var title: String?
 
   enum CodingKeys: String, CodingKey {

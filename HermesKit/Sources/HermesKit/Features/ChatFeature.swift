@@ -424,8 +424,10 @@ public struct ChatFeature {
     case slashSuggestionTapped(SlashSuggestion)
     /// The slash pipeline produced its ephemeral output (`slash.exec` or an
     /// `exec`/`plugin` directive): append the bubble-less `commandOutput` row, unlock the
-    /// composer, then fire the runtime-only refresh. The output is local-only, desktop
-    /// parity — the next wholesale hydrate drops it (never in server history).
+    /// composer, then fire the full server-authoritative refresh (`session.resume` →
+    /// `applyActivate` via `.slashHistoryRefreshed`, carrying the ephemeral output row
+    /// across the wholesale replace). The output is local-only, desktop parity — a normal
+    /// hydrate drops it (never in server history).
     case slashCommandOutput(String)
     /// A `send` directive's `notice` (e.g. "⊙ Goal set …" from `/goal`) — the backend's
     /// only user feedback before the directive's message is submitted. Renders the output
@@ -1233,24 +1235,7 @@ public struct ChatFeature {
 
       case let .slashCommandOutput(output):
         appendCommandOutput(output, into: &state)
-        // The exec round-trip is over: release the mid-exec composer lock (a hydrate may
-        // now set `isSending` from the authoritative `running` again).
-        state.slashExecInFlight = false
-        // Cross-client guard: if a REAL server turn began while the exec was in flight
-        // (`message.start` set the thinking row + `isSending`), the exec completion must
-        // not clobber it — the row is appended, but the lock and the running state belong
-        // to the server turn's own lifecycle (`runningChanged` must stay server-confirmed).
-        guard state.thinkingRowID == nil else { return .none }
-        state.isSending = false
-        // Client-side "turn" end — no server event follows an exec-style command, so emit
-        // `runningChanged(false)` like `.promptSubmitFailed` does (a DETACHED slot waiting
-        // on the turn must be torn down; harmless to the list glow, which only lights on
-        // `message.start`). Then the server-authoritative refresh.
-        guard let sessionID = state.liveSessionID else { return runningChanged(false, state) }
-        return .merge(
-          runningChanged(false, state),
-          refreshAfterSlashCommand(sessionID: sessionID, profile: state.scopedProfile)
-        )
+        return finishSlashExec(refresh: true, into: &state)
 
       case let .slashCommandNotice(text):
         // Output row only — no lock/turn-state changes: the `prompt.submit` following a
@@ -1275,26 +1260,12 @@ public struct ChatFeature {
         // which is server-authoritative precisely because the rewind IS a history change.
         if let notice { appendCommandOutput(notice, into: &state) }
         if !message.isEmpty { state.composerText = message }
-        state.slashExecInFlight = false
-        // Same cross-client guard + client-side turn end as `.slashCommandOutput`.
-        guard state.thinkingRowID == nil else { return .none }
-        state.isSending = false
-        guard let sessionID = state.liveSessionID else { return runningChanged(false, state) }
-        return .merge(
-          runningChanged(false, state),
-          refreshAfterSlashCommand(sessionID: sessionID, profile: state.scopedProfile)
-        )
+        return finishSlashExec(refresh: true, into: &state)
 
       case let .slashCommandFailed(message):
         state.errorBanner = "Command failed: \(message)"
-        state.slashExecInFlight = false
-        // Cross-client guard (see `.slashCommandOutput`): a server turn that started while
-        // the exec was in flight keeps its lock and running state.
-        guard state.thinkingRowID == nil else { return .none }
-        state.isSending = false
-        // Client-side turn end (mirrors `.promptSubmitFailed`): no server event will
-        // follow, so a detached slot waiting on the turn is released here.
-        return runningChanged(false, state)
+        // No refresh — a failure lands no history change (unlike output/prefill).
+        return finishSlashExec(refresh: false, into: &state)
 
       case let .slashHistoryRefreshed(response):
         // The post-command refresh landed. It is the FULL server-authoritative hydrate,
@@ -2150,6 +2121,29 @@ public struct ChatFeature {
     maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
   }
 
+  /// Shared terminal tail for the slash-exec pipeline's completion actions
+  /// (`.slashCommandOutput` / `.slashCommandPrefill` / `.slashCommandFailed`). The exec
+  /// round-trip is over: release the mid-exec composer lock (a hydrate may now set
+  /// `isSending` from the authoritative `running` again). Then — UNLESS a REAL server turn
+  /// began while the exec was in flight (`message.start` set the thinking row + `isSending`),
+  /// in which case the lock and running state belong to that turn's own lifecycle and
+  /// `runningChanged` must stay server-confirmed — end the client-side "turn": no server
+  /// event follows an exec-style command, so emit `runningChanged(false)` like
+  /// `.promptSubmitFailed` does (tearing down a DETACHED slot waiting on the turn; harmless
+  /// to the list glow, which only lights on `message.start`). When `refresh` is true and a
+  /// live session exists, also fire the full server-authoritative `refreshAfterSlashCommand`
+  /// hydrate (output/prefill land history changes; a failure passes `refresh: false`).
+  private func finishSlashExec(refresh: Bool, into state: inout State) -> Effect<Action> {
+    state.slashExecInFlight = false
+    guard state.thinkingRowID == nil else { return .none }
+    state.isSending = false
+    guard refresh, let sessionID = state.liveSessionID else { return runningChanged(false, state) }
+    return .merge(
+      runningChanged(false, state),
+      refreshAfterSlashCommand(sessionID: sessionID, profile: state.scopedProfile)
+    )
+  }
+
   // MARK: - Snapshot write-back
 
   /// Whether a gateway event changes the transcript / model / usage enough to warrant a
@@ -2351,6 +2345,12 @@ private let serverRoutedSlashCommands: Set<String> = [
   "retry", "queue", "q", "steer", "plan", "goal", "moa", "undo", "learn", "compress", "compact",
 ]
 
+/// The typed `command.dispatch` directive `type`s the client acts on — the SINGLE source of
+/// truth for both `isDispatchDirective` (the gate) and `runDispatchDirective`'s switch (the
+/// behavior). Adding a directive type means adding it here AND a switch case; anything not
+/// listed here is treated as a plain `{output, warning}` exec result (never a directive).
+private let dispatchDirectiveTypes: Set<String> = ["exec", "plugin", "alias", "skill", "send", "prefill"]
+
 /// True when a slash-pipeline result carries a typed `command.dispatch` directive. A
 /// SUCCESSFUL `slash.exec` can answer one too — the server routes `_PENDING_INPUT_COMMANDS`
 /// (`/retry`, `/queue`, `/steer`, `/goal`, `/moa`, `/undo`, `/learn`, …) and skill-bundle
@@ -2359,10 +2359,8 @@ private let serverRoutedSlashCommands: Set<String> = [
 /// directive FIRST (desktop parity: `slash.ts` runs `parseCommandDispatch` on the exec
 /// result before falling back to the `{output, warning}` shape).
 private func isDispatchDirective(_ result: JSONValue) -> Bool {
-  switch result["type"]?.stringValue {
-  case "exec", "plugin", "alias", "skill", "send", "prefill": return true
-  default: return false
-  }
+  guard let type = result["type"]?.stringValue else { return false }
+  return dispatchDirectiveTypes.contains(type)
 }
 
 /// Act on a typed `command.dispatch` directive (from either surface — a directive-shaped
@@ -2381,6 +2379,9 @@ private func runDispatchDirective(
   send: Send<ChatFeature.Action>,
   allowAliasHop: Bool
 ) async {
+  // The cases here MUST cover `dispatchDirectiveTypes` (the gate); the `default` is only
+  // reached for a malformed/unexpected directive (e.g. a `command.dispatch` fallback answer
+  // with no recognized `type`).
   switch directive["type"]?.stringValue {
   case "exec", "plugin":
     await send(.slashCommandOutput(directive["output"]?.stringValue?.nonEmpty ?? "(no output)"))

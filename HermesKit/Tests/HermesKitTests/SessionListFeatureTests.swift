@@ -339,6 +339,54 @@ struct SessionListFeatureTests {
     #expect(state.pinnedSessions.map(\.id) == ["a"]) // stale id dropped
   }
 
+  // MARK: Copy session ID (transient toast)
+
+  // The reducer copies the tapped id verbatim — it deliberately does NOT look the session
+  // up in `state.sessions`, because the id always comes from a row rendered from that
+  // array. No fixture is seeded here, so the test can't pretend otherwise.
+  @Test func copyIDPutsSessionIDOnPasteboardAndAutoDismissesToast() async {
+    let copied = LockIsolated<String?>(nil)
+    let clock = TestClock()
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyIDButtonTapped(id: "s1")) { $0.copiedIDToastToken = 1 }
+
+    await clock.advance(by: .seconds(1.5))
+    await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
+    // Asserted after the effects have been drained — `send` alone doesn't guarantee the
+    // merged copy effect has run.
+    #expect(copied.value == "s1")
+  }
+
+  @Test func recopyingWhileToastVisibleRestartsTheDwellTimer() async {
+    let copied = LockIsolated<[String]>([])
+    let clock = TestClock()
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.withValue { $0.append(text) } }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyIDButtonTapped(id: "a")) { $0.copiedIDToastToken = 1 }
+    await clock.advance(by: .seconds(1)) // first dwell is 2/3 elapsed…
+    // …a second copy cancels it (cancelInFlight) so the toast does NOT dismiss early. The
+    // token bumps even though the toast never hid — that bump is what the view turns into
+    // a second VoiceOver announcement.
+    await store.send(.copyIDButtonTapped(id: "b")) { $0.copiedIDToastToken = 2 }
+    await clock.advance(by: .seconds(1)) // past the first timer's deadline — still visible
+    #expect(store.state.copiedIDToastToken == 2)
+
+    await clock.advance(by: .seconds(0.5)) // completes the restarted dwell
+    await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
+    #expect(copied.value == ["a", "b"])
+  }
+
   // MARK: Cron partition
 
   @Test func cronSessionsAreRecencyOrderedAndExcludedFromInteractiveSections() {

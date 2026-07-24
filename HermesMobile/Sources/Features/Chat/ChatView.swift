@@ -186,8 +186,18 @@ struct ChatView: View {
         elapsedSeconds: elapsedSeconds,
         isComplete: isComplete
       )
-    case let .status(_, text):
-      Text(text).font(.caption).foregroundStyle(.secondary)
+    case let .status(kind, text):
+      // Review summaries (#47) are multi-sentence system lines — render them a step
+      // larger (`.footnote`) and selectable so they stay readable/copyable. Other
+      // status kinds ("Approved", clarify answers, …) keep the terse caption styling.
+      if kind == "review" {
+        Text(text)
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+          .textSelection(.enabled)
+      } else {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+      }
     }
   }
 

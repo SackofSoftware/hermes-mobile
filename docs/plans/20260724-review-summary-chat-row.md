@@ -131,10 +131,10 @@ GitHub issue: #47
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift`
 
-- [ ] in `rowView`, render `.status(kind: "review", …)` at `.footnote` + `.textSelection(.enabled)`; other status kinds keep `.caption` secondary styling
-- [ ] add/extend a chat snapshot fixture with a review status row (multi-sentence text to prove readability)
-- [ ] `make snapshot-record` to record the new/changed reference images
-- [ ] run `make snapshot` — must pass before task 4
+- [x] in `rowView`, render `.status(kind: "review", …)` at `.footnote` + `.textSelection(.enabled)`; other status kinds keep `.caption` secondary styling
+- [x] add/extend a chat snapshot fixture with a review status row (multi-sentence text to prove readability) (`testChatView_reviewSummaryStatusRow` — review row next to an "approval" caption row for contrast)
+- [x] `make snapshot-record` to record the new/changed reference images (recorded only the NEW baseline via SnapshotTesting's record-on-missing first run — a full `snapshot-record` wipes/re-renders every non-pixel-exact device image and would churn unrelated PNGs)
+- [x] run `make snapshot` — must pass before task 4 (81 tests pass)
 
 ### Task 4: Verify acceptance criteria
 

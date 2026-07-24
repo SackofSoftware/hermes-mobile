@@ -685,4 +685,287 @@ struct ChatBranchTests {
       $0.errorBanner = "This chat can’t be branched yet."
     }
   }
+
+  // MARK: Interrupted replay (transport failure mid-replay — the seed must survive)
+
+  /// A socket drop while the seeded replay create is in flight is NOT a server verdict:
+  /// the client-held seed is the only copy of the branch, so the transient failure KEEPS
+  /// it (and refunds the one-shot replay budget) instead of destroying it — and never
+  /// fires a `createSession` into the dead socket (which would fail `.notConnected` and
+  /// overwrite the banner). Mirrors `.sessionResult(.failure(.disconnected))`:
+  /// status-only.
+  @Test func transientReplayFailureKeepsSeedAndFiresNoDeadSocketCreate() async {
+    let calls = LockIsolated<[String]>([])
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.attachLiveSessionID = "branch-live"
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        throw GatewayError.disconnected // socket died under the replayed create
+      }
+    }
+
+    await store.send(.activateResult(.failure(.server("session not found")))) {
+      $0.status = .reconnecting
+      $0.liveSessionID = nil
+      $0.attachLiveSessionID = nil
+      $0.hasRequestedSession = true
+      $0.hasReplayedBranchSeed = true
+    }
+    await store.receive(\.branchReplayResult.failure) {
+      $0.hasReplayedBranchSeed = false // budget refunded: no server verdict was reached
+    }
+    // ONLY the interrupted replay hit the wire — no bare create chased the dead socket,
+    // and the seed survives for the post-reconnect hydrate to replay.
+    #expect(calls.value == ["session.create"])
+    #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
+    #expect(store.state.errorBanner == nil)
+  }
+
+  /// The full interrupted-replay sequence: replay create dies with the socket, the
+  /// stream closes, and the reconnected `.ready` hydrates by the row-less stored id —
+  /// whose "session not found" must REPLAY the kept seed (keyed on the durable
+  /// `branchSeed`, not the already-consumed `attachLiveSessionID`), never silently swap
+  /// in a bare session under the still-painted seed.
+  @Test func interruptedReplayRecoversSeedAfterReconnect() async {
+    let calls = LockIsolated<[(method: String, params: JSONValue)]>([])
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.liveSessionID = "branch-live"
+    initial.attachLiveSessionID = "branch-live"
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, params in
+        let n = calls.withValue { $0.append((method, params)); return $0.count }
+        switch (method, n) {
+        case ("session.create", 1):
+          throw GatewayError.disconnected // the first replay dies with the socket
+        case ("session.resume", _):
+          throw GatewayError.server("session not found") // row-less branch key
+        case ("session.create", _):
+          return .object([
+            "session_id": .string("fresh-live"), "stored_session_id": .string("fresh-stored"),
+          ])
+        default: // the re-attach
+          return .object([
+            "session_id": .string("fresh-live"),
+            "session_key": .string("fresh-stored"),
+            "messages": .array([.object([
+              "id": .number(1), "role": .string("assistant"), "text": .string("seeded answer"),
+            ])]),
+            "running": .bool(false),
+            "info": .object([
+              "model": .string("claude-opus-4-8"),
+              "usage": .object([
+                "context_used": .number(0), "context_max": .number(200_000),
+                "context_percent": .number(0),
+              ]),
+            ]),
+          ])
+        }
+      }
+    }
+
+    // The reap's not-found triggers the replay; the socket dies under it.
+    await store.send(.activateResult(.failure(.server("session not found")))) {
+      $0.status = .reconnecting
+      $0.liveSessionID = nil
+      $0.attachLiveSessionID = nil
+      $0.hasRequestedSession = true
+      $0.hasReplayedBranchSeed = true
+    }
+    await store.receive(\.branchReplayResult.failure) {
+      $0.hasReplayedBranchSeed = false // refunded: the replay reached no server verdict
+    }
+    // The stream closes (companion of the drop) and schedules the backoff redial.
+    await store.send(.gatewayClosed) {
+      $0.hasRequestedSession = false
+      $0.reconnectAttempt = 1
+    }
+    // Reconnected: the hydrate by the row-less stored id 4007s, and recovery — keyed on
+    // the DURABLE seed with the attach redirect long gone — replays the seeded create.
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.reconnectAttempt = 0
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.failure) {
+      $0.status = .reconnecting
+      $0.hasReplayedBranchSeed = true
+    }
+    await store.receive(\.branchReplayResult.success) {
+      $0.liveSessionID = "fresh-live"
+      $0.storedSessionID = "fresh-stored"
+      $0.attachLiveSessionID = "fresh-live"
+    }
+    await store.receive(\.activateResult.success) {
+      $0.status = .ready
+      $0.hasReplayedBranchSeed = false
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
+      $0.transcript = [ChatRow(
+        id: ChatRow.deterministicID(sequenceIndex: 0, role: .assistant, kindDiscriminator: "message"),
+        kind: .message(role: .assistant, text: "seeded answer", isComplete: true)
+      )]
+    }
+    await store.receive(\.delegate.runningChanged)
+
+    // Interrupted replay → resume-not-found → SEEDED replay → attach: never a bare create.
+    #expect(calls.value.map(\.method)
+      == ["session.create", "session.resume", "session.create", "session.activate"])
+    let replayParams = calls.value[2].params
+    guard case let .array(messages)? = replayParams["messages"] else {
+      Issue.record("post-reconnect replay missing the seed messages")
+      return
+    }
+    #expect(messages.first?["content"]?.stringValue == "seeded answer")
+    #expect(replayParams["parent_session_id"]?.stringValue == "parent-1")
+    #expect(store.state.errorBanner == nil)
+    #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
+    await store.send(.teardown)
+  }
+
+  /// A replay `.timedOut` may be the ONLY symptom of a half-open socket (no
+  /// `.gatewayClosed` for minutes) — keep the seed, refund the budget, and redial
+  /// ourselves so the chat isn't stranded in `.reconnecting` with the seed parked.
+  @Test func replayTimeoutKeepsSeedAndRedials() async {
+    let continuation = LockIsolated<AsyncStream<GatewayEvent>.Continuation?>(nil)
+    let dialed = LockIsolated(false)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.attachLiveSessionID = "branch-live"
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        throw GatewayError.timedOut(method: "session.create")
+      }
+      $0.hermesGateway.connect = { @Sendable _, _ in
+        dialed.setValue(true)
+        let (stream, cont) = AsyncStream<GatewayEvent>.makeStream()
+        continuation.setValue(cont) // hold the socket open — the fresh `.ready` is live's
+        return stream
+      }
+    }
+
+    await store.send(.activateResult(.failure(.server("session not found")))) {
+      $0.status = .reconnecting
+      $0.liveSessionID = nil
+      $0.attachLiveSessionID = nil
+      $0.hasRequestedSession = true
+      $0.hasReplayedBranchSeed = true
+    }
+    await store.receive(\.branchReplayResult.failure) {
+      $0.hasReplayedBranchSeed = false
+      $0.hasRequestedSession = false // the fresh `.ready` must re-run the recovery
+    }
+    #expect(dialed.value)
+    #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
+    #expect(store.state.errorBanner == nil)
+    await store.send(.teardown)
+  }
+
+  /// The stale-seed degrade with the attach redirect already consumed (interrupted
+  /// replay whose budget was genuinely spent): a not-found must still banner + drop the
+  /// seed — never the old silent bare create — so the seed can't dangle on the plain
+  /// session and later mis-arm attach-by-live-id through `liveSessionIDRefreshed`.
+  @Test func spentBudgetNotFoundWithoutAttachModeDegradesHonestly() async {
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    initial.hasReplayedBranchSeed = true // budget spent; attachLiveSessionID already nil
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, params in
+        // The degrade create is BARE — the seed must not leak into the plain session.
+        #expect(params["messages"] == nil)
+        #expect(params["parent_session_id"] == nil)
+        return .object([
+          "session_id": .string("plain-live"), "stored_session_id": .string("plain-stored"),
+        ])
+      }
+    }
+
+    await store.send(.activateResult(.failure(.server("session not found")))) {
+      $0.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
+      $0.branchSeed = nil
+      $0.status = .reconnecting
+      $0.liveSessionID = nil
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "plain-live"
+      $0.storedSessionID = "plain-stored"
+      $0.status = .ready
+    }
+    // With the seed gone, a later heal CANNOT mis-arm attach-by-live-id mode.
+    await store.send(.liveSessionIDRefreshed(liveSessionID: "healed-live", storedSessionID: nil)) {
+      $0.liveSessionID = "healed-live"
+    }
+    #expect(store.state.attachLiveSessionID == nil)
+  }
+
+  /// The `.ready` bare-create fallback is seed-aware too: a standing seed with NO stored
+  /// id (an interrupted replay on a branch whose create returned no session_key) replays
+  /// the seeded create instead of silently minting a bare session under the painted seed.
+  @Test func readyWithSeedAndNoStoredIDReplaysInsteadOfBareCreate() async {
+    let calls = LockIsolated<[(method: String, params: JSONValue)]>([])
+    var initial = ChatFeature.State(connection: conn, status: .reconnecting)
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append((method, params)) }
+        switch method {
+        case "session.create":
+          return .object([
+            "session_id": .string("fresh-live"), "stored_session_id": .string("fresh-stored"),
+          ])
+        default: // the attach
+          return .object([
+            "session_id": .string("fresh-live"),
+            "session_key": .string("fresh-stored"),
+            "messages": .array([]),
+            "running": .bool(false),
+            "info": .object([
+              "model": .string("claude-opus-4-8"),
+              "usage": .object([
+                "context_used": .number(0), "context_max": .number(200_000),
+                "context_percent": .number(0),
+              ]),
+            ]),
+          ])
+        }
+      }
+    }
+
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+      $0.hasReplayedBranchSeed = true
+    }
+    await store.receive(\.branchReplayResult.success) {
+      $0.liveSessionID = "fresh-live"
+      $0.storedSessionID = "fresh-stored"
+      $0.attachLiveSessionID = "fresh-live"
+    }
+    await store.receive(\.activateResult.success) {
+      $0.hasReplayedBranchSeed = false
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
+    }
+    await store.receive(\.delegate.runningChanged)
+
+    #expect(calls.value.map(\.method) == ["session.create", "session.activate"])
+    let createParams = calls.value.first?.params
+    guard case let .array(messages)? = createParams?["messages"] else {
+      Issue.record("`.ready` replay missing the seed messages")
+      return
+    }
+    #expect(messages.first?["content"]?.stringValue == "seeded answer")
+    #expect(createParams?["parent_session_id"]?.stringValue == "parent-1")
+    #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
+    await store.send(.teardown)
+  }
 }

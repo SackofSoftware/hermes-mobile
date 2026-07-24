@@ -167,15 +167,21 @@ public struct ChatFeature {
     /// parent primes this chat from the branch create. A "session not found" while it is
     /// set means the server reaped the never-prompted live session — replay the SEEDED
     /// `session.create` from this (rebuilding context + nesting) instead of silently
-    /// degrading to a bare, context-less session under the still-painted seed. Cleared
+    /// degrading to a bare, context-less session under the still-painted seed. This is
+    /// the DURABLE fact branch recovery keys on (`attachLiveSessionID` is transient —
+    /// the replay trigger consumes it before the replayed create resolves). Cleared
     /// with `attachLiveSessionID` on the first `message.start` (the seed is durable
-    /// server-side now) and when a failed replay degrades to a bannered fresh create.
+    /// server-side now) and whenever recovery degrades to the bannered fresh create —
+    /// a stale seed must never survive onto a plain session (it would mis-arm
+    /// attach-by-live-id in `liveSessionIDRefreshed`); a TRANSPORT-interrupted replay
+    /// keeps it (the seed is the only copy of the branch).
     var branchSeed: BranchSeed?
     /// One-shot guard for the seed replay: at most ONE replayed `session.create` per
     /// successful hydrate (reset in `applyActivate` and on `message.start`), so a server
     /// answering "session not found" even for a just-recreated session can't loop
     /// replay → attach → replay forever — the bounded fallback is the bannered fresh
-    /// create.
+    /// create. A replay interrupted by transport (disconnect/timeout — no server
+    /// verdict) REFUNDS the budget so the post-reconnect hydrate can replay again.
     var hasReplayedBranchSeed: Bool
     /// The PARENT side of a branch in flight: the seed stashed at `.branchFromMessage`
     /// and handed to `Delegate.branchCreated` on success (so the replacement chat can
@@ -680,8 +686,12 @@ public struct ChatFeature {
         // wholesale (context + nesting) instead of degrading to a bare session under the
         // still-painted seed. One replay per hydrate (`hasReplayedBranchSeed`); a replay
         // that fails — or a server that keeps answering not-found — degrades to the
-        // bannered fresh create below.
-        if state.attachLiveSessionID != nil, error.isSessionNotFound,
+        // bannered fresh create below. Recovery keys on the DURABLE `branchSeed`, never
+        // the transient `attachLiveSessionID`: an interrupted replay (socket drop while
+        // the seeded create was in flight) has already nilled the attach redirect, and
+        // the post-reconnect hydrate's not-found on the row-less stored id must still
+        // replay the seed rather than silently swap in a bare session.
+        if error.isSessionNotFound,
            let seed = state.branchSeed, !state.hasReplayedBranchSeed {
           state.status = .reconnecting
           state.liveSessionID = nil
@@ -702,7 +712,11 @@ public struct ChatFeature {
         // asking follow-ups about it. The branch bookkeeping must not stick to the fresh
         // session either way.
         if error.isSessionNotFound || (state.attachLiveSessionID != nil && error.isUnknownMethod) {
-          if state.attachLiveSessionID != nil {
+          // A standing seed counts as branch bookkeeping even when the attach redirect
+          // was already consumed (interrupted replay): degrading past it must banner
+          // AND drop the seed, or it would dangle on the fresh plain session and later
+          // mis-arm attach-by-live-id via `liveSessionIDRefreshed`.
+          if state.attachLiveSessionID != nil || state.branchSeed != nil {
             state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
             state.branchSeed = nil
           }
@@ -1142,10 +1156,39 @@ public struct ChatFeature {
         state.attachLiveSessionID = handle.sessionID
         return attachLive(sessionID: handle.sessionID)
 
-      case let .branchReplayResult(.failure):
-        // The rebuild itself failed — degrade to a fresh session so the chat still
-        // works, but NEVER silently: the on-screen seeded message is not in the fresh
-        // session's context, and the user must know before asking follow-ups about it.
+      case let .branchReplayResult(.failure(error)):
+        // A transport-shaped interruption (socket drop / deliberate teardown while the
+        // seeded create was in flight) is no server verdict, and the client-held seed is
+        // the ONLY copy of the branch — KEEP it and refund the replay budget so the
+        // post-reconnect hydrate's not-found replays it again. Mirrors
+        // `.sessionResult(.failure(.disconnected))`: status-only, no destructive side
+        // effect, and never a `createSession` fired into a dead socket (it would fail
+        // `.notConnected`, overwrite the banner, and the eventual `.ready` clears
+        // banners anyway).
+        if error.isDisconnected || error == .notConnected {
+          state.hasReplayedBranchSeed = false
+          state.status = .reconnecting
+          // The companion `.gatewayClosed` owns the backoff redial — don't stack one.
+          return .none
+        }
+        if error.isTimedOut {
+          // A HALF-OPEN socket may never surface `.gatewayClosed` (see the hydrate
+          // timeout arm) — schedule the redial ourselves so the chat isn't stranded in
+          // `.reconnecting` with the seed parked forever; the fresh `.ready` re-runs
+          // the recovery and replays the kept seed.
+          state.hasReplayedBranchSeed = false
+          state.status = .reconnecting
+          guard !state.awaitingReauth else { return .none }
+          state.hasRequestedSession = false
+          return .merge(
+            .cancel(id: CancelID.reconnect),
+            connect(state.connection)
+          )
+        }
+        // A genuine server rejection: the rebuild itself failed — degrade to a fresh
+        // session so the chat still works, but NEVER silently: the on-screen seeded
+        // message is not in the fresh session's context, and the user must know before
+        // asking follow-ups about it.
         state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
         state.branchSeed = nil
         return createSession(profile: state.scopedProfile)
@@ -1460,6 +1503,18 @@ public struct ChatFeature {
       if let stored = state.storedSessionID {
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
         return hydrate(sessionID: stored, profile: state.scopedProfile)
+      }
+      // A standing branch seed with no stored id (an interrupted replay on a branch
+      // whose create returned no session_key) recovers the branch here — never a
+      // silent bare create under the still-painted seed; a spent replay budget
+      // degrades honestly (banner + seed drop) instead.
+      if let seed = state.branchSeed {
+        if !state.hasReplayedBranchSeed {
+          state.hasReplayedBranchSeed = true
+          return replayBranchSeed(seed, profile: state.scopedProfile)
+        }
+        state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
+        state.branchSeed = nil
       }
       return createSession(profile: state.scopedProfile)
 

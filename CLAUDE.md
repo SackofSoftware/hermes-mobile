@@ -90,11 +90,18 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   empty session). The primed chat hydrates via **`session.activate` by LIVE id** (re-binds the new
   socket's transport, returns the seeded history) until the first `message.start` clears
   `attachLiveSessionID`/`branchSeed`. **The server reaps a detached never-prompted branch after
-  ~20s** (`_WS_ORPHAN_REAP_GRACE_S`) — a "session not found" while unattached (hydrate OR the
-  submit heal) **replays the SEEDED create from the client-held `branchSeed`** (one replay per
-  hydrate via `hasReplayedBranchSeed`; the heal keeps attach-by-live-id mode), rebuilding context
-  + nesting; only a failed replay (or `-32601`) degrades to a fresh create **with an honest
-  "Couldn’t restore the branch" banner — never silently** (the cached paint still shows the seed).
+  ~20s** (`_WS_ORPHAN_REAP_GRACE_S`) — a "session not found" (hydrate OR the submit heal)
+  **replays the SEEDED create from the client-held `branchSeed`** (one replay per hydrate via
+  `hasReplayedBranchSeed`; the heal keeps attach-by-live-id mode), rebuilding context + nesting.
+  **Recovery keys on the DURABLE `branchSeed`, never the transient `attachLiveSessionID`** (the
+  replay trigger consumes the attach redirect before its create resolves, so an interrupted
+  replay must still recover on the next hydrate/`.ready`); a **transport-interrupted replay
+  (`.disconnected`/`.notConnected`/`.timedOut`) KEEPS the seed + refunds the budget** (status-only,
+  mirroring `.sessionResult(.failure(.disconnected))`; timeout redials itself — half-open socket),
+  never firing a create into a dead socket. Only a genuine server rejection (or `-32601`, or a
+  spent budget) degrades to a fresh create **with an honest "Couldn’t restore the branch" banner —
+  never silently** (the cached paint still shows the seed), always **clearing the seed** so it
+  can't dangle on the plain session and mis-arm attach mode via `liveSessionIDRefreshed`.
   Old agents silently ignore the seed params (no `-32601` on create) → plain empty chat; no
   capability gate. No optimistic list row — an abandoned branch never appears.
 - **Session-list branch nesting is display-only** (#34): `parent_session_id` decodes leniently

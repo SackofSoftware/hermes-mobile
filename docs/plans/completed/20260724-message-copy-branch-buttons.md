@@ -300,6 +300,18 @@ Iteration 2 (orphan-reap resilience):
   per hydrate (`hasReplayedBranchSeed`); a failed replay or `-32601` degrades to a fresh
   create with an honest "Couldn’t restore the branch" banner — never the old silent swap
   under the still-painted seed.
+- **An interrupted replay can't bypass the recovery guards** (iteration 3) — recovery
+  keys on the DURABLE `branchSeed`, not the transient `attachLiveSessionID` the replay
+  trigger consumes before its create resolves: the hydrate not-found gate, the degrade
+  banner/seed-clear, and the `.ready` bare-create fallback all check the seed, so a
+  socket drop mid-replay still recovers the branch on the next hydrate (never a silent
+  bare create, never a dangling seed that could mis-arm attach mode via
+  `liveSessionIDRefreshed`). A transport-shaped `branchReplayResult` failure
+  (`.disconnected`/`.notConnected`/`.timedOut`) KEEPS the seed and refunds the replay
+  budget (status-only, mirroring `.sessionResult(.failure(.disconnected))`; timeout
+  redials itself against a half-open socket) instead of destroying the only copy of the
+  branch and firing a `createSession` into a dead socket; the seed-dropping banner
+  degrade is reserved for genuine server rejections.
 
 ## Post-Completion
 

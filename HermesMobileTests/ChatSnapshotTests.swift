@@ -11,21 +11,24 @@ final class ChatSnapshotTests: SnapshotTestCase {
 
   /// Build a `ChatView` over `rows`. The transcript is rendered by the sole
   /// `UICollectionView`-backed engine.
+  /// `configure` mutates the built state for the handful of flags that aren't `State.init`
+  /// parameters (e.g. `copiedIDToastToken`, defaulted in the init body).
   private func chatView(
     rows: [ChatRow],
     title: String,
-    status: ChatFeature.State.Status
+    status: ChatFeature.State.Status,
+    configure: (inout ChatFeature.State) -> Void = { _ in }
   ) -> some View {
-    NavigationStack {
+    var state = ChatFeature.State(
+      connection: connection,
+      title: title,
+      transcript: IdentifiedArray(uniqueElements: rows),
+      status: status
+    )
+    configure(&state)
+    return NavigationStack {
       ChatView(
-        store: Store(
-          initialState: ChatFeature.State(
-            connection: connection,
-            title: title,
-            transcript: IdentifiedArray(uniqueElements: rows),
-            status: status
-          )
-        ) {
+        store: Store(initialState: state) {
           ChatFeature()
         } withDependencies: {
           // Don't open a real socket during render.
@@ -40,12 +43,13 @@ final class ChatSnapshotTests: SnapshotTestCase {
     rows: [ChatRow],
     title: String,
     status: ChatFeature.State.Status,
+    configure: (inout ChatFeature.State) -> Void = { _ in },
     file: StaticString = #file,
     testName: String = #function,
     line: UInt = #line
   ) {
     assertSnapshot(
-      of: chatView(rows: rows, title: title, status: status),
+      of: chatView(rows: rows, title: title, status: status, configure: configure),
       as: deviceImage(),
       file: file,
       testName: testName,
@@ -107,6 +111,25 @@ final class ChatSnapshotTests: SnapshotTestCase {
       )),
     ]
     assertChatView(rows: rows, title: "Review chat", status: .ready)
+  }
+
+  /// The copied-ID toast (chat toolbar ⋯ → Copy ID). The overlay is attached to the
+  /// transcript rather than the outer `VStack`, so this pins that it floats just above the
+  /// composer instead of covering it.
+  func testChatView_copiedIDToast() {
+    let rows: [ChatRow] = [
+      ChatRow(id: id(0), kind: .message(role: .user, text: "What's this session's id?", isComplete: true)),
+      ChatRow(id: id(1), kind: .message(
+        role: .assistant,
+        text: "Grab it from the ⋯ menu — I don't have it from in here.",
+        isComplete: true
+      )),
+    ]
+    // `copiedIDToastToken` is defaulted in `State.init`'s body, not a parameter — set it
+    // on the built state.
+    assertChatView(rows: rows, title: "Protocol chat", status: .ready) {
+      $0.copiedIDToastToken = 1
+    }
   }
 
   // MARK: Code-block copy affordance (#9)

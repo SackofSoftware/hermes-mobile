@@ -43,6 +43,12 @@ from your desk and still keep your agent moving.
 - **Compose hands-free or with files.** Dictate a message with voice input (a live
   waveform while recording; transcribed by your agent), and attach photos, camera
   captures, PDFs, or any file straight from the composer.
+- **Run slash commands.** Type `/` in the composer to pull up the agent's command
+  catalog — built-ins like `/compress`, `/undo`, `/status`, plus your installed
+  skills — with as-you-type filtering and tap-to-insert. Commands execute through
+  the agent's real slash pipeline (skill commands stream like a normal turn), so
+  mid-conversation session control works from your pocket. On agents without
+  command support the composer simply behaves as before.
 - **See how full the context is.** A color-coded pill in the composer shows
   used/max tokens and percent (mirroring the Hermes TUI thresholds); tap it for a
   breakdown of input/output split, compactions, and estimated cost.

@@ -395,10 +395,10 @@ deterministic row ID (never random, never derived from mutable text).
 
 ### Task 10: [Final] Update documentation
 
-- [ ] add a slash-command convention bullet to `CLAUDE.md` (catalog fetch + gate,
+- [x] add a slash-command convention bullet to `CLAUDE.md` (catalog fetch + gate,
       client-side filter, exec pipeline, ephemerality rule)
-- [ ] update `README.md` feature list if it enumerates chat features
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `README.md` feature list if it enumerates chat features
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

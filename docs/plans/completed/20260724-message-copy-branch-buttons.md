@@ -313,6 +313,41 @@ Iteration 2 (orphan-reap resilience):
   branch and firing a `createSession` into a dead socket; the seed-dropping banner
   degrade is reserved for genuine server rejections.
 
+Iteration 6 (external codex review, 4 findings — 3 confirmed, 1 false positive):
+
+- **CONFIRMED (most important) — a hydrate not-found could discard a persisted branch's
+  real history.** The server persists a branch's DB row in `prompt.submit`
+  (`_ensure_session_db_row`/`_persist_branch_seed`) BEFORE `message.start` reaches the
+  client, under the SAME id as the live `session_key`. A socket drop/server restart
+  landing in that window left `attachLiveSessionID`/`branchSeed` still standing even
+  though a durable first turn already existed server-side; the not-found handler took
+  this as proof the branch was never prompted and replayed the bare seed, silently
+  creating an unrelated sibling and losing the real follow-up turn. Fix: a one-shot
+  probe (`hasProbedBranchResume`, budgeted like the replay) tries `session.resume` by
+  the SAME id FIRST — `session.activate` is live-only (no DB fallback) so it 404s
+  regardless of a persisted row, but `session.resume` DOES fall back to the DB. A probe
+  success is treated exactly like `message.start` (clears the unpersisted-branch
+  bookkeeping, hydrates wholesale); only a not-found from the probe ITSELF proves the
+  branch is truly unpersisted and falls through to the existing seed-replay/degrade
+  logic, extracted into `handleActivateFailure(_:into:)` so both the plain not-found
+  path and the post-probe path share it verbatim.
+- **CONFIRMED — `canBranch`/the reducer guard didn't require a connected socket.**
+  `.gatewayClosed` finalizes a mid-stream row as `isComplete` and clears `isSending` the
+  instant the socket drops, so a truncated reply looked branchable while
+  `.reconnecting` (and the RPC would just fail against the dead socket instead of being
+  blocked up front). Fix: added `status == .ready` to `canBranch` and the
+  `.branchFromMessage` guard (same "This chat can't be branched yet." banner).
+- **CONFIRMED — `canSend` allowed a new parent turn while a branch `session.create` was
+  in flight.** `AppFeature` tears down the WHOLE slot on `branchCreated` to open the
+  replacement chat; a turn submitted during that window would be silently lost
+  (cancelled effects, no server response ever observed). Fix: added `!isBranching` to
+  `canSend`.
+- **FALSE POSITIVE — branch omitting `cwd`.** Verified: the mobile client's PLAIN
+  (non-branch) `session.create` also sends no `cwd` at all (`fields: [:]` in
+  `createSession(profile:)`) — mobile is a thin remote client with no workspace state to
+  send in the first place, so the branch omitting it is consistent, not a regression.
+  No code change.
+
 ## Post-Completion
 
 **Manual verification:**

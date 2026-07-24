@@ -79,9 +79,17 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   1.5s clock expiry, `cancelInFlight`); **branch** is desktop parity — no branch RPC exists, so
   `.branchFromMessage` fires a one-shot `session.create` seeded with ONLY the selected assistant
   message (`messages`) + `parent_session_id` (**no `title`** — server auto-titles on first submit),
-  gated by `canBranch` (**requires `storedSessionID` AND `attachLiveSessionID == nil`** — a
-  live-only handle, or an unpersisted branch's row-less `session_key`, would stamp a parent link
-  no list row ever matches; turn not running; `isBranching` double-fire). **A fresh branch has NO
+  gated by `canBranch` (**requires `storedSessionID` AND `attachLiveSessionID == nil` AND
+  `branchSeed == nil`** — a live-only handle, or an unpersisted branch's row-less `session_key`,
+  would stamp a parent link no list row ever matches; a standing `branchSeed` covers the window
+  where an interrupted replay has already nilled `attachLiveSessionID` but `storedSessionID` still
+  points at the OLD dead session; turn not running; `isBranching` double-fire; **AND
+  `status == .ready`** — a `.gatewayClosed` finalizes a mid-stream row as `isComplete` and clears
+  `isSending` the instant the socket drops, so without the connected-status gate a truncated reply
+  would look branchable while `.reconnecting` and the RPC would just fail against the dead socket).
+  **`canSend` also requires `!isBranching`** — a branch `session.create` in flight must block a NEW
+  parent turn, since `AppFeature` tears down this whole slot on `branchCreated` and a just-submitted
+  turn would be silently lost (cancelled effects, no server response ever observed). **A fresh branch has NO
   DB row until its first prompt** (server-lazy), so `Delegate.branchCreated` carries the
   `SessionHandle` **plus the `BranchSeed`** (text + parent id) and `AppFeature` fills the slot
   with a chat PRIMED from the create response (`resumeStoredID` + `attachLiveSessionID` +
@@ -93,6 +101,18 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   ~20s** (`_WS_ORPHAN_REAP_GRACE_S`) — a "session not found" (hydrate OR the submit heal)
   **replays the SEEDED create from the client-held `branchSeed`** (one replay per hydrate via
   `hasReplayedBranchSeed`; the heal keeps attach-by-live-id mode), rebuilding context + nesting.
+  **Before ever replaying the seed, a hydrate not-found from `session.activate` probes
+  `session.resume` ONCE, by the SAME id** (`hasProbedBranchResume`, one-shot like the replay
+  budget): the server persists the branch's DB row in `prompt.submit`
+  (`_ensure_session_db_row`/`_persist_branch_seed`) **before** `message.start` reaches the
+  client, and that row's primary key is the SAME value as the live `session_key`
+  (`attachLiveSessionID`) — so a socket drop/server restart landing in that window would
+  otherwise land straight in the seed-replay path and DISCARD a real, already-persisted turn.
+  `session.activate` is live-only (no DB fallback) and 404s regardless of a persisted row;
+  `session.resume` DOES fall back to the DB. A probe success is treated exactly like
+  `message.start` (clears `attachLiveSessionID`/`branchSeed`, hydrates wholesale via the
+  normal path); only a not-found from the probe itself proves the branch is truly
+  unpersisted and falls through to the seed replay below.
   **Recovery keys on the DURABLE `branchSeed`, never the transient `attachLiveSessionID`** (the
   replay trigger consumes the attach redirect before its create resolves, so an interrupted
   replay must still recover on the next hydrate/`.ready`); a **transport-interrupted replay

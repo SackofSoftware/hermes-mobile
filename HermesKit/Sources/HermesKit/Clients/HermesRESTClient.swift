@@ -529,6 +529,7 @@ struct SessionListDTO: Decodable {
   let cwd: String?
   let isActive: Bool?
   let source: String?
+  let parentSessionID: String?
 
   enum CodingKeys: String, CodingKey {
     case id, title, preview, cwd, source
@@ -536,6 +537,7 @@ struct SessionListDTO: Decodable {
     case startedAt = "started_at"
     case messageCount = "message_count"
     case isActive = "is_active"
+    case parentSessionID = "parent_session_id"
   }
 
   var asSession: Session {
@@ -548,7 +550,8 @@ struct SessionListDTO: Decodable {
       startedAt: startedAt.map { Date(timeIntervalSince1970: $0) },
       messageCount: messageCount,
       isActive: isActive,
-      source: source
+      source: source,
+      parentSessionID: parentSessionID?.nonEmpty
     )
   }
 }

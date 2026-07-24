@@ -162,6 +162,35 @@ struct HermesRESTClientTests {
     #expect(s.isCron == false)
   }
 
+  @Test func sessionsDecodesParentSessionID() async throws {
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260724_101500_bbbb22","title":"Branch","last_active":1749556800.0,"parent_session_id":"20260610_120231_afcca6"}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.parentSessionID == "20260610_120231_afcca6")
+  }
+
+  @Test func sessionsDecodesAbsentParentSessionIDAsNil() async throws {
+    // Backward-compat: older agents omit `parent_session_id` entirely → nil, decode succeeds.
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.parentSessionID == nil)
+  }
+
+  @Test func sessionsDecodesNullParentSessionIDAsNil() async throws {
+    // Regular (non-branch) sessions report `parent_session_id: null` → nil.
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0,"parent_session_id":null}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.parentSessionID == nil)
+  }
+
   @Test func sessionsAttachesSessionTokenHeaderAndQuery() async throws {
     MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
     _ = try await makeClient().sessions(connection, 20, 0, .recent)

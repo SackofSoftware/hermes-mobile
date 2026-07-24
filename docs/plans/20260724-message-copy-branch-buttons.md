@@ -163,10 +163,10 @@ Files involved:
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift` (SessionListDTO)
 - Modify: `HermesKit/Tests/HermesKitTests/` (session decoding tests)
 
-- [ ] add `parentSessionID: String?` to `Session` (public init update; lenient decode)
-- [ ] map `parent_session_id` in `SessionListDTO` → `Session`
-- [ ] write tests: payload with `parent_session_id` decodes it; payload without → `nil` (old-agent compat)
-- [ ] run tests - must pass before task 2
+- [x] add `parentSessionID: String?` to `Session` (public init update; lenient decode)
+- [x] map `parent_session_id` in `SessionListDTO` → `Session`
+- [x] write tests: payload with `parent_session_id` decodes it; payload without → `nil` (old-agent compat)
+- [x] run tests - must pass before task 2
 
 ### Task 2: SessionBranchTree flatten helper
 

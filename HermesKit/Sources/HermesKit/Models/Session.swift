@@ -24,6 +24,10 @@ public struct Session: Equatable, Sendable, Identifiable {
   /// Kept as a raw string (not enum-ified) so we stay lenient about unknown sources and
   /// only special-case `"cron"` (see `isCron`).
   public var source: String?
+  /// The stored id of the session this one was branched from (`parent_session_id` on
+  /// REST `GET /api/sessions`). Drives the desktop-style nested rendering in the list;
+  /// `nil` for regular sessions and on older agents that omit the field.
+  public var parentSessionID: String?
 
   public init(
     id: String,
@@ -34,7 +38,8 @@ public struct Session: Equatable, Sendable, Identifiable {
     startedAt: Date? = nil,
     messageCount: Int? = nil,
     isActive: Bool? = nil,
-    source: String? = nil
+    source: String? = nil,
+    parentSessionID: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -45,6 +50,7 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.messageCount = messageCount
     self.isActive = isActive
     self.source = source
+    self.parentSessionID = parentSessionID
   }
 
   /// Whether this is a cron-scheduled session — the single source of truth for the

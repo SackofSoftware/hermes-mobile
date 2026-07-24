@@ -170,9 +170,14 @@ not assumed):
   capability-gated like attachments) → `slash.exec` → `command.dispatch` fallback. A
   *successful* `slash.exec` can itself answer a typed dispatch directive (the server routes
   `/retry`-style pending-input commands and skill bundles through `command.dispatch`
-  internally), so the exec result is parsed as a directive first — desktop parity. Exec
-  output is **ephemeral** (never in `session.resume` history), so a successful exec
-  refreshes runtime info only, never a full hydrate.
+  internally), so the exec result is parsed as a directive first — desktop parity. The
+  dispatch fallback is skipped whenever re-issuing it could execute the command twice: a
+  `-32601`, a transport-shaped failure, or a name the server routes internally. Exec output
+  is **ephemeral** (never in `session.resume` history), but slash commands DO mutate history
+  (`/undo` rewinds, `/compress` rewrites, `/retry` truncates), so a completed command runs
+  the full server-authoritative hydrate and carries the ephemeral output rows across the
+  wholesale replace. The pipeline's RPCs get a 120s budget (vs the 30s default): `slash.exec`
+  can block the gateway for minutes.
 
 ## Push notifications
 

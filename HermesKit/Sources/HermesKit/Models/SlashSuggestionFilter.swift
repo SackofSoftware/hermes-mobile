@@ -35,19 +35,38 @@ public struct SlashSuggestion: Equatable, Sendable, Identifiable {
 /// Rules (desktop parity, prefix-only, no fuzzy):
 /// - Leading whitespace is trimmed first — `composerSubmitted` trims before its slash
 ///   check, so " /status" EXECUTES as a slash command and must autocomplete too.
-/// - The (trimmed) text must begin with "/" and contain no newline — else `[]` (a
-///   mid-sentence slash never triggers the panel).
+/// - The (trimmed) text must be COMMAND-SHAPED (`isCommandShaped`) and contain no newline
+///   — else `[]` (a mid-sentence slash, a path, or a `//` comment never triggers the panel).
 /// - Bare "/" → the full curated catalog in category order, skills last.
 /// - First token, no space yet ("/qu") → case-insensitive prefix match on canonical
 ///   names AND aliases; a matched alias displays its canonical row.
-/// - Known command + space + partial ("/reasoning l") → subcommand completions from
+/// - Known command + space + partial ("/goal s") → subcommand completions from
 ///   the `sub` map; an EXACT match is suppressed (the argument is complete, so the
 ///   panel clears after a subcommand tap). Any other post-space text → `[]` (args are
 ///   freeform).
 public enum SlashSuggestionFilter {
+  /// The slash-command SHAPE rule, ported from the desktop reference's
+  /// `SLASH_COMMAND_RE = /^\/[^\s/]*(?:\s|$)/` (`apps/desktop/src/lib/chat-runtime.ts`):
+  /// a leading "/" whose FIRST TOKEN contains no further "/", terminated by whitespace or
+  /// end-of-string.
+  ///
+  /// Everything else is ordinary prose that must reach the agent as a plain prompt —
+  /// `/tmp/agent.log look at this`, `/Users/me/notes.md summarize`, `// TODO fix this`.
+  /// Routing those through the slash pipeline fails twice (`slash.exec` then
+  /// `command.dispatch`) and DESTROYS the typed text, because the composer is cleared on
+  /// submit and the echoed user row is local-only (the next wholesale hydrate drops it).
+  ///
+  /// Shared by the composer's submit gate and this panel so the two can never disagree
+  /// (identical text must either suggest AND execute, or do neither).
+  public static func isCommandShaped(_ text: String) -> Bool {
+    let text = text.drop(while: \.isWhitespace)
+    guard text.hasPrefix("/") else { return false }
+    return !text.dropFirst().prefix(while: { !$0.isWhitespace }).contains("/")
+  }
+
   public static func suggestions(for text: String, catalog: CommandCatalog?) -> [SlashSuggestion] {
     let text = String(text.drop(while: \.isWhitespace))
-    guard let catalog, text.hasPrefix("/"), !text.contains(where: \.isNewline) else { return [] }
+    guard let catalog, isCommandShaped(text), !text.contains(where: \.isNewline) else { return [] }
 
     guard let spaceIndex = text.firstIndex(of: " ") else {
       return commandSuggestions(query: text, catalog: catalog)

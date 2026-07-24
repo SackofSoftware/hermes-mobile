@@ -431,6 +431,61 @@ Protocol gaps found by review against the current hermes-agent source (the plan'
   alias) — accurate for the level it describes; threading the original name through the
   hop was judged not worth the extra parameter for a rare registry misconfiguration.
 
+### Review fixes, round 2 (2026-07-24 critical re-review)
+
+- ➕ **Slash SHAPE gate replaces `hasPrefix("/")`** — ported the desktop's
+  `SLASH_COMMAND_RE = /^\/[^\s/]*(?:\s|$)/` into
+  `SlashSuggestionFilter.isCommandShaped`, shared by the submit gate AND the panel so
+  they can never disagree. `/tmp/agent.log look at this`, `/Users/me/notes.md summarize`
+  and `// TODO fix this` were being routed into the slash pipeline, failing twice, and
+  DESTROYING the typed text (composer cleared on submit, echo row local-only).
+- ➕ **Degenerate `/` / `/ <payload>` no longer loses the payload** — the empty-name case
+  now fails in the reducer BEFORE clearing the composer or echoing a row (desktop
+  restores the draft for exactly this case).
+- ➕ **The slash pipeline gets a 120s per-request budget**
+  (`HermesGatewayClient.longRunningMethods` = `slash.exec` + `command.dispatch`,
+  method-keyed so no call site can forget it). `/compress` runs an *unbounded* inline LLM
+  summarisation (`_live_slash_command_output` → `_mirror_slash_side_effects`), so under
+  the 30s default it reliably timed out on exactly the sessions worth compressing — while
+  the compression SUCCEEDED server-side. Desktop budgets 120s for its equivalent
+  `session.compress` call.
+  - [decision] Chose the method-keyed timeout over routing `/compress` to `session.compress`:
+    a per-call budget is needed either way (the 30s cap applies to every `send`), the
+    method-keyed form needs no client-API/arity change (94 test `send` overrides would have
+    had to change), and it also covers worker-routed commands in the 30–45s band. The
+    dedicated RPC's richer summary payload buys nothing here — the mobile refresh is a full
+    hydrate anyway.
+- ➕ **The post-command refresh is the FULL server-authoritative hydrate**, not a
+  runtime-only patch. `/undo` rewinds history (`db.rewind_to_message`), `/compress`
+  rewrites it, `/retry` truncates it — the rewound/compressed turns previously stayed on
+  screen indefinitely and were re-persisted into the snapshot cache. Same `session.resume`
+  round-trip (it always returned the whole cooked history; the old path decoded it and
+  threw it away); the ephemeral `commandOutput` rows are carried across the wholesale
+  replace and re-appended, so the command's own output survives.
+- ➕ **`slashExecInFlight` holds the composer lock across a mid-exec hydrate** — an exec is
+  not a turn, so `applyActivate`'s `isSending = running` unlocked the composer mid-command
+  and let a SECOND slash command be submitted whose state the first exec's terminal action
+  would then tear down. `isSending = running || slashExecInFlight`; cleared by the exec's
+  terminal action or `.slashCommandHandedOff` (after a `skill`/`send` submit).
+- ➕ **The dispatch fallback is skipped for `serverRoutedSlashCommands`** (a verbatim mirror
+  of the gateway's `_PENDING_INPUT_COMMANDS`): `slash.exec` already ran `command.dispatch`
+  for those itself, so an error came FROM that dispatch and re-issuing it re-enters the
+  same handler (`/compact` past "compress failed" has already mutated history).
+- ➕ **Hide-list extended with commands that have no live effect on mobile** — verified
+  per-command against `tui_gateway/server.py`: the slash worker is a separate
+  `python -m tui_gateway.slash_worker` process and only
+  `model`/`personality`/`prompt`/`compress`/`fast`/`reload-mcp`/`stop` are mirrored onto the
+  live session. Hidden: `/new`+`/reset`, `/sessions`, `/resume` (all rebind the WORKER's
+  session), `/reasoning` (session-scoped to the worker's agent, not mirrored), and the
+  `_TUI_EXTRA` chrome `/density`, `/logs`, `/mouse`. All have native affordances.
+  - [deviation] This reverses the plan's decision 1 ("keep `/new`, `/sessions`, `/resume`,
+    `/reasoning` visible for muscle-memory parity") — they render worker output that reads
+    like success while this session is untouched. `/title` was verified to WORK (the worker
+    is constructed with `resume=<session_key>`, so its DB title write lands here) and stays
+    visible; so do `/model` and `/compress` (both mirrored).
+- ➕ Subcommand lists are deduped case-insensitively at decode (`SlashSuggestion.id` is its
+  insertion text — a repeated server entry would give the panel's `ForEach` duplicate ids).
+
 ### Task 10: [Final] Update documentation
 
 - [x] add a slash-command convention bullet to `CLAUDE.md` (catalog fetch + gate,

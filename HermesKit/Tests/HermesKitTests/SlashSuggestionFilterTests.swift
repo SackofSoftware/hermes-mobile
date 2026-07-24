@@ -175,4 +175,30 @@ struct SlashSuggestionFilterTests {
   @Test func emptyCatalogYieldsNothing() {
     #expect(suggestions("/", catalog: CommandCatalog()).isEmpty)
   }
+
+  // MARK: Command shape (the desktop's SLASH_COMMAND_RE)
+
+  @Test func commandShapeMatchesTheDesktopRegex() {
+    // `SLASH_COMMAND_RE = /^\/[^\s/]*(?:\s|$)/` (apps/desktop/src/lib/chat-runtime.ts):
+    // a leading "/" whose first token holds no further "/", ended by whitespace or EOS.
+    for shaped in ["/", "/status", "/status ", "/goal ship it", "/goal\nmultiline", " /status", "/ "] {
+      #expect(SlashSuggestionFilter.isCommandShaped(shaped), "\(shaped) is command-shaped")
+    }
+    // Paths and comments are prose — routing them through the slash pipeline fails twice
+    // and destroys the typed text.
+    for prose in [
+      "/tmp/agent.log look at this", "/Users/me/notes.md summarize", "//TODO fix this",
+      "/a/b", "hello /status", "", "status",
+    ] {
+      #expect(!SlashSuggestionFilter.isCommandShaped(prose), "\(prose) is NOT command-shaped")
+    }
+  }
+
+  @Test func pathLikeTextNeverTriggersThePanel() {
+    // The panel and the composer's submit gate share `isCommandShaped`, so identical text
+    // either suggests AND executes, or does neither.
+    #expect(suggestions("/tmp/agent.log look").isEmpty)
+    #expect(suggestions("/Users/me/notes.md").isEmpty)
+    #expect(suggestions("//qu").isEmpty)
+  }
 }

@@ -47,15 +47,34 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
     self.canonical = canonical
   }
 
-  /// Terminal-only commands with no sensible mobile surface (screen control, clipboard,
-  /// TUI chrome, host-process management). Static and unit-tested; applied at decode.
-  /// Redundant-with-native-UI commands (/model, /new, …) are deliberately NOT here —
-  /// they stay visible for desktop muscle-memory parity.
+  /// Commands with no usable mobile surface. Static and unit-tested; applied at decode.
+  /// Two groups, both verified against `tui_gateway/server.py` + `hermes_cli/commands.py`:
+  ///
+  /// 1. **Terminal-only** — screen control, clipboard, TUI chrome, host-process management
+  ///    (`/clear`, `/redraw`, `/copy`, … plus the gateway's `_TUI_EXTRA` chrome
+  ///    `/density`, `/logs`, `/mouse`).
+  /// 2. **No live effect on this client** — commands the gateway runs inside `_SlashWorker`,
+  ///    a SEPARATE `python -m tui_gateway.slash_worker` subprocess with its own `HermesCLI`.
+  ///    Only `model`, `personality`, `prompt`, `compress`, `fast`, `reload-mcp` and `stop`
+  ///    are mirrored back onto the live gateway session (`_mirror_slash_side_effects`);
+  ///    everything else mutates the worker's own conversation and renders output that READS
+  ///    like success while this session is untouched. `/new` (+`/reset`), `/sessions` and
+  ///    `/resume` rebind the WORKER's session (so later worker commands would target the
+  ///    wrong one), and `/reasoning <effort>` is session-scoped to the worker's agent. The
+  ///    app offers all four natively (new chat, session list, reasoning picker), and the
+  ///    desktop reference likewise routes them to native surfaces or drops them from its
+  ///    palette (`desktop-slash-commands.ts`).
+  ///
+  /// Commands that DO reach the live session stay visible even where native UI duplicates
+  /// them (`/model`, `/title` — the worker shares the session key, so its DB title write
+  /// lands on this session).
   public static let mobileHiddenCommands: Set<String> = [
     "/clear", "/redraw", "/history", "/prompt", "/snapshot", "/config", "/statusbar",
     "/timestamps", "/skin", "/indicator", "/busy", "/copy", "/paste", "/image", "/quit",
     "/handoff", "/tools", "/toolsets", "/pet", "/hatch", "/reload", "/reload-mcp",
     "/reload-skills", "/browser", "/plugins", "/billing", "/platforms", "/journey",
+    "/density", "/logs", "/mouse",
+    "/new", "/reset", "/sessions", "/resume", "/reasoning",
   ]
 
   enum CodingKeys: String, CodingKey {
@@ -140,7 +159,9 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
 
   /// `{"/cmd": [subs]}` — non-array values are skipped, non-string members dropped;
   /// hidden commands lose their subcommand entries. Keys are lowercased here, ONCE, so
-  /// lookups downstream are plain subscripts.
+  /// lookups downstream are plain subscripts. Members are deduped case-insensitively
+  /// (first spelling wins): a `SlashSuggestion`'s identity is its insertion text, so a
+  /// server list repeating a subcommand would hand the panel's `ForEach` duplicate ids.
   private static func decodeSubcommands(_ value: JSONValue?) -> [String: [String]] {
     guard case let .object(raw)? = value else { return [:] }
     var result: [String: [String]] = [:]
@@ -148,7 +169,8 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
       let lowered = key.lowercased()
       guard !mobileHiddenCommands.contains(lowered) else { continue }
       guard let members = entry.arrayValue else { continue }
-      result[lowered] = members.compactMap(\.stringValue)
+      var seen: Set<String> = []
+      result[lowered] = members.compactMap(\.stringValue).filter { seen.insert($0.lowercased()).inserted }
     }
     return result
   }

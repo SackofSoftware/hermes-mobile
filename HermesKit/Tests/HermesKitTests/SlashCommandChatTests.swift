@@ -36,22 +36,22 @@ struct SlashCommandChatTests {
   nonisolated private static let catalogPayload: JSONValue = .object([
     "pairs": .array([
       .array([.string("/status"), .string("Show session status")]),
-      .array([.string("/reasoning"), .string("Set reasoning effort")]),
-      .array([.string("/plan"), .string("Skill: make a plan")]),
+      .array([.string("/goal"), .string("Manage the standing goal")]),
+      .array([.string("/deploy"), .string("Skill: ship the build")]),
     ]),
-    "sub": .object(["/reasoning": .array([.string("none"), .string("low"), .string("high")])]),
+    "sub": .object(["/goal": .array([.string("show"), .string("pause"), .string("resume")])]),
     "canon": .object([
       "/status": .string("/status"),
       "/st": .string("/status"),
-      "/reasoning": .string("/reasoning"),
-      "/plan": .string("/plan"),
+      "/goal": .string("/goal"),
+      "/deploy": .string("/deploy"),
     ]),
     "categories": .array([
       .object([
         "name": .string("Session"),
         "pairs": .array([
           .array([.string("/status"), .string("Show session status")]),
-          .array([.string("/reasoning"), .string("Set reasoning effort")]),
+          .array([.string("/goal"), .string("Manage the standing goal")]),
         ]),
       ]),
     ]),
@@ -61,15 +61,15 @@ struct SlashCommandChatTests {
   nonisolated private static let expectedCatalog = CommandCatalog(
     commands: [
       SlashCommand(name: "/status", description: "Show session status", category: "Session", isSkill: false),
-      SlashCommand(name: "/reasoning", description: "Set reasoning effort", category: "Session", isSkill: false),
-      SlashCommand(name: "/plan", description: "Skill: make a plan", category: nil, isSkill: true),
+      SlashCommand(name: "/goal", description: "Manage the standing goal", category: "Session", isSkill: false),
+      SlashCommand(name: "/deploy", description: "Skill: ship the build", category: nil, isSkill: true),
     ],
-    subcommands: ["/reasoning": ["none", "low", "high"]],
+    subcommands: ["/goal": ["show", "pause", "resume"]],
     canonical: [
       "/status": "/status",
       "/st": "/status",
-      "/reasoning": "/reasoning",
-      "/plan": "/plan",
+      "/goal": "/goal",
+      "/deploy": "/deploy",
     ]
   )
 
@@ -102,6 +102,7 @@ struct SlashCommandChatTests {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         if method == "commands.catalog" {
@@ -143,6 +144,7 @@ struct SlashCommandChatTests {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         if method == "commands.catalog" { return Self.catalogPayload }
@@ -178,6 +180,7 @@ struct SlashCommandChatTests {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         if method == "commands.catalog" {
@@ -220,6 +223,7 @@ struct SlashCommandChatTests {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         if method == "commands.catalog" {
@@ -261,6 +265,7 @@ struct SlashCommandChatTests {
       $0.uuid = .incrementing
       $0.continuousClock = TestClock()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         if method == "commands.catalog" {
@@ -303,7 +308,7 @@ struct SlashCommandChatTests {
     await store.send(.binding(.set(\.composerText, "/"))) {
       $0.composerText = "/"
     }
-    #expect(store.state.slashSuggestions.map(\.name) == ["/status", "/reasoning", "/plan"])
+    #expect(store.state.slashSuggestions.map(\.name) == ["/status", "/goal", "/deploy"])
     #expect(store.state.slashSuggestions.map(\.isSkill) == [false, false, true])
   }
 
@@ -313,10 +318,10 @@ struct SlashCommandChatTests {
     // shown once).
     let store = TestStore(initialState: stateWithCatalog()) { ChatFeature() }
 
-    await store.send(.binding(.set(\.composerText, "/re"))) {
-      $0.composerText = "/re"
+    await store.send(.binding(.set(\.composerText, "/go"))) {
+      $0.composerText = "/go"
     }
-    #expect(store.state.slashSuggestions.map(\.name) == ["/reasoning"])
+    #expect(store.state.slashSuggestions.map(\.name) == ["/goal"])
 
     await store.send(.binding(.set(\.composerText, "/st"))) {
       $0.composerText = "/st"
@@ -324,10 +329,10 @@ struct SlashCommandChatTests {
     #expect(store.state.slashSuggestions.map(\.name) == ["/status"])
 
     // Subcommand mode: a known command + space + partial completes from the `sub` map.
-    await store.send(.binding(.set(\.composerText, "/reasoning l"))) {
-      $0.composerText = "/reasoning l"
+    await store.send(.binding(.set(\.composerText, "/goal p"))) {
+      $0.composerText = "/goal p"
     }
-    #expect(store.state.slashSuggestions.map(\.name) == ["low"])
+    #expect(store.state.slashSuggestions.map(\.name) == ["pause"])
   }
 
   @Test func tapInsertsCommandAndClearsPanel() async throws {
@@ -347,12 +352,12 @@ struct SlashCommandChatTests {
 
     // A subcommand tap inserts "/cmd sub" (no trailing space — the arg is complete) and
     // the panel clears itself: an exact subcommand match is suppressed by the filter.
-    await store.send(.binding(.set(\.composerText, "/reasoning l"))) {
-      $0.composerText = "/reasoning l"
+    await store.send(.binding(.set(\.composerText, "/goal p"))) {
+      $0.composerText = "/goal p"
     }
     let sub = try #require(store.state.slashSuggestions.first)
     await store.send(.slashSuggestionTapped(sub)) {
-      $0.composerText = "/reasoning low"
+      $0.composerText = "/goal pause"
     }
     #expect(store.state.slashSuggestions.isEmpty)
   }
@@ -376,6 +381,15 @@ struct SlashCommandChatTests {
       $0.composerText = "/status\nsecond line"
     }
     #expect(store.state.slashSuggestions.isEmpty)
+
+    // Shape rule (desktop's `SLASH_COMMAND_RE`): a first token containing a second "/" is
+    // a path or a comment, never a command — the panel and the submit gate agree.
+    for prose in ["/tmp/agent.log look at this", "/Users/me/notes.md summarize", "//TODO fix"] {
+      await store.send(.binding(.set(\.composerText, prose))) {
+        $0.composerText = prose
+      }
+      #expect(store.state.slashSuggestions.isEmpty, "\(prose) must not suggest")
+    }
   }
 
   @Test func suggestionsEmptyWhenCommandsUnsupported() async {
@@ -413,16 +427,17 @@ struct SlashCommandChatTests {
   @Test func slashSubmitRunsExecPipelineAndRefreshesRuntime() async {
     // The issue's core exec path: "/status" echoes a user row, goes out as
     // `slash.exec {command (no slash), session_id}` — NOT prompt.submit — appends the
-    // ephemeral commandOutput row, unlocks the composer, and then the runtime-only
-    // refresh applies model/usage from `session.resume`'s info WITHOUT touching the
-    // transcript (the response's `messages` must not be reconstructed — that would wipe
-    // the output row).
+    // ephemeral commandOutput row, unlocks the composer, and then the SERVER-AUTHORITATIVE
+    // refresh rebuilds the transcript from `session.resume` (slash commands mutate history:
+    // `/compress` rewrites it, `/undo` rewinds it) while CARRYING the ephemeral
+    // commandOutput row across the wholesale replace.
     let calls = LockIsolated<[String]>([])
     let execParams = LockIsolated<JSONValue?>(nil)
     let snapshot = ChatSnapshotClient.inMemory()
     let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = snapshot
       $0.hermesGateway.send = { @Sendable method, params in
         calls.withValue { $0.append(method) }
@@ -456,10 +471,12 @@ struct SlashCommandChatTests {
       ]
       $0.composerText = ""
       $0.isSending = true
+      $0.slashExecInFlight = true
     }
     await store.receive(\.slashCommandOutput) {
       $0.transcript.append(ChatRow(id: self.uuid(1), kind: .commandOutput(text: "Session: all good")))
       $0.isSending = false
+      $0.slashExecInFlight = false
     }
     // The client-side "turn" end is delegated (no server event follows an exec) so a
     // detached slot waiting on it is released.
@@ -467,7 +484,7 @@ struct SlashCommandChatTests {
       guard case let .delegate(.runningChanged(sessionID, running)) = action else { return false }
       return sessionID == "stored123" && running == false
     })
-    await store.receive(\.slashRuntimeInfoRefreshed) {
+    await store.receive(\.slashHistoryRefreshed) {
       $0.model = "claude-opus-4-9"
       $0.title = "Renamed by slash"
       $0.usage = Usage(contextUsed: 500, contextMax: 200_000)
@@ -478,10 +495,11 @@ struct SlashCommandChatTests {
     #expect(calls.value == ["slash.exec", "session.resume"])
     #expect(execParams.value?["command"]?.stringValue == "status")
     #expect(execParams.value?["session_id"]?.stringValue == "live123")
-    // The refresh applied runtime info only: the transcript is still the typed command +
-    // its output, NOT a rebuild of the server-history payload.
+    // Server-authoritative: the transcript is the server's history (the optimistic "/status"
+    // echo is gone — server wins) with the EPHEMERAL command output carried across the
+    // wholesale replace and re-appended last.
     #expect(store.state.transcript.map(\.kind) == [
-      .message(role: .user, text: "/status", isComplete: true),
+      .message(role: .user, text: "server history", isComplete: true),
       .commandOutput(text: "Session: all good"),
     ])
     #expect(store.state.errorBanner == nil)
@@ -497,6 +515,7 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         switch method {
@@ -507,9 +526,10 @@ struct SlashCommandChatTests {
           }
           return .object([:]) // no output at all
         case "session.resume":
-          // Runtime refresh with no `info` → no refresh action.
+          // The post-command refresh (usage present → no session.usage fallback).
           return .object([
             "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
           ])
         default:
           return .object([:])
@@ -542,6 +562,7 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -588,6 +609,7 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         let sid = params["session_id"]?.stringValue
@@ -597,12 +619,13 @@ struct SlashCommandChatTests {
           if sid == "stale-live" { throw GatewayError.server("session not found") }
           return .object(["output": .string("ok")])
         case "session.resume":
-          // Serves both the heal and the post-exec runtime refresh (no `info` → silent).
+          // Serves both the #17 heal and the post-command refresh.
           return .object([
             "session_id": .string("fresh-live"),
             "stored_session_id": .string("stored123"),
             "messages": .array([]),
             "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
           ])
         default:
           return .object([:])
@@ -634,6 +657,7 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -660,6 +684,7 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         let attempt = calls.withValue { $0.append(method); return $0.count }
@@ -688,16 +713,21 @@ struct SlashCommandChatTests {
     #expect(calls.value == ["slash.exec", "slash.exec"])
   }
 
-  @Test func bareSlashFailsLocallyWithoutARoundtrip() async {
-    // "/" parses to an empty command name — the server could only answer "empty command"
-    // after a doomed roundtrip (two, with the fallback), so the pipeline guards locally
-    // (web parity) and nothing hits the wire.
+  @Test func degenerateSlashKeepsTheTypedTextAndNeverHitsTheWire() async {
+    // "/" (and "/ <payload>") parses to an empty command name. The server could only answer
+    // "empty command" after a doomed roundtrip, so the reducer guards BEFORE clearing the
+    // composer: the banner is raised, nothing hits the wire, no user row is echoed, and —
+    // critically — the typed text is handed back intact. Desktop restores the draft for
+    // exactly this case; without it an arbitrarily long payload after a stray slash is
+    // lost forever.
     let calls = LockIsolated<[String]>([])
+    let payload = "/ a very long pasted payload the user must not lose"
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/")
+      initialState: readyStateWithCatalog(composerText: payload)
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -706,26 +736,88 @@ struct SlashCommandChatTests {
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
-    await store.send(.composerSubmitted)
-    await store.receive(\.slashCommandFailed) {
+    await store.send(.composerSubmitted) {
       $0.errorBanner = "Command failed: empty command"
-      $0.isSending = false
     }
     await store.finish()
     #expect(calls.value.isEmpty)
+    #expect(store.state.composerText == payload)
+    #expect(store.state.transcript.isEmpty)
+    #expect(store.state.isSending == false)
+    #expect(store.state.slashExecInFlight == false)
+
+    // A bare "/" behaves identically.
+    let bare = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        return .object([:])
+      }
+    }
+    bare.exhaustivity = .off(showSkippedAssertions: false)
+    await bare.send(.composerSubmitted) {
+      $0.errorBanner = "Command failed: empty command"
+    }
+    await bare.finish()
+    #expect(calls.value.isEmpty)
+    #expect(bare.state.composerText == "/")
+  }
+
+  @Test func pathLikeSlashTextGoesThroughPlainPromptSubmit() async {
+    // The shape rule (desktop's `SLASH_COMMAND_RE = /^\/[^\s/]*(?:\s|$)/`): a first token
+    // containing a SECOND "/" is a path or a comment, not a command. A bare `hasPrefix("/")`
+    // routed `/tmp/agent.log look at this` into the slash pipeline, where it failed twice
+    // and DESTROYED the message (the composer is cleared on submit and the echoed row is
+    // local-only). These must reach the agent as ordinary prompts.
+    let calls = LockIsolated<[(method: String, text: String?)]>([])
+    for prose in ["/tmp/agent.log look at this", "/Users/me/notes.md summarize", "//TODO fix this"] {
+      let store = TestStore(
+        initialState: readyStateWithCatalog(composerText: prose)
+      ) { ChatFeature() } withDependencies: {
+        $0.uuid = .incrementing
+        $0.date = .constant(Date(timeIntervalSince1970: 0))
+        $0.chatSnapshot = .inMemory()
+        $0.hermesGateway.send = { @Sendable method, params in
+          calls.withValue { $0.append((method, params["text"]?.stringValue)) }
+          return .object([:])
+        }
+      }
+      store.exhaustivity = .off(showSkippedAssertions: false)
+
+      await store.send(.composerSubmitted) {
+        $0.composerText = ""
+        $0.isSending = true
+      }
+      await store.finish()
+      // The plain path: prompt.submit with the text verbatim, never slash.exec, and the
+      // usual turn anchor + optimistic user row.
+      #expect(calls.value.map(\.method) == ["prompt.submit"])
+      #expect(calls.value.first?.text == prose)
+      #expect(store.state.slashExecInFlight == false)
+      #expect(store.state.transcript.map(\.kind) == [
+        .message(role: .user, text: prose, isComplete: true),
+      ])
+      calls.setValue([])
+    }
   }
 
   @Test func multilineSlashTextTakesTheSlashPipeline() async {
     // Desktop/server parity: slash args may span newlines (`/goal <pasted text>` — the
-    // server splits on any whitespace, and the desktop's parse was explicitly fixed for
-    // this), so a multiline submission starting with "/" still executes through
-    // slash.exec — the suggestion panel simply never shows for it.
+    // server splits on any whitespace, and the desktop's `\s` shape terminator matches a
+    // newline), so a multiline submission whose FIRST TOKEN is command-shaped still
+    // executes through slash.exec — the suggestion panel simply never shows for it.
     let execParams = LockIsolated<JSONValue?>(nil)
     let store = TestStore(
       initialState: readyStateWithCatalog(composerText: "/goal line one\nline two")
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         if method == "slash.exec" {
@@ -734,6 +826,7 @@ struct SlashCommandChatTests {
         }
         return .object([
           "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+          "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
         ])
       }
     }
@@ -746,6 +839,108 @@ struct SlashCommandChatTests {
     await store.finish()
     #expect(execParams.value?["command"]?.stringValue == "goal line one\nline two")
     #expect(store.state.transcript.last?.kind == .commandOutput(text: "goal set"))
+  }
+
+  @Test func serverRoutedCommandFailureSkipsTheDispatchFallback() async {
+    // The gateway routes `_PENDING_INPUT_COMMANDS` (`/undo`, `/retry`, `/compact`, …)
+    // through `command.dispatch` ITSELF, inside `slash.exec`. An error therefore comes FROM
+    // a dispatch that already ran, so re-issuing our own would re-enter the same handler —
+    // a `/compact` that reached "compress failed" has already mutated history and would be
+    // recompressed. Same double-execution class as the transport-failure guard.
+    let calls = LockIsolated<[String]>([])
+    for command in ["/undo", "/compact", "/retry"] {
+      let store = TestStore(
+        initialState: readyStateWithCatalog(composerText: command)
+      ) { ChatFeature() } withDependencies: {
+        $0.uuid = .incrementing
+        $0.date = .constant(Date(timeIntervalSince1970: 0))
+        $0.continuousClock = ImmediateClock()
+        $0.chatSnapshot = .inMemory()
+        $0.hermesGateway.send = { @Sendable method, _ in
+          calls.withValue { $0.append(method) }
+          throw GatewayError.server("compress failed")
+        }
+      }
+      store.exhaustivity = .off(showSkippedAssertions: false)
+
+      await store.send(.composerSubmitted)
+      await store.receive(\.slashCommandFailed) {
+        $0.errorBanner = "Command failed: compress failed"
+        $0.isSending = false
+        $0.slashExecInFlight = false
+      }
+      await store.finish()
+      #expect(calls.value == ["slash.exec"], "\(command) must not re-dispatch")
+      calls.setValue([])
+    }
+
+    // Contrast: a command the server does NOT route internally still gets the fallback.
+    let other = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/deploy")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        other.withValue { $0.append(method) }
+        throw GatewayError.server("not a quick/plugin/skill command")
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandFailed)
+    await store.finish()
+    #expect(other.value == ["slash.exec", "command.dispatch"])
+  }
+
+  @Test func hydrateMidExecKeepsTheComposerLocked() async {
+    // A hydrate landing while the exec is in flight (`.foreground`, `.reattached`, a
+    // reconnect `.ready`) reports `running == false` — an exec is NOT a turn. Taking that
+    // verbatim would UNLOCK the composer mid-command and let a SECOND slash command be
+    // submitted, whose state the first exec's terminal action would then tear down.
+    // `slashExecInFlight` holds the lock until the exec's own terminal action clears it.
+    let calls = LockIsolated<[String]>([])
+    let (gate, gateContinuation) = AsyncStream<Void>.makeStream()
+    var initial = readyStateWithCatalog()
+    initial.status = .ready // `.foreground` hydrates a healthy socket instead of redialing
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        if method == "slash.exec" {
+          for await _ in gate { break } // block until the hydrate has landed
+          return .object(["output": .string("late output")])
+        }
+        return .object([
+          "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+          "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.slashExecInFlight = true
+    }
+    // A foreground hydrate lands mid-exec and reports an idle session.
+    await store.send(.foreground)
+    await store.receive(\.activateResult.success)
+    #expect(store.state.isSending, "the composer must stay locked while the exec runs")
+    #expect(store.state.canSend == false)
+
+    gateContinuation.yield(())
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+      $0.slashExecInFlight = false
+    }
+    await store.finish()
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "late output"))
   }
 
   @Test func serverTurnStartedMidExecKeepsLockAndRunningState() async {
@@ -802,6 +997,7 @@ struct SlashCommandChatTests {
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         calls.withValue { $0.append(method) }
@@ -812,9 +1008,10 @@ struct SlashCommandChatTests {
           dispatchParams.setValue(params)
           return .object(["type": .string("exec"), "output": .string("dispatched output")])
         case "session.resume":
-          // Runtime refresh with no `info` → silent.
+          // The post-command refresh (usage present → no session.usage fallback).
           return .object([
             "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
           ])
         default:
           return .object([:])
@@ -849,6 +1046,7 @@ struct SlashCommandChatTests {
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         calls.withValue { $0.append((method, params["command"]?.stringValue)) }
@@ -863,6 +1061,7 @@ struct SlashCommandChatTests {
         case "session.resume":
           return .object([
             "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
           ])
         default:
           return .object([:])
@@ -893,6 +1092,7 @@ struct SlashCommandChatTests {
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -919,17 +1119,18 @@ struct SlashCommandChatTests {
   }
 
   @Test func skillDirectiveSubmitsPromptWithExactlyOneUserRow() async {
-    // "/plan tidy the API" is a skill route: slash.exec rejects it, dispatch answers a
+    // "/deploy tidy the API" is a skill route: slash.exec rejects it, dispatch answers a
     // `skill` directive whose message goes through the NORMAL prompt.submit — with the
-    // duplicate optimistic user row suppressed (the typed "/plan …" row is already in
+    // duplicate optimistic user row suppressed (the typed "/deploy …" row is already in
     // the transcript). isSending stays true: the turn streams via events like any prompt.
     let calls = LockIsolated<[String]>([])
     let submitParams = LockIsolated<JSONValue?>(nil)
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/plan tidy the API")
+      initialState: readyStateWithCatalog(composerText: "/deploy tidy the API")
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         calls.withValue { $0.append(method) }
@@ -938,8 +1139,8 @@ struct SlashCommandChatTests {
           throw GatewayError.server("skill routes dispatch client-side")
         case "command.dispatch":
           return .object([
-            "type": .string("skill"), "name": .string("plan"),
-            "message": .string("Use the plan skill: tidy the API"),
+            "type": .string("skill"), "name": .string("deploy"),
+            "message": .string("Use the deploy skill: tidy the API"),
           ])
         case "prompt.submit":
           submitParams.setValue(params)
@@ -953,7 +1154,7 @@ struct SlashCommandChatTests {
 
     await store.send(.composerSubmitted) {
       $0.transcript = [
-        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/plan tidy the API", isComplete: true)),
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/deploy tidy the API", isComplete: true)),
       ]
       $0.composerText = ""
       $0.isSending = true
@@ -961,12 +1162,12 @@ struct SlashCommandChatTests {
     await store.finish()
 
     #expect(calls.value == ["slash.exec", "command.dispatch", "prompt.submit"])
-    #expect(submitParams.value?["text"]?.stringValue == "Use the plan skill: tidy the API")
+    #expect(submitParams.value?["text"]?.stringValue == "Use the deploy skill: tidy the API")
     #expect(submitParams.value?["session_id"]?.stringValue == "live123")
     // Exactly one user row — the typed command; the directive's message is NOT echoed
     // and no output row appears (streaming/thinking will take over via events).
     #expect(store.state.transcript.map(\.kind) == [
-      .message(role: .user, text: "/plan tidy the API", isComplete: true),
+      .message(role: .user, text: "/deploy tidy the API", isComplete: true),
     ])
     #expect(store.state.isSending)
     #expect(store.state.errorBanner == nil)
@@ -979,16 +1180,17 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         switch method {
         case "slash.exec":
           throw GatewayError.server("nope")
         case "command.dispatch":
-          guard params["name"]?.stringValue == "plan" else {
+          guard params["name"]?.stringValue == "deploy" else {
             return .object(["type": .string("mystery")])
           }
-          return .object(["type": .string("skill"), "name": .string("plan")]) // no message
+          return .object(["type": .string("skill"), "name": .string("deploy")]) // no message
         default:
           return .object([:])
         }
@@ -1002,12 +1204,12 @@ struct SlashCommandChatTests {
       $0.isSending = false
     }
 
-    await store.send(.binding(.set(\.composerText, "/plan"))) {
-      $0.composerText = "/plan"
+    await store.send(.binding(.set(\.composerText, "/deploy"))) {
+      $0.composerText = "/deploy"
     }
     await store.send(.composerSubmitted)
     await store.receive(\.slashCommandFailed) {
-      $0.errorBanner = "Command failed: /plan: skill payload missing message"
+      $0.errorBanner = "Command failed: /deploy: skill payload missing message"
       $0.isSending = false
     }
     await store.finish()
@@ -1027,6 +1229,7 @@ struct SlashCommandChatTests {
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -1036,6 +1239,7 @@ struct SlashCommandChatTests {
         case "session.resume":
           return .object([
             "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
           ])
         default:
           return .object([:])
@@ -1067,6 +1271,7 @@ struct SlashCommandChatTests {
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         calls.withValue { $0.append(method) }
@@ -1113,17 +1318,22 @@ struct SlashCommandChatTests {
     #expect(store.state.errorBanner == nil)
   }
 
-  @Test func prefillDirectivePrefillsComposerAndRendersNotice() async {
-    // /undo answers {type:"prefill", message, notice} AFTER rewinding history on disk:
-    // the undone message lands in the composer for editing (never auto-resubmitted) and
-    // the notice renders as the output row — silently dropping either would leave a
-    // destructive server-side change with zero feedback.
+  @Test func prefillDirectivePrefillsComposerAndDropsTheRewoundTurns() async {
+    // /undo answers {type:"prefill", message, notice} AFTER rewinding history on disk
+    // (`db.rewind_to_message`): the undone message lands in the composer for editing
+    // (never auto-resubmitted) and the notice renders as the output row — silently
+    // dropping either would leave a destructive server-side change with zero feedback.
+    // The refresh is then SERVER-AUTHORITATIVE: the rewound turns must actually leave the
+    // screen (a runtime-only refresh left them standing indefinitely — re-persisted into
+    // the cache, so even a cold relaunch repainted them, and re-sending the prefill
+    // produced a visually duplicated turn).
     let calls = LockIsolated<[String]>([])
     let store = TestStore(
       initialState: readyStateWithCatalog(composerText: "/undo")
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -1135,8 +1345,14 @@ struct SlashCommandChatTests {
             "notice": .string("↶ Undid 1 turn (2 message(s)). Edit and resubmit, or send a new message."),
           ])
         case "session.resume":
+          // The post-rewind history: the undone exchange is gone server-side.
           return .object([
-            "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "session_id": .string("live123"),
+            "messages": .array([
+              .object(["id": .number(1), "role": .string("user"), "text": .string("kept turn")]),
+            ]),
+            "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
           ])
         default:
           return .object([:])
@@ -1151,6 +1367,7 @@ struct SlashCommandChatTests {
       ]
       $0.composerText = ""
       $0.isSending = true
+      $0.slashExecInFlight = true
     }
     await store.receive(\.slashCommandPrefill) {
       $0.transcript.append(ChatRow(
@@ -1159,12 +1376,19 @@ struct SlashCommandChatTests {
       ))
       $0.composerText = "my undone prompt"
       $0.isSending = false
+      $0.slashExecInFlight = false
     }
+    await store.receive(\.slashHistoryRefreshed)
     await store.finish()
 
-    // The undone message is edited, not auto-resubmitted — no prompt.submit; the
-    // standard runtime-only refresh still runs (usage changed after the rewind).
+    // The undone message is edited, not auto-resubmitted — no prompt.submit.
     #expect(calls.value == ["slash.exec", "session.resume"])
+    // Server wins: the transcript is the post-rewind history, the optimistic "/undo" echo
+    // is gone, and only the ephemeral notice rides across the wholesale replace.
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "kept turn", isComplete: true),
+      .commandOutput(text: "↶ Undid 1 turn (2 message(s)). Edit and resubmit, or send a new message."),
+    ])
     #expect(store.state.errorBanner == nil)
   }
 
@@ -1174,10 +1398,11 @@ struct SlashCommandChatTests {
     // composer or a swallowed error.
     let calls = LockIsolated<[String]>([])
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/plan tidy")
+      initialState: readyStateWithCatalog(composerText: "/deploy tidy")
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }
@@ -1186,8 +1411,8 @@ struct SlashCommandChatTests {
           throw GatewayError.server("skill routes dispatch client-side")
         case "command.dispatch":
           return .object([
-            "type": .string("skill"), "name": .string("plan"),
-            "message": .string("Use the plan skill: tidy"),
+            "type": .string("skill"), "name": .string("deploy"),
+            "message": .string("Use the deploy skill: tidy"),
           ])
         case "prompt.submit":
           throw GatewayError.server("submit boom")
@@ -1211,10 +1436,11 @@ struct SlashCommandChatTests {
     // The send-flavored empty-message wording (the skill flavor is covered by
     // malformedDirectiveFailsCleanly).
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/moa")
+      initialState: readyStateWithCatalog(composerText: "/deploy")
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         switch method {
@@ -1231,7 +1457,7 @@ struct SlashCommandChatTests {
 
     await store.send(.composerSubmitted)
     await store.receive(\.slashCommandFailed) {
-      $0.errorBanner = "Command failed: /moa: empty message"
+      $0.errorBanner = "Command failed: /deploy: empty message"
       $0.isSending = false
     }
     await store.finish()
@@ -1254,6 +1480,7 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, params in
         calls.withValue { $0.append(method) }
@@ -1292,6 +1519,7 @@ struct SlashCommandChatTests {
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
         calls.withValue { $0.append(method) }

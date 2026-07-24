@@ -14,37 +14,41 @@ struct CommandCatalogTests {
   private let fullFixture = """
     {
       "pairs": [
-        ["/new", "Start a new session"],
+        ["/model", "Switch the model for this session"],
         ["/compress", "Compress the conversation context"],
-        ["/reasoning", "Set reasoning effort [none|low|medium|high]"],
+        ["/goal", "Manage the standing goal"],
         ["/status", "Show session status"],
         ["/clear", "Clear the screen"],
         ["/quit", "Exit the TUI"],
+        ["/new", "Start a new session"],
+        ["/reasoning", "Set reasoning effort [none|low|medium|high]"],
         ["/deploy", "exec: ./deploy.sh"],
         ["/code-review", "Review the current changes"],
         ["/research", "Deep-research a topic"]
       ],
       "sub": {
+        "/goal": ["show", "pause", "resume"],
         "/reasoning": ["none", "low", "medium", "high"],
         "/skin": ["dark", "light"]
       },
       "canon": {
-        "/new": "/new",
-        "/reset": "/new",
+        "/model": "/model",
         "/compress": "/compress",
         "/compact": "/compress",
-        "/reasoning": "/reasoning",
+        "/goal": "/goal",
         "/status": "/status",
         "/clear": "/clear",
         "/cls": "/clear",
         "/quit": "/quit",
+        "/new": "/new",
+        "/reset": "/new",
         "/deploy": "/deploy",
         "/code-review": "/code-review",
         "/research": "/research"
       },
       "categories": [
-        {"name": "Session", "pairs": [["/new", "Start a new session"], ["/compress", "Compress the conversation context"]]},
-        {"name": "Settings", "pairs": [["/reasoning", "Set reasoning effort [none|low|medium|high]"]]},
+        {"name": "Session", "pairs": [["/model", "Switch the model for this session"], ["/compress", "Compress the conversation context"], ["/new", "Start a new session"]]},
+        {"name": "Settings", "pairs": [["/goal", "Manage the standing goal"], ["/reasoning", "Set reasoning effort [none|low|medium|high]"]]},
         {"name": "Info", "pairs": [["/status", "Show session status"]]},
         {"name": "TUI", "pairs": [["/clear", "Clear the screen"], ["/quit", "Exit the TUI"]]},
         {"name": "User commands", "pairs": [["/deploy", "exec: ./deploy.sh"]]}
@@ -60,18 +64,18 @@ struct CommandCatalogTests {
     let catalog = try decode(fullFixture)
 
     #expect(catalog.commands.map(\.name) == [
-      "/new", "/compress", "/reasoning", "/status", "/deploy", "/code-review", "/research",
+      "/model", "/compress", "/goal", "/status", "/deploy", "/code-review", "/research",
     ])
-    #expect(catalog.commands.first?.description == "Start a new session")
+    #expect(catalog.commands.first?.description == "Switch the model for this session")
   }
 
   @Test func categorizedCommandsKeepTheirCategoryAndAreNotSkills() throws {
     let catalog = try decode(fullFixture)
     let byName = Dictionary(uniqueKeysWithValues: catalog.commands.map { ($0.name, $0) })
 
-    #expect(byName["/new"]?.category == "Session")
+    #expect(byName["/model"]?.category == "Session")
     #expect(byName["/compress"]?.category == "Session")
-    #expect(byName["/reasoning"]?.category == "Settings")
+    #expect(byName["/goal"]?.category == "Settings")
     #expect(byName["/deploy"]?.category == "User commands")
     #expect(catalog.commands.filter { $0.category != nil }.allSatisfy { !$0.isSkill })
   }
@@ -97,12 +101,29 @@ struct CommandCatalogTests {
     #expect(!catalog.commands.contains { $0.isSkill && ($0.name == "/clear" || $0.name == "/quit") })
   }
 
+  @Test func hideListRemovesCommandsWithNoLiveEffectOnMobile() throws {
+    // The gateway runs worker-routed commands in a SEPARATE `slash_worker` subprocess and
+    // mirrors only model/personality/prompt/compress/fast/reload-mcp/stop back onto the
+    // live session, so `/new` (and its `/reset` alias) and `/reasoning` would render
+    // success while this session stayed untouched — they must never be advertised.
+    let catalog = try decode(fullFixture)
+
+    #expect(!catalog.commands.contains { $0.name == "/new" })
+    #expect(!catalog.commands.contains { $0.name == "/reasoning" })
+    #expect(catalog.canonical["/reset"] == nil)
+    #expect(catalog.canonical["/new"] == nil)
+    #expect(catalog.subcommands["/reasoning"] == nil)
+    // Commands that DO reach the live session stay visible.
+    #expect(catalog.commands.contains { $0.name == "/model" })
+    #expect(catalog.commands.contains { $0.name == "/compress" })
+  }
+
   @Test func aliasesAreMappedAndHiddenOnesDropped() throws {
     let catalog = try decode(fullFixture)
 
-    #expect(catalog.canonical["/reset"] == "/new")
     #expect(catalog.canonical["/compact"] == "/compress")
-    #expect(catalog.canonical["/new"] == "/new")
+    #expect(catalog.canonical["/compress"] == "/compress")
+    #expect(catalog.canonical["/model"] == "/model")
     // Hidden canonical target → the alias and self-mapping are both gone.
     #expect(catalog.canonical["/cls"] == nil)
     #expect(catalog.canonical["/clear"] == nil)
@@ -112,7 +133,7 @@ struct CommandCatalogTests {
   @Test func subcommandsAreMappedAndHiddenOnesDropped() throws {
     let catalog = try decode(fullFixture)
 
-    #expect(catalog.subcommands["/reasoning"] == ["none", "low", "medium", "high"])
+    #expect(catalog.subcommands["/goal"] == ["show", "pause", "resume"])
     #expect(catalog.subcommands["/skin"] == nil)
   }
 
@@ -122,7 +143,7 @@ struct CommandCatalogTests {
     let catalog = try #require(value.decoded(CommandCatalog.self))
 
     #expect(catalog.commands.count == 7)
-    #expect(catalog.canonical["/reset"] == "/new")
+    #expect(catalog.canonical["/compact"] == "/compress")
   }
 
   @Test func hideListMatchingIsCaseInsensitive() throws {
@@ -152,14 +173,26 @@ struct CommandCatalogTests {
     let catalog = try decode(
       """
       {
-        "sub": {"/Reasoning": ["Low", "High"]},
-        "canon": {"/Reset": "/new"}
+        "sub": {"/Goal": ["Show", "Pause"]},
+        "canon": {"/Compact": "/compress"}
       }
       """
     )
 
-    #expect(catalog.subcommands == ["/reasoning": ["Low", "High"]])
-    #expect(catalog.canonical == ["/reset": "/new"])
+    #expect(catalog.subcommands == ["/goal": ["Show", "Pause"]])
+    #expect(catalog.canonical == ["/compact": "/compress"])
+  }
+
+  @Test func duplicateSubcommandsAreDeduplicated() throws {
+    // `SlashSuggestion.id` is its insertion text, so a server list repeating a subcommand
+    // would hand the panel's `ForEach` duplicate ids. First spelling wins.
+    let catalog = try decode(
+      """
+      {"sub": {"/goal": ["show", "pause", "SHOW", "show", "resume"]}}
+      """
+    )
+
+    #expect(catalog.subcommands["/goal"] == ["show", "pause", "resume"])
   }
 
   @Test func hideListContainsOnlySlashPrefixedLowercaseNames() {
@@ -168,9 +201,14 @@ struct CommandCatalogTests {
       #expect(name == name.lowercased())
     }
     #expect(CommandCatalog.mobileHiddenCommands.contains("/quit"))
-    // Native-UI-redundant commands stay visible (muscle-memory parity).
-    #expect(!CommandCatalog.mobileHiddenCommands.contains("/model"))
-    #expect(!CommandCatalog.mobileHiddenCommands.contains("/new"))
+    // TUI chrome (the gateway's `_TUI_EXTRA`) and worker-only commands are hidden.
+    for hidden in ["/density", "/logs", "/mouse", "/new", "/reset", "/sessions", "/resume", "/reasoning"] {
+      #expect(CommandCatalog.mobileHiddenCommands.contains(hidden), "\(hidden) must be hidden")
+    }
+    // Commands that DO reach the live gateway session stay visible.
+    for visible in ["/model", "/title", "/compress", "/status", "/goal"] {
+      #expect(!CommandCatalog.mobileHiddenCommands.contains(visible), "\(visible) must stay visible")
+    }
   }
 
   // MARK: Lenient decoding
@@ -231,14 +269,14 @@ struct CommandCatalogTests {
     let catalog = try decode(
       """
       {
-        "sub": {"/reasoning": ["low", 3, "high"], "/broken": "not-an-array", "/alsobad": {"x": 1}},
-        "canon": {"/reset": "/new", "/broken": 12, "/alsobad": null}
+        "sub": {"/goal": ["low", 3, "high"], "/broken": "not-an-array", "/alsobad": {"x": 1}},
+        "canon": {"/compact": "/compress", "/broken": 12, "/alsobad": null}
       }
       """
     )
 
-    #expect(catalog.subcommands == ["/reasoning": ["low", "high"]])
-    #expect(catalog.canonical == ["/reset": "/new"])
+    #expect(catalog.subcommands == ["/goal": ["low", "high"]])
+    #expect(catalog.canonical == ["/compact": "/compress"])
   }
 
   @Test func duplicateNamesAreDeduplicatedKeepingTheFirst() throws {

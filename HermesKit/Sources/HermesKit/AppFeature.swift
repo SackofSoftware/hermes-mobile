@@ -505,6 +505,37 @@ public struct AppFeature {
         state.pendingApprovalSessionIDs = []
         return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
 
+      case let .liveChat(.delegate(.branchCreated(creation))):
+        // A branch `session.create` resolved (#34). The new session lives ONLY in server
+        // memory until its first prompt (the DB row is created lazily), so it must NOT go
+        // through the resume-by-stored-id `openSession` flow — `session.resume` hard-fails
+        // "session not found" without a DB row, and the not-found self-heal would then
+        // strand the user in a fresh, unrelated, EMPTY session. Mirror the desktop's fork
+        // flow instead: prime the replacement chat straight from the create response —
+        // the stored id (list/marker identity) plus `attachLiveSessionID`, which makes
+        // the new chat's socket attach via `session.activate` (re-binding the live
+        // session's transport and returning the seeded history), plus the SEED (text +
+        // parent id) so a server-side orphan reap of the never-prompted branch can be
+        // healed by replaying the seeded create. Slot replacement still runs through
+        // `teardownSlot(thenFill:)` (persist → teardown → nil-out → fill — never a
+        // direct swap). Finally request a list refetch so the branch shows (nested
+        // under its parent) once its DB row exists server-side — an abandoned branch
+        // simply never appears (documented v1 behavior, no optimistic insert).
+        guard let home = state.home else { return .none }
+        var chat = ChatFeature.State(
+          connection: home.connection,
+          resumeStoredID: creation.handle.storedSessionID,
+          profileName: home.scopedProfileName
+        )
+        chat.attachLiveSessionID = creation.handle.sessionID
+        chat.branchSeed = creation.seed
+        let reload: Effect<Action> = .send(.home(.pulledToRefresh))
+        guard state.liveChat != nil else {
+          fillLiveChat(chat, into: &state)
+          return reload
+        }
+        return .concatenate(teardownSlot(thenFill: chat), reload)
+
       case let .liveChat(.delegate(.runningChanged(sessionID, running))):
         // Route the live chat's authoritative working-state change to the session list so its
         // row glow clears/lights INSTANTLY (event-driven), without waiting for the next poll.

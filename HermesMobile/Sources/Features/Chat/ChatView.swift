@@ -172,17 +172,33 @@ struct ChatView: View {
     }
   }
 
+  // Internal (not `private`) so snapshot tests can render a single transcript cell
+  // deterministically — a full-device capture of a *streaming* row is flaky (the
+  // spinner keeps animations alive while the collection view re-pins to bottom).
   @ViewBuilder
-  private func rowView(_ row: ChatRow) -> some View {
+  func rowView(_ row: ChatRow) -> some View {
     switch row.kind {
     case let .message(role, text, isComplete):
-      MessageBubbleView(
-        role: role, text: text, isComplete: isComplete,
-        copiedToken: store.recentlyCopiedToken,
-        tokenPrefix: "\(row.id)",
-        onCopyCode: { text, token in store.send(.copyCode(text: text, token: token)) },
-        attachmentImages: row.attachmentImages
-      )
+      VStack(alignment: .leading, spacing: 8) {
+        MessageBubbleView(
+          role: role, text: text, isComplete: isComplete,
+          copiedToken: store.recentlyCopiedToken,
+          tokenPrefix: "\(row.id)",
+          onCopyCode: { text, token in store.send(.copyCode(text: text, token: token)) },
+          attachmentImages: row.attachmentImages
+        )
+        // The visible action row (#34): only under COMPLETED assistant messages with
+        // real text — hidden while streaming (the reducer re-guards all of this).
+        if role == .assistant, isComplete,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          MessageActionBar(
+            isCopied: store.recentlyCopiedToken == ChatFeature.rowCopyToken(row.id),
+            isBranchDisabled: !store.canBranch,
+            onCopy: { store.send(.copyRow(id: row.id)) },
+            onBranch: { store.send(.branchFromMessage(id: row.id)) }
+          )
+        }
+      }
     case let .tool(name, title, state, detail, durationS):
       ToolStatusView(
         name: name, title: title, state: state, durationS: durationS,

@@ -259,6 +259,62 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  /// Branch nesting (#34): a parent session with two branch children renders the children
+  /// nested underneath with desktop-style elbow stems — newest sibling first (`├─`), last
+  /// sibling `└─` — indented, in the parent's workspace group; an unrelated session stays
+  /// a normal top-level row below the cluster.
+  func testSessionList_branchNesting() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = [
+      Session(id: "m0", title: "Refactor the streaming parser",
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800),
+              messageCount: 10),
+      // Two branches of m0 — b1 is fresher, so it renders first with the middle stem.
+      Session(id: "b1", title: "Try an actor-isolated fold",
+              updatedAt: Date(timeIntervalSince1970: 1_749_553_200),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_553_200),
+              messageCount: 4,
+              parentSessionID: "m0"),
+      Session(id: "b2", title: "Alternative delta parser",
+              updatedAt: Date(timeIntervalSince1970: 1_749_549_600),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_549_600),
+              messageCount: 3,
+              parentSessionID: "m0"),
+      Session(id: "m1", title: "Plan the iOS MVP",
+              updatedAt: Date(timeIntervalSince1970: 1_749_470_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_470_400),
+              messageCount: 10),
+    ]
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            expandedGroups: [mobile]
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   // MARK: Cron Jobs section
 
   /// A mix of interactive + cron sessions: the cron rows are pulled out into a dedicated

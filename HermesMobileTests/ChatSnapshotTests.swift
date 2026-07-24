@@ -10,7 +10,9 @@ final class ChatSnapshotTests: SnapshotTestCase {
   // MARK: ChatView
 
   /// Build a `ChatView` over `rows`. The transcript is rendered by the sole
-  /// `UICollectionView`-backed engine.
+  /// `UICollectionView`-backed engine. The state carries a stored session id so the
+  /// action bar's branch affordance renders ENABLED (`canBranch` requires a persisted
+  /// id), matching a real resumed chat.
   /// `configure` mutates the built state for the handful of flags that aren't `State.init`
   /// parameters (e.g. `copiedIDToastToken`, defaulted in the init body).
   private func chatView(
@@ -21,6 +23,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
   ) -> some View {
     var state = ChatFeature.State(
       connection: connection,
+      resumeStoredID: "snapshot-session",
       title: title,
       transcript: IdentifiedArray(uniqueElements: rows),
       status: status
@@ -95,6 +98,168 @@ final class ChatSnapshotTests: SnapshotTestCase {
       ChatRow(id: id(1), kind: .message(role: .assistant, text: "A solid teal square.", isComplete: true)),
     ]
     assertChatView(rows: rows, title: "Vision chat", status: .ready)
+  }
+
+  // MARK: Message action bar (#34)
+
+  /// Completed assistant message: the copy + branch action row renders under the text
+  /// (also exercised integrated in `testChatView`).
+  func testChatView_messageActionBar() {
+    let rows: [ChatRow] = [
+      ChatRow(id: id(0), kind: .message(role: .user, text: "What renders the transcript?", isComplete: true)),
+      ChatRow(id: id(1), kind: .message(
+        role: .assistant,
+        text: "The `UICollectionView`-backed `CollectionTranscriptView` — the only engine.",
+        isComplete: true
+      )),
+    ]
+    assertChatView(rows: rows, title: "Action bar", status: .ready)
+  }
+
+  /// A streaming (incomplete) assistant row must NOT show the action bar. Rendered as a
+  /// single `rowView` cell (component snapshot): a full-device capture of a streaming row
+  /// is flaky — the spinner keeps animations alive while the collection view re-pins to
+  /// bottom, occasionally compositing the cell twice mid-flight.
+  func testStreamingAssistantRow_noActionBar() {
+    let row = ChatRow(id: id(1), kind: .message(
+      role: .assistant,
+      text: "The `UICollectionView`-backed",
+      isComplete: false
+    ))
+    let chat = ChatView(
+      store: Store(
+        initialState: ChatFeature.State(
+          connection: connection,
+          title: "Action bar",
+          transcript: IdentifiedArray(uniqueElements: [row]),
+          status: .ready
+        )
+      ) {
+        ChatFeature()
+      } withDependencies: {
+        $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+        $0.continuousClock = ImmediateClock()
+      }
+    )
+    let view = chat.rowView(row)
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Store-driven `rowView` wiring: the copy checkmark must light from the REDUCER's
+  /// row-scoped token (`recentlyCopiedToken == ChatFeature.rowCopyToken(row.id)`), not
+  /// just from hardcoded component props.
+  func testAssistantRow_copiedViaStoreToken() {
+    let row = ChatRow(id: id(1), kind: .message(
+      role: .assistant, text: "Copy me.", isComplete: true
+    ))
+    var state = ChatFeature.State(
+      connection: connection,
+      title: "Action bar",
+      transcript: IdentifiedArray(uniqueElements: [row]),
+      status: .ready
+    )
+    state.recentlyCopiedToken = ChatFeature.rowCopyToken(row.id)
+    let chat = ChatView(
+      store: Store(initialState: state) {
+        ChatFeature()
+      } withDependencies: {
+        $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+        $0.continuousClock = ImmediateClock()
+      }
+    )
+    let view = chat.rowView(row)
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Store-driven `rowView` wiring: a streaming turn (`isSending`) disables + dims the
+  /// branch button through the real `canBranch` gate (`!store.canBranch`).
+  func testAssistantRow_branchDisabledWhileSendingViaStore() {
+    let row = ChatRow(id: id(1), kind: .message(
+      role: .assistant, text: "Earlier reply.", isComplete: true
+    ))
+    var state = ChatFeature.State(
+      connection: connection,
+      title: "Action bar",
+      transcript: IdentifiedArray(uniqueElements: [row]),
+      status: .ready
+    )
+    state.isSending = true
+    let chat = ChatView(
+      store: Store(initialState: state) {
+        ChatFeature()
+      } withDependencies: {
+        $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+        $0.continuousClock = ImmediateClock()
+      }
+    )
+    let view = chat.rowView(row)
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// A COMPLETED assistant row whose text is whitespace-only must not show the bar
+  /// (there is nothing to copy or branch).
+  func testWhitespaceOnlyCompletedAssistantRow_noActionBar() {
+    let row = ChatRow(id: id(1), kind: .message(
+      role: .assistant, text: "  \n ", isComplete: true
+    ))
+    let chat = ChatView(
+      store: Store(
+        initialState: ChatFeature.State(
+          connection: connection,
+          title: "Action bar",
+          transcript: IdentifiedArray(uniqueElements: [row]),
+          status: .ready
+        )
+      ) {
+        ChatFeature()
+      } withDependencies: {
+        $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+        $0.continuousClock = ImmediateClock()
+      }
+    )
+    let view = chat.rowView(row)
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Copied state: the copy icon swaps to the green checkmark while the row's
+  /// feedback token is live.
+  func testMessageActionBar_copied() {
+    let view = MessageActionBar(
+      isCopied: true,
+      isBranchDisabled: false,
+      onCopy: {},
+      onBranch: {}
+    )
+    .padding()
+    .frame(width: 320)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Branch disabled while a turn is running (mirrors the reducer guard).
+  func testMessageActionBar_branchDisabled() {
+    let view = MessageActionBar(
+      isCopied: false,
+      isBranchDisabled: true,
+      onCopy: {},
+      onBranch: {}
+    )
+    .padding()
+    .frame(width: 320)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
   }
 
   /// Review-summary status row (#47): `.status(kind: "review")` renders at `.footnote`

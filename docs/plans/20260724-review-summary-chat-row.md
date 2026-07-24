@@ -138,10 +138,16 @@ GitHub issue: #47
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify issue #47 fix scope: event decoded, rendered live, no crash on old/unknown events
-- [ ] verify edge cases: empty text dropped, mid-turn arrival, snapshot-cache round-trip
-- [ ] run full package suite: `script -q /dev/null swift test --package-path HermesKit` (or `make test`)
-- [ ] run snapshot suite: `make snapshot`
+- [x] verify issue #47 fix scope: event decoded, rendered live, no crash on old/unknown events
+  (decode `GatewayEvent.swift:91` + 3 decoding tests; fold `ChatFeature.swift:1398` + 4 reducer
+  tests; render `ChatView.swift:189` + snapshot test; `default` still falls to `.unknown` and
+  `unknownEventTypeDecodesToUnknownAndNeverThrows` still passes; `GatewayLogEntry` switches exhaustive)
+- [x] verify edge cases: empty text dropped, mid-turn arrival, snapshot-cache round-trip
+  (first two covered by existing reducer tests; round-trip had no direct test — ➕ added
+  `snapshotRoundTripsReviewStatusRows` to `ChatSnapshotClientTests` pinning a `.status(kind: "review")`
+  row through `ChatSnapshotClient.inMemory()`)
+- [x] run full package suite: `script -q /dev/null swift test --package-path HermesKit` (728 tests pass)
+- [x] run snapshot suite: `make snapshot` (81 tests pass)
 
 ### Task 5: [Final] Update documentation
 

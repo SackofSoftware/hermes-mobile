@@ -117,13 +117,13 @@ GitHub issue: #47
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] handle `.reviewSummary` in the gateway-event reduce: guard non-empty text, append `ChatRow(id: uuid(), kind: .status(kind: "review", text: text))`, then `keepThinkingLast(into: &state)`
-- [ ] add `.reviewSummary` to the snapshot-persist event list (`shouldPersistSnapshot`, ~line 1876)
-- [ ] write test: event appends the status row with verbatim text
-- [ ] write test: empty-text event is a no-op (no row appended)
-- [ ] write test: event during a running turn keeps the thinking row last
-- [ ] write test: event triggers a snapshot persist (matches the existing persist-trigger test pattern)
-- [ ] run `swift test --package-path HermesKit` — must pass before task 3
+- [x] handle `.reviewSummary` in the gateway-event reduce: guard non-empty text, append `ChatRow(id: uuid(), kind: .status(kind: "review", text: text))`, then `keepThinkingLast(into: &state)`
+- [x] add `.reviewSummary` to the snapshot-persist event list (`persistRelevant`, ~line 1877)
+- [x] write test: event appends the status row with verbatim text
+- [x] write test: empty-text event is a no-op (no row appended)
+- [x] write test: event during a running turn keeps the thinking row last
+- [x] write test: event triggers a snapshot persist (matches the existing persist-trigger test pattern)
+- [x] run `swift test --package-path HermesKit` — must pass before task 3 (727 tests pass)
 
 ### Task 3: Render review status rows readably in ChatView
 

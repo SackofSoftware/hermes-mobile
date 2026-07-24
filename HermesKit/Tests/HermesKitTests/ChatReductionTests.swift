@@ -1026,6 +1026,99 @@ struct ChatReductionTests {
     await store.send(.gatewayEvent(.unknown(type: "tool.progress", raw: .object([:]))))
   }
 
+  // MARK: Review summary (#47) — live-only system row
+
+  @Test func reviewSummaryAppendsStatusRowVerbatim() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    // The wire text (💾 prefix included) lands verbatim in a bubble-less status row.
+    await store.send(.gatewayEvent(.reviewSummary(text: "💾 Self-improvement review: tightened the search prompt."))) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .status(kind: "review", text: "💾 Self-improvement review: tightened the search prompt."))
+      ]
+    }
+  }
+
+  @Test func emptyReviewSummaryIsDropped() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    }
+    // A payload with no text must not render an empty caption row.
+    await store.send(.gatewayEvent(.reviewSummary(text: "")))
+  }
+
+  @Test func reviewSummaryMidTurnKeepsThinkingRowLast() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
+      $0.thinkingRowID = uuid(0)
+    }
+    // A summary arriving mid-turn slots in above the pinned live thinking row.
+    await store.send(.gatewayEvent(.reviewSummary(text: "💾 Self-improvement review: noted."))) {
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .status(kind: "review", text: "💾 Self-improvement review: noted.")),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
+    }
+    #expect(store.state.transcript.last?.id == uuid(0))
+    // Turn ends: the empty thinking row is removed; the summary row stays.
+    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil))) {
+      $0.transcript.remove(id: self.uuid(0))
+      $0.thinkingRowID = nil
+      $0.isSending = false
+    }
+    #expect(store.state.transcript.map(\.id) == [uuid(1)])
+  }
+
+  @Test func reviewSummaryTriggersSnapshotPersist() async {
+    // The appended row must reach the snapshot cache (same debounced write-back as other
+    // transcript-changing events) so the next open paints it instantly.
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.status = .ready
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(Date(timeIntervalSince1970: 123))
+      $0.chatSnapshot = snapshotClient
+    }
+
+    await store.send(.gatewayEvent(.reviewSummary(text: "💾 Self-improvement review: done."))) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .status(kind: "review", text: "💾 Self-improvement review: done."))
+      ]
+    }
+    // Nothing persisted yet (still inside the debounce window).
+    #expect(snapshotClient.loadSnapshot("stored123") == nil)
+
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.persistSnapshotTick)
+
+    let saved = snapshotClient.loadSnapshot("stored123")
+    #expect(saved?.rows == [
+      ChatRow(id: self.uuid(0), kind: .status(kind: "review", text: "💾 Self-improvement review: done."))
+    ])
+
+    await store.send(.teardown)
+  }
+
   @Test func sessionInfoUpdatesModelAndReasoningChip() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()

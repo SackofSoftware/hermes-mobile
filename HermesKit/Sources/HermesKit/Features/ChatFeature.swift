@@ -1395,8 +1395,13 @@ public struct ChatFeature {
       if let u = info.usage { state.usage = u }
       return .none
 
-    case .reviewSummary:
-      // Handled in Task 2 (fold into a `.status(kind: "review")` transcript row).
+    case let .reviewSummary(text):
+      // Live-only self-improvement review summary (#47): render as a bubble-less system
+      // line, verbatim (the 💾 prefix arrives on the wire). Ephemeral by design — the
+      // event never lands in session history, so the next hydrate replaces it wholesale.
+      guard !text.isEmpty else { return .none }
+      state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: "review", text: text)))
+      keepThinkingLast(into: &state)
       return .none
 
     case .unknown:
@@ -1878,11 +1883,10 @@ public struct ChatFeature {
     switch event {
     case .messageStart, .messageDelta, .messageComplete,
          .thinkingDelta, .reasoningAvailable, .statusUpdate,
-         .toolStart, .toolComplete, .sessionInfo:
+         .toolStart, .toolComplete, .sessionInfo, .reviewSummary:
       return true
     case .ready, .error, .authExpired, .approvalRequest, .clarifyRequest,
-         .sudoRequest, .secretRequest, .reviewSummary, .unknown:
-      // `.reviewSummary` moves to the persist list in Task 2 (it appends a transcript row).
+         .sudoRequest, .secretRequest, .unknown:
       return false
     }
   }

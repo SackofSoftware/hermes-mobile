@@ -383,15 +383,15 @@ deterministic row ID (never random, never derived from mutable text).
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify the issue's expected behavior end-to-end in tests: `/` opens the list,
+- [x] verify the issue's expected behavior end-to-end in tests: `/` opens the list,
       filtering works, selection inserts, commands submit through the slash
       pipeline, non-`/` input unaffected
-- [ ] verify backward compat: `commandsUnsupported` path leaves every existing test
+- [x] verify backward compat: `commandsUnsupported` path leaves every existing test
       untouched (no snapshot or reducer diffs outside the new feature)
-- [ ] run the full HermesKit suite:
+- [x] run the full HermesKit suite:
       `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run `make snapshot`
-- [ ] build the app: `tuist generate` + simulator build succeeds
+- [x] run `make snapshot`
+- [x] build the app: `tuist generate` + simulator build succeeds
 
 ### Task 10: [Final] Update documentation
 

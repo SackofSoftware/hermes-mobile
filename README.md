@@ -49,7 +49,9 @@ from your desk and still keep your agent moving.
   used/max tokens and percent (mirroring the Hermes TUI thresholds); tap it for a
   breakdown of input/output split, compactions, and estimated cost.
 - **Copy what you need.** Copy a whole message, or just a single code block with a
-  one-tap button and a green-check confirmation.
+  one-tap button and a green-check confirmation — or grab a session's id from its
+  long-press menu (or the chat's ⋯ menu) when you need to cross-reference it with the
+  agent's CLI or logs.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
   and `sudo`/`secret` prompts the moment they arrive. Even if the app was offline when
   an approval fired, tapping its push notification still surfaces an approve/deny card

@@ -182,7 +182,7 @@ struct ChatView: View {
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
           MessageActionBar(
             isCopied: store.recentlyCopiedToken == ChatFeature.rowCopyToken(row.id),
-            isBranchDisabled: store.isSending || store.isBranching,
+            isBranchDisabled: !store.canBranch,
             onCopy: { store.send(.copyRow(id: row.id)) },
             onBranch: { store.send(.branchFromMessage(id: row.id)) }
           )

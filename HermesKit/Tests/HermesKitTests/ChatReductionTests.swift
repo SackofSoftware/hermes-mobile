@@ -1246,6 +1246,34 @@ struct ChatReductionTests {
     await store.receive(\.copyFeedbackExpired) { $0.recentlyCopiedToken = nil }
   }
 
+  @Test func rowCopyCancelsPendingCodeCopyFeedback() async {
+    // Code-block copy and whole-row copy share one feedback slot (`CancelID.copyFeedback`):
+    // a row copy 1s after a code copy cancels the code timer — only ONE expiry arrives,
+    // 1.5s after the row copy, and the code token is gone the moment the row copy lands.
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn)
+    initial.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "row text", isComplete: true))]
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable _ in }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyCode(text: "let x = 1", token: "code#0")) {
+      $0.recentlyCopiedToken = "code#0"
+    }
+    await clock.advance(by: .seconds(1.0))
+    await store.send(.copyRow(id: uuid(0))) {
+      $0.recentlyCopiedToken = ChatFeature.rowCopyToken(self.uuid(0))
+    }
+    // 1.5s after the FIRST copy — its timer is dead, nothing fires.
+    await clock.advance(by: .seconds(0.5))
+    // 1.5s after the row copy: the single surviving expiry clears the row token.
+    await clock.advance(by: .seconds(1.0))
+    await store.receive(\.copyFeedbackExpired) {
+      $0.recentlyCopiedToken = nil
+    }
+  }
+
   @Test func copyUnknownRowIsNoOp() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
     await store.send(.copyRow(id: uuid(9))) // no such row → no effect, no state change

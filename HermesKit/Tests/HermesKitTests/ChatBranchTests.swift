@@ -47,8 +47,13 @@ struct ChatBranchTests {
     await store.receive(\.branchResult.success) {
       $0.isBranching = false
     }
-    // The delegate carries the persisted id — what REST lists and the open flow resumes by.
-    await store.receive(\.delegate.branchCreated, "branch-stored")
+    // The delegate carries the FULL handle: the stored id is the branch's list/marker
+    // identity, and the live id is what the replacement chat attaches to (the branch has
+    // no DB row until its first prompt, so it can't be resumed by stored id).
+    await store.receive(
+      \.delegate.branchCreated,
+      SessionHandle(sessionID: "branch-live", storedSessionID: "branch-stored")
+    )
 
     #expect(sent.value?.method == "session.create")
     let params = sent.value?.params
@@ -69,30 +74,35 @@ struct ChatBranchTests {
     #expect(store.state.errorBanner == nil)
   }
 
-  @Test func branchThreadsSelectedProfileAndFallsBackToLiveID() async {
+  @Test func branchThreadsSelectedProfile() async {
     let sent = LockIsolated<JSONValue?>(nil)
     var initial = ChatFeature.State(connection: conn, profileName: "work", status: .ready)
     initial.liveSessionID = "live"
-    // No stored id (a brand-new live chat) → the live handle parents the branch.
+    initial.storedSessionID = "stored123"
     initial.transcript = [
       ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "answer", isComplete: true))
     ]
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.hermesGateway.send = { @Sendable _, params in
         sent.setValue(params)
-        // Old-agent shape: no stored id at create time → delegate falls back to the
-        // live handle.
-        return .object(["session_id": .string("branch-live")])
+        return .object([
+          "session_id": .string("branch-live"),
+          "stored_session_id": .string("branch-stored"),
+        ])
       }
     }
 
     await store.send(.branchFromMessage(id: uuid(0))) { $0.isBranching = true }
     await store.receive(\.branchResult.success) { $0.isBranching = false }
-    await store.receive(\.delegate.branchCreated, "branch-live")
+    await store.receive(
+      \.delegate.branchCreated,
+      SessionHandle(sessionID: "branch-live", storedSessionID: "branch-stored")
+    )
 
-    // A non-default profile is threaded (same convention as create/resume).
+    // A non-default profile is threaded (same convention as create/resume), and the
+    // parent link is the PERSISTED id (the one REST list rows carry, so nesting works).
     #expect(sent.value?["profile"]?.stringValue == "work")
-    #expect(sent.value?["parent_session_id"]?.stringValue == "live")
+    #expect(sent.value?["parent_session_id"]?.stringValue == "stored123")
   }
 
   // MARK: Failure
@@ -122,6 +132,20 @@ struct ChatBranchTests {
     await store.receive(\.branchResult.failure) {
       $0.isBranching = false
       $0.errorBanner = "Couldn’t branch the chat: Malformed session.create result"
+    }
+  }
+
+  @Test func nonGatewayErrorSurfacesAsDisconnected() async {
+    // A throw that isn't a `GatewayError` (e.g. a transport-layer Cocoa error) maps to
+    // the generic `.disconnected` failure — surfaced, never swallowed.
+    let store = TestStore(initialState: branchableState()) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in throw CocoaError(.fileNoSuchFile) }
+    }
+
+    await store.send(.branchFromMessage(id: uuid(0))) { $0.isBranching = true }
+    await store.receive(\.branchResult.failure) {
+      $0.isBranching = false
+      $0.errorBanner = "Couldn’t branch the chat: \(GatewayError.disconnected.message)"
     }
   }
 
@@ -166,13 +190,208 @@ struct ChatBranchTests {
     await store.send(.branchFromMessage(id: uuid(0))) // double-fire guard → no second RPC
   }
 
-  @Test func missingSessionIDIsANoOp() async {
-    var initial = ChatFeature.State(connection: conn) // no live/stored id yet
+  @Test func missingStoredIDShowsBannerNotSilentNoOp() async {
+    var initial = ChatFeature.State(connection: conn) // no stored id yet
     initial.transcript = [
       ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "answer", isComplete: true))
     ]
     let store = TestStore(initialState: initial) { ChatFeature() }
 
-    await store.send(.branchFromMessage(id: uuid(0))) // nothing to parent to → no RPC
+    // Nothing persisted to parent to → no RPC, but honest feedback (the view normally
+    // disables the button via `canBranch`; a race must not be a silent no-op).
+    await store.send(.branchFromMessage(id: uuid(0))) {
+      $0.errorBanner = "This chat can’t be branched yet."
+    }
+  }
+
+  @Test func liveOnlySessionCannotBranch() async {
+    // Old-agent shape: `session.create` returned no stored id. A live-only handle would
+    // stamp a `parent_session_id` no REST list row ever matches (the branch could never
+    // nest), so branching requires the persisted id — banner, no RPC.
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    initial.transcript = [
+      ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "answer", isComplete: true))
+    ]
+    #expect(initial.canBranch == false)
+    let store = TestStore(initialState: initial) { ChatFeature() }
+
+    await store.send(.branchFromMessage(id: uuid(0))) {
+      $0.errorBanner = "This chat can’t be branched yet."
+    }
+  }
+
+  // MARK: Opening the branch (attach by live id — no DB row until the first prompt)
+
+  /// A chat primed from the branch create response (`attachLiveSessionID`) must hydrate
+  /// via `session.activate` with the LIVE id — `session.resume` by stored id would 4007
+  /// (the server creates the branch's DB row lazily on the first prompt) and the
+  /// not-found self-heal would strand the user in an unrelated fresh session.
+  @Test func branchPrimedChatAttachesByLiveIDOnReady() async {
+    let sent = LockIsolated<(method: String, params: JSONValue)?>(nil)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored")
+    initial.attachLiveSessionID = "branch-live"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue((method, params))
+        // `session.activate` live payload: stored id under `session_key`, seeded history.
+        return .object([
+          "session_id": .string("branch-live"),
+          "session_key": .string("branch-stored"),
+          "messages": .array([.object([
+            "id": .number(1), "role": .string("assistant"), "text": .string("seeded answer"),
+          ])]),
+          "running": .bool(false),
+          "info": .object([
+            "model": .string("claude-opus-4-8"),
+            "usage": .object([
+              "context_used": .number(0), "context_max": .number(200_000), "context_percent": .number(0),
+            ]),
+          ]),
+        ])
+      }
+    }
+
+    await store.send(.gatewayEvent(.ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.success) {
+      $0.liveSessionID = "branch-live"
+      $0.storedSessionID = "branch-stored"
+      $0.status = .ready
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
+      $0.transcript = [ChatRow(
+        id: ChatRow.deterministicID(sequenceIndex: 0, role: .assistant, kindDiscriminator: "message"),
+        kind: .message(role: .assistant, text: "seeded answer", isComplete: true)
+      )]
+      // The branch is still unpersisted — a later foreground must attach again.
+    }
+    #expect(sent.value?.method == "session.activate")
+    #expect(sent.value?.params == .object(["session_id": .string("branch-live")]))
+    #expect(store.state.attachLiveSessionID == "branch-live")
+    await store.receive(\.delegate.runningChanged)
+    await store.send(.teardown)
+  }
+
+  /// A foreground re-hydrate of a still-unpersisted branch re-attaches by live id over
+  /// the healthy socket (never `session.resume` by the row-less stored id).
+  @Test func foregroundRehydratesUnpersistedBranchViaActivate() async {
+    let methods = LockIsolated<[String]>([])
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.attachLiveSessionID = "branch-live"
+    initial.liveSessionID = "branch-live"
+    initial.hasStarted = true
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, _ in
+        methods.withValue { $0.append(method) }
+        return .object([
+          "session_id": .string("branch-live"),
+          "session_key": .string("branch-stored"),
+          "messages": .array([]),
+          "running": .bool(false),
+          "info": .object([
+            "model": .string("claude-opus-4-8"),
+            "usage": .object([
+              "context_used": .number(0), "context_max": .number(200_000), "context_percent": .number(0),
+            ]),
+          ]),
+        ])
+      }
+    }
+
+    await store.send(.foreground) {
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.activateResult.success) {
+      $0.model = "claude-opus-4-8"
+      $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
+    }
+    #expect(methods.value == ["session.activate"])
+    await store.receive(\.delegate.runningChanged)
+    await store.send(.teardown)
+  }
+
+  /// The first `message.start` means the first prompt landed — the server persisted the
+  /// branch's DB row, so the attach bookkeeping clears and subsequent hydrates use the
+  /// standard `session.resume` by stored id.
+  @Test func messageStartClearsUnpersistedBranchBookkeeping() async {
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.attachLiveSessionID = "branch-live"
+    initial.liveSessionID = "branch-live"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+    }
+
+    await store.send(.gatewayEvent(.messageStart)) {
+      $0.isSending = true
+      $0.attachLiveSessionID = nil
+      $0.transcript = [ChatRow(
+        id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)
+      )]
+      $0.thinkingRowID = uuid(0)
+    }
+    await store.receive(\.delegate.runningChanged)
+    await store.send(.teardown)
+  }
+
+  /// "Session not found" on the attach (the live session was reaped before the first
+  /// prompt — e.g. the app sat backgrounded past the server's orphan grace) degrades to
+  /// the standard #17 self-heal: a fresh `session.create`, with the branch bookkeeping
+  /// cleared so it can't redirect later hydrates at a dead id.
+  @Test func attachNotFoundSelfHealsToFreshCreate() async {
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.attachLiveSessionID = "branch-live"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object(["session_id": .string("fresh-live"), "stored_session_id": .string("fresh-stored")])
+      }
+    }
+
+    await store.send(.activateResult(.failure(.server("session not found")))) {
+      $0.status = .reconnecting
+      $0.liveSessionID = nil
+      $0.attachLiveSessionID = nil
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "fresh-live"
+      $0.storedSessionID = "fresh-stored"
+      $0.status = .ready
+    }
+  }
+
+  /// An old agent without `session.activate` (`-32601`) degrades the same way — it
+  /// ignored the seed params anyway, so the fresh create matches its plain-chat behavior.
+  @Test func attachUnknownMethodSelfHealsToFreshCreate() async {
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
+    initial.attachLiveSessionID = "branch-live"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, _ in
+        .object(["session_id": .string("fresh-live"), "stored_session_id": .string("fresh-stored")])
+      }
+    }
+
+    await store.send(.activateResult(.failure(.server("unknown method: session.activate")))) {
+      $0.status = .reconnecting
+      $0.liveSessionID = nil
+      $0.attachLiveSessionID = nil
+      $0.hasRequestedSession = true
+    }
+    await store.receive(\.sessionResult.success) {
+      $0.liveSessionID = "fresh-live"
+      $0.storedSessionID = "fresh-stored"
+      $0.status = .ready
+    }
   }
 }

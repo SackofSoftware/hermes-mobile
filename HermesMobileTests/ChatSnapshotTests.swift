@@ -10,7 +10,9 @@ final class ChatSnapshotTests: SnapshotTestCase {
   // MARK: ChatView
 
   /// Build a `ChatView` over `rows`. The transcript is rendered by the sole
-  /// `UICollectionView`-backed engine.
+  /// `UICollectionView`-backed engine. The state carries a stored session id so the
+  /// action bar's branch affordance renders ENABLED (`canBranch` requires a persisted
+  /// id), matching a real resumed chat.
   private func chatView(
     rows: [ChatRow],
     title: String,
@@ -21,6 +23,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
         store: Store(
           initialState: ChatFeature.State(
             connection: connection,
+            resumeStoredID: "snapshot-session",
             title: title,
             transcript: IdentifiedArray(uniqueElements: rows),
             status: status
@@ -118,6 +121,91 @@ final class ChatSnapshotTests: SnapshotTestCase {
       role: .assistant,
       text: "The `UICollectionView`-backed",
       isComplete: false
+    ))
+    let chat = ChatView(
+      store: Store(
+        initialState: ChatFeature.State(
+          connection: connection,
+          title: "Action bar",
+          transcript: IdentifiedArray(uniqueElements: [row]),
+          status: .ready
+        )
+      ) {
+        ChatFeature()
+      } withDependencies: {
+        $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+        $0.continuousClock = ImmediateClock()
+      }
+    )
+    let view = chat.rowView(row)
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Store-driven `rowView` wiring: the copy checkmark must light from the REDUCER's
+  /// row-scoped token (`recentlyCopiedToken == ChatFeature.rowCopyToken(row.id)`), not
+  /// just from hardcoded component props.
+  func testAssistantRow_copiedViaStoreToken() {
+    let row = ChatRow(id: id(1), kind: .message(
+      role: .assistant, text: "Copy me.", isComplete: true
+    ))
+    var state = ChatFeature.State(
+      connection: connection,
+      title: "Action bar",
+      transcript: IdentifiedArray(uniqueElements: [row]),
+      status: .ready
+    )
+    state.recentlyCopiedToken = ChatFeature.rowCopyToken(row.id)
+    let chat = ChatView(
+      store: Store(initialState: state) {
+        ChatFeature()
+      } withDependencies: {
+        $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+        $0.continuousClock = ImmediateClock()
+      }
+    )
+    let view = chat.rowView(row)
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Store-driven `rowView` wiring: a streaming turn (`isSending`) disables + dims the
+  /// branch button through the real `canBranch` gate (`!store.canBranch`).
+  func testAssistantRow_branchDisabledWhileSendingViaStore() {
+    let row = ChatRow(id: id(1), kind: .message(
+      role: .assistant, text: "Earlier reply.", isComplete: true
+    ))
+    var state = ChatFeature.State(
+      connection: connection,
+      title: "Action bar",
+      transcript: IdentifiedArray(uniqueElements: [row]),
+      status: .ready
+    )
+    state.isSending = true
+    let chat = ChatView(
+      store: Store(initialState: state) {
+        ChatFeature()
+      } withDependencies: {
+        $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+        $0.continuousClock = ImmediateClock()
+      }
+    )
+    let view = chat.rowView(row)
+      .padding()
+      .frame(width: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// A COMPLETED assistant row whose text is whitespace-only must not show the bar
+  /// (there is nothing to copy or branch).
+  func testWhitespaceOnlyCompletedAssistantRow_noActionBar() {
+    let row = ChatRow(id: id(1), kind: .message(
+      role: .assistant, text: "  \n ", isComplete: true
     ))
     let chat = ChatView(
       store: Store(

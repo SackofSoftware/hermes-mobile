@@ -273,14 +273,17 @@ struct AppFeatureTests {
     #expect(snapshotClient.loadSnapshot("old")?.model == "claude-opus-4-8")
   }
 
-  /// A branch created from the open chat (#34) routes through the standard `openSession`
-  /// slot-replacement flow: the parent chat is torn down THROUGH the nil-out, the new
-  /// branch chat fills the slot, the path is SET to the single new marker, and a session
-  /// list reload is requested so the branch shows (nested) once its DB row exists.
+  /// A branch created from the open chat (#34) replaces the slot with a chat PRIMED from
+  /// the create response: the parent chat is torn down THROUGH the nil-out, the new chat
+  /// carries the stored id (marker identity) + `attachLiveSessionID` (so it attaches to
+  /// the live seeded session via `session.activate` — the branch has no DB row until its
+  /// first prompt, so it must NOT resume by stored id), the path is SET to the single new
+  /// marker, and a session list reload is requested AFTER the replacement chain.
   @Test func branchCreatedReplacesSlotAndReloadsList() async {
     let snapshotClient = ChatSnapshotClient.inMemory()
     var liveChat = ChatFeature.State(connection: connection, resumeStoredID: "parent")
     liveChat.liveSessionID = "parent-live"
+    liveChat.model = "claude-opus-4-8"
     let store = TestStore(
       initialState: AppFeature.State(
         home: SessionListFeature.State(connection: connection),
@@ -298,22 +301,29 @@ struct AppFeatureTests {
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
-    await store.send(.liveChat(.delegate(.branchCreated(sessionID: "branch-1"))))
-    await store.receive(\.home.delegate.openSession)
-    // List reload requested so the nested branch row appears once it exists server-side.
-    await store.receive(\.home.pulledToRefresh)
-    // Slot replacement goes through the mandatory nil-out, never a direct state swap.
+    await store.send(.liveChat(.delegate(.branchCreated(
+      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1")
+    ))))
+    // Slot replacement goes through the mandatory nil-out, never a direct state swap —
+    // the parent's snapshot is flushed FIRST, then teardown, clear, fill, and only then
+    // the list reload (so the refetch can't interleave into a half-replaced slot).
     await store.receive(\.liveChat.persistNow)
     await store.receive(\.liveChat.teardown)
     await store.receive(\.clearLiveChat) {
       $0.liveChat = nil
     }
     await store.receive(\.fillLiveChat) {
-      $0.liveChat = ChatFeature.State(connection: self.connection, resumeStoredID: "branch-1")
+      var chat = ChatFeature.State(connection: self.connection, resumeStoredID: "branch-1")
+      chat.attachLiveSessionID = "branch-live"
+      $0.liveChat = chat
     }
+    // List reload requested so the nested branch row appears once it exists server-side.
+    await store.receive(\.home.pulledToRefresh)
     // Path is SET to the single new marker — never stacked on the parent's.
     #expect(store.state.path.count == 1)
     #expect(store.state.path.last?.sessionKey == "branch-1")
+    // The parent chat's snapshot was flushed before the replacement filled the slot.
+    #expect(snapshotClient.loadSnapshot("parent")?.model == "claude-opus-4-8")
 
     await store.send(.liveChat(.teardown))
     await store.send(.home(.onDisappear))
@@ -345,13 +355,17 @@ struct AppFeatureTests {
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
-    await store.send(.liveChat(.delegate(.branchCreated(sessionID: "branch-1"))))
-    await store.receive(\.home.pulledToRefresh)
+    await store.send(.liveChat(.delegate(.branchCreated(
+      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1")
+    ))))
     await store.receive(\.fillLiveChat) {
-      $0.liveChat = ChatFeature.State(
+      var chat = ChatFeature.State(
         connection: self.connection, resumeStoredID: "branch-1", profileName: "work"
       )
+      chat.attachLiveSessionID = "branch-live"
+      $0.liveChat = chat
     }
+    await store.receive(\.home.pulledToRefresh)
 
     await store.send(.liveChat(.teardown))
     await store.send(.home(.onDisappear))
@@ -368,7 +382,9 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.liveChat(.delegate(.branchCreated(sessionID: "branch-1"))))
+    await store.send(.liveChat(.delegate(.branchCreated(
+      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1")
+    ))))
     await store.finish()
   }
 

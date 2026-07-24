@@ -28,6 +28,12 @@ public struct Session: Equatable, Sendable, Identifiable {
   /// REST `GET /api/sessions`). Drives the desktop-style nested rendering in the list;
   /// `nil` for regular sessions and on older agents that omit the field.
   public var parentSessionID: String?
+  /// When a session auto-compresses, the server projects its list row forward to the
+  /// continuation tip: the row's `id` becomes the TIP id while `_lineage_root_id` keeps
+  /// the ORIGINAL id — the one a branch's `parent_session_id` still points at. Needed by
+  /// `flattenSessionsWithBranches` so branches keep nesting under a compressed parent
+  /// (desktop `byVisibleId` aliasing). `nil` for un-compressed sessions and old agents.
+  public var lineageRootID: String?
 
   public init(
     id: String,
@@ -39,7 +45,8 @@ public struct Session: Equatable, Sendable, Identifiable {
     messageCount: Int? = nil,
     isActive: Bool? = nil,
     source: String? = nil,
-    parentSessionID: String? = nil
+    parentSessionID: String? = nil,
+    lineageRootID: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -51,6 +58,7 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.isActive = isActive
     self.source = source
     self.parentSessionID = parentSessionID
+    self.lineageRootID = lineageRootID
   }
 
   /// Whether this is a cron-scheduled session — the single source of truth for the
@@ -138,6 +146,9 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     // `session.resume` returns the stored/persisted id under `resumed` (the live `session_id`
     // it returns is the freshly-reattached in-memory id, used for subsequent RPCs).
     case resumed
+    // `session.activate` (the branch-attach path, #34) returns the live-session payload,
+    // whose stored/persisted id key is `session_key`.
+    case sessionKey = "session_key"
     case messages, info, running, inflight
   }
 
@@ -156,11 +167,13 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
   public init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     sessionID = (try? c.decode(String.self, forKey: .sessionID)) ?? ""
-    // Flatten the `try? decodeIfPresent` double-optional so an absent `stored_session_id`
-    // key actually falls through to `resumed` (`session.resume`'s stored-id key).
+    // Flatten the `try? decodeIfPresent` double-optionals so an absent `stored_session_id`
+    // key actually falls through to `resumed` (`session.resume`'s stored-id key) and then
+    // to `session_key` (`session.activate`'s live-payload stored-id key, #34).
     let storedKey = (try? c.decodeIfPresent(String.self, forKey: .storedSessionID)) ?? nil
     let resumedKey = (try? c.decodeIfPresent(String.self, forKey: .resumed)) ?? nil
-    storedSessionID = storedKey ?? resumedKey
+    let liveKey = (try? c.decodeIfPresent(String.self, forKey: .sessionKey)) ?? nil
+    storedSessionID = storedKey ?? resumedKey ?? liveKey
     messages = (try? c.decodeIfPresent([SessionMessage].self, forKey: .messages)) ?? []
     info = try? c.decodeIfPresent(SessionInfo.self, forKey: .info)
     running = try? c.decodeIfPresent(Bool.self, forKey: .running)

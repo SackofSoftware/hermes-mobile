@@ -18,10 +18,18 @@ struct MessageActionBar: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
-    HStack(spacing: 20) {
+    // Each ~16pt glyph is padded to a comfortably tappable hit area (the padding is part
+    // of the button label, and `.contentShape` makes the whole padded rect hittable —
+    // bare `.plain` images over the transcript's scroll surface otherwise have a
+    // footnote-sized target). The 4pt spacing keeps the VISUAL gap between icons at the
+    // original 20pt (8 + 4 + 8); the negative leading inset re-aligns the first icon
+    // with the assistant text's leading edge.
+    HStack(spacing: 4) {
       Button(action: onCopy) {
         Image(systemName: isCopied ? "checkmark" : "document.on.document")
           .foregroundStyle(isCopied ? Color.green : Color.secondary)
+          .padding(8)
+          .contentShape(Rectangle())
       }
       .accessibilityLabel(isCopied ? "Copied" : "Copy message")
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isCopied)
@@ -30,6 +38,8 @@ struct MessageActionBar: View {
         Image(systemName: "arrow.triangle.branch")
           .foregroundStyle(.secondary)
           .opacity(isBranchDisabled ? 0.4 : 1)
+          .padding(8)
+          .contentShape(Rectangle())
       }
       .disabled(isBranchDisabled)
       .accessibilityLabel("Branch in new chat")
@@ -38,6 +48,7 @@ struct MessageActionBar: View {
     }
     .font(.footnote.weight(.medium))
     .buttonStyle(.plain)
+    .padding(.leading, -8)
     .frame(maxWidth: .infinity, alignment: .leading)
   }
 }

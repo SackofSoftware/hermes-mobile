@@ -230,10 +230,10 @@ Files involved:
 - Modify: `HermesKit/Sources/HermesKit/Features/AppFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] handle `.liveChat(.delegate(.branchCreated(sessionID:)))`: open the new session via the existing `openSession`/slot-replacement policy (`teardownSlot` → `.clearLiveChat` → new slot + path marker — never swap slot state directly)
-- [ ] trigger a session-list refetch so the branch shows (nested) once its DB row exists
-- [ ] write tests: branch from the open slot replaces the slot and sets the path to the single new marker; list reload requested
-- [ ] run tests - must pass before task 8
+- [x] handle `.liveChat(.delegate(.branchCreated(sessionID:)))`: open the new session via the existing `openSession`/slot-replacement policy (`teardownSlot` → `.clearLiveChat` → new slot + path marker — never swap slot state directly; routed as `.send(.home(.delegate(.openSession(...))))` — the same flow a list tap uses; note: `AppFeature.swift` lives at `HermesKit/Sources/HermesKit/AppFeature.swift`, not under `Features/`)
+- [x] trigger a session-list refetch so the branch shows (nested) once its DB row exists (`.home(.pulledToRefresh)` concatenated after the open)
+- [x] write tests: branch from the open slot replaces the slot and sets the path to the single new marker; list reload requested (+ profile threading into the replacement chat, and a no-home defensive no-op)
+- [x] run tests - must pass before task 8
 
 ### Task 8: MessageActionBar UI in ChatView
 

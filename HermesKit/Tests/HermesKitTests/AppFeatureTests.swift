@@ -273,6 +273,105 @@ struct AppFeatureTests {
     #expect(snapshotClient.loadSnapshot("old")?.model == "claude-opus-4-8")
   }
 
+  /// A branch created from the open chat (#34) routes through the standard `openSession`
+  /// slot-replacement flow: the parent chat is torn down THROUGH the nil-out, the new
+  /// branch chat fills the slot, the path is SET to the single new marker, and a session
+  /// list reload is requested so the branch shows (nested) once its DB row exists.
+  @Test func branchCreatedReplacesSlotAndReloadsList() async {
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    var liveChat = ChatFeature.State(connection: connection, resumeStoredID: "parent")
+    liveChat.liveSessionID = "parent-live"
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "parent")]),
+        liveChat: liveChat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.chatSnapshot = snapshotClient
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.liveChat(.delegate(.branchCreated(sessionID: "branch-1"))))
+    await store.receive(\.home.delegate.openSession)
+    // List reload requested so the nested branch row appears once it exists server-side.
+    await store.receive(\.home.pulledToRefresh)
+    // Slot replacement goes through the mandatory nil-out, never a direct state swap.
+    await store.receive(\.liveChat.persistNow)
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat) {
+      $0.liveChat = nil
+    }
+    await store.receive(\.fillLiveChat) {
+      $0.liveChat = ChatFeature.State(connection: self.connection, resumeStoredID: "branch-1")
+    }
+    // Path is SET to the single new marker — never stacked on the parent's.
+    #expect(store.state.path.count == 1)
+    #expect(store.state.path.last?.sessionKey == "branch-1")
+
+    await store.send(.liveChat(.teardown))
+    await store.send(.home(.onDisappear))
+  }
+
+  /// Branch open threads the selected profile like any list-tap open — the replacement
+  /// chat carries `scopedProfileName` so resume/history scope to the right `state.db`.
+  @Test func branchCreatedThreadsActiveProfileIntoNewChat() async {
+    var home = SessionListFeature.State(connection: connection)
+    home.profilesSupported = true
+    home.selectedProfileName = "work"
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: home,
+        path: StackState([ChatScreen.State(sessionKey: "parent")]),
+        liveChat: ChatFeature.State(
+          connection: connection, resumeStoredID: "parent", profileName: "work"
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.chatSnapshot = .inMemory()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.liveChat(.delegate(.branchCreated(sessionID: "branch-1"))))
+    await store.receive(\.home.pulledToRefresh)
+    await store.receive(\.fillLiveChat) {
+      $0.liveChat = ChatFeature.State(
+        connection: self.connection, resumeStoredID: "branch-1", profileName: "work"
+      )
+    }
+
+    await store.send(.liveChat(.teardown))
+    await store.send(.home(.onDisappear))
+  }
+
+  /// `branchCreated` with no session list (defensive — the slot shouldn't outlive `home`)
+  /// is a no-op rather than routing actions into a nil child.
+  @Test func branchCreatedWithoutHomeIsNoOp() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        liveChat: ChatFeature.State(connection: connection, resumeStoredID: "parent")
+      )
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.liveChat(.delegate(.branchCreated(sessionID: "branch-1"))))
+    await store.finish()
+  }
+
   /// Logout (disconnect from Settings) clears the slot unconditionally along with the path.
   @Test func disconnectClearsLiveChatSlot() async {
     let store = TestStore(

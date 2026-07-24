@@ -486,6 +486,58 @@ Protocol gaps found by review against the current hermes-agent source (the plan'
 - ➕ Subcommand lists are deduped case-insensitively at decode (`SlashSuggestion.id` is its
   insertion text — a repeated server entry would give the panel's `ForEach` duplicate ids).
 
+### Review fixes, round 3 (2026-07-24 codex review)
+
+Confirmed and fixed:
+- ➕ **`canSend` also gates on `!slashExecInFlight`** (#1) — an interrupt tap
+  (`.interruptTapped`) or a socket finalization can clear `isSending` while the exec's
+  round-trip is still outstanding, so `!isSending` alone left a window for a SECOND
+  submission that `finishSlashExec` would then clobber.
+- ➕ **The submit gate requires catalog MEMBERSHIP, not just a loaded catalog** (#2) — the
+  hide-list only filtered the panel; a manually-typed HIDDEN command (`/new`, `/quit`,
+  `/branch`, `/yolo`) still reached `slash.exec` and ran in the isolated worker, reporting
+  fake success. `composerSubmitted` now takes the slash branch ONLY when
+  `CommandCatalog.resolvesCommand(named:)` (a visible command/skill route or a known alias);
+  hidden/unknown fall through to plain `prompt.submit` (byte-identical to the nil-catalog
+  path). Skill routes still resolve and exec.
+- ➕ **Hide-list += `/branch`(+`/fork`), `/yolo`, `/voice`** (#3) — verified worker-isolated
+  against `_mirror_slash_side_effects`: none is in the mirror set, `/branch` branches only
+  the worker's DB session, `/yolo` toggles the worker's own approval-bypass (desktop uses a
+  dedicated `session.yolo` RPC), `/voice` toggles voice on the worker subprocess (the app
+  owns its own mic UI).
+- ➕ **The post-command refresh carries ONLY the just-produced `commandOutput` row** (#5) —
+  carrying every historical output re-appended earlier ones after the whole server
+  transcript, out of chronological order once >1 exec had run. The [decision] is to keep the
+  current command's feedback (the last row, freshly produced, correctly ordered) and drop
+  stale older ones like any real hydrate does — NOT to drop the carry entirely (that would
+  vanish a `/undo` "↶ Undid …" notice the instant it appeared).
+- ➕ **The refresh is a no-op if a new turn/exec started while it was in flight** (#6) — the
+  composer is unlocked for the refresh's async `session.resume` window, so a new
+  `prompt.submit` could start; the stale response (which predates it) would wholesale-replace
+  the transcript and reset `isSending`. Guarded on `isSending`/`slashExecInFlight`/
+  `thinkingRowID`.
+- ➕ **The original `slash.exec` error survives the fallback** (#9) — when both the exec and
+  the `command.dispatch` fallback fail and the fallback only reports the routing-noise "not a
+  quick/…/skill command" (server code 4018), the original worker error is now surfaced
+  instead of being buried under the noise (desktop parity, `slash.ts` ~270-278).
+
+Documented as accepted bounded limitations (server-internal, no clean client fix):
+- [decision] **#4 fresh-session mirror race** — on a FRESH `session.create` the gateway
+  defers the live-agent build, and the `model`/`personality`/`fast`/`compress` mirror is
+  gated on `session["agent"]`; one of those typed before the first message can report worker
+  success while the not-yet-built live agent keeps the default. Rare, bounded, no clean
+  client signal for "agent ready" — documented in `CLAUDE.md`, re-issue after the first turn.
+- [decision] **#7 cross-client refresh suppression** — if another client starts a real turn
+  mid-exec, the `thinkingRowID` guard suppresses the post-command refresh (correct: it must
+  not clobber the live turn), so a `/undo`/`/retry`/compression mutation stays unreconciled
+  until the next real hydrate (foreground/reattach). Bounded staleness, not permanent.
+- [decision] **#8 skill/send generated-prompt divergence** — a `skill`/`send` directive
+  echoes the typed `/cmd` locally but persists the GENERATED message via `prompt.submit`, so
+  the next hydrate shows the generated prompt in place of the `/cmd`. Inherent (the server
+  stores the generated message; desktop-consistent), same ephemerality as the local echo row.
+
+False positives: none — all nine were genuine (six fixed, three documented).
+
 ### Task 10: [Final] Update documentation
 
 - [x] add a slash-command convention bullet to `CLAUDE.md` (catalog fetch + gate,

@@ -47,6 +47,21 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
     self.canonical = canonical
   }
 
+  /// True when a typed command name (NO leading slash, e.g. "status", "st", "deploy")
+  /// resolves to a curated, non-hidden command — a visible command/skill route or a known
+  /// alias. Both maps already had the `mobileHiddenCommands` hide-list applied at decode, so
+  /// a hidden or genuinely-unknown name returns `false`. The submit gate uses this so a
+  /// manually-typed hidden command (`/new`, `/quit`, `/branch`, …) NEVER reaches
+  /// `slash.exec` — where it would run in the isolated slash-worker subprocess and report
+  /// fake success while this live session is untouched — and instead falls through to a
+  /// plain `prompt.submit` (byte-identical to the old-agent / nil-catalog backward-compat
+  /// path). Skill routes stay executable (they live in `commands` with `isSkill == true`).
+  public func resolvesCommand(named name: String) -> Bool {
+    let key = "/" + name.lowercased()
+    if canonical[key] != nil { return true }
+    return commands.contains { $0.name.lowercased() == key }
+  }
+
   /// Commands with no usable mobile surface. Static and unit-tested; applied at decode.
   /// Two groups, both verified against `tui_gateway/server.py` + `hermes_cli/commands.py`:
   ///
@@ -55,13 +70,18 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
   ///    `/density`, `/logs`, `/mouse`).
   /// 2. **No live effect on this client** — commands the gateway runs inside `_SlashWorker`,
   ///    a SEPARATE `python -m tui_gateway.slash_worker` subprocess with its own `HermesCLI`.
-  ///    Only `model`, `personality`, `prompt`, `compress`, `fast`, `reload-mcp` and `stop`
-  ///    are mirrored back onto the live gateway session (`_mirror_slash_side_effects`);
-  ///    everything else mutates the worker's own conversation and renders output that READS
-  ///    like success while this session is untouched. `/new` (+`/reset`), `/sessions` and
-  ///    `/resume` rebind the WORKER's session (so later worker commands would target the
-  ///    wrong one), and `/reasoning <effort>` is session-scoped to the worker's agent. The
-  ///    app offers all four natively (new chat, session list, reasoning picker), and the
+  ///    Only `model`, `personality`, `prompt`, `compress`/`compact`, `fast`, `reload-mcp`
+  ///    and `stop` are mirrored back onto the live gateway session
+  ///    (`_mirror_slash_side_effects`, verified `tui_gateway/server.py`); everything else
+  ///    mutates the worker's own conversation and renders output that READS like success
+  ///    while this session is untouched. `/new` (+`/reset`), `/sessions` and `/resume`
+  ///    rebind the WORKER's session (so later worker commands would target the wrong one),
+  ///    `/reasoning <effort>` is session-scoped to the worker's agent, `/branch` (+alias
+  ///    `/fork`) branches only the WORKER's DB session, `/yolo` toggles the worker's own
+  ///    approval-bypass state (the desktop drives it via a dedicated `session.yolo` RPC,
+  ///    never `slash.exec`), and `/voice` toggles voice on the worker subprocess (voice is
+  ///    process-global on the gateway and the app owns its own mic UI). The app offers the
+  ///    native equivalents (new chat, session list, reasoning picker, voice input), and the
   ///    desktop reference likewise routes them to native surfaces or drops them from its
   ///    palette (`desktop-slash-commands.ts`).
   ///
@@ -75,6 +95,7 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
     "/reload-skills", "/browser", "/plugins", "/billing", "/platforms", "/journey",
     "/density", "/logs", "/mouse",
     "/new", "/reset", "/sessions", "/resume", "/reasoning",
+    "/branch", "/yolo", "/voice",
   ]
 
   enum CodingKeys: String, CodingKey {

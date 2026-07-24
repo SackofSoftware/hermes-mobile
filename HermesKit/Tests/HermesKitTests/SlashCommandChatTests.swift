@@ -415,11 +415,30 @@ struct SlashCommandChatTests {
   // MARK: slash.exec pipeline (Task 6)
 
   /// A ready chat with the catalog loaded and a resolved session, poised to submit.
-  private func readyStateWithCatalog(composerText: String = "/status") -> ChatFeature.State {
+  ///
+  /// `extraCommands` injects additional catalog entries so a pipeline test can submit a
+  /// command that isn't part of the minimal shared fixture (`/fork`, `/retry`, `/undo`, …).
+  /// The submit gate now routes to `slash.exec` ONLY for commands that resolve in the
+  /// catalog (`CommandCatalog.resolvesCommand`), so these commands must be present or they
+  /// would fall through to a plain `prompt.submit`.
+  private func readyStateWithCatalog(
+    composerText: String = "/status",
+    extraCommands: [String] = []
+  ) -> ChatFeature.State {
     var state = ChatFeature.State(connection: conn)
     state.liveSessionID = "live123"
     state.storedSessionID = "stored123"
-    state.commandCatalog = Self.expectedCatalog
+    if extraCommands.isEmpty {
+      state.commandCatalog = Self.expectedCatalog
+    } else {
+      state.commandCatalog = CommandCatalog(
+        commands: Self.expectedCatalog.commands + extraCommands.map {
+          SlashCommand(name: $0, description: "", category: "Session", isSkill: false)
+        },
+        subcommands: Self.expectedCatalog.subcommands,
+        canonical: Self.expectedCatalog.canonical
+      )
+    }
     state.composerText = composerText
     return state
   }
@@ -850,7 +869,7 @@ struct SlashCommandChatTests {
     let calls = LockIsolated<[String]>([])
     for command in ["/undo", "/compact", "/retry"] {
       let store = TestStore(
-        initialState: readyStateWithCatalog(composerText: command)
+        initialState: readyStateWithCatalog(composerText: command, extraCommands: [command])
       ) { ChatFeature() } withDependencies: {
         $0.uuid = .incrementing
         $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -1042,7 +1061,7 @@ struct SlashCommandChatTests {
     // target's exec output lands. No banner, composer unlocked.
     let calls = LockIsolated<[(method: String, command: String?)]>([])
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/fork main")
+      initialState: readyStateWithCatalog(composerText: "/fork main", extraCommands: ["/fork"])
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -1088,7 +1107,7 @@ struct SlashCommandChatTests {
     // reference's unbounded recursion).
     let calls = LockIsolated<[String]>([])
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/fork")
+      initialState: readyStateWithCatalog(composerText: "/fork", extraCommands: ["/fork"])
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -1225,7 +1244,7 @@ struct SlashCommandChatTests {
     // truncated history — the directive must be routed.
     let calls = LockIsolated<[String]>([])
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/retry")
+      initialState: readyStateWithCatalog(composerText: "/retry", extraCommands: ["/retry"])
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -1329,7 +1348,7 @@ struct SlashCommandChatTests {
     // produced a visually duplicated turn).
     let calls = LockIsolated<[String]>([])
     let store = TestStore(
-      initialState: readyStateWithCatalog(composerText: "/undo")
+      initialState: readyStateWithCatalog(composerText: "/undo", extraCommands: ["/undo"])
     ) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -1534,6 +1553,206 @@ struct SlashCommandChatTests {
 
     #expect(calls.value == ["image.attach_bytes", "prompt.submit"])
     #expect(!calls.value.contains("slash.exec"))
+  }
+
+  // MARK: Codex review round (findings #1, #2, #5, #6, #9)
+
+  @Test func canSendBlockedWhileSlashExecInFlight() async {
+    // Finding #1: an interrupt tap or socket finalization can clear `isSending` while a
+    // slash exec is still outstanding. `canSend` must ALSO gate on `slashExecInFlight`, or a
+    // SECOND submission could slip through that window — and the first command's completion
+    // (`finishSlashExec`) would then clear its state.
+    var state = readyStateWithCatalog(composerText: "type something new")
+    state.isSending = false        // an interrupt / socket finalization cleared it
+    state.slashExecInFlight = true // ...but the exec is still running
+    #expect(state.canSend == false)
+
+    // And `composerSubmitted` (guarded by `canSend`) is a hard no-op in that window.
+    let calls = LockIsolated<[String]>([])
+    let store = TestStore(initialState: state) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        return .object([:])
+      }
+    }
+    await store.send(.composerSubmitted) // full exhaustivity: asserts no state change
+    #expect(calls.value.isEmpty, "no RPC while a slash exec holds the composer")
+  }
+
+  @Test func typedHiddenOrUnknownCommandFallsThroughToPlainPrompt() async {
+    // Finding #2: the submit gate execs ONLY commands the CURATED catalog resolves. A
+    // manually-typed command absent from it — a hidden terminal-only / worker-isolated one
+    // (`/new`, `/quit`, `/branch`, `/yolo`) or a genuine unknown — must NOT reach
+    // `slash.exec`, where a hidden command runs in the isolated slash-worker subprocess and
+    // reports FAKE success while this session is untouched. It falls through to a plain
+    // `prompt.submit`, byte-identical to the old-agent / nil-catalog path (the LLM just sees
+    // the literal text).
+    for command in ["/new", "/quit", "/branch retry", "/yolo", "/totallyunknown"] {
+      let calls = LockIsolated<[String]>([])
+      let submitText = LockIsolated<String?>(nil)
+      let store = TestStore(
+        initialState: readyStateWithCatalog(composerText: command)
+      ) { ChatFeature() } withDependencies: {
+        $0.uuid = .incrementing
+        $0.date = .constant(Date(timeIntervalSince1970: 0))
+        $0.continuousClock = ImmediateClock()
+        $0.chatSnapshot = .inMemory()
+        $0.hermesGateway.send = { @Sendable method, params in
+          calls.withValue { $0.append(method) }
+          if method == "prompt.submit" { submitText.setValue(params["text"]?.stringValue) }
+          return .object(["status": .string("streaming")])
+        }
+      }
+      store.exhaustivity = .off(showSkippedAssertions: false)
+
+      await store.send(.composerSubmitted)
+      await store.finish()
+
+      #expect(calls.value == ["prompt.submit"], "\(command) must take the plain path, never slash.exec")
+      #expect(submitText.value == command, "the literal text is sent verbatim")
+      #expect(store.state.slashExecInFlight == false)
+      #expect(store.state.composerText == "")
+    }
+  }
+
+  @Test func typedAliasStillResolvesAndExecs() async {
+    // Finding #2 must not break aliases: "/st" is in the catalog's canonical map
+    // ("/st" → "/status"), so it RESOLVES and execs through `slash.exec` (the server
+    // resolves the alias), never plain `prompt.submit`.
+    let calls = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/st")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "slash.exec": return .object(["output": .string("status ok")])
+        case "session.resume":
+          return .object([
+            "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+          ])
+        default: return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandOutput)
+    await store.finish()
+    #expect(calls.value.first == "slash.exec", "an aliased command still execs, not prompt.submit")
+    #expect(!calls.value.contains("prompt.submit"))
+  }
+
+  @Test func staleRefreshAfterNewTurnStartedIsIgnored() async {
+    // Finding #6: the post-command refresh's `session.resume` is async and the composer is
+    // UNLOCKED for that window. If a NEW turn started meanwhile (`isSending == true`), the
+    // response PREDATES it — applying it would wholesale-replace the transcript, wiping the
+    // new turn's optimistic rows and resetting `isSending`. It must be a no-op.
+    let stalePayload: JSONValue = .object([
+      "session_id": .string("live123"),
+      "messages": .array([
+        .object(["id": .number(1), "role": .string("user"), "text": .string("stale server row")]),
+      ]),
+      "running": .bool(false),
+      "info": .object(["model": .string("stale-model")]),
+    ])
+    let response = stalePayload.decoded(ActivateResponse.self)!
+
+    var state = readyStateWithCatalog(composerText: "")
+    state.isSending = true // a fresh prompt.submit started while the refresh was in flight
+    state.transcript = [ChatRow(id: uuid(1), kind: .message(role: .user, text: "new turn prompt", isComplete: true))]
+    let store = TestStore(initialState: state) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+    }
+
+    // Full exhaustivity: the stale refresh must change NOTHING (no transcript replace, no
+    // model swap, no isSending reset).
+    await store.send(.slashHistoryRefreshed(response))
+  }
+
+  @Test func refreshCarriesOnlyTheLatestCommandOutputRow() async {
+    // Finding #5: carrying EVERY historical `commandOutput` row across the wholesale replace
+    // re-appended older outputs after the whole server transcript, out of chronological
+    // order once more than one exec had run. Carry ONLY the just-produced (last) one.
+    let historyPayload: JSONValue = .object([
+      "session_id": .string("live123"),
+      "messages": .array([
+        .object(["id": .number(1), "role": .string("user"), "text": .string("server history")]),
+      ]),
+      "running": .bool(false),
+      "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+    ])
+    let response = historyPayload.decoded(ActivateResponse.self)!
+
+    var state = readyStateWithCatalog(composerText: "")
+    state.isSending = false
+    state.slashExecInFlight = false
+    state.transcript = [
+      ChatRow(id: uuid(1), kind: .commandOutput(text: "first command output")),
+      ChatRow(id: uuid(2), kind: .commandOutput(text: "second command output")),
+    ]
+    let store = TestStore(initialState: state) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.slashHistoryRefreshed(response))
+    // Server history first, then ONLY the latest command output — the older one is dropped.
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "server history", isComplete: true),
+      .commandOutput(text: "second command output"),
+    ])
+  }
+
+  @Test func originalSlashExecErrorSurvivesRoutingNoiseFallback() async {
+    // Finding #9: when BOTH the exec and the `command.dispatch` fallback fail, and the
+    // fallback only reports the routing-noise "not a quick/…/skill command" error, the
+    // ORIGINAL `slash.exec` failure (a worker timeout/crash) is the real error and must be
+    // surfaced — not buried under the routing noise (desktop parity, `slash.ts`).
+    let calls = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/status")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "slash.exec": throw GatewayError.server("slash worker crashed mid-run")
+        case "command.dispatch": throw GatewayError.server("not a quick/plugin/bundle/skill command: status")
+        default: return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandFailed) {
+      $0.errorBanner = "Command failed: slash worker crashed mid-run"
+      $0.isSending = false
+      $0.slashExecInFlight = false
+    }
+    await store.finish()
+    // Both surfaces were tried; the informative original error won.
+    #expect(calls.value == ["slash.exec", "command.dispatch"])
   }
 }
 

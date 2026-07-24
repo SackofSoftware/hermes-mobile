@@ -201,14 +201,41 @@ struct CommandCatalogTests {
       #expect(name == name.lowercased())
     }
     #expect(CommandCatalog.mobileHiddenCommands.contains("/quit"))
-    // TUI chrome (the gateway's `_TUI_EXTRA`) and worker-only commands are hidden.
-    for hidden in ["/density", "/logs", "/mouse", "/new", "/reset", "/sessions", "/resume", "/reasoning"] {
+    // TUI chrome (the gateway's `_TUI_EXTRA`) and worker-only commands are hidden. `/branch`,
+    // `/yolo` and `/voice` run in the isolated slash-worker with NO live-session effect
+    // (verified against `_mirror_slash_side_effects`), so they must never be advertised.
+    for hidden in [
+      "/density", "/logs", "/mouse", "/new", "/reset", "/sessions", "/resume", "/reasoning",
+      "/branch", "/yolo", "/voice",
+    ] {
       #expect(CommandCatalog.mobileHiddenCommands.contains(hidden), "\(hidden) must be hidden")
     }
     // Commands that DO reach the live gateway session stay visible.
     for visible in ["/model", "/title", "/compress", "/status", "/goal"] {
       #expect(!CommandCatalog.mobileHiddenCommands.contains(visible), "\(visible) must stay visible")
     }
+  }
+
+  @Test func resolvesCommandMatchesCuratedCommandsAndAliases() {
+    let catalog = CommandCatalog(
+      commands: [
+        SlashCommand(name: "/status", description: "", category: "Session", isSkill: false),
+        SlashCommand(name: "/deploy", description: "", category: nil, isSkill: true),
+      ],
+      subcommands: [:],
+      canonical: ["/st": "/status", "/status": "/status", "/deploy": "/deploy"]
+    )
+    // Visible command, skill route, and alias all resolve (case-insensitively, no slash).
+    #expect(catalog.resolvesCommand(named: "status"))
+    #expect(catalog.resolvesCommand(named: "STATUS"))
+    #expect(catalog.resolvesCommand(named: "deploy")) // skill route
+    #expect(catalog.resolvesCommand(named: "st"))     // alias
+    // Hidden (never in the curated maps) and unknown names do NOT resolve — they fall
+    // through to a plain prompt.submit instead of reaching slash.exec.
+    #expect(!catalog.resolvesCommand(named: "new"))
+    #expect(!catalog.resolvesCommand(named: "branch"))
+    #expect(!catalog.resolvesCommand(named: "totallyunknown"))
+    #expect(!catalog.resolvesCommand(named: ""))
   }
 
   // MARK: Lenient decoding

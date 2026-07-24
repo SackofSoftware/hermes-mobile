@@ -257,9 +257,11 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   the gateway runs worker-routed commands in a separate `slash_worker` subprocess and mirrors
   only `model`/`personality`/`prompt`/`compress`/`fast`/`reload-mcp`/`stop` back onto the live
   session (`_mirror_slash_side_effects`), so `/new`+`/reset`, `/sessions`, `/resume`,
-  `/reasoning` and the `_TUI_EXTRA` chrome (`/density`, `/logs`, `/mouse`) would render
-  success while this session stayed untouched — all have native affordances instead.
-  `/title` DOES work (the worker shares the session key, so its DB write lands here). **Capability gate = the attach pattern verbatim**: `isUnknownMethod` →
+  `/reasoning`, `/branch`(+`/fork`), `/yolo`, `/voice` and the `_TUI_EXTRA` chrome (`/density`,
+  `/logs`, `/mouse`) would render success while this session stayed untouched — all have native
+  affordances instead (`/branch` is desktop-native, `/yolo` desktop drives via a dedicated RPC,
+  `/voice` the app owns its own mic UI). `/title` DOES work (the worker shares the session key,
+  so its DB write lands here). **Capability gate = the attach pattern verbatim**: `isUnknownMethod` →
   `commandsUnsupported` (fetch skipped thereafter); other failures leave the catalog `nil`,
   silently retried on the next hydrate — old agents stay byte-identical. An **EMPTY decoded
   catalog also stays `nil`** (the lenient decode never throws, so a garbage payload must not
@@ -272,9 +274,15 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   `SLASH_COMMAND_RE = /^\/[^\s/]*(?:\s|$)/`): a leading `/` whose FIRST TOKEN holds no second
   `/`. A bare `hasPrefix("/")` swallowed prose — `/tmp/agent.log look at this`, `// TODO` —
   failed it twice and DESTROYED the text (composer cleared, echo row local-only). Submit
-  branches to the command path only when the text is command-shaped, the catalog is loaded,
-  AND no attachments are staged; a degenerate `/` or `/ <payload>` (empty parsed name) fails
-  locally **without clearing the composer or echoing a row**, so the payload is never lost. Pipeline: `slash.exec` — whose
+  branches to the command path only when the text is command-shaped, no attachments are staged,
+  AND **the parsed name RESOLVES in the curated catalog** (`CommandCatalog.resolvesCommand` — a
+  visible command/skill route or a known alias). The hide-list only filters the panel; without
+  this gate a manually-typed HIDDEN command (`/new`, `/quit`, `/branch`, `/yolo`) reached
+  `slash.exec` and reported fake worker success. A hidden or genuinely-unknown command instead
+  **falls through to plain `prompt.submit`** (byte-identical to the old-agent / nil-catalog
+  path — the LLM sees the literal text; skill routes still resolve, so they exec). A degenerate
+  `/` or `/ <payload>` (empty parsed name) fails locally **without clearing the composer or
+  echoing a row**, so the payload is never lost. Pipeline: `slash.exec` — whose
   SUCCESS can itself be a typed directive (the server routes `_PENDING_INPUT_COMMANDS`
   (`/retry`, `/goal`, `/undo`, …) and skill bundles through `command.dispatch` internally and
   answers its directive as the exec result — **parse the directive FIRST**, desktop parity) —
@@ -290,33 +298,54 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   **suppressing the duplicate optimistic user row** (a `send` `notice` renders first as an
   output row — the only feedback `/goal`/`/moa` give); `prefill` (`/undo`) drops the undone
   message into the composer + renders the notice; both-fail → `errorBanner`, never a
-  swallowed `try?` — all wrapped in the #17 session-not-found heal. An exec is **not a
+  swallowed `try?` — and when the `command.dispatch` fallback ALSO fails with only the
+  routing-noise "not a quick/…/skill command" error, the **original `slash.exec` error is
+  preferred** (a worker timeout/crash must not be buried under the noise — desktop parity,
+  `slash.ts`). All wrapped in the #17 session-not-found heal. An exec is **not a
   turn** — no turn anchor; the terminal actions unlock + emit `runningChanged(false)` ONLY
   when no real server turn started meanwhile (`thinkingRowID == nil` — a `message.start`
   that raced the exec keeps its lock and its server-confirmed running state). Because it is
   not a turn, `running` is false throughout, so a hydrate landing mid-exec would unlock the
   composer and let a SECOND command clobber the first: **`slashExecInFlight` holds the lock
   across `applyActivate`** (`isSending = running || slashExecInFlight`) until the exec's own
-  terminal action (or `.slashCommandHandedOff`, after a `skill`/`send` submit) clears it. **Mid-turn
-  slash submission is deliberately out of scope**: `canSend` gates on `!isSending` (the send
-  button is Interrupt mid-turn), so `/steer`-while-running and mid-turn `/queue` aren't
-  reachable — their idle-time `send` directives work normally. **Command output rows
-  (`ChatRow.Kind.commandOutput`) are EPHEMERAL — desktop parity**: local-only, never in
-  server history, wiped by the next wholesale hydrate. The post-command refresh is
-  nevertheless the **full server-authoritative hydrate** (`session.resume` → `applyActivate`
-  + title): slash commands MUTATE history — `/undo` rewinds it (`db.rewind_to_message`),
-  `/compress`//`/compact` rewrite it, `/retry` truncates it — and a runtime-only refresh left
-  those rows on screen indefinitely (re-persisted into the cache, so even a cold relaunch
-  repainted them). It costs nothing extra on the wire (`session.resume` always returns the
-  whole cooked history), and the ephemeral rows are carried across the wholesale replace and
-  re-appended, so the command's own output survives the refresh that removes the rows it
-  acted on. **The slash pipeline also gets a longer per-request budget**
+  terminal action (or `.slashCommandHandedOff`, after a `skill`/`send` submit) clears it.
+  **`canSend` gates on BOTH `!isSending` AND `!slashExecInFlight`** — an interrupt tap or a
+  socket finalization can clear `isSending` mid-exec while the round-trip is still outstanding,
+  so the dedicated flag is what actually blocks a second submission in that window. **Mid-turn
+  slash submission is deliberately out of scope**: the send button is Interrupt mid-turn, so
+  `/steer`-while-running and mid-turn `/queue` aren't reachable — their idle-time `send`
+  directives work normally. **Command output rows (`ChatRow.Kind.commandOutput`) are EPHEMERAL
+  — desktop parity**: local-only, never in server history, wiped by the next wholesale hydrate.
+  The post-command refresh is nevertheless the **full server-authoritative hydrate**
+  (`session.resume` → `applyActivate` + title): slash commands MUTATE history — `/undo` rewinds
+  it (`db.rewind_to_message`), `/compress`//`/compact` rewrite it, `/retry` truncates it — and a
+  runtime-only refresh left those rows on screen indefinitely (re-persisted into the cache, so
+  even a cold relaunch repainted them). It costs nothing extra on the wire (`session.resume`
+  always returns the whole cooked history). Only the **just-produced (last) `commandOutput`
+  row** is carried across the wholesale replace and re-appended, so the command's own output
+  survives the refresh that removes the rows it acted on (carrying EVERY historical output row
+  put earlier ones after the whole transcript, out of chronological order once more than one
+  exec had run — older ones are dropped like any real hydrate drops them). The refresh is a
+  **no-op if a new turn or exec started while it was in flight** (`isSending`/`slashExecInFlight`/
+  `thinkingRowID`) — its `session.resume` predates the new turn, so applying it would wipe the
+  new turn's optimistic rows and unlock a genuinely-running turn. **The slash pipeline also gets a longer per-request budget**
   (`HermesGatewayClient.longRunningMethods` → 120s, desktop parity): `slash.exec` blocks the
   gateway dispatcher "for seconds to minutes" and `/compress` runs an unbounded inline LLM
   summarisation, so the 30s default failed it on exactly the sessions worth compressing —
   while the compression succeeded server-side. The `SlashSuggestionPanel` is view-thin between
   transcript and composer, rendered only when `slashSuggestions` is non-empty; a tap sends
-  `.slashSuggestionTapped`, which just sets `composerText`.
+  `.slashSuggestionTapped`, which just sets `composerText`. **Known bounded limitations (server-
+  internal, no clean client fix — accepted):** (1) on a FRESH `session.create` the gateway's
+  live-agent build is deferred, and the `model`/`personality`/`fast`/`compress` mirror is gated
+  on `session["agent"]`, so one of those typed BEFORE the first message can report worker
+  success while the not-yet-built live agent keeps the default — re-issue after the first turn.
+  (2) if another client starts a REAL turn mid-exec, the `thinkingRowID` cross-client guard
+  suppresses the post-command refresh (no clobbering the live turn), so a `/undo`/`/retry`/
+  compression history mutation stays unreconciled until the next real hydrate (foreground/
+  reattach) — bounded staleness, not permanent. (3) a `skill`/`send` directive echoes the typed
+  `/cmd` locally but persists the GENERATED directive message via `prompt.submit`, so the next
+  hydrate shows the generated prompt in place of the `/cmd` — inherent (the server stores the
+  generated message, desktop-consistent), same ephemerality as the local echo row.
 - **Context-usage pill** derives all display (label / fraction / severity / `formatTokens`)
   from `Usage` helpers in HermesKit — thresholds (green `<50` / yellow `≥50` / amber `>80` /
   red `≥95`) mirror the Hermes TUI and are unit-tested in HermesKit; the severity→color

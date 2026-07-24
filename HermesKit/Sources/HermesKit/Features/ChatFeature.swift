@@ -278,6 +278,13 @@ public struct ChatFeature {
         // failed, emit a spurious `runningChanged(false)` that tears down a detached slot
         // whose first turn is still genuinely running).
         && !isSending
+        // A slash exec locks the composer via `isSending` too, but `isSending` can be
+        // cleared out from under it — an interrupt tap (`.interruptTapped`) or a socket
+        // finalization clears `isSending` while the `slash.exec`/`command.dispatch`
+        // round-trip is still outstanding. Guarding on the dedicated in-flight flag as well
+        // blocks a SECOND submission in that window, whose state the first command's
+        // completion (`finishSlashExec`) would otherwise clear (#36).
+        && !slashExecInFlight
     }
 
     /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
@@ -819,21 +826,33 @@ public struct ChatFeature {
         // `/Users/me/notes.md summarize`, `// TODO fix this` — fail it twice and DESTROY
         // the text (the composer is cleared here and the echoed row is local-only). The
         // shape rule is shared with the suggestion panel so the two always agree.
-        // Staged attachments always take the plain path — they returned above (bytes must
-        // upload; the exec pipeline has no attachment semantics). The typed `/cmd` is
-        // echoed as a normal user row; no turn anchor is set (an exec is not a turn — no
-        // `message.start` will follow, so a hydrate mid-exec must not resurrect a phantom
-        // elapsed timer).
-        if SlashSuggestionFilter.isCommandShaped(text), state.commandCatalog != nil {
-          // Degenerate "/" or "/ <payload>" parses to an EMPTY name. The server would only
-          // answer "empty command" after a doomed round-trip, so fail locally — and
-          // crucially WITHOUT clearing the composer or echoing a row, or the payload after
-          // the slash would be lost forever (desktop restores the draft for exactly this
-          // case, `use-prompt-actions/slash.ts`).
-          guard !parseSlashCommand(text).name.isEmpty else {
-            state.errorBanner = "Command failed: empty command"
-            return .none
-          }
+        //
+        // Degenerate "/" or "/ <payload>" parses to an EMPTY name. The server would only
+        // answer "empty command" after a doomed round-trip, so fail locally — and crucially
+        // WITHOUT clearing the composer or echoing a row, or the payload after the slash
+        // would be lost forever (desktop restores the draft for exactly this case,
+        // `use-prompt-actions/slash.ts`).
+        if SlashSuggestionFilter.isCommandShaped(text), state.commandCatalog != nil,
+           parseSlashCommand(text).name.isEmpty {
+          state.errorBanner = "Command failed: empty command"
+          return .none
+        }
+        // Take the slash pipeline ONLY when the command RESOLVES in the curated catalog (a
+        // visible command/skill route or a known alias — `CommandCatalog.resolvesCommand`).
+        // A manually-typed HIDDEN command (`/new`, `/quit`, `/branch`, `/yolo`, … — the
+        // `mobileHiddenCommands` hide-list is applied at decode) or a genuinely-unknown one
+        // would otherwise reach `slash.exec`, run in the isolated slash-worker subprocess,
+        // and report FAKE success while this live session is untouched. Those fall through
+        // to the plain `prompt.submit` path below — byte-identical to the old-agent /
+        // nil-catalog backward-compat behavior (the LLM just sees the literal text). Skill
+        // routes still resolve (they live in the catalog with `isSkill == true`), so they
+        // exec. Staged attachments always take the plain path (they returned above). The
+        // typed `/cmd` is echoed as a normal user row; no turn anchor is set (an exec is not
+        // a turn — no `message.start` will follow, so a hydrate mid-exec must not resurrect a
+        // phantom elapsed timer).
+        if SlashSuggestionFilter.isCommandShaped(text),
+           let catalog = state.commandCatalog,
+           catalog.resolvesCommand(named: parseSlashCommand(text).name) {
           let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
           state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
           maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
@@ -1268,6 +1287,17 @@ public struct ChatFeature {
         return finishSlashExec(refresh: false, into: &state)
 
       case let .slashHistoryRefreshed(response):
+        // Stale-refresh guard (#36): the refresh's `session.resume` was fired when the exec
+        // finished, but its round-trip is async and the composer is UNLOCKED for that window
+        // (`finishSlashExec` already cleared the lock). If a NEW turn (`prompt.submit`) or a
+        // NEW slash exec started in the meantime, this response PREDATES it — applying it
+        // would wholesale-replace the transcript, wiping the new turn's optimistic user/
+        // streaming rows and resetting `isSending`, unlocking or erasing a genuinely-running
+        // turn. Drop it; the new turn's own lifecycle (and any later real hydrate) is
+        // authoritative. `isSending` catches both a fresh `prompt.submit` and a live
+        // `message.start`; `slashExecInFlight`/`thinkingRowID` are belt-and-suspenders.
+        guard !state.isSending, !state.slashExecInFlight, state.thinkingRowID == nil
+        else { return .none }
         // The post-command refresh landed. It is the FULL server-authoritative hydrate,
         // not a runtime-only patch: slash commands MUTATE server history — `/undo` rewinds
         // it (`db.rewind_to_message`), `/compress`//`/compact` rewrite it, `/retry`
@@ -1277,11 +1307,15 @@ public struct ChatFeature {
         // nothing extra on the wire: `session.resume` already returns the whole cooked
         // history; the old path decoded it and threw it away.
         //
-        // The EPHEMERAL `commandOutput` rows (the command's own output/notice — never in
-        // server history) are carried across the wholesale replace and re-appended after
-        // it, so the command's feedback survives the refresh that removes the rows it
-        // acted on. Normal hydrates are untouched: they still drop those rows.
-        let ephemeral = state.transcript.filter { $0.kind.discriminator == "commandOutput" }
+        // Carry ONLY the JUST-produced ephemeral `commandOutput` row (the current command's
+        // own output/notice — never in server history) across the wholesale replace, so this
+        // command's feedback survives the refresh that removes the rows it acted on. Each
+        // refresh-triggering command appends exactly one such row immediately before firing
+        // the refresh, so it's the LAST `commandOutput` row. Older ones from EARLIER execs
+        // are dropped here (like any real hydrate drops them): re-appending them all after
+        // the whole server transcript put them out of chronological order once more than one
+        // exec had run. Normal hydrates are untouched — they still drop every such row.
+        let ephemeral = state.transcript.filter { $0.kind.discriminator == "commandOutput" }.suffix(1)
         let effect = applyActivate(response, into: &state)
         for row in ephemeral where state.transcript[id: row.id] == nil { state.transcript.append(row) }
         // Title isn't part of `applyActivate`'s runtime info — apply it so `/title x`
@@ -2484,7 +2518,10 @@ private func runDispatchDirective(
 ///    may still be running server-side, `slash.exec` is documented slow, so re-running it
 ///    via dispatch could execute the command TWICE, e.g. `/retry`'s truncate-and-resend),
 ///    and any `serverRoutedSlashCommands` name (the server already dispatched it itself).
-/// 3. Any remaining failure surfaces `.slashCommandFailed` — never a swallowed `try?`.
+/// 3. Any remaining failure surfaces `.slashCommandFailed` — never a swallowed `try?`. When
+///    BOTH the exec and the fallback fail, the ORIGINAL `slash.exec` error is preferred if
+///    the fallback only reported the routing-noise "not a quick/…/skill command" error (a
+///    worker timeout/crash must not be buried under it — desktop parity, `slash.ts`).
 ///
 /// Every RPC rides the standard session-not-found self-heal (#17): a stale live id
 /// re-resumes once and replays.
@@ -2506,6 +2543,10 @@ private func executeSlashCommand(
     await send(.slashCommandFailed(message: "empty command"))
     return
   }
+
+  // The genuine `slash.exec` rejection, kept so the `command.dispatch` fallback can prefer
+  // it over the fallback's own routing-noise error (see below).
+  var slashExecError: GatewayError?
 
   // 1. Primary dispatcher: slash.exec.
   do {
@@ -2554,9 +2595,14 @@ private func executeSlashCommand(
     // would only re-enter the same handler. Fail directly.
     await send(.slashCommandFailed(message: error.message))
     return
-  } catch {
+  } catch let error as GatewayError {
     // Genuine server rejection (unknown to the registry, needs client dispatch) — fall
-    // through to the command.dispatch fallback.
+    // through to the command.dispatch fallback, but KEEP this error: a `slash.exec` worker
+    // timeout/crash is the real failure, not the fallback's "not a quick/…/skill command"
+    // routing noise (desktop parity: `slash.ts` preserves `slashExecError`).
+    slashExecError = error
+  } catch {
+    // Non-gateway error — nothing informative to preserve; still attempt the fallback.
   }
 
   // 2. Fallback: command.dispatch answers the typed directive.
@@ -2578,7 +2624,17 @@ private func executeSlashCommand(
       profile: profile, gateway: gateway, send: send, allowAliasHop: allowAliasHop
     )
   } catch let error as GatewayError {
-    await send(.slashCommandFailed(message: error.message))
+    // If the fallback ONLY reports the routing-noise "not a quick/plugin/bundle/skill
+    // command" error (`tui_gateway/server.py`, code 4018), the real failure is the original
+    // `slash.exec` error (worker timeout/crash) — surface that instead of burying it under
+    // the noise (desktop parity: `slash.ts` ~270-278). Otherwise the dispatch error is the
+    // informative one.
+    if let original = slashExecError,
+       error.message.range(of: "not a quick", options: .caseInsensitive) != nil {
+      await send(.slashCommandFailed(message: original.message))
+    } else {
+      await send(.slashCommandFailed(message: error.message))
+    }
   } catch {
     await send(.slashCommandFailed(message: GatewayError.disconnected.message))
   }

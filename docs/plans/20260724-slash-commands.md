@@ -216,16 +216,16 @@ deterministic row ID (never random, never derived from mutable text).
 - Create: `HermesKit/Sources/HermesKit/Models/SlashSuggestionFilter.swift`
 - Create: `HermesKit/Tests/HermesKitTests/SlashSuggestionFilterTests.swift`
 
-- [ ] add `SlashSuggestion` (id/name/description/isSkill or subcommand variant —
+- [x] add `SlashSuggestion` (id/name/description/isSkill or subcommand variant —
       whatever the panel needs, `Equatable`) and
       `SlashSuggestionFilter.suggestions(for:catalog:)` implementing the rules in
       Technical Details (leading-`/` + no-newline guard, bare `/` full list, prefix
       match on names + aliases, subcommand mode after `/cmd `, `[]` otherwise)
-- [ ] write tests: bare `/` → full list in category order with skills last; `/qu`
+- [x] write tests: bare `/` → full list in category order with skills last; `/qu`
       prefix filtering; alias lookup (`/fork` → `/branch` row); case-insensitivity
-- [ ] write tests: subcommand mode (`/reasoning l` → `low`); freeform args → `[]`;
+- [x] write tests: subcommand mode (`/reasoning l` → `low`); freeform args → `[]`;
       mid-sentence `/` and multiline text → `[]`; nil catalog → `[]`
-- [ ] run `swift test --package-path HermesKit` — must pass before task 3
+- [x] run `swift test --package-path HermesKit` — must pass before task 3
 
 ### Task 3: Catalog fetch and capability gate in ChatFeature
 

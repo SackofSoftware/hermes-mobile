@@ -67,6 +67,18 @@ struct ChatSnapshotClientTests {
     #expect(client.loadSnapshot("s1")?.rows == [toolRow])
   }
 
+  @Test func snapshotRoundTripsCommandOutputRows() {
+    // The ephemeral slash-output kind (#36) survives the cache round-trip like any other
+    // row — a silent decode miss here would drop it from the instant-paint snapshot.
+    let client = ChatSnapshotClient.inMemory()
+    let rows = [
+      messageRow("ran /status"),
+      ChatRow(id: UUID(), kind: .commandOutput(text: "Session: all good")),
+    ]
+    client.saveSnapshot("s1", ChatSnapshot(rows: rows))
+    #expect(client.loadSnapshot("s1")?.rows == rows)
+  }
+
   @Test func attachmentImagesDoNotRoundTrip() throws {
     // Attachment BYTES are stripped by `ChatRow`'s `Codable` (omitted from `CodingKeys`),
     // so they never reach — or come back from — the cache, regardless of the reducer.

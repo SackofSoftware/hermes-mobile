@@ -99,7 +99,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
     _ name: String, _ description: String, isSkill: Bool = false
   ) -> SlashSuggestion {
     SlashSuggestion(
-      id: name, name: name, description: description, isSkill: isSkill,
+      name: name, description: description, isSkill: isSkill,
       insertionText: name + " "
     )
   }

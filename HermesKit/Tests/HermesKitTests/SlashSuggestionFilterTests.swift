@@ -80,7 +80,8 @@ struct SlashSuggestionFilterTests {
     let result = suggestions("/sta")
 
     #expect(result.first?.insertionText == "/status ")
-    #expect(result.first?.id == "/status")
+    // Identity is derived from the insertion text (unique in both modes).
+    #expect(result.first?.id == "/status ")
   }
 
   // MARK: Subcommand mode
@@ -126,11 +127,33 @@ struct SlashSuggestionFilterTests {
     #expect(suggestions("/nonsense x").isEmpty)
   }
 
+  @Test func exactSubcommandMatchSuppressesThePanel() {
+    // A fully-typed subcommand needs no completion — this is what clears the panel
+    // right after a subcommand tap inserts "/reasoning low" (the insertion would
+    // otherwise prefix-match itself and linger as a single chosen row).
+    #expect(suggestions("/reasoning low").isEmpty)
+    #expect(suggestions("/REASONING LOW").isEmpty)
+    // A partial that exact-matches one sub still surfaces longer siblings.
+    let catalog = CommandCatalog(
+      commands: self.catalog.commands,
+      subcommands: ["/reasoning": ["low", "lowest"]],
+      canonical: self.catalog.canonical
+    )
+    #expect(suggestions("/reasoning low", catalog: catalog).map(\.name) == ["lowest"])
+  }
+
   // MARK: Guards
+
+  @Test func leadingWhitespaceIsTrimmedLikeSubmitDoes() {
+    // `composerSubmitted` trims before its slash check, so " /status" EXECUTES as a
+    // slash command — the panel must agree and autocomplete it (web parity: the popover
+    // trims too).
+    #expect(suggestions(" /qu").map(\.name) == ["/queue", "/quickfix"])
+    #expect(suggestions("  /").isEmpty == false)
+  }
 
   @Test func midSentenceSlashNeverTriggers() {
     #expect(suggestions("hello /qu").isEmpty)
-    #expect(suggestions(" /qu").isEmpty)
     #expect(suggestions("run /status now").isEmpty)
   }
 

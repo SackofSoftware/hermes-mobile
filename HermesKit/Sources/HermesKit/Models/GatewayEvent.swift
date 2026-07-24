@@ -251,16 +251,20 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
   public var cwd: String?
   public var profileName: String?
   public var usage: Usage?
+  /// The session's live title — applied by the post-slash runtime-only refresh so
+  /// `/title x` updates the open chat's nav title immediately (#36).
+  public var title: String?
 
   enum CodingKeys: String, CodingKey {
-    case model, running, version, cwd, usage
+    case model, running, version, cwd, usage, title
     case reasoningEffort = "reasoning_effort"
     case profileName = "profile_name"
   }
 
   public init(
     model: String? = nil, reasoningEffort: String? = nil, running: Bool? = nil,
-    version: String? = nil, cwd: String? = nil, profileName: String? = nil, usage: Usage? = nil
+    version: String? = nil, cwd: String? = nil, profileName: String? = nil, usage: Usage? = nil,
+    title: String? = nil
   ) {
     self.model = model
     self.reasoningEffort = reasoningEffort
@@ -269,6 +273,7 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
     self.cwd = cwd
     self.profileName = profileName
     self.usage = usage
+    self.title = title
   }
 }
 

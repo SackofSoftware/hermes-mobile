@@ -393,6 +393,44 @@ deterministic row ID (never random, never derived from mutable text).
 - [x] run `make snapshot`
 - [x] build the app: `tuist generate` + simulator build succeeds
 
+### Review fixes (2026-07-24 post-completion code review)
+
+Protocol gaps found by review against the current hermes-agent source (the plan's
+`slashExec.ts` web reference predates a server change):
+
+- ➕ **A successful `slash.exec` can answer a typed dispatch directive** — the server
+  routes `_PENDING_INPUT_COMMANDS` (`/retry`, `/queue`, `/steer`, `/goal`, `/moa`,
+  `/undo`, `/learn`, `/compress`, …) and skill-bundle commands through `command.dispatch`
+  *inside* `slash.exec` and returns the directive as the exec SUCCESS result
+  (`tui_gateway/server.py`). The success path now parses the directive FIRST (desktop
+  parity: `slash.ts` `parseCommandDispatch`), falling back to the `{output, warning}`
+  shape only when no directive type is recognized.
+- ➕ **`prefill` directive handled** (`/undo` answers `{type:"prefill", message, notice}`
+  after rewinding history): the undone message lands in the composer for editing and the
+  notice renders as the output row (`.slashCommandPrefill`).
+- ➕ **`send` directive `notice` rendered** before the submit (`.slashCommandNotice`,
+  row-append only — the submit owns the turn lifecycle) — `/goal`/`/moa`'s only feedback.
+- ➕ **Transport-shaped exec failures (timeout/drop) skip the dispatch fallback** — the
+  exec may still be running server-side (45s worker budget vs 30s client RPC timeout), so
+  the fallback could double-execute (`/retry` would truncate-and-resend twice).
+- ➕ **Empty command name guards locally** ("/" → "empty command", no roundtrip — web
+  parity) and the runtime-only refresh now applies **title** too (`/title x` updates the
+  open nav title; `SessionInfo` gained the `title` field).
+- ➕ **Cross-client unlock guard**: the slash terminal actions unlock + emit
+  `runningChanged(false)` only when no real server turn started meanwhile
+  (`thinkingRowID == nil`) — the delegate stays server-confirmed.
+- ➕ Filter/panel polish: leading whitespace trimmed like submit (" /status" now
+  autocompletes), exact subcommand match suppressed (the panel clears after a tap);
+  `sub`/`canon` keys lowercased once at decode; `SlashSuggestion.id` derived from
+  `insertionText`.
+- [decision] **Mid-turn slash submission is out of scope**: `canSend` gates on
+  `!isSending` and the composer's send affordance becomes Interrupt mid-turn, so
+  `/steer`-while-running and mid-turn `/queue` are unreachable by design; their idle-time
+  `send` directives work normally. Documented in `CLAUDE.md`.
+- [decision] The alias-loop banner names the hop that failed (not the originally typed
+  alias) — accurate for the level it describes; threading the original name through the
+  hop was judged not worth the extra parameter for a rare registry misconfiguration.
+
 ### Task 10: [Final] Update documentation
 
 - [x] add a slash-command convention bullet to `CLAUDE.md` (catalog fetch + gate,

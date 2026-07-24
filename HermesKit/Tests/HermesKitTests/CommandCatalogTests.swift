@@ -125,6 +125,43 @@ struct CommandCatalogTests {
     #expect(catalog.canonical["/reset"] == "/new")
   }
 
+  @Test func hideListMatchingIsCaseInsensitive() throws {
+    // A server emitting "/Clear" (any casing) is still hidden — pairs, categories, sub
+    // entries, and aliases alike.
+    let catalog = try decode(
+      """
+      {
+        "pairs": [["/Clear", "Clear the screen"], ["/QUIT", "Exit"], ["/ok", "fine"]],
+        "sub": {"/Clear": ["all"]},
+        "canon": {"/CLS": "/Clear", "/ok": "/ok"},
+        "categories": [
+          {"name": "TUI", "pairs": [["/Clear", "Clear the screen"], ["/QUIT", "Exit"]]}
+        ]
+      }
+      """
+    )
+
+    #expect(catalog.commands.map(\.name) == ["/ok"])
+    #expect(catalog.subcommands.isEmpty)
+    #expect(catalog.canonical == ["/ok": "/ok"])
+  }
+
+  @Test func subAndCanonKeysAreLowercasedAtDecode() throws {
+    // Case is normalized ONCE at decode so the suggestion filter can use plain
+    // subscripts; values keep their casing.
+    let catalog = try decode(
+      """
+      {
+        "sub": {"/Reasoning": ["Low", "High"]},
+        "canon": {"/Reset": "/new"}
+      }
+      """
+    )
+
+    #expect(catalog.subcommands == ["/reasoning": ["Low", "High"]])
+    #expect(catalog.canonical == ["/reset": "/new"])
+  }
+
   @Test func hideListContainsOnlySlashPrefixedLowercaseNames() {
     for name in CommandCatalog.mobileHiddenCommands {
       #expect(name.hasPrefix("/"))

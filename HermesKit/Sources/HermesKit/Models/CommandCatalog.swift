@@ -30,9 +30,11 @@ public struct SlashCommand: Equatable, Sendable {
 public struct CommandCatalog: Equatable, Sendable, Decodable {
   /// Hide-list already applied; category order preserved, skill routes appended last.
   public let commands: [SlashCommand]
-  /// Subcommand completions keyed by canonical name, e.g. "/reasoning" → ["none", "low", …].
+  /// Subcommand completions keyed by LOWERCASED canonical name (normalized once at
+  /// decode), e.g. "/reasoning" → ["none", "low", …].
   public let subcommands: [String: [String]]
-  /// Lowercased alias → canonical name (self-mappings included), e.g. "/reset" → "/new".
+  /// LOWERCASED alias (normalized once at decode) → canonical name (self-mappings
+  /// included), e.g. "/reset" → "/new".
   public let canonical: [String: String]
 
   public init(
@@ -66,8 +68,8 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
       return
     }
 
-    let allPairs = Self.decodePairs((try? c.decodeIfPresent(JSONValue.self, forKey: .pairs)) ?? nil)
-    let categories = Self.decodeCategories((try? c.decodeIfPresent(JSONValue.self, forKey: .categories)) ?? nil)
+    let allPairs = Self.decodePairs(try? c.decode(JSONValue.self, forKey: .pairs))
+    let categories = Self.decodeCategories(try? c.decode(JSONValue.self, forKey: .categories))
 
     var commands: [SlashCommand] = []
     var categorizedNames: Set<String> = []
@@ -99,8 +101,8 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
 
     self.init(
       commands: commands,
-      subcommands: Self.decodeSubcommands((try? c.decodeIfPresent(JSONValue.self, forKey: .sub)) ?? nil),
-      canonical: Self.decodeCanonical((try? c.decodeIfPresent(JSONValue.self, forKey: .canon)) ?? nil)
+      subcommands: Self.decodeSubcommands(try? c.decode(JSONValue.self, forKey: .sub)),
+      canonical: Self.decodeCanonical(try? c.decode(JSONValue.self, forKey: .canon))
     )
   }
 
@@ -137,30 +139,34 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
   }
 
   /// `{"/cmd": [subs]}` — non-array values are skipped, non-string members dropped;
-  /// hidden commands lose their subcommand entries.
+  /// hidden commands lose their subcommand entries. Keys are lowercased here, ONCE, so
+  /// lookups downstream are plain subscripts.
   private static func decodeSubcommands(_ value: JSONValue?) -> [String: [String]] {
     guard case let .object(raw)? = value else { return [:] }
     var result: [String: [String]] = [:]
     for (key, entry) in raw {
-      guard !mobileHiddenCommands.contains(key.lowercased()) else { continue }
+      let lowered = key.lowercased()
+      guard !mobileHiddenCommands.contains(lowered) else { continue }
       guard let members = entry.arrayValue else { continue }
-      result[key] = members.compactMap(\.stringValue)
+      result[lowered] = members.compactMap(\.stringValue)
     }
     return result
   }
 
   /// `{alias: canonical}` — non-string values skipped; entries whose alias OR target
-  /// is hidden are dropped (an alias must never resurface a hidden command).
+  /// is hidden are dropped (an alias must never resurface a hidden command). Alias keys
+  /// are lowercased here, ONCE, so lookups downstream are plain subscripts.
   private static func decodeCanonical(_ value: JSONValue?) -> [String: String] {
     guard case let .object(raw)? = value else { return [:] }
     var result: [String: String] = [:]
     for (key, entry) in raw {
+      let lowered = key.lowercased()
       guard let target = entry.stringValue else { continue }
       guard
-        !mobileHiddenCommands.contains(key.lowercased()),
+        !mobileHiddenCommands.contains(lowered),
         !mobileHiddenCommands.contains(target.lowercased())
       else { continue }
-      result[key] = target
+      result[lowered] = target
     }
     return result
   }

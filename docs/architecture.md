@@ -166,6 +166,13 @@ not assumed):
   (REST) — omitted for `"default"` so single-profile agents are byte-identical to today.
   **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
   intentionally omitted.
+- **Slash commands have their own pipeline** — `commands.catalog` (discovery,
+  capability-gated like attachments) → `slash.exec` → `command.dispatch` fallback. A
+  *successful* `slash.exec` can itself answer a typed dispatch directive (the server routes
+  `/retry`-style pending-input commands and skill bundles through `command.dispatch`
+  internally), so the exec result is parsed as a directive first — desktop parity. Exec
+  output is **ephemeral** (never in `session.resume` history), so a successful exec
+  refreshes runtime info only, never a full hydrate.
 
 ## Push notifications
 

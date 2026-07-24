@@ -251,25 +251,43 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   discovery is a one-shot `commands.catalog` RPC in `ChatFeature` (fired once hydrate or
   `session.create` reaches ready; the `model.options` convention, no new dependency client),
   decoded leniently into `CommandCatalog` with the static `mobileHiddenCommands` hide-list
-  applied at decode (terminal-only commands dropped; uncategorized `pairs` are skill routes,
-  listed last). **Capability gate = the attach pattern verbatim**: `isUnknownMethod` →
+  applied at decode (terminal-only commands dropped, matched case-insensitively;
+  uncategorized `pairs` are skill routes, listed last; `sub`/`canon` keys lowercased once at
+  decode). **Capability gate = the attach pattern verbatim**: `isUnknownMethod` →
   `commandsUnsupported` (fetch skipped thereafter); other failures leave the catalog `nil`,
-  silently retried on the next hydrate — old agents stay byte-identical. **Filtering is
-  client-side only**: computed `slashSuggestions` delegates to the pure
-  `SlashSuggestionFilter` (leading-`/` + no-newline guard, prefix match on names + aliases,
-  subcommand mode after `/cmd `) — NO stored suggestion state, no `complete.slash`. Submit
-  branches to the command path only when trimmed text starts with `/`, the catalog is loaded,
-  AND no attachments are staged: `slash.exec` → on failure `command.dispatch` (`alias`
-  re-enters the pipeline **once** — single hop, no loop; `skill`/`send` hand `message` to the
-  normal `prompt.submit` **suppressing the duplicate optimistic user row** — the typed `/cmd`
-  row is the one user row; both-fail → `errorBanner`, never a swallowed `try?`), wrapped in
-  the #17 session-not-found heal. An exec is **not a turn** — no turn anchor; the terminal
-  actions emit `runningChanged(false)`. **Command output rows
+  silently retried on the next hydrate — old agents stay byte-identical. An **EMPTY decoded
+  catalog also stays `nil`** (the lenient decode never throws, so a garbage payload must not
+  latch a dead catalog). **Filtering is client-side only**: computed `slashSuggestions`
+  delegates to the pure `SlashSuggestionFilter` (leading whitespace trimmed like submit,
+  leading-`/` + no-newline guard, prefix match on names + aliases, subcommand mode after
+  `/cmd ` with an exact match suppressed so the panel clears after a tap) — NO stored
+  suggestion state, no `complete.slash`. Submit branches to the command path only when
+  trimmed text starts with `/`, the catalog is loaded, AND no attachments are staged; an
+  empty command name ("/") fails locally, no roundtrip. Pipeline: `slash.exec` — whose
+  SUCCESS can itself be a typed directive (the server routes `_PENDING_INPUT_COMMANDS`
+  (`/retry`, `/goal`, `/undo`, …) and skill bundles through `command.dispatch` internally and
+  answers its directive as the exec result — **parse the directive FIRST**, desktop parity) —
+  → on failure `command.dispatch` (**except** a `-32601` from `slash.exec` itself, which
+  fails directly — dispatch shipped with exec, the fallback would only add a second
+  unknown-method roundtrip — and **except transport-shaped failures** (timeout/drop): the
+  exec may still be running server-side, so a dispatch fallback could execute the command
+  TWICE). Directives: `exec`/`plugin` → output row; `alias` re-enters the pipeline **once**
+  (single hop, no loop); `skill`/`send` hand `message` to the normal `prompt.submit`
+  **suppressing the duplicate optimistic user row** (a `send` `notice` renders first as an
+  output row — the only feedback `/goal`/`/moa` give); `prefill` (`/undo`) drops the undone
+  message into the composer + renders the notice; both-fail → `errorBanner`, never a
+  swallowed `try?` — all wrapped in the #17 session-not-found heal. An exec is **not a
+  turn** — no turn anchor; the terminal actions unlock + emit `runningChanged(false)` ONLY
+  when no real server turn started meanwhile (`thinkingRowID == nil` — a `message.start`
+  that raced the exec keeps its lock and its server-confirmed running state). **Mid-turn
+  slash submission is deliberately out of scope**: `canSend` gates on `!isSending` (the send
+  button is Interrupt mid-turn), so `/steer`-while-running and mid-turn `/queue` aren't
+  reachable — their idle-time `send` directives work normally. **Command output rows
   (`ChatRow.Kind.commandOutput`) are EPHEMERAL — desktop parity**: local-only, never in
   server history, wiped by the next wholesale hydrate; a successful exec therefore does a
-  **runtime-only refresh** (`session.resume` → `applyRuntimeInfo`, transcript untouched),
-  never a full hydrate. The `SlashSuggestionPanel` is view-thin between transcript and
-  composer, rendered only when `slashSuggestions` is non-empty; a tap sends
+  **runtime-only refresh** (`session.resume` → `applyRuntimeInfo` + title, transcript
+  untouched), never a full hydrate. The `SlashSuggestionPanel` is view-thin between
+  transcript and composer, rendered only when `slashSuggestions` is non-empty; a tap sends
   `.slashSuggestionTapped`, which just sets `composerText`.
 - **Context-usage pill** derives all display (label / fraction / severity / `formatTokens`)
   from `Usage` helpers in HermesKit — thresholds (green `<50` / yellow `≥50` / amber `>80` /

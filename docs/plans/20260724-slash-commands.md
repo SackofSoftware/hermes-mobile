@@ -369,17 +369,17 @@ deterministic row ID (never random, never derived from mutable text).
 - Modify: the chat row view rendering (`rowView` site) for `.commandOutput`
 - Modify: `HermesMobileTests/` (snapshot tests)
 
-- [ ] build `SlashSuggestionPanel(suggestions:onTap:)` — thin view: rows of
+- [x] build `SlashSuggestionPanel(suggestions:onTap:)` — thin view: rows of
       monospaced name + secondary description, skill icon for `isSkill`, ~5 visible
       rows max with internal scroll, reduce-motion-respecting transition
-- [ ] slot it in `ChatView` between the transcript and `Divider()`/`ComposerView`,
+- [x] slot it in `ChatView` between the transcript and `Divider()`/`ComposerView`,
       rendered only when `store.slashSuggestions` is non-empty; taps send
       `.slashSuggestionTapped`; keyboard stays up
-- [ ] render `.commandOutput` rows bubble-less, dimmed, monospaced, selectable
-- [ ] run `tuist generate` so the new source file joins the app target
-- [ ] write snapshot tests: panel with built-ins + a skill row; a commandOutput row;
+- [x] render `.commandOutput` rows bubble-less, dimmed, monospaced, selectable
+- [x] run `tuist generate` so the new source file joins the app target
+- [x] write snapshot tests: panel with built-ins + a skill row; a commandOutput row;
       record via `make snapshot-record`
-- [ ] run `make snapshot` — must pass before task 9
+- [x] run `make snapshot` — must pass before task 9
 
 ### Task 9: Verify acceptance criteria
 

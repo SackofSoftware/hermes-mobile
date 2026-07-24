@@ -198,17 +198,17 @@ deterministic row ID (never random, never derived from mutable text).
 - Create: `HermesKit/Sources/HermesKit/Models/CommandCatalog.swift`
 - Create: `HermesKit/Tests/HermesKitTests/CommandCatalogTests.swift`
 
-- [ ] add `SlashCommand` + `CommandCatalog` structs (public, `Equatable`, `Sendable`)
-- [ ] implement lenient decode from the `commands.catalog` JSON response
+- [x] add `SlashCommand` + `CommandCatalog` structs (public, `Equatable`, `Sendable`)
+- [x] implement lenient decode from the `commands.catalog` JSON response
       (`pairs`/`sub`/`canon`/`categories`): categorized pairs keep their category,
       uncategorized pairs → `isSkill = true` appended last; malformed/missing fields
       degrade, never throw
-- [ ] add static `mobileHiddenCommands: Set<String>` (list in Technical Details) and
+- [x] add static `mobileHiddenCommands: Set<String>` (list in Technical Details) and
       apply it at decode (also drop hidden names from `subcommands`/`canonical`)
-- [ ] write tests: full fixture decode (categories, skills marked, hide-list
+- [x] write tests: full fixture decode (categories, skills marked, hide-list
       applied, aliases mapped, subcommands mapped)
-- [ ] write tests: malformed/empty/partial payloads decode leniently without throwing
-- [ ] run `swift test --package-path HermesKit` — must pass before task 2
+- [x] write tests: malformed/empty/partial payloads decode leniently without throwing
+- [x] run `swift test --package-path HermesKit` — must pass before task 2
 
 ### Task 2: SlashSuggestionFilter pure filtering logic
 

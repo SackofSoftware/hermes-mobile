@@ -8,6 +8,9 @@ import Testing
 /// session becomes ready, capability-gated the attach way — `-32601` flips
 /// `commandsUnsupported` (suppressing future fetches), any other failure stays silent with
 /// the catalog `nil` so the next hydrate naturally retries.
+///
+/// Task 4: the computed `slashSuggestions` (pure derivation from `composerText` + catalog,
+/// nothing stored) and `.slashSuggestionTapped` (inserts the suggestion's text, nothing else).
 @MainActor
 struct SlashCommandChatTests {
   private let conn = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t")
@@ -254,5 +257,117 @@ struct SlashCommandChatTests {
     await store.send(.teardown)
     #expect(store.state.commandCatalog == nil)
     #expect(store.state.commandsUnsupported == false)
+  }
+
+  // MARK: Computed suggestions (Task 4)
+
+  /// A loaded-catalog state with no gateway plumbing: the suggestion tests exercise only
+  /// the pure computed property + the tap action, no effects fire.
+  private func stateWithCatalog() -> ChatFeature.State {
+    var state = ChatFeature.State(connection: conn)
+    state.commandCatalog = Self.expectedCatalog
+    return state
+  }
+
+  @Test func typingSlashYieldsFullSuggestionList() async {
+    // The issue's core affordance: typing "/" surfaces the whole curated catalog in
+    // category order with the skill route last — derived from the computed property,
+    // no stored suggestion state.
+    let store = TestStore(initialState: stateWithCatalog()) { ChatFeature() }
+
+    await store.send(.binding(.set(\.composerText, "/"))) {
+      $0.composerText = "/"
+    }
+    #expect(store.state.slashSuggestions.map(\.name) == ["/status", "/reasoning", "/plan"])
+    #expect(store.state.slashSuggestions.map(\.isSkill) == [false, false, true])
+  }
+
+  @Test func typingFiltersSuggestions() async {
+    // Continued typing narrows by case-insensitive prefix; aliases resolve to their
+    // canonical row ("/st" matches "/status" both directly and via the "/st" alias —
+    // shown once).
+    let store = TestStore(initialState: stateWithCatalog()) { ChatFeature() }
+
+    await store.send(.binding(.set(\.composerText, "/re"))) {
+      $0.composerText = "/re"
+    }
+    #expect(store.state.slashSuggestions.map(\.name) == ["/reasoning"])
+
+    await store.send(.binding(.set(\.composerText, "/st"))) {
+      $0.composerText = "/st"
+    }
+    #expect(store.state.slashSuggestions.map(\.name) == ["/status"])
+
+    // Subcommand mode: a known command + space + partial completes from the `sub` map.
+    await store.send(.binding(.set(\.composerText, "/reasoning l"))) {
+      $0.composerText = "/reasoning l"
+    }
+    #expect(store.state.slashSuggestions.map(\.name) == ["low"])
+  }
+
+  @Test func tapInsertsCommandAndClearsPanel() async throws {
+    // Tapping a command row puts "/name " (trailing space, ready for args) in the
+    // composer and changes NOTHING else; the computed suggestions clear on their own
+    // ("/status " has no subcommands).
+    let store = TestStore(initialState: stateWithCatalog()) { ChatFeature() }
+
+    await store.send(.binding(.set(\.composerText, "/st"))) {
+      $0.composerText = "/st"
+    }
+    let suggestion = try #require(store.state.slashSuggestions.first)
+    await store.send(.slashSuggestionTapped(suggestion)) {
+      $0.composerText = "/status "
+    }
+    #expect(store.state.slashSuggestions.isEmpty)
+
+    // A subcommand tap inserts "/cmd sub" (no trailing space — the arg is complete).
+    await store.send(.binding(.set(\.composerText, "/reasoning l"))) {
+      $0.composerText = "/reasoning l"
+    }
+    let sub = try #require(store.state.slashSuggestions.first)
+    await store.send(.slashSuggestionTapped(sub)) {
+      $0.composerText = "/reasoning low"
+    }
+  }
+
+  @Test func nonSlashInputNeverProducesSuggestions() async {
+    // Ordinary prose — including a mid-sentence slash and multiline text — must never
+    // pop the panel.
+    let store = TestStore(initialState: stateWithCatalog()) { ChatFeature() }
+
+    await store.send(.binding(.set(\.composerText, "hello"))) {
+      $0.composerText = "hello"
+    }
+    #expect(store.state.slashSuggestions.isEmpty)
+
+    await store.send(.binding(.set(\.composerText, "see /status for details"))) {
+      $0.composerText = "see /status for details"
+    }
+    #expect(store.state.slashSuggestions.isEmpty)
+
+    await store.send(.binding(.set(\.composerText, "/status\nsecond line"))) {
+      $0.composerText = "/status\nsecond line"
+    }
+    #expect(store.state.slashSuggestions.isEmpty)
+  }
+
+  @Test func suggestionsEmptyWhenCommandsUnsupported() async {
+    // Backward-compat guard: an old agent (commandsUnsupported latched) never shows the
+    // panel — even defensively against a somehow-populated catalog. And with no catalog
+    // loaded yet (nil), "/" likewise yields nothing.
+    var unsupported = stateWithCatalog()
+    unsupported.commandsUnsupported = true
+    let store = TestStore(initialState: unsupported) { ChatFeature() }
+
+    await store.send(.binding(.set(\.composerText, "/"))) {
+      $0.composerText = "/"
+    }
+    #expect(store.state.slashSuggestions.isEmpty)
+
+    let nilCatalog = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
+    await nilCatalog.send(.binding(.set(\.composerText, "/"))) {
+      $0.composerText = "/"
+    }
+    #expect(nilCatalog.state.slashSuggestions.isEmpty)
   }
 }

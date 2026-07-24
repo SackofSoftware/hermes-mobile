@@ -273,6 +273,16 @@ public struct ChatFeature {
     /// silently no-ops) — drives whether the toolbar Rename control is enabled.
     public var canRename: Bool { liveSessionID != nil }
 
+    /// Rows for the slash-command autocomplete panel (#36), derived PURELY from
+    /// `composerText` + the cached catalog on every keystroke — no stored suggestion
+    /// state, nothing to keep in sync. Empty when the catalog isn't loaded yet or the
+    /// agent predates slash commands (`commandsUnsupported`), so the panel simply never
+    /// appears on old agents.
+    public var slashSuggestions: [SlashSuggestion] {
+      guard !commandsUnsupported else { return [] }
+      return SlashSuggestionFilter.suggestions(for: composerText, catalog: commandCatalog)
+    }
+
     /// The profile name to thread into session create/resume + REST scoping, or `nil` for
     /// the default profile. Treating the default name as `nil` keeps requests byte-identical
     /// to the single-profile behavior. The canonical default name lives on
@@ -397,6 +407,10 @@ public struct ChatFeature {
     // Slash commands (#36)
     case commandCatalogLoaded(CommandCatalog)
     case commandsUnsupportedDetected
+    /// A row in the suggestion panel was tapped — put its insertion text in the composer
+    /// ("/cmd " trailing-space ready for args, or "/cmd sub"). Nothing else changes; the
+    /// computed `slashSuggestions` updates/clears automatically and the keyboard stays up.
+    case slashSuggestionTapped(SlashSuggestion)
 
     /// Signals the parent (`AppFeature`) routes: the dead-session signal that raises the
     /// re-auth modal (reconnect backoff is paused for it), and the authoritative
@@ -1133,6 +1147,10 @@ public struct ChatFeature {
         // whole slash affordance — nothing the user did failed, so no banner; plain sends
         // stay byte-identical to today.
         state.commandsUnsupported = true
+        return .none
+
+      case let .slashSuggestionTapped(suggestion):
+        state.composerText = suggestion.insertionText
         return .none
 
       case let .toolTapped(id):

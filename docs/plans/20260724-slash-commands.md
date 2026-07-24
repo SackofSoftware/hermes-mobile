@@ -264,15 +264,15 @@ deterministic row ID (never random, never derived from mutable text).
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 
-- [ ] add computed `State.slashSuggestions` delegating to `SlashSuggestionFilter`
+- [x] add computed `State.slashSuggestions` delegating to `SlashSuggestionFilter`
       (empty when catalog is `nil` or `commandsUnsupported`)
-- [ ] add `.slashSuggestionTapped(SlashSuggestion)` → set `composerText` to
+- [x] add `.slashSuggestionTapped(SlashSuggestion)` → set `composerText` to
       `"/name "` (trailing space) or `"/cmd sub"`; no other state changes
-- [ ] write TestStore tests (the issue's required four): typing `/` yields
+- [x] write TestStore tests (the issue's required four): typing `/` yields
       suggestions; typing filters; tap inserts the command; non-`/` input never
       produces suggestions
-- [ ] write test: suggestions stay empty when `commandsUnsupported`
-- [ ] run `swift test --package-path HermesKit` — must pass before task 5
+- [x] write test: suggestions stay empty when `commandsUnsupported`
+- [x] run `swift test --package-path HermesKit` — must pass before task 5
 
 ### Task 5: commandOutput transcript row kind
 

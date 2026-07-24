@@ -22,8 +22,13 @@ public struct SessionBranchEntry: Equatable, Sendable, Identifiable {
 ///
 /// - children grouped by `parentSessionID` **within the given slice only** (an orphan
 ///   whose parent is absent — archived, filtered, another lane — de-nests to a normal
-///   top-level row; nothing is ever hidden)
-/// - siblings sorted by recency (last-active, else started-at), newest first
+///   top-level row; nothing is ever hidden); a parent is matched by row `id` OR by
+///   `lineageRootID` (desktop `byVisibleId` aliasing) so branches keep nesting under a
+///   parent whose list row was compression-projected forward to its continuation tip
+/// - siblings sorted by recency (`updatedAt`, `nil` last — matching the lanes this
+///   flatten re-sorts; the desktop's extra `started_at` fallback is deliberately dropped
+///   because the mobile lanes never used it, and the REST decode already folds
+///   `started_at` into `updatedAt` when `last_active` is absent), newest first
 /// - a parent group sorts by its **freshest member**, so activity on any branch lifts
 ///   the whole cluster instead of stranding the parent at its own stale timestamp
 ///   (skipped when `sortTopLevelByRecency` is `false` — lanes with a caller-owned order,
@@ -36,17 +41,19 @@ public func flattenSessionsWithBranches(
   _ sessions: [Session],
   sortTopLevelByRecency: Bool = true
 ) -> [SessionBranchEntry] {
-  guard sessions.count >= 2 else {
-    return sessions.map { SessionBranchEntry(session: $0) }
-  }
-
-  var byID: [String: Session] = [:]
+  // Parent lookup by VISIBLE identity: the row id, plus the lineage-root alias for
+  // compression-projected rows (the branch's `parent_session_id` keeps pointing at the
+  // original id after the parent's row id rotated to the continuation tip).
+  var byVisibleID: [String: Session] = [:]
   for session in sessions {
-    byID[session.id] = session
+    byVisibleID[session.id] = session
+    if let rootID = session.lineageRootID?.trimmedNonEmpty {
+      byVisibleID[rootID] = session
+    }
   }
 
   func recency(_ session: Session) -> Date {
-    session.updatedAt ?? session.startedAt ?? .distantPast
+    session.updatedAt ?? .distantPast
   }
 
   var childrenByParent: [String: [Session]] = [:]
@@ -55,7 +62,7 @@ public func flattenSessionsWithBranches(
   for session in sessions {
     guard
       let parentID = session.parentSessionID?.trimmedNonEmpty,
-      let parent = byID[parentID],
+      let parent = byVisibleID[parentID],
       parent.id != session.id
     else { continue }
     nestedIDs.insert(session.id)

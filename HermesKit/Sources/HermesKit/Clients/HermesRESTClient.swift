@@ -530,6 +530,7 @@ struct SessionListDTO: Decodable {
   let isActive: Bool?
   let source: String?
   let parentSessionID: String?
+  let lineageRootID: String?
 
   enum CodingKeys: String, CodingKey {
     case id, title, preview, cwd, source
@@ -538,6 +539,9 @@ struct SessionListDTO: Decodable {
     case messageCount = "message_count"
     case isActive = "is_active"
     case parentSessionID = "parent_session_id"
+    // Present only on compression-projected rows: the ORIGINAL id the row had before the
+    // server projected it forward to its continuation tip (branch nesting aliases on it).
+    case lineageRootID = "_lineage_root_id"
   }
 
   var asSession: Session {
@@ -551,7 +555,8 @@ struct SessionListDTO: Decodable {
       messageCount: messageCount,
       isActive: isActive,
       source: source,
-      parentSessionID: parentSessionID?.nonEmpty
+      parentSessionID: parentSessionID?.trimmedNonEmpty,
+      lineageRootID: lineageRootID?.trimmedNonEmpty
     )
   }
 }

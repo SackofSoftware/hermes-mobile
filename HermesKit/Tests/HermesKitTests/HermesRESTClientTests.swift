@@ -191,6 +191,38 @@ struct HermesRESTClientTests {
     #expect(s.parentSessionID == nil)
   }
 
+  @Test func sessionsDecodesEmptyParentSessionIDAsNil() async throws {
+    // Leniency: an empty (or whitespace-only) `parent_session_id` is no parent link —
+    // normalized to nil at decode so the branch flatten never sees a junk key.
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"a","last_active":1.0,"parent_session_id":""},{"id":"b","last_active":1.0,"parent_session_id":"  "}],"total":2}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    #expect(sessions.count == 2)
+    #expect(sessions.allSatisfy { $0.parentSessionID == nil })
+  }
+
+  @Test func sessionsDecodesLineageRootID() async throws {
+    // A compression-projected row: the id rotated to the continuation tip while
+    // `_lineage_root_id` kept the original id (branch nesting aliases on it). It is NOT
+    // stripped by the server's session-list heavy-field filter.
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"tip_id","title":"Long chat","last_active":1749556800.0,"_lineage_root_id":"root_id"}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.lineageRootID == "root_id")
+  }
+
+  @Test func sessionsDecodesAbsentLineageRootIDAsNil() async throws {
+    MockURLProtocol.set(json: #"""
+    {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0}],"total":1}
+    """#)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let s = try #require(sessions.first)
+    #expect(s.lineageRootID == nil)
+  }
+
   @Test func sessionsAttachesSessionTokenHeaderAndQuery() async throws {
     MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
     _ = try await makeClient().sessions(connection, 20, 0, .recent)

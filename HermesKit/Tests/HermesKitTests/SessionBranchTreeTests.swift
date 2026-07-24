@@ -5,13 +5,15 @@ import Testing
 
 struct SessionBranchTreeTests {
   private func session(
-    _ id: String, parent: String? = nil, updatedAt: Double? = nil, startedAt: Double? = nil
+    _ id: String, parent: String? = nil, updatedAt: Double? = nil, startedAt: Double? = nil,
+    lineageRoot: String? = nil
   ) -> Session {
     Session(
       id: id,
       updatedAt: updatedAt.map { Date(timeIntervalSince1970: $0) },
       startedAt: startedAt.map { Date(timeIntervalSince1970: $0) },
-      parentSessionID: parent
+      parentSessionID: parent,
+      lineageRootID: lineageRoot
     )
   }
 
@@ -71,14 +73,18 @@ struct SessionBranchTreeTests {
     #expect(entries.map(\.branchStem) == [nil, "└─ ", "└─ "])
   }
 
-  @Test func recencyFallsBackToStartedAt() {
-    // b1 has no updatedAt but a fresher startedAt than b2's updatedAt → b1 sorts first.
+  @Test func nilUpdatedAtSortsLastMatchingTheLanes() {
+    // Recency is `updatedAt ?? .distantPast` — the SAME rule the pinned/workspace/
+    // chronological lanes sort by, so nesting can't reorder flat rows those lanes already
+    // placed. (`startedAt` is deliberately NOT a fallback here: the REST decode already
+    // folds `started_at` into `updatedAt` when `last_active` is absent, and a divergent
+    // fallback would float nil-`updatedAt` rows the lanes sank to the bottom.)
     let entries = flattenSessionsWithBranches([
       session("parent", updatedAt: 10),
-      session("b1", parent: "parent", startedAt: 7),
+      session("b1", parent: "parent", startedAt: 7), // no updatedAt → last among siblings
       session("b2", parent: "parent", updatedAt: 5),
     ])
-    #expect(entries.map(\.id) == ["parent", "b1", "b2"])
+    #expect(entries.map(\.id) == ["parent", "b2", "b1"])
     #expect(entries.map(\.branchStem) == [nil, "├─ ", "└─ "])
   }
 
@@ -133,6 +139,31 @@ struct SessionBranchTreeTests {
     #expect(entries.map(\.branchStem) == [nil, nil, "└─ ", nil])
   }
 
+  // MARK: - Compression-projected parents (lineage-root aliasing)
+
+  @Test func branchNestsUnderCompressionProjectedParentViaLineageRoot() {
+    // The parent auto-compressed: its list row's id rotated to the continuation tip
+    // ("tip") while `_lineage_root_id` kept the original id the branch's
+    // `parent_session_id` still points at. The alias keeps the branch nested.
+    let entries = flattenSessionsWithBranches([
+      session("tip", updatedAt: 10, lineageRoot: "root"),
+      session("branch", parent: "root", updatedAt: 5),
+    ])
+    #expect(entries.map(\.id) == ["tip", "branch"])
+    #expect(entries.map(\.branchStem) == [nil, "└─ "])
+  }
+
+  @Test func lineageAliasMatchingSelfDoesNotNest() {
+    // Degenerate: a row whose lineage root is claimed as its own parent id still never
+    // nests under itself.
+    let entries = flattenSessionsWithBranches([
+      session("tip", parent: "root", updatedAt: 10, lineageRoot: "root"),
+      session("a", updatedAt: 5),
+    ])
+    #expect(entries.map(\.id) == ["tip", "a"])
+    #expect(entries.allSatisfy { $0.branchStem == nil })
+  }
+
   // MARK: - Orphans + safety
 
   @Test func orphanWithAbsentParentDeNestsToTopLevel() {
@@ -163,6 +194,22 @@ struct SessionBranchTreeTests {
     ])
     #expect(entries.map(\.id).sorted() == ["a", "b"])
     #expect(entries.count == 2)
+  }
+
+  @Test func childOfACycleFallsThroughTheSweepFlat() {
+    // z's parent sits inside an a↔b cycle: no member of the cluster is a top-level root,
+    // so the whole cluster (cycle members AND z) is emitted by the trailing sweep, flat —
+    // z loses its stem but is never dropped.
+    let entries = flattenSessionsWithBranches([
+      session("solo", updatedAt: 20),
+      session("a", parent: "b", updatedAt: 10),
+      session("b", parent: "a", updatedAt: 5),
+      session("z", parent: "a", updatedAt: 1),
+    ])
+    #expect(entries.map(\.id).sorted() == ["a", "b", "solo", "z"])
+    #expect(entries.count == 4)
+    #expect(entries.first?.id == "solo")
+    #expect(entries.allSatisfy { $0.branchStem == nil })
   }
 
   @Test func whitespaceOnlyParentIDTreatedAsNoParent() {

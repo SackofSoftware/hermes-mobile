@@ -185,10 +185,10 @@ Files involved:
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] apply `flattenSessionsWithBranches` inside the computed section state (pinned / workspace groups / chronological), after the cron partition — cron lanes and `unmatchedCronSessions` stay flat
-- [ ] keep search results flat (existing convention) and leave `ArchivedSessionsFeature` untouched
-- [ ] write tests: a branch renders nested under its parent in the correct lane; a pinned branch de-nests in the Pinned lane; search stays flat
-- [ ] run tests - must pass before task 4
+- [x] apply `flattenSessionsWithBranches` inside the computed section state (pinned / workspace groups / chronological), after the cron partition — cron lanes and `unmatchedCronSessions` stay flat
+- [x] keep search results flat (existing convention) and leave `ArchivedSessionsFeature` untouched
+- [x] write tests: a branch renders nested under its parent in the correct lane; a pinned branch de-nests in the Pinned lane; search stays flat
+- [x] run tests - must pass before task 4
 
 ### Task 4: SessionListView nested row rendering
 

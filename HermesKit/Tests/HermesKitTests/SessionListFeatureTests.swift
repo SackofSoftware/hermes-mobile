@@ -400,6 +400,153 @@ struct SessionListFeatureTests {
     #expect(state.groups.flatMap { $0.sessions.map(\.id) } == ["b"])
   }
 
+  // MARK: Branch nesting per lane
+
+  @Test func branchNestsUnderParentInChronologicalLane() {
+    let sessions = [
+      Session(id: "other", updatedAt: Date(timeIntervalSince1970: 30)),
+      Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10)),
+      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 20), parentSessionID: "parent"),
+    ]
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions)
+    )
+
+    // Plain chronological order would be other > branch > parent; the entries lane nests
+    // the branch under its parent (elbow stem) and sorts the cluster by its freshest
+    // member (the branch at 20), still below "other" (30).
+    #expect(state.chronologicalEntries.map(\.id) == ["other", "parent", "branch"])
+    #expect(state.chronologicalEntries.map(\.branchStem) == [nil, nil, "└─ "])
+  }
+
+  @Test func branchNestsUnderParentInWorkspaceGroupLane() throws {
+    let sessions = [
+      Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10), cwd: "/w"),
+      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 20), cwd: "/w", parentSessionID: "parent"),
+      Session(id: "other", updatedAt: Date(timeIntervalSince1970: 30), cwd: "/w"),
+    ]
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions)
+    )
+
+    let group = try #require(state.groups.first)
+    let entries = state.visibleEntries(in: group)
+    #expect(entries.map(\.id) == ["other", "parent", "branch"])
+    #expect(entries.map(\.branchStem) == [nil, nil, "└─ "])
+  }
+
+  @Test func branchWhoseParentIsCappedOutOfCollapsedGroupDeNests() throws {
+    // Six rows in one workspace: the collapsed cap (5) cuts the stale parent, so its
+    // (visible) branch de-nests — nesting happens within the RENDERED slice only.
+    var sessions = (1...4).map { i in
+      Session(id: "s\(i)", updatedAt: Date(timeIntervalSince1970: Double(100 - i)), cwd: "/w")
+    }
+    sessions.append(
+      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 50), cwd: "/w", parentSessionID: "parent")
+    )
+    sessions.append(Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 1), cwd: "/w"))
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions)
+    )
+
+    let group = try #require(state.groups.first)
+    let entries = state.visibleEntries(in: group)
+    #expect(entries.count == SessionListFeature.State.collapsedLimit)
+    #expect(!entries.map(\.id).contains("parent")) // capped out while collapsed
+    #expect(entries.first { $0.id == "branch" }?.branchStem == nil) // de-nested, not hidden
+  }
+
+  @Test func pinnedBranchDeNestsInPinnedLane() {
+    let sessions = [
+      Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10)),
+      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 20), parentSessionID: "parent"),
+    ]
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions),
+      pinnedIDs: ["branch"]
+    )
+
+    // The pinned slice doesn't contain the parent → the branch renders as a normal row.
+    #expect(state.pinnedEntries.map(\.id) == ["branch"])
+    #expect(state.pinnedEntries.map(\.branchStem) == [nil])
+    // The parent stays in the main lane, unstemmed and without its pinned child.
+    #expect(state.chronologicalEntries.map(\.id) == ["parent"])
+    #expect(state.chronologicalEntries.map(\.branchStem) == [nil])
+  }
+
+  @Test func pinnedLaneKeepsPinOrderAndNestsWithinPinnedSlice() {
+    let sessions = [
+      Session(id: "a", updatedAt: Date(timeIntervalSince1970: 1)),
+      Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 2)),
+      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 30), parentSessionID: "parent"),
+    ]
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions),
+      pinnedIDs: ["a", "parent", "branch"] // "a" pinned first despite being oldest
+    )
+
+    // Both parent and branch are pinned → they nest, but top-level order stays the
+    // user's pin order (a recency sort would have lifted the parent cluster above "a").
+    #expect(state.pinnedEntries.map(\.id) == ["a", "parent", "branch"])
+    #expect(state.pinnedEntries.map(\.branchStem) == [nil, nil, "└─ "])
+  }
+
+  @Test func cronRowsStayOutOfBranchNesting() {
+    let sessions = [
+      Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10)),
+      Session(
+        id: "cron_job1_1", updatedAt: Date(timeIntervalSince1970: 20),
+        source: "cron", parentSessionID: "parent"
+      ),
+    ]
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions)
+    )
+
+    // The cron partition runs FIRST: a cron row never nests into (or lifts) the
+    // interactive lanes, and the cron section itself stays flat.
+    #expect(state.chronologicalEntries.map(\.id) == ["parent"])
+    #expect(state.chronologicalEntries.map(\.branchStem) == [nil])
+    #expect(state.cronSessions.map(\.id) == ["cron_job1_1"])
+  }
+
+  @Test func searchResultsStayFlatInServerOrder() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.hermesREST.search = { @Sendable _, _ in
+        [
+          Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 20), parentSessionID: "parent"),
+          Session(id: "other", updatedAt: Date(timeIntervalSince1970: 15)),
+          Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10)),
+        ]
+      }
+      $0.continuousClock = clock
+    }
+
+    await store.send(\.binding.searchQuery, "foo") { $0.searchQuery = "foo" }
+    await clock.advance(by: .milliseconds(300))
+    await store.receive(\.sessionsResponse.success) {
+      $0.sessions = [
+        Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 20), parentSessionID: "parent"),
+        Session(id: "other", updatedAt: Date(timeIntervalSince1970: 15)),
+        Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10)),
+      ]
+      $0.seenCounts = ["branch": 0, "other": 0, "parent": 0]
+    }
+    // Search renders `sessions` directly (flat, server relevance order) — a branch in the
+    // results is NOT regrouped under its parent.
+    #expect(store.state.isSearching)
+    #expect(store.state.sessions.map(\.id) == ["branch", "other", "parent"])
+  }
+
   @Test func taskLoadsPinnedIDsFromPreferences() async {
     let prefs = PreferencesClient.inMemory()
     prefs.savePinnedIDs(["s1"])

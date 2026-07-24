@@ -26,10 +26,16 @@ public struct SessionBranchEntry: Equatable, Sendable, Identifiable {
 /// - siblings sorted by recency (last-active, else started-at), newest first
 /// - a parent group sorts by its **freshest member**, so activity on any branch lifts
 ///   the whole cluster instead of stranding the parent at its own stale timestamp
+///   (skipped when `sortTopLevelByRecency` is `false` — lanes with a caller-owned order,
+///   e.g. the Pinned lane's pin order, keep top-level rows where the input put them;
+///   children still nest recency-sorted underneath)
 /// - depth-first emit so a branch-of-a-branch still renders under its own parent
 /// - cycle-safe (self-parents ignored; a `seen` set guards pathological parent cycles)
 ///   with a trailing sweep so no input session is ever dropped
-public func flattenSessionsWithBranches(_ sessions: [Session]) -> [SessionBranchEntry] {
+public func flattenSessionsWithBranches(
+  _ sessions: [Session],
+  sortTopLevelByRecency: Bool = true
+) -> [SessionBranchEntry] {
   guard sessions.count >= 2 else {
     return sessions.map { SessionBranchEntry(session: $0) }
   }
@@ -97,15 +103,15 @@ public func flattenSessionsWithBranches(_ sessions: [Session]) -> [SessionBranch
     }
   }
 
-  sessions
-    .enumerated()
-    .filter { !nestedIDs.contains($0.element.id) }
-    .sorted { a, b in
-      let ra = groupRecency(a.element)
-      let rb = groupRecency(b.element)
-      return ra != rb ? ra > rb : a.offset < b.offset
-    }
-    .forEach { emit($0.element) }
+  let roots = sessions.enumerated().filter { !nestedIDs.contains($0.element.id) }
+  let orderedRoots = sortTopLevelByRecency
+    ? roots.sorted { a, b in
+        let ra = groupRecency(a.element)
+        let rb = groupRecency(b.element)
+        return ra != rb ? ra > rb : a.offset < b.offset
+      }
+    : roots
+  orderedRoots.forEach { emit($0.element) }
 
   // Trailing sweep: anything the walk missed (e.g. a parent cycle where every member is
   // "nested") still renders, flat.

@@ -115,6 +115,24 @@ struct SessionBranchTreeTests {
     #expect(entries.map(\.id) == ["a", "b", "c"])
   }
 
+  // MARK: - Caller-owned top-level order
+
+  @Test func unsortedTopLevelKeepsInputOrderButStillNests() {
+    // Pin-order lanes: roots stay exactly where the input put them (no recency lift),
+    // while a branch still nests recency-sorted under its (also-present) parent.
+    let entries = flattenSessionsWithBranches(
+      [
+        session("older", updatedAt: 1),
+        session("parent", updatedAt: 2),
+        session("branch", parent: "parent", updatedAt: 30),
+        session("newer", updatedAt: 10),
+      ],
+      sortTopLevelByRecency: false
+    )
+    #expect(entries.map(\.id) == ["older", "parent", "branch", "newer"])
+    #expect(entries.map(\.branchStem) == [nil, nil, "└─ ", nil])
+  }
+
   // MARK: - Orphans + safety
 
   @Test func orphanWithAbsentParentDeNestsToTopLevel() {

@@ -262,6 +262,15 @@ public struct SessionListFeature {
       pinnedIDs.compactMap { id in sessions[id: id].flatMap { $0.isCron ? nil : $0 } }
     }
 
+    /// The Pinned lane's rows with branch nesting applied WITHIN the pinned slice: a branch
+    /// nests (with its elbow stem) only when its parent is also pinned; a pinned branch
+    /// whose parent isn't pinned de-nests to a normal row. Top-level order stays the user's
+    /// pin order (`sortTopLevelByRecency: false`) — nesting is display-only and must not
+    /// reorder pins.
+    public var pinnedEntries: [SessionBranchEntry] {
+      flattenSessionsWithBranches(pinnedSessions, sortTopLevelByRecency: false)
+    }
+
     /// Non-cron sessions not pinned — these feed the workspace grouping.
     public var unpinnedSessions: [Session] {
       let pinned = Set(pinnedIDs)
@@ -280,6 +289,14 @@ public struct SessionListFeature {
       unpinnedSessions.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
     }
 
+    /// The chronological lane's rows with branch nesting applied: branches render under
+    /// their parent with elbow stems, and a parent cluster sorts by its freshest member
+    /// (activity on a branch lifts the whole group). Applied AFTER the cron partition —
+    /// cron rows never reach this lane. Orphans (parent pinned/absent) de-nest.
+    public var chronologicalEntries: [SessionBranchEntry] {
+      flattenSessionsWithBranches(chronologicalSessions)
+    }
+
     /// Sessions with new activity since the user last opened them.
     public var unreadSessionIDs: Set<Session.ID> {
       Set(sessions.compactMap { session in
@@ -294,6 +311,14 @@ public struct SessionListFeature {
       guard !expandedGroups.contains(group.id), group.sessions.count > Self.collapsedLimit
       else { return group.sessions }
       return Array(group.sessions.prefix(Self.collapsedLimit))
+    }
+
+    /// A workspace group's visible rows with branch nesting applied — nesting happens
+    /// within the RENDERED slice only (desktop parity), so it runs after both the cron
+    /// partition and the collapsed-limit cap: a branch whose parent got capped out (or
+    /// lives in another group) de-nests rather than hiding.
+    public func visibleEntries(in group: SessionGroup) -> [SessionBranchEntry] {
+      flattenSessionsWithBranches(visibleSessions(in: group))
     }
   }
 

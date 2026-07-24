@@ -79,18 +79,30 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   1.5s clock expiry, `cancelInFlight`); **branch** is desktop parity — no branch RPC exists, so
   `.branchFromMessage` fires a one-shot `session.create` seeded with ONLY the selected assistant
   message (`messages`) + `parent_session_id` (**no `title`** — server auto-titles on first submit),
-  guarded (turn not running, non-empty text, `isBranching` double-fire), then
-  `Delegate.branchCreated` routes through the existing `AppFeature` `openSession`
-  slot-replacement flow + a list refetch. Old agents silently ignore the seed params (no `-32601`)
-  → plain empty chat; no capability gate. No optimistic list row — a branch has no DB row until
-  its first prompt.
+  gated by `canBranch` (**requires `storedSessionID`** — a live-only handle would stamp a parent
+  link no list row matches; turn not running; `isBranching` double-fire). **A fresh branch has NO
+  DB row until its first prompt** (server-lazy), so `Delegate.branchCreated` carries the full
+  `SessionHandle` and `AppFeature` fills the slot with a chat PRIMED from the create response
+  (`resumeStoredID` + `attachLiveSessionID`) + a list refetch — **never** the resume-by-stored-id
+  `openSession` flow (`session.resume` 4007s row-less ids and the self-heal would strand the user
+  in an unrelated empty session). The primed chat hydrates via **`session.activate` by LIVE id**
+  (re-binds the new socket's transport, returns the seeded history) until the first
+  `message.start` clears `attachLiveSessionID`; a reaped/unknown-method attach degrades through
+  the standard fresh-create self-heal. Old agents silently ignore the seed params (no `-32601`) →
+  plain empty chat; no capability gate. No optimistic list row — an abandoned branch never
+  appears.
 - **Session-list branch nesting is display-only** (#34): `parent_session_id` decodes leniently
-  from REST onto `Session.parentSessionID`; pure `flattenSessionsWithBranches` (desktop
-  algorithm — sibling recency sort, group-recency lift, recursion, cycle-safe, trailing sweep)
+  from REST onto `Session.parentSessionID` (`trimmedNonEmpty`); pure `flattenSessionsWithBranches`
+  (desktop algorithm — sibling recency sort, group-recency lift, recursion, cycle-safe, trailing
+  sweep, **`byVisibleID` lineage aliasing**: `_lineage_root_id` → `Session.lineageRootID` keeps a
+  branch nested after its parent auto-compresses and the row id rotates to the continuation tip)
   runs per rendered lane (pinned / workspace / chronological) after the cron partition, emitting
-  `└─`/`├─` stems. Orphans (parent absent from the lane) de-nest — never hidden; the Pinned lane
-  keeps pin order (a pinned branch de-nests there); search / archived / cron stay flat. Row
-  identity and swipe/context affordances are unchanged.
+  `└─`/`├─` stems. Recency is `updatedAt ?? .distantPast` — deliberately the SAME rule the lanes
+  sort by (no desktop `started_at` fallback), so nesting never reorders flat rows. Orphans (parent
+  absent from the lane) de-nest — never hidden; the Pinned lane keeps pin order
+  (`sortTopLevelByRecency: false`; a pinned branch nests only when its parent is also pinned,
+  otherwise it de-nests); search / archived / cron stay flat. Row identity and swipe/context
+  affordances are unchanged.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
 - **Auth has two regimes**, modeled by `AuthSession` (`.token` | `.cookie(CookieSession)`) so
   the REST/Gateway clients adapt transport without scattering regime checks. **Token mode**

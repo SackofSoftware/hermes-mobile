@@ -205,7 +205,7 @@ Files involved:
 
 **Files:**
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
 - [x] generalize the copy-feedback state so `.copyRow` sets a row-scoped token (e.g. `"row:<id>"`) with the same 1.5s clock expiry + `cancelInFlight` semantics as `.copyCode` (shared `copyWithFeedback` helper; public `ChatFeature.rowCopyToken(_:)` so the view derives the same token)
 - [x] write tests: copy sets token + pasteboard receives raw Markdown; token clears after 1.5s via `TestClock`; re-copy restarts the timer; empty-text row is a no-op
@@ -215,7 +215,7 @@ Files involved:
 
 **Files:**
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
+- Create: `HermesKit/Tests/HermesKitTests/ChatBranchTests.swift`
 
 - [x] add `.branchFromMessage(id: ChatRow.ID)`: guard completed assistant row with non-empty text, guard no running turn (mirror desktop's "stop the current turn first" → set `errorBanner` when running), guard a live/stored session id exists
 - [x] one-shot `session.create` effect with the single-message seed + `parent_session_id` + threaded `profile` (byte-identical to the existing create otherwise; `[gateway]` captured explicitly)
@@ -263,6 +263,28 @@ Files involved:
 - [x] update `README.md` feature list if it enumerates chat features (added a "Branch a reply into a new chat" bullet after the copy bullet)
 - [x] issue #34 closed via PR (comment deferred to the PR)
 - [x] move this plan to `docs/plans/completed/`
+
+## Review-phase amendments (post-implementation)
+
+The code-review phase reworked the branch-open flow and hardened the nesting:
+
+- **Branch open no longer routes through `openSession`/`session.resume`** — the server
+  creates the branch's DB row lazily on the first prompt, so resuming the fresh stored id
+  4007s and the not-found self-heal stranded the user in an unrelated empty session.
+  `Delegate.branchCreated` now carries the full `SessionHandle`; `AppFeature` fills the
+  slot with a chat primed from the create response (`resumeStoredID` +
+  `attachLiveSessionID`), and the chat hydrates via `session.activate` by LIVE id (which
+  re-binds the new socket's transport and returns the seeded history) until the first
+  `message.start`. Mirrors the desktop's "skip the redundant resume" fork flow.
+- **Branching requires `storedSessionID`** (`canBranch`) — a live-only parent handle could
+  never match a REST list row, so the branch would never nest; the live-id fallback was
+  removed (banner instead of silent no-op on a race).
+- **`_lineage_root_id` aliasing added** (`Session.lineageRootID` + `byVisibleID` in the
+  flatten) so branches keep nesting under a parent whose list row was
+  compression-projected forward to its continuation tip (desktop parity).
+- **Flatten recency unified with the lanes** (`updatedAt ?? .distantPast`, no `started_at`
+  fallback) so nesting never reorders flat rows the lanes already placed.
+- **Action-bar hit targets padded** (8pt + `contentShape`) and reducer/view guards aligned.
 
 ## Post-Completion
 

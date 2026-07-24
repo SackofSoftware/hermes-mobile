@@ -260,6 +260,13 @@ public final class PushBridge: @unchecked Sendable {
   private var tokenContinuations: [AsyncStream<String>.Continuation] = []
   private var tapContinuations: [AsyncStream<PushTap>.Continuation] = []
   private var lastToken: String?
+  /// The last tap that arrived with zero subscribers (a launch-from-push fires the app
+  /// delegate's `didReceive` before the reducer's `.task` subscribes — #46). Unlike
+  /// `lastToken` (idempotent, replayed to every late subscriber), a tap is consume-once:
+  /// the first `tapStream()` subscriber drains it, so a stale tap never re-navigates a
+  /// later re-subscriber. A tap delivered to at least one live continuation is never
+  /// cached — buffering exists only for the launch race.
+  private var pendingTap: PushTap?
   /// The session the user is currently viewing, set by the reducer (via
   /// `PushClient.setCurrentSession`) on chat open/close. Read by `willPresent` to decide
   /// foreground suppression — kept here so the app delegate carries no state of its own.
@@ -299,7 +306,13 @@ public final class PushBridge: @unchecked Sendable {
 
   func tapStream() -> AsyncStream<PushTap> {
     AsyncStream { continuation in
-      lock.withLock { tapContinuations.append(continuation) }
+      let buffered: PushTap? = lock.withLock {
+        tapContinuations.append(continuation)
+        defer { pendingTap = nil }
+        return pendingTap
+      }
+      // Deliver the tap that raced ahead of subscription (launch-from-push), exactly once.
+      if let buffered { continuation.yield(buffered) }
     }
   }
 
@@ -313,10 +326,14 @@ public final class PushBridge: @unchecked Sendable {
     for continuation in continuations { continuation.yield(hex) }
   }
 
-  /// Called by the app delegate on a notification tap (`didReceive`).
+  /// Called by the app delegate on a notification tap (`didReceive`). With no subscriber
+  /// yet (cold launch), the tap is buffered for the first `tapStream()` subscriber.
   public func tapReceived(_ payload: [AnyHashable: Any]) {
     guard let tap = PushClient.tap(fromPayload: payload) else { return }
-    let continuations = lock.withLock { tapContinuations }
+    let continuations: [AsyncStream<PushTap>.Continuation] = lock.withLock {
+      if tapContinuations.isEmpty { pendingTap = tap }
+      return tapContinuations
+    }
     for continuation in continuations { continuation.yield(tap) }
   }
 }

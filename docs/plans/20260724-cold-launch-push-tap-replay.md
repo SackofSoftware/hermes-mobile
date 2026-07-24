@@ -130,16 +130,16 @@
 - Modify: `HermesKit/Tests/HermesKitTests/PushClientTests.swift`
 - Modify: `HermesKit/Sources/HermesKit/Clients/PushClient.swift`
 
-- [ ] write failing test: `tapReceived` before any subscriber → first `tapStream()`
+- [x] write failing test: `tapReceived` before any subscriber → first `tapStream()`
       subscriber receives the buffered tap
-- [ ] write failing test: buffered tap is consume-once — a second, later `tapStream()`
+- [x] write failing test: buffered tap is consume-once — a second, later `tapStream()`
       subscriber does NOT receive it again
-- [ ] write failing test: a tap delivered to a live subscriber is not buffered — a
+- [x] write failing test: a tap delivered to a live subscriber is not buffered — a
       subsequent new subscriber receives nothing
-- [ ] write test (existing behavior guard): tap with live subscribers reaches all of them
-- [ ] implement `pendingTap` cache in `tapReceived` + drain in `tapStream()` per
+- [x] write test (existing behavior guard): tap with live subscribers reaches all of them
+- [x] implement `pendingTap` cache in `tapReceived` + drain in `tapStream()` per
       Technical Details
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: Stash and replay the pre-home tap in AppFeature (TDD)
 

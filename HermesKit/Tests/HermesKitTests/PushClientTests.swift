@@ -162,4 +162,58 @@ struct PushClientTests {
     bridge.tokenReceived(Data([0x0f, 0xf0]))
     #expect(await iterator.next() == "0ff0")
   }
+
+  // MARK: PushBridge tap buffering (cold-launch race, #46)
+
+  @Test func bridgeTapStreamDeliversBufferedTapToFirstSubscriber() async {
+    let bridge = PushBridge()
+    // Tap arrives BEFORE anyone subscribes (launch-from-push race)…
+    bridge.tapReceived(["session_id": "s1", "type": "approval"])
+    // …then the first subscriber still receives the buffered tap.
+    let stream = bridge.tapStream()
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == PushTap(sessionID: "s1", type: "approval"))
+  }
+
+  @Test func bridgeTapBufferIsConsumeOnce() async {
+    let bridge = PushBridge()
+    bridge.tapReceived(["session_id": "s1"])
+    // The first subscriber drains the buffer…
+    let firstStream = bridge.tapStream()
+    var first = firstStream.makeAsyncIterator()
+    #expect(await first.next() == PushTap(sessionID: "s1"))
+    // …so a later second subscriber must NOT see the stale tap again (re-yielding it
+    // would re-navigate). Its first value is the next live tap, used as a sentinel.
+    let secondStream = bridge.tapStream()
+    var second = secondStream.makeAsyncIterator()
+    bridge.tapReceived(["session_id": "s2"])
+    #expect(await second.next() == PushTap(sessionID: "s2"))
+  }
+
+  @Test func bridgeTapDeliveredLiveIsNotBuffered() async {
+    let bridge = PushBridge()
+    // A live subscriber receives the tap directly…
+    let liveStream = bridge.tapStream()
+    var live = liveStream.makeAsyncIterator()
+    bridge.tapReceived(["session_id": "s1"])
+    #expect(await live.next() == PushTap(sessionID: "s1"))
+    // …and because it was delivered, it is NOT cached: a new subscriber gets nothing
+    // buffered — its first value is the next live tap (sentinel), never the old one.
+    let lateStream = bridge.tapStream()
+    var late = lateStream.makeAsyncIterator()
+    bridge.tapReceived(["session_id": "s2"])
+    #expect(await late.next() == PushTap(sessionID: "s2"))
+  }
+
+  @Test func bridgeTapReachesAllLiveSubscribers() async {
+    let bridge = PushBridge()
+    let streamA = bridge.tapStream()
+    let streamB = bridge.tapStream()
+    var a = streamA.makeAsyncIterator()
+    var b = streamB.makeAsyncIterator()
+    bridge.tapReceived(["session_id": "s1", "type": "complete"])
+    let expected = PushTap(sessionID: "s1", type: "complete")
+    #expect(await a.next() == expected)
+    #expect(await b.next() == expected)
+  }
 }

@@ -335,20 +335,31 @@ deterministic row ID (never random, never derived from mutable text).
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 
-- [ ] on `slash.exec` failure (non-unknown-method) → `command.dispatch
+- [x] on `slash.exec` failure (non-unknown-method) → `command.dispatch
       {name, arg, session_id}`; decode the typed directive leniently
-- [ ] handle directives: `exec`/`plugin` → output row (as Task 6); `alias` →
+- [x] handle directives: `exec`/`plugin` → output row (as Task 6); `alias` →
       re-enter the pipeline once with the target (single hop — a second alias fails
       to the error path); `skill`/`send` → route `message` into the existing
       `prompt.submit` flow suppressing the duplicate optimistic user row;
       `isSending` then follows the normal turn lifecycle
-- [ ] both-fail path → `errorBanner` + clear `isSending` (no swallowed `try?`)
-- [ ] write TestStore tests: dispatch `exec` output row; alias single hop resolves;
+- [x] both-fail path → `errorBanner` + clear `isSending` (no swallowed `try?`)
+- [x] write TestStore tests: dispatch `exec` output row; alias single hop resolves;
       double-alias hits the error path
-- [ ] write TestStore tests: `skill` directive submits the message with exactly one
+- [x] write TestStore tests: `skill` directive submits the message with exactly one
       user row (the typed `/cmd`); both-RPCs-fail → `errorBanner` and composer
       unlocked
-- [ ] run `swift test --package-path HermesKit` — must pass before task 8
+- [x] run `swift test --package-path HermesKit` — must pass before task 8
+- ➕ a `-32601` from `slash.exec` itself skips the dispatch fallback and fails
+  directly — `command.dispatch` shipped alongside `slash.exec` (same pipeline), so
+  the fallback would only add a second unknown-method roundtrip
+- ➕ lenient directive handling: unknown `type` / missing `alias` target →
+  `"invalid response: command.dispatch"` banner; skill/send empty-message wording
+  mirrors the web reference (`skill payload missing message` / `empty message`) —
+  covered by `malformedDirectiveFailsCleanly`
+- ➕ the skill/send `prompt.submit` rides `withSessionHeal` like every outbound RPC;
+  success sends NO action (the typed `/cmd` row is the one optimistic user row,
+  `isSending` follows the normal turn lifecycle, and `message.start` writes the turn
+  anchor — the slash branch still sets none itself)
 
 ### Task 8: SlashSuggestionPanel view, ChatView wiring, row rendering
 

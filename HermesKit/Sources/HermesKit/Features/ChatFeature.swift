@@ -2231,21 +2231,38 @@ private func parseSlashCommand(_ command: String) -> (name: String, arg: String)
 
 /// Run a submitted slash command through the gateway's dedicated slash pipeline (#36),
 /// mirroring the web reference client (`web/src/lib/slashExec.ts`, explicitly written for
-/// native clients to copy): `slash.exec {command (no leading slash), session_id}` covers
-/// every registry-backed command and answers `{output, warning?}` — surfaced as an
-/// ephemeral `commandOutput` row (empty output degrades to "/name: no output", a warning
-/// is prefixed). Wrapped in the standard session-not-found self-heal (#17): a stale live
-/// id re-resumes once and replays. Failure surfaces `.slashCommandFailed` — never a
-/// swallowed `try?`.
+/// native clients to copy):
+///
+/// 1. `slash.exec {command (no leading slash), session_id}` covers every registry-backed
+///    command and answers `{output, warning?}` — surfaced as an ephemeral `commandOutput`
+///    row (empty output degrades to "/name: no output", a warning is prefixed).
+/// 2. On `slash.exec` failure (command rejected, unknown to the registry, or needing
+///    client behavior) fall back to `command.dispatch {name, arg, session_id}` and decode
+///    its typed directive LENIENTLY: `exec`/`plugin` → output row; `alias` → re-enter the
+///    pipeline ONCE with the target (single hop — a second alias directive fails to the
+///    error path; deliberate divergence from the web reference's unbounded recursion);
+///    `skill`/`send` → the directive's message goes through the normal `prompt.submit`
+///    with the duplicate optimistic user row suppressed (the typed `/cmd` row is already
+///    in the transcript) — success sends NO action, so `isSending` follows the standard
+///    turn lifecycle and the turn anchor is written at `message.start`. A `-32601` from
+///    `slash.exec` skips the fallback: an agent without `slash.exec` has no
+///    `command.dispatch` either (same pipeline) — fail directly, no pointless roundtrip.
+/// 3. Any remaining failure surfaces `.slashCommandFailed` — never a swallowed `try?`.
+///
+/// Every RPC rides the standard session-not-found self-heal (#17): a stale live id
+/// re-resumes once and replays.
 private func executeSlashCommand(
   command: String,
   sessionID: String,
   storedSessionID: String?,
   profile: String?,
   gateway: HermesGatewayClient,
-  send: Send<ChatFeature.Action>
+  send: Send<ChatFeature.Action>,
+  allowAliasHop: Bool = true
 ) async {
-  let name = parseSlashCommand(command).name
+  let (name, arg) = parseSlashCommand(command)
+
+  // 1. Primary dispatcher: slash.exec.
   do {
     let result = try await withSessionHeal(
       { targetID in
@@ -2260,6 +2277,80 @@ private func executeSlashCommand(
     let body = result["output"]?.stringValue?.nonEmpty ?? "/\(name): no output"
     let text = result["warning"]?.stringValue?.nonEmpty.map { "warning: \($0)\n\(body)" } ?? body
     await send(.slashCommandOutput(text))
+    return
+  } catch let error as GatewayError where error.isUnknownMethod {
+    // The agent predates the slash pipeline entirely (shouldn't happen once the catalog
+    // loaded, but stay defensive) — `command.dispatch` shipped alongside `slash.exec`,
+    // so the fallback would only add a second `-32601` roundtrip.
+    await send(.slashCommandFailed(message: error.message))
+    return
+  } catch {
+    // Fall through to the command.dispatch fallback.
+  }
+
+  // 2. Fallback: command.dispatch answers a typed directive, decoded leniently — a
+  // malformed/unknown directive is an error surface, never a crash.
+  do {
+    let directive = try await withSessionHeal(
+      { targetID in
+        try await gateway.send("command.dispatch", .object([
+          "name": .string(name),
+          "arg": .string(arg),
+          "session_id": .string(targetID),
+        ]))
+      },
+      sessionID: sessionID, storedSessionID: storedSessionID,
+      profile: profile, gateway: gateway, send: send
+    )
+    switch directive["type"]?.stringValue {
+    case "exec", "plugin":
+      await send(.slashCommandOutput(directive["output"]?.stringValue?.nonEmpty ?? "(no output)"))
+
+    case "alias":
+      guard let target = directive["target"]?.stringValue?.nonEmpty else {
+        await send(.slashCommandFailed(message: "invalid response: command.dispatch"))
+        return
+      }
+      guard allowAliasHop else {
+        // Single hop only — a registry misconfigured with alias → alias must fail,
+        // never loop.
+        await send(.slashCommandFailed(message: "/\(name): alias resolved to another alias (/\(target))"))
+        return
+      }
+      await executeSlashCommand(
+        command: "/\(target)\(arg.isEmpty ? "" : " \(arg)")",
+        sessionID: sessionID, storedSessionID: storedSessionID,
+        profile: profile, gateway: gateway, send: send, allowAliasHop: false
+      )
+
+    case "skill", "send":
+      let isSkill = directive["type"]?.stringValue == "skill"
+      guard
+        let message = directive["message"]?.stringValue?
+          .trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+      else {
+        await send(.slashCommandFailed(
+          message: "/\(name): \(isSkill ? "skill payload missing message" : "empty message")"))
+        return
+      }
+      // The directive's message goes through the NORMAL prompt flow, suppressing the
+      // duplicate optimistic user row (the typed `/cmd` is already in the transcript).
+      // Success sends no action: the ack is `{status:"streaming"}` and the turn streams
+      // via events, so `isSending` (already true) follows the standard turn lifecycle
+      // and `message.start` writes the turn anchor.
+      try await withSessionHeal(
+        { targetID in
+          _ = try await gateway.send("prompt.submit", .object([
+            "session_id": .string(targetID), "text": .string(message),
+          ]))
+        },
+        sessionID: sessionID, storedSessionID: storedSessionID,
+        profile: profile, gateway: gateway, send: send
+      )
+
+    default:
+      await send(.slashCommandFailed(message: "invalid response: command.dispatch"))
+    }
   } catch let error as GatewayError {
     await send(.slashCommandFailed(message: error.message))
   } catch {

@@ -18,6 +18,12 @@ import Testing
 /// refresh (`session.resume` → `applyRuntimeInfo`, transcript untouched). Backward-compat
 /// guard: nil catalog / `commandsUnsupported` / staged attachments all take today's plain
 /// path byte-identical.
+///
+/// Task 7: the `command.dispatch` fallback when `slash.exec` rejects the command — typed
+/// directives decoded leniently: `exec`/`plugin` → output row, `alias` → single-hop
+/// re-entry (a second alias fails, never loops), `skill`/`send` → the directive's message
+/// through the normal `prompt.submit` with the duplicate optimistic user row suppressed;
+/// both-RPCs-fail → banner + unlocked composer.
 @MainActor
 struct SlashCommandChatTests {
   private let conn = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t")
@@ -507,14 +513,15 @@ struct SlashCommandChatTests {
   }
 
   @Test func slashExecFailureSurfacesBannerAndUnlocks() async {
-    // The pipeline failing outright must surface a banner and unlock the composer —
-    // never a swallowed `try?`. (Both pipeline RPCs fail here, so this test also covers
-    // the both-fail contract once the Task 7 dispatch fallback lands.)
+    // The both-fail contract: `slash.exec` rejects, the `command.dispatch` fallback is
+    // attempted and fails too → banner + unlocked composer — never a swallowed `try?`.
+    let calls = LockIsolated<[String]>([])
     let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
         switch method {
         case "slash.exec", "command.dispatch": throw GatewayError.server("boom")
         default: return .object([:])
@@ -535,7 +542,9 @@ struct SlashCommandChatTests {
       $0.isSending = false
     }
     await store.finish()
-    // The typed command row stays visible; no output row was appended.
+    // The fallback WAS attempted before failing; the typed command row stays visible and
+    // no output row was appended.
+    #expect(calls.value == ["slash.exec", "command.dispatch"])
     #expect(store.state.transcript.map(\.kind) == [
       .message(role: .user, text: "/status", isComplete: true),
     ])
@@ -588,6 +597,230 @@ struct SlashCommandChatTests {
     #expect(calls.value[2].sid == "fresh-live")
     #expect(store.state.errorBanner == nil)
     #expect(store.state.transcript.last?.kind == .commandOutput(text: "ok"))
+  }
+
+  // MARK: command.dispatch fallback (Task 7)
+
+  @Test func dispatchExecDirectiveRendersOutputRow() async {
+    // `slash.exec` rejects the command → the pipeline falls back to
+    // `command.dispatch {name, arg, session_id}`, whose `exec` directive's output renders
+    // the same ephemeral commandOutput row (then the standard runtime-only refresh fires).
+    let calls = LockIsolated<[String]>([])
+    let dispatchParams = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/status verbose")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "slash.exec":
+          throw GatewayError.server("needs client dispatch")
+        case "command.dispatch":
+          dispatchParams.setValue(params)
+          return .object(["type": .string("exec"), "output": .string("dispatched output")])
+        case "session.resume":
+          // Runtime refresh with no `info` → silent.
+          return .object([
+            "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    await store.finish()
+
+    // Exec → dispatch fallback → the output action's runtime refresh; the dispatch
+    // carries the parsed name + arg (never the raw slashed text).
+    #expect(calls.value == ["slash.exec", "command.dispatch", "session.resume"])
+    #expect(dispatchParams.value?["name"]?.stringValue == "status")
+    #expect(dispatchParams.value?["arg"]?.stringValue == "verbose")
+    #expect(dispatchParams.value?["session_id"]?.stringValue == "live123")
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "dispatched output"))
+    #expect(store.state.errorBanner == nil)
+  }
+
+  @Test func aliasDirectiveResolvesWithSingleHop() async {
+    // "/fork main" is unknown to slash.exec; dispatch answers an `alias` directive → the
+    // pipeline re-enters ONCE with "/branch main" (target + preserved arg) and the
+    // target's exec output lands. No banner, composer unlocked.
+    let calls = LockIsolated<[(method: String, command: String?)]>([])
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/fork main")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append((method, params["command"]?.stringValue)) }
+        switch method {
+        case "slash.exec":
+          guard params["command"]?.stringValue == "branch main" else {
+            throw GatewayError.server("unknown command")
+          }
+          return .object(["output": .string("branched")])
+        case "command.dispatch":
+          return .object(["type": .string("alias"), "target": .string("branch")])
+        case "session.resume":
+          return .object([
+            "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    await store.finish()
+
+    #expect(calls.value.map(\.method) == ["slash.exec", "command.dispatch", "slash.exec", "session.resume"])
+    #expect(calls.value[2].command == "branch main")
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "branched"))
+    #expect(store.state.errorBanner == nil)
+  }
+
+  @Test func doubleAliasHitsTheErrorPath() async {
+    // Single hop only: a registry misconfigured with alias → alias must fail to the
+    // error path after one re-entry — never loop (deliberate divergence from the web
+    // reference's unbounded recursion).
+    let calls = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/fork")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "slash.exec": throw GatewayError.server("unknown command")
+        case "command.dispatch":
+          return .object(["type": .string("alias"), "target": .string("other")])
+        default: return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandFailed) {
+      $0.errorBanner = "Command failed: /other: alias resolved to another alias (/other)"
+      $0.isSending = false
+    }
+    await store.finish()
+
+    // Exactly one hop: exec + dispatch for the typed command, exec + dispatch for the
+    // alias target, then the hard stop — no third round.
+    #expect(calls.value == ["slash.exec", "command.dispatch", "slash.exec", "command.dispatch"])
+  }
+
+  @Test func skillDirectiveSubmitsPromptWithExactlyOneUserRow() async {
+    // "/plan tidy the API" is a skill route: slash.exec rejects it, dispatch answers a
+    // `skill` directive whose message goes through the NORMAL prompt.submit — with the
+    // duplicate optimistic user row suppressed (the typed "/plan …" row is already in
+    // the transcript). isSending stays true: the turn streams via events like any prompt.
+    let calls = LockIsolated<[String]>([])
+    let submitParams = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/plan tidy the API")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "slash.exec":
+          throw GatewayError.server("skill routes dispatch client-side")
+        case "command.dispatch":
+          return .object([
+            "type": .string("skill"), "name": .string("plan"),
+            "message": .string("Use the plan skill: tidy the API"),
+          ])
+        case "prompt.submit":
+          submitParams.setValue(params)
+          return .object(["status": .string("streaming")])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/plan tidy the API", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+    }
+    await store.finish()
+
+    #expect(calls.value == ["slash.exec", "command.dispatch", "prompt.submit"])
+    #expect(submitParams.value?["text"]?.stringValue == "Use the plan skill: tidy the API")
+    #expect(submitParams.value?["session_id"]?.stringValue == "live123")
+    // Exactly one user row — the typed command; the directive's message is NOT echoed
+    // and no output row appears (streaming/thinking will take over via events).
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "/plan tidy the API", isComplete: true),
+    ])
+    #expect(store.state.isSending)
+    #expect(store.state.errorBanner == nil)
+  }
+
+  @Test func malformedDirectiveFailsCleanly() async {
+    // Lenient directive decode: an unknown `type` — and a skill payload missing its
+    // message — are error surfaces (banner + unlocked composer), never a crash and
+    // never a swallowed `try?`.
+    let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        switch method {
+        case "slash.exec":
+          throw GatewayError.server("nope")
+        case "command.dispatch":
+          guard params["name"]?.stringValue == "plan" else {
+            return .object(["type": .string("mystery")])
+          }
+          return .object(["type": .string("skill"), "name": .string("plan")]) // no message
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandFailed) {
+      $0.errorBanner = "Command failed: invalid response: command.dispatch"
+      $0.isSending = false
+    }
+
+    await store.send(.binding(.set(\.composerText, "/plan"))) {
+      $0.composerText = "/plan"
+    }
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandFailed) {
+      $0.errorBanner = "Command failed: /plan: skill payload missing message"
+      $0.isSending = false
+    }
+    await store.finish()
   }
 
   // MARK: Backward-compat guard (Task 6)

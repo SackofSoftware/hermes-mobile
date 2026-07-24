@@ -153,6 +153,11 @@ not assumed):
   created lazily on the first delta — a `message.start` with no text would otherwise
   render as an empty bubble. The `session_id` lives on the event *frame*.
 - **Decode leniently.** Unknown event `type`s decode to `.unknown` and never crash.
+- **`review.summary` is live-only** (#47). The background self-improvement review emits it
+  to the session's own socket but never writes it to session history, so the chat renders
+  it as an ephemeral system row — the next hydrate (`session.resume`) replaces the
+  transcript wholesale and the row disappears, until an upstream hermes-agent change
+  persists it.
 - **Pins are device-local** (Hermes has no pin API) — an ordered `[String]` of session
   ids in `PreferencesClient`. **Archive is server-side**
   (`PATCH /api/sessions/{id}` `{"archived": …}`), done optimistically.

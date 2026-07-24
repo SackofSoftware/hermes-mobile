@@ -44,4 +44,18 @@ struct DebugLogClientTests {
     log.append(.messageComplete(text: "line one\nline two", usage: nil))
     #expect(log.snapshot().last?.summary == "line one⏎line two")
   }
+
+  @Test func reviewSummaryEntryUsesWireTypeAndTruncatesLongText() {
+    // A real review summary is exactly the long, multi-line payload the 80-char digest
+    // truncation exists for — pin the wire-style type label and the collapsed preview.
+    let log = DebugLogClient.ringBuffer()
+    let text = "💾 Self-improvement review:\n" + String(repeating: "tightened the retry loop. ", count: 10)
+    log.append(.reviewSummary(text: text))
+
+    let entry = log.snapshot().last
+    #expect(entry?.type == "review.summary")
+    #expect(entry?.summary.hasPrefix("💾 Self-improvement review:⏎tightened") == true)
+    #expect(entry?.summary.hasSuffix("…") == true)
+    #expect(entry?.summary.count == 81) // 80-char preview + ellipsis
+  }
 }

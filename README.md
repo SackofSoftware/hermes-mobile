@@ -39,7 +39,9 @@ from your desk and still keep your agent moving.
 - **Watch it work.** Streaming responses render as native Markdown, with tool/skill
   activity rows (tap for args, results, and diffs), a live "Thinking" indicator with an
   elapsed timer that collapses into a reviewable reasoning + status disclosure when the
-  turn ends, and a subtle glow on sessions that are actively running.
+  turn ends, and a subtle glow on sessions that are actively running. When the agent's
+  background self-improvement review posts a summary, it shows up right in the chat as
+  a system line (live sessions only).
 - **Compose hands-free or with files.** Dictate a message with voice input (a live
   waveform while recording; transcribed by your agent), and attach photos, camera
   captures, PDFs, or any file straight from the composer.

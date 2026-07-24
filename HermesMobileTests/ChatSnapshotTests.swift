@@ -93,6 +93,22 @@ final class ChatSnapshotTests: SnapshotTestCase {
     assertChatView(rows: rows, title: "Vision chat", status: .ready)
   }
 
+  /// Review-summary status row (#47): `.status(kind: "review")` renders at `.footnote`
+  /// with text selection so a multi-sentence self-improvement summary stays readable;
+  /// the plain "approval" status row alongside it keeps the terse `.caption` styling.
+  func testChatView_reviewSummaryStatusRow() {
+    let rows: [ChatRow] = [
+      ChatRow(id: id(0), kind: .message(role: .user, text: "Tidy up the retry logic.", isComplete: true)),
+      ChatRow(id: id(1), kind: .message(role: .assistant, text: "Done — retries now back off exponentially.", isComplete: true)),
+      ChatRow(id: id(2), kind: .status(kind: "approval", text: "Approved")),
+      ChatRow(id: id(3), kind: .status(
+        kind: "review",
+        text: "💾 Self-improvement review: The retry loop now honors the backoff ceiling. Consider persisting the failure counter across restarts, and add a test for clock skew during long waits."
+      )),
+    ]
+    assertChatView(rows: rows, title: "Review chat", status: .ready)
+  }
+
   // MARK: Code-block copy affordance (#9)
 
   private static let copySample = "Run this:\n\n```bash\nmake snapshot\n```"

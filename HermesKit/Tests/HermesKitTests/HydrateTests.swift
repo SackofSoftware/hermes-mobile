@@ -585,6 +585,54 @@ struct HydrateTests {
     await store.send(.teardown)
   }
 
+  @Test func hydrateRunningDropsLiveReviewRowButPreservesToolAndThinkingRows() async {
+    // Pins the ACCEPTED #47 limitation (and its asymmetry with #26): the running-turn
+    // preservation re-appends only TOOL + THINKING rows, and `review.summary` is never
+    // written to session history, so a review row that arrived mid-turn is dropped by a
+    // foreground re-hydrate even while the turn still runs — while the tool/thinking rows
+    // survive. If a future change starts preserving it (e.g. once the upstream
+    // hermes-agent persist lands and `reconstructTranscript` maps it), update this test
+    // deliberately — it exists so the behavior can't change silently.
+    let snapshotClient = ChatSnapshotClient.inMemory()
+    let clock = TestClock()
+    let nowDate = Date(timeIntervalSince1970: 1_000)
+    snapshotClient.setTurnAnchor("stored123", nowDate.addingTimeInterval(-7))
+
+    let toolID = uuid(301)
+    let reviewID = uuid(302)
+    let thinkingID = uuid(303)
+    var initial = ChatFeature.State(connection: conn, resumeStoredID: "stored123")
+    initial.transcript = [
+      ChatRow(id: toolID, kind: .tool(name: "grep", title: "Search", state: .running, detail: nil, durationS: nil)),
+      ChatRow(id: reviewID, kind: .status(kind: "review", text: "💾 Self-improvement review: noted.")),
+      ChatRow(id: thinkingID, kind: .thinking(reasoning: "weighing", status: nil, elapsedSeconds: 4, isComplete: false)),
+    ]
+    initial.toolRowIDs = ["t1": toolID]
+    initial.thinkingRowID = thinkingID
+
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = clock
+      $0.date = .constant(nowDate)
+      $0.chatSnapshot = snapshotClient
+      $0.hermesGateway.send = { @Sendable _, _ in Self.activateResponse(running: true) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.gatewayEvent(.ready))
+    await store.receive(\.activateResult.success)
+
+    // Tool + thinking rows survived (#26); the ephemeral review row is gone.
+    #expect(store.state.transcript.map(\.id) == [toolID, thinkingID])
+    #expect(store.state.transcript[id: reviewID] == nil)
+    #expect(store.state.toolRowIDs == ["t1": toolID])
+    #expect(store.state.thinkingRowID == thinkingID)
+
+    await store.send(.teardown)
+  }
+
   @Test func hydrateNotRunningWipesLiveThinkingAndToolRows() async {
     // A COMPLETED turn (`running == false`) keeps the strict server-wins behavior: the prior
     // live thinking/tool rows are GONE and their tracking ids reset — no live rows leak into a

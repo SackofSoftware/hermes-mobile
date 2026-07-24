@@ -89,6 +89,14 @@ public struct ChatFeature {
     /// Set once the agent rejects an attach RPC as unknown (`-32601`) — too old to support
     /// uploads. Hides the attach affordance for the rest of the session.
     public var attachmentsUnsupported: Bool
+    /// The slash-command catalog (`commands.catalog`), fetched once per screen when the
+    /// session becomes ready (#36). `nil` until loaded — a transient fetch failure leaves
+    /// it `nil` and the next hydrate naturally retries.
+    public var commandCatalog: CommandCatalog?
+    /// Set once the agent rejects `commands.catalog` as unknown (`-32601`) — too old for
+    /// slash commands. Suppresses future catalog fetches; typed `/text` then goes out as a
+    /// plain prompt, byte-identical to the pre-feature behavior (backward-compat guard).
+    public var commandsUnsupported: Bool
 
     /// Voice-input state machine: tap mic → permission → record (waveform) → stop →
     /// transcribe → text appended to the composer.
@@ -202,6 +210,8 @@ public struct ChatFeature {
       self.thinkingSeconds = 0
       self.attachments = []
       self.attachmentsUnsupported = false
+      self.commandCatalog = nil
+      self.commandsUnsupported = false
 
       // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
       // its cached tail + model/usage immediately, before `session.resume` lands. The
@@ -384,6 +394,9 @@ public struct ChatFeature {
     case attachmentsSubmitted(displayText: String, images: [Data], rowID: UUID)
     case attachmentUploadFailed(message: String)
     case attachmentsUnsupportedDetected
+    // Slash commands (#36)
+    case commandCatalogLoaded(CommandCatalog)
+    case commandsUnsupportedDetected
 
     /// Signals the parent (`AppFeature`) routes: the dead-session signal that raises the
     /// re-auth modal (reconnect backoff is paused for it), and the authoritative
@@ -552,7 +565,10 @@ public struct ChatFeature {
         state.liveSessionID = handle.sessionID
         state.storedSessionID = handle.storedSessionID ?? state.storedSessionID
         state.status = .ready
-        return .none
+        // A fresh session never hydrates (`session.create` resolves directly to ready), so
+        // this is its catalog-fetch point (#36) — without it a brand-new chat would have no
+        // slash panel until the first foreground re-hydrate.
+        return commandCatalogEffect(state, sessionID: handle.sessionID)
 
       case let .usageResponse(usage):
         state.usage = usage
@@ -1107,6 +1123,17 @@ public struct ChatFeature {
         // `runningChanged(false)` so a DETACHED slot waiting on the turn is torn down
         // (mirrors `.promptSubmitFailed` / `.attachmentUploadFailed`).
         return runningChanged(false, state)
+
+      case let .commandCatalogLoaded(catalog):
+        state.commandCatalog = catalog
+        return .none
+
+      case .commandsUnsupportedDetected:
+        // Attach pattern (#36): the agent predates `commands.catalog`. Silently hide the
+        // whole slash affordance — nothing the user did failed, so no banner; plain sends
+        // stay byte-identical to today.
+        state.commandsUnsupported = true
+        return .none
 
       case let .toolTapped(id):
         guard let row = state.transcript[id: id], case .tool = row.kind else { return .none }
@@ -1779,12 +1806,20 @@ public struct ChatFeature {
     // `running` flag is straight from `session.resume`.
     let runningEffect = runningChanged(running, state)
 
+    // One-shot slash-command catalog fetch now the hydrate reached ready (#36). Gated: only
+    // when not yet loaded and the capability wasn't ruled out — a transient failure left the
+    // catalog `nil`, making this next hydrate the natural retry point.
+    let catalogEffect = commandCatalogEffect(state, sessionID: response.sessionID)
+
     // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors
     // the prior resume behavior so the gauge isn't blank until the next turn.
     if state.usage == nil {
-      return .merge(fetchUsage(sessionID: response.sessionID), persist, timerEffect, runningEffect)
+      return .merge(
+        fetchUsage(sessionID: response.sessionID), persist, timerEffect, runningEffect,
+        catalogEffect
+      )
     }
-    return .merge(persist, timerEffect, runningEffect)
+    return .merge(persist, timerEffect, runningEffect, catalogEffect)
   }
 
   /// Reconcile the live "Thinking" elapsed timer on hydrate from the persisted turn-start
@@ -1862,6 +1897,40 @@ public struct ChatFeature {
         // Agent too old to support session.usage — leave the gauge hidden.
       } catch {
         // Transient failure; usage will still arrive on the next message.complete.
+      }
+    }
+  }
+
+  // MARK: - Slash-command catalog (#36)
+
+  /// The one-shot `commands.catalog` fetch when it's due — not yet loaded and the
+  /// capability not ruled out — or `.none`, so repeated hydrates never refetch a loaded
+  /// catalog and never poke an agent that already answered `-32601`.
+  private func commandCatalogEffect(_ state: State, sessionID: String) -> Effect<Action> {
+    guard state.commandCatalog == nil, !state.commandsUnsupported else { return .none }
+    return fetchCommandCatalog(sessionID: sessionID)
+  }
+
+  /// Fetch the slash-command catalog (the `model.options` convention: a discrete one-shot
+  /// `gateway.send`). Capability-gated the attach way: `-32601` flips
+  /// `commandsUnsupported`; any other failure is silent — the catalog stays `nil` and the
+  /// next hydrate naturally retries.
+  private func fetchCommandCatalog(sessionID: String) -> Effect<Action> {
+    .run { [gateway] send in
+      do {
+        let result = try await gateway.send(
+          "commands.catalog", .object(["session_id": .string(sessionID)])
+        )
+        // The lenient decode never throws, so an arbitrary/garbage payload surfaces as an
+        // EMPTY catalog — as useless as none. Don't latch it: leave the state `nil`
+        // (suggestions are empty either way) so a later hydrate can still recover.
+        if let catalog = result.decoded(CommandCatalog.self), !catalog.commands.isEmpty {
+          await send(.commandCatalogLoaded(catalog))
+        }
+      } catch let error as GatewayError where error.isUnknownMethod {
+        await send(.commandsUnsupportedDetected)
+      } catch {
+        // Transient failure: silent — the catalog stays `nil`; the next hydrate retries.
       }
     }
   }

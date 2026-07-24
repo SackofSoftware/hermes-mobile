@@ -233,20 +233,30 @@ deterministic row ID (never random, never derived from mutable text).
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 
-- [ ] add `commandCatalog: CommandCatalog?` + `commandsUnsupported: Bool` to State
+- [x] add `commandCatalog: CommandCatalog?` + `commandsUnsupported: Bool` to State
       and actions `.commandCatalogLoaded(CommandCatalog)` /
       `.commandsUnsupportedDetected`
-- [ ] fire a one-shot `gateway.send("commands.catalog", …)` effect once hydrate
+- [x] fire a one-shot `gateway.send("commands.catalog", …)` effect once hydrate
       reaches ready (mirror the `model.options` convention; `[gateway]` capture per
       `@Sendable` gotcha); decode via Task 1
-- [ ] on `GatewayError.isUnknownMethod` → `.commandsUnsupportedDetected` (attach
+- [x] on `GatewayError.isUnknownMethod` → `.commandsUnsupportedDetected` (attach
       pattern verbatim); any other failure → silent no-op (catalog stays `nil`,
       naturally retried on next hydrate); skip the fetch when `commandsUnsupported`
-- [ ] write TestStore tests: successful fetch populates the catalog; unknown-method
+- [x] write TestStore tests: successful fetch populates the catalog; unknown-method
       flips `commandsUnsupported` and suppresses future fetches
-- [ ] write TestStore tests: transient failure leaves catalog `nil` and a later
+- [x] write TestStore tests: transient failure leaves catalog `nil` and a later
       hydrate refetches
-- [ ] run `swift test --package-path HermesKit` — must pass before task 4
+- [x] run `swift test --package-path HermesKit` — must pass before task 4
+- ➕ also fire the catalog fetch when `session.create` resolves (`.sessionResult`
+  success): a brand-new chat never hydrates, so without this fresh chats would have
+  no slash panel until the first foreground re-hydrate (tested:
+  `freshSessionCreateFetchesCatalog`)
+- ➕ skip the fetch when the catalog is already loaded (repeated hydrates don't
+  refetch), and treat an EMPTY decoded catalog as not-loaded (lenient decode never
+  throws, so garbage payloads must not latch a dead catalog) — both unit-tested
+- ➕ tests live in a new `SlashCommandChatTests.swift` (there is no single
+  `ChatFeatureTests.swift`; the chat suite is split by concern) — Tasks 4/6/7 reducer
+  tests land there too
 
 ### Task 4: Computed suggestions and selection action
 

@@ -147,4 +147,19 @@ struct PushClientTests {
     push.client.setCurrentSession(nil)
     #expect(push.currentSession == nil)
   }
+
+  // MARK: PushBridge token stream (outside the UIKit guard → testable on macOS)
+
+  @Test func bridgeTokenStreamReplaysLastTokenToLateSubscriber() async {
+    let bridge = PushBridge()
+    // Token arrives BEFORE anyone subscribes (the launch race)…
+    bridge.tokenReceived(Data([0xde, 0xad, 0xbe, 0xef]))
+    // …then the late subscriber still gets the cached token.
+    let stream = bridge.tokenStream()
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == "deadbeef")
+    // And a live subscriber keeps receiving subsequent tokens.
+    bridge.tokenReceived(Data([0x0f, 0xf0]))
+    #expect(await iterator.next() == "0ff0")
+  }
 }

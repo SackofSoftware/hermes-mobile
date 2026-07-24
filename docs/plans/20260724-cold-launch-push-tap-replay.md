@@ -115,14 +115,14 @@
 **Files:**
 - Modify: `HermesKit/Sources/HermesKit/Clients/PushClient.swift`
 
-- [ ] move the `PushBridge` class above the `#if canImport(UIKit)` block; keep the
+- [x] move the `PushBridge` class above the `#if canImport(UIKit)` block; keep the
       `liveValue` extension and app-delegate-facing UIKit code inside the guard
-- [ ] verify `PushBridge` compiles on macOS: only Foundation + pure `PushClient` helpers
+- [x] verify `PushBridge` compiles on macOS: only Foundation + pure `PushClient` helpers
       (`hexToken`, `tap(fromPayload:)`, `sessionID(fromPayload:)`,
       `shouldPresentForeground`) — no UIKit/UserNotifications symbols
-- [ ] write a smoke unit test in `PushClientTests.swift`: `tokenStream()` late-subscriber
+- [x] write a smoke unit test in `PushClientTests.swift`: `tokenStream()` late-subscriber
       replay via `PushBridge` (locks in existing behavior now that it's testable)
-- [ ] run tests — must pass before task 2
+- [x] run tests — must pass before task 2
 
 ### Task 2: Buffer the last undelivered tap in PushBridge (TDD)
 

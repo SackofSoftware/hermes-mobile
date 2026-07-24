@@ -74,6 +74,12 @@ public struct ChatFeature {
     /// Token of the code block whose copy button was most recently tapped, for the
     /// transient "copied" checkmark. Cleared by a clock-driven effect (#9).
     public var recentlyCopiedToken: String?
+    /// Non-`nil` while the transient "Session ID copied" toast is showing. Purely transient
+    /// confirmation state: raised by a copy, cleared by the timed expiry. It's a counter
+    /// rather than a `Bool` so a re-copy while the toast is already up is still an
+    /// observable change — that's what re-announces the copy to VoiceOver (a `Bool` would
+    /// stay `true` and the announcement would be swallowed).
+    public var copiedIDToastToken: Int?
     /// Voice-input recording lifecycle (#7).
     public var recording: RecordingState
     /// Rolling window of normalized (0...1) mic amplitudes driving the recording waveform.
@@ -196,6 +202,7 @@ public struct ChatFeature {
       self.modelPicker = nil
       self.renameDraft = nil
       self.recentlyCopiedToken = nil
+      self.copiedIDToastToken = nil
       self.recording = .idle
       self.waveformLevels = []
       self.recordingSeconds = 0
@@ -354,6 +361,11 @@ public struct ChatFeature {
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
     case copyFeedbackExpired(token: String)
+    /// Put this chat's session id (`sessionKey`) on the pasteboard and raise the transient
+    /// confirmation toast. A no-op before the session resolves (`sessionKey == nil`).
+    case copySessionIDTapped
+    /// The copy toast's dwell time elapsed — hide it.
+    case copiedIDToastExpired
     // Voice input (#7)
     case voiceButtonTapped
     case recordingPermission(Bool)
@@ -404,11 +416,16 @@ public struct ChatFeature {
   }
 
   private enum CancelID {
-    case socket, reconnect, hydrate, copyFeedback, voiceLevels, voiceTimer, thinkingTimer, persist
+    case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer,
+         thinkingTimer, persist
   }
 
   /// Debounce window for write-back so heavy streaming doesn't thrash SQLite.
   private static let persistDebounce: Duration = .seconds(1)
+
+  /// How long a copy confirmation stays up. Shared by the code-block checkmark and the
+  /// "Session ID copied" toast so the two can't visually desync.
+  static let copiedFeedbackDuration: Duration = .seconds(1.5)
 
   @Dependency(\.hermesGateway) var gateway
   @Dependency(\.hermesREST) var rest
@@ -917,7 +934,7 @@ public struct ChatFeature {
         return .merge(
           .run { [pasteboard] _ in pasteboard.copy(text) },
           .run { [clock] send in
-            try await clock.sleep(for: .seconds(1.5))
+            try await clock.sleep(for: Self.copiedFeedbackDuration)
             await send(.copyFeedbackExpired(token: token))
           }
           .cancellable(id: CancelID.copyFeedback, cancelInFlight: true)
@@ -925,6 +942,26 @@ public struct ChatFeature {
 
       case let .copyFeedbackExpired(token):
         if state.recentlyCopiedToken == token { state.recentlyCopiedToken = nil }
+        return .none
+
+      case .copySessionIDTapped:
+        // No session yet (brand-new chat before `session.create` resolves) — nothing to
+        // copy, and no toast to promise one.
+        guard let sessionID = state.sessionKey else { return .none }
+        state.copiedIDToastToken = (state.copiedIDToastToken ?? 0) + 1
+        // Copy now; hide the confirmation after a beat. A second copy while the toast is
+        // up restarts the dwell (cancelInFlight) so the latest copy owns the countdown.
+        return .merge(
+          .run { [pasteboard] _ in pasteboard.copy(sessionID) },
+          .run { [clock] send in
+            try await clock.sleep(for: Self.copiedFeedbackDuration)
+            await send(.copiedIDToastExpired)
+          }
+          .cancellable(id: CancelID.copyIDToast, cancelInFlight: true)
+        )
+
+      case .copiedIDToastExpired:
+        state.copiedIDToastToken = nil
         return .none
 
       // MARK: Voice input (#7)

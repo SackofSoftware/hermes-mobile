@@ -1399,8 +1399,10 @@ public struct ChatFeature {
       // Live-only self-improvement review summary (#47): render as a bubble-less system
       // line, verbatim (the 💾 prefix arrives on the wire). Ephemeral by design — the
       // event never lands in session history, so the next hydrate replaces it wholesale.
-      guard !text.isEmpty else { return .none }
-      state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: "review", text: text)))
+      guard Self.hasRenderableReviewText(text) else { return .none }
+      state.transcript.append(
+        ChatRow(id: uuid(), kind: .status(kind: ChatRow.Kind.reviewStatusKind, text: text))
+      )
       keepThinkingLast(into: &state)
       return .none
 
@@ -1883,12 +1885,23 @@ public struct ChatFeature {
     switch event {
     case .messageStart, .messageDelta, .messageComplete,
          .thinkingDelta, .reasoningAvailable, .statusUpdate,
-         .toolStart, .toolComplete, .sessionInfo, .reviewSummary:
+         .toolStart, .toolComplete, .sessionInfo:
       return true
+    case let .reviewSummary(text):
+      // Blank text is dropped by the fold with zero state change — don't schedule a
+      // pointless snapshot write for it.
+      return Self.hasRenderableReviewText(text)
     case .ready, .error, .authExpired, .approvalRequest, .clarifyRequest,
          .sudoRequest, .secretRequest, .unknown:
       return false
     }
+  }
+
+  /// Whether a `review.summary` payload has visible content. Whitespace-only text would
+  /// render a blank status row, so the fold (drop the row) and `persistRelevant` (skip the
+  /// snapshot write for a no-op fold) share this one check and can't drift.
+  private static func hasRenderableReviewText(_ text: String) -> Bool {
+    text.trimmedNonEmpty != nil
   }
 
   /// Debounced write-back trigger: coalesces a burst of streaming deltas into a single

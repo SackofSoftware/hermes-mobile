@@ -1042,15 +1042,24 @@ struct ChatReductionTests {
     }
   }
 
-  @Test func emptyReviewSummaryIsDropped() async {
-    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+  @Test func blankReviewSummaryIsDroppedWithoutPersist() async {
+    // Session ids are set so the persist gate at the `.gatewayEvent` wrapper is live: if a
+    // blank summary counted as persist-relevant, the exhaustive TestStore would fail on the
+    // scheduled (never-completed) debounce effect. Proves the fold no-op schedules nothing.
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.status = .ready
+    let store = TestStore(initialState: initial) {
       ChatFeature()
     }
-    // A payload with no text must not render an empty caption row.
+    // A payload with no visible text must not render a blank caption row — neither empty
+    // nor whitespace-only (a whitespace row would paint as an invisible line).
     await store.send(.gatewayEvent(.reviewSummary(text: "")))
+    await store.send(.gatewayEvent(.reviewSummary(text: " \n\t ")))
   }
 
-  @Test func reviewSummaryMidTurnKeepsThinkingRowLast() async {
+  @Test func reviewSummaryMidTurnInterleavesWithStreamingAndKeepsThinkingLast() async {
     let clock = TestClock()
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
       ChatFeature()
@@ -1064,21 +1073,40 @@ struct ChatReductionTests {
       $0.transcript = [ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))]
       $0.thinkingRowID = uuid(0)
     }
-    // A summary arriving mid-turn slots in above the pinned live thinking row.
+    // The turn is actively streaming when the summary lands: the first delta creates the
+    // in-flight assistant row (above the pinned thinking row).
+    await store.send(.gatewayEvent(.messageDelta(text: "Sure, "))) {
+      $0.transcript = [
+        ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Sure, ", isComplete: false)),
+        ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
+      ]
+      $0.streamingRowID = uuid(1)
+    }
+    // A summary arriving mid-turn slots in BELOW the partial assistant row and above the
+    // pinned live thinking row: [assistant][summary][thinking].
     await store.send(.gatewayEvent(.reviewSummary(text: "💾 Self-improvement review: noted."))) {
       $0.transcript = [
-        ChatRow(id: uuid(1), kind: .status(kind: "review", text: "💾 Self-improvement review: noted.")),
+        ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Sure, ", isComplete: false)),
+        ChatRow(id: uuid(2), kind: .status(kind: "review", text: "💾 Self-improvement review: noted.")),
         ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
       ]
     }
     #expect(store.state.transcript.last?.id == uuid(0))
-    // Turn ends: the empty thinking row is removed; the summary row stays.
-    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil))) {
+    // Later deltas keep mutating the SAME streaming row in place, above the summary — the
+    // summary must not capture or reorder the stream.
+    await store.send(.gatewayEvent(.messageDelta(text: "here goes."))) {
+      $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Sure, here goes.", isComplete: false)
+    }
+    #expect(store.state.transcript.map(\.id) == [uuid(1), uuid(2), uuid(0)])
+    // Turn ends: the empty thinking row is removed; the answer + summary stay in order.
+    await store.send(.gatewayEvent(.messageComplete(text: "Sure, here goes.", usage: nil))) {
+      $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Sure, here goes.", isComplete: true)
       $0.transcript.remove(id: self.uuid(0))
       $0.thinkingRowID = nil
+      $0.streamingRowID = nil
       $0.isSending = false
     }
-    #expect(store.state.transcript.map(\.id) == [uuid(1)])
+    #expect(store.state.transcript.map(\.id) == [uuid(1), uuid(2)])
   }
 
   @Test func reviewSummaryTriggersSnapshotPersist() async {

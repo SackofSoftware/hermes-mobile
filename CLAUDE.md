@@ -74,11 +74,12 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   degrades to prose), rendered in `MarkdownText` (headings → scaled bold, blockquote → indented bar,
   table → `Grid`). **Only USER messages have a bubble** — assistant / tool / thinking rows render
   bubble-less plain content, and the assistant Markdown is fully selectable (`.textSelection`).
-- **`review.summary` is a LIVE-ONLY broadcast** (#47) — the agent's background self-improvement
-  review emits it over the socket but never writes it to session history, so a hydrate wipes the
-  row (accepted until an upstream hermes-agent change persists it). Decoded to `.reviewSummary`,
-  folded into a bubble-less `.status(kind: "review")` row rendered at footnote size (selectable);
-  empty text is dropped.
+- **`review.summary` is a LIVE-ONLY event** (#47) — the agent's background self-improvement
+  review emits it to the session's own socket (per-session `_emit`, not a global broadcast) but
+  never writes it to session history, so a hydrate wipes the row (accepted until an upstream
+  hermes-agent change persists it). Decoded to `.reviewSummary`, folded into a bubble-less
+  `.status(kind: ChatRow.Kind.reviewStatusKind)` row rendered at footnote size (selectable);
+  blank (empty/whitespace-only) text is dropped.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
 - **Auth has two regimes**, modeled by `AuthSession` (`.token` | `.cookie(CookieSession)`) so
   the REST/Gateway clients adapt transport without scattering regime checks. **Token mode**

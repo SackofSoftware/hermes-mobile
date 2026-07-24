@@ -189,8 +189,8 @@ struct ChatView: View {
     case let .status(kind, text):
       // Review summaries (#47) are multi-sentence system lines — render them a step
       // larger (`.footnote`) and selectable so they stay readable/copyable. Other
-      // status kinds ("Approved", clarify answers, …) keep the terse caption styling.
-      if kind == "review" {
+      // status kinds ("approval", "clarify", …) keep the terse caption styling.
+      if kind == ChatRow.Kind.reviewStatusKind {
         Text(text)
           .font(.footnote)
           .foregroundStyle(.secondary)

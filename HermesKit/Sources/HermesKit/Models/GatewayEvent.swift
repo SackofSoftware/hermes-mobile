@@ -22,8 +22,9 @@ public enum GatewayEvent: Equatable, Sendable {
   case sudoRequest(SecretPrompt)
   case secretRequest(SecretPrompt)
   case error(message: String)
-  /// Live-only broadcast from the agent's background self-improvement review
-  /// (`review.summary`, issue #47). Never written to session history, so a hydrate
+  /// Live-only event from the agent's background self-improvement review
+  /// (`review.summary`, issue #47), emitted to the session's own transport (not a
+  /// global broadcast). Never written to session history, so a hydrate
   /// (`session.resume`) cannot return it — the rendered row is ephemeral by design.
   case reviewSummary(text: String)
   /// Synthetic (client-side, never on the wire): the gated `ws-ticket` mint returned `401`,

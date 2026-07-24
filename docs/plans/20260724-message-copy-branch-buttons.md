@@ -242,12 +242,12 @@ Files involved:
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 - Modify: `HermesMobileTests/` (chat snapshot tests)
 
-- [ ] build `MessageActionBar` (copy button with checkmark-swap driven by the row token; branch button `arrow.triangle.branch`) — small secondary-tinted icons, leading-aligned under the assistant text, a11y labels
-- [ ] show it only under completed assistant `.message` rows in `rowView`; keep the existing context-menu copy
-- [ ] disable/hide branch while the turn is running (mirror the reducer guard for instant affordance feedback)
-- [ ] run `tuist generate` (new source file)
-- [ ] write snapshot tests: completed assistant message with action bar; copied state (checkmark); streaming row without the bar
-- [ ] run `make snapshot` + full test suite - must pass before task 9
+- [x] build `MessageActionBar` (copy button with checkmark-swap driven by the row token; branch button `arrow.triangle.branch`) — small secondary-tinted icons, leading-aligned under the assistant text, a11y labels
+- [x] show it only under completed assistant `.message` rows in `rowView`; keep the existing context-menu copy
+- [x] disable/hide branch while the turn is running (disabled + dimmed, also while `isBranching` — mirrors the reducer guard for instant affordance feedback)
+- [x] run `tuist generate` (new source file)
+- [x] write snapshot tests: completed assistant message with action bar (device); copied state + branch-disabled (component); streaming row without the bar (component `rowView` cell — a full-device streaming capture is flaky: the spinner keeps animations alive while the collection view re-pins, occasionally compositing the cell twice; `rowView` made internal for the test)
+- [x] run `make snapshot` + full test suite - must pass before task 9 (assistant-message baselines re-recorded for the new action row; all other baselines byte-identical)
 
 ### Task 9: Verify acceptance criteria
 

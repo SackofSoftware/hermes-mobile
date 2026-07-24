@@ -4,9 +4,10 @@ GitHub issue: #47
 
 ## Overview
 
-- The agent's background self-improvement review broadcasts a **live-only** gateway event
+- The agent's background self-improvement review emits a **live-only** per-session gateway event
   `{"type": "review.summary", "session_id": "...", "payload": {"text": "💾 Self-improvement review: …"}}`
-  (emitted by `agent/background_review.py`, broadcast by `tui_gateway/server.py`). The desktop
+  (emitted by `agent/background_review.py`, routed by `tui_gateway/server.py`'s per-session
+  `_emit` to the session-owning transport — not a global broadcast). The desktop
   TUI renders it as a system line; Telegram persists it as an ordinary message. Mobile silently
   drops it: `GatewayEvent` has no case for it, so it decodes to `.unknown` and the reducer no-ops.
 - Fix (mobile side, per issue #47): decode the event and render it as a lightweight, bubble-less
@@ -151,8 +152,8 @@ GitHub issue: #47
 
 ### Task 5: [Final] Update documentation
 
-- [ ] add a brief `review.summary` note to the CLAUDE.md conventions (live-only event → `.status(kind: "review")` row; never in history)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] add a brief `review.summary` note to the CLAUDE.md conventions (live-only event → `.status(kind: "review")` row; never in history)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

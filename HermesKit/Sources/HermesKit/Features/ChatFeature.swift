@@ -411,6 +411,17 @@ public struct ChatFeature {
     /// ("/cmd " trailing-space ready for args, or "/cmd sub"). Nothing else changes; the
     /// computed `slashSuggestions` updates/clears automatically and the keyboard stays up.
     case slashSuggestionTapped(SlashSuggestion)
+    /// The slash pipeline produced its ephemeral output (`slash.exec`): append the
+    /// bubble-less `commandOutput` row, unlock the composer, then fire the runtime-only
+    /// refresh. The output is local-only, desktop parity — the next wholesale hydrate
+    /// drops it (never in server history).
+    case slashCommandOutput(String)
+    /// The slash pipeline failed outright: banner + unlock (never a swallowed `try?`).
+    case slashCommandFailed(message: String)
+    /// The post-exec runtime-only refresh landed: apply model/reasoning/usage ONLY — the
+    /// transcript is deliberately untouched (a full hydrate's wholesale replace would wipe
+    /// the ephemeral `commandOutput` row just appended).
+    case slashRuntimeInfoRefreshed(SessionInfo)
 
     /// Signals the parent (`AppFeature`) routes: the dead-session signal that raises the
     /// re-auth modal (reconnect backoff is paused for it), and the authoritative
@@ -769,6 +780,32 @@ public struct ChatFeature {
               await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
             }
           })
+        }
+
+        // Slash-command branch (#36): a typed command executes through the gateway's
+        // dedicated slash pipeline (`slash.exec`), never as plain prompt text — but ONLY
+        // when the catalog actually loaded (backward-compat guard: an old agent without
+        // `commands.catalog`, or one whose catalog never arrived, falls through to the
+        // plain path byte-identical to today). Staged attachments always take the plain
+        // path — they returned above (bytes must upload; the exec pipeline has no
+        // attachment semantics). The typed `/cmd` is echoed as a normal user row; no turn
+        // anchor is set (an exec is not a turn — no `message.start` will follow, so a
+        // hydrate mid-exec must not resurrect a phantom elapsed timer).
+        if text.hasPrefix("/"), state.commandCatalog != nil {
+          let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+          state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
+          maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+          state.composerText = ""
+          state.errorBanner = nil
+          state.isSending = true
+          let stored = state.storedSessionID
+          let profile = state.scopedProfile
+          return .run { [gateway] send in
+            await executeSlashCommand(
+              command: text, sessionID: sessionID, storedSessionID: stored,
+              profile: profile, gateway: gateway, send: send
+            )
+          }
         }
 
         let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
@@ -1151,6 +1188,42 @@ public struct ChatFeature {
 
       case let .slashSuggestionTapped(suggestion):
         state.composerText = suggestion.insertionText
+        return .none
+
+      case let .slashCommandOutput(output):
+        let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+        state.transcript.append(ChatRow(id: uuid(), kind: .commandOutput(text: output)))
+        maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+        state.isSending = false
+        // Client-side "turn" end — no server event follows an exec-style command, so emit
+        // `runningChanged(false)` like `.promptSubmitFailed` does (a DETACHED slot waiting
+        // on the turn must be torn down; harmless to the list glow, which only lights on
+        // `message.start`). Then the runtime-only refresh: the command may have changed
+        // model/reasoning/usage (`/compress`, `/model`, …).
+        guard let sessionID = state.liveSessionID else { return runningChanged(false, state) }
+        return .merge(
+          runningChanged(false, state),
+          refreshRuntimeInfo(sessionID: sessionID, profile: state.scopedProfile)
+        )
+
+      case let .slashCommandFailed(message):
+        state.errorBanner = "Command failed: \(message)"
+        state.isSending = false
+        // Client-side turn end (mirrors `.promptSubmitFailed`): no server event will
+        // follow, so a detached slot waiting on the turn is released here.
+        return runningChanged(false, state)
+
+      case let .slashRuntimeInfoRefreshed(info):
+        // Runtime-only refresh landed: model/reasoning/usage only — the transcript is
+        // NEVER touched here (desktop-parity ephemerality: the commandOutput row must
+        // survive; a wholesale rebuild would wipe it).
+        var target = RuntimeInfoTarget(
+          model: state.model, reasoningEffort: state.reasoningEffort, usage: state.usage
+        )
+        applyRuntimeInfo(info, into: &target)
+        state.model = target.model
+        state.reasoningEffort = target.reasoningEffort
+        state.usage = target.usage
         return .none
 
       case let .toolTapped(id):
@@ -1953,6 +2026,25 @@ public struct ChatFeature {
     }
   }
 
+  /// The runtime-only refresh after a successful slash exec (#36): call `session.resume`
+  /// and apply ONLY its `info` (model/reasoning/usage — e.g. `/compress` shrinks the
+  /// context pill, `/model` swaps the chip). Deliberately NOT the full hydrate:
+  /// `reconstructTranscript`'s wholesale replace would wipe the ephemeral `commandOutput`
+  /// row just appended (slash output is never in server history — desktop parity).
+  /// Failure is silent by design: the refresh is purely cosmetic and the next real
+  /// hydrate reconciles.
+  private func refreshRuntimeInfo(sessionID: String, profile: String?) -> Effect<Action> {
+    .run { [gateway] send in
+      var fields: [String: JSONValue] = ["session_id": .string(sessionID)]
+      if let profile { fields["profile"] = .string(profile) }
+      guard
+        let result = try? await gateway.send("session.resume", .object(fields)),
+        let info = result.decoded(ActivateResponse.self)?.info
+      else { return }
+      await send(.slashRuntimeInfoRefreshed(info))
+    }
+  }
+
   // MARK: - Snapshot write-back
 
   /// Whether a gateway event changes the transcript / model / usage enough to warrant a
@@ -2099,24 +2191,79 @@ private func healLiveSessionID(
 /// Run an outbound RPC with transparent self-heal on "session not found" (#17): run `op`
 /// against the current live id; if it throws `isSessionNotFound`, re-resume/recreate for a
 /// fresh id (applying it via `.liveSessionIDRefreshed`) and replay `op(healedID)` ONCE. A
-/// single retry — never recurses. This is the SHARED inner mechanism; callers keep their own
-/// OUTER catch to map a failure (heal, retry, or any other error) to the right per-call action
-/// (`.promptSubmitFailed` / `.attachmentUploadFailed` / `.renameFailed`).
-private func withSessionHeal(
-  _ op: (_ targetID: String) async throws -> Void,
+/// single retry — never recurses. Returns `op`'s value (discardable for fire-and-forget
+/// RPCs). This is the SHARED inner mechanism; callers keep their own OUTER catch to map a
+/// failure (heal, retry, or any other error) to the right per-call action
+/// (`.promptSubmitFailed` / `.attachmentUploadFailed` / `.renameFailed` /
+/// `.slashCommandFailed`).
+@discardableResult
+private func withSessionHeal<T>(
+  _ op: (_ targetID: String) async throws -> T,
   sessionID: String,
   storedSessionID: String?,
   profile: String?,
   gateway: HermesGatewayClient,
   send: Send<ChatFeature.Action>
-) async throws {
+) async throws -> T {
   do {
-    try await op(sessionID)
+    return try await op(sessionID)
   } catch let error as GatewayError where error.isSessionNotFound {
     let healedID = try await healLiveSessionID(
       storedSessionID: storedSessionID, profile: profile, gateway: gateway, send: send
     )
-    try await op(healedID)
+    return try await op(healedID)
+  }
+}
+
+/// Split a typed slash command into its `name` (leading slashes stripped, first token)
+/// and trimmed argument remainder — the web reference's `parseSlash`
+/// (`web/src/lib/slashExec.ts`). Pure.
+private func parseSlashCommand(_ command: String) -> (name: String, arg: String) {
+  let stripped = command.drop(while: { $0 == "/" })
+  guard let space = stripped.firstIndex(where: \.isWhitespace) else {
+    return (String(stripped), "")
+  }
+  let name = String(stripped[..<space])
+  let arg = String(stripped[stripped.index(after: space)...])
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+  return (name, arg)
+}
+
+/// Run a submitted slash command through the gateway's dedicated slash pipeline (#36),
+/// mirroring the web reference client (`web/src/lib/slashExec.ts`, explicitly written for
+/// native clients to copy): `slash.exec {command (no leading slash), session_id}` covers
+/// every registry-backed command and answers `{output, warning?}` — surfaced as an
+/// ephemeral `commandOutput` row (empty output degrades to "/name: no output", a warning
+/// is prefixed). Wrapped in the standard session-not-found self-heal (#17): a stale live
+/// id re-resumes once and replays. Failure surfaces `.slashCommandFailed` — never a
+/// swallowed `try?`.
+private func executeSlashCommand(
+  command: String,
+  sessionID: String,
+  storedSessionID: String?,
+  profile: String?,
+  gateway: HermesGatewayClient,
+  send: Send<ChatFeature.Action>
+) async {
+  let name = parseSlashCommand(command).name
+  do {
+    let result = try await withSessionHeal(
+      { targetID in
+        try await gateway.send("slash.exec", .object([
+          "command": .string(String(command.drop(while: { $0 == "/" }))),
+          "session_id": .string(targetID),
+        ]))
+      },
+      sessionID: sessionID, storedSessionID: storedSessionID,
+      profile: profile, gateway: gateway, send: send
+    )
+    let body = result["output"]?.stringValue?.nonEmpty ?? "/\(name): no output"
+    let text = result["warning"]?.stringValue?.nonEmpty.map { "warning: \($0)\n\(body)" } ?? body
+    await send(.slashCommandOutput(text))
+  } catch let error as GatewayError {
+    await send(.slashCommandFailed(message: error.message))
+  } catch {
+    await send(.slashCommandFailed(message: GatewayError.disconnected.message))
   }
 }
 

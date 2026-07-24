@@ -11,9 +11,19 @@ import Testing
 ///
 /// Task 4: the computed `slashSuggestions` (pure derivation from `composerText` + catalog,
 /// nothing stored) and `.slashSuggestionTapped` (inserts the suggestion's text, nothing else).
+///
+/// Task 6: the `slash.exec` pipeline in `composerSubmitted` — a typed `/cmd` with a loaded
+/// catalog echoes a user row and executes through the gateway's slash pipeline (never
+/// `prompt.submit`), appends the ephemeral `commandOutput` row, then fires the runtime-only
+/// refresh (`session.resume` → `applyRuntimeInfo`, transcript untouched). Backward-compat
+/// guard: nil catalog / `commandsUnsupported` / staged attachments all take today's plain
+/// path byte-identical.
 @MainActor
 struct SlashCommandChatTests {
   private let conn = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t")
+  private func uuid(_ n: Int) -> UUID {
+    UUID(uuidString: "00000000-0000-0000-0000-\(String(format: "%012x", n))")!
+  }
 
   /// A realistic `commands.catalog` payload: two categorized built-ins (one with
   /// subcommands + an alias) and one uncategorized skill route appended last.
@@ -369,5 +379,284 @@ struct SlashCommandChatTests {
       $0.composerText = "/"
     }
     #expect(nilCatalog.state.slashSuggestions.isEmpty)
+  }
+
+  // MARK: slash.exec pipeline (Task 6)
+
+  /// A ready chat with the catalog loaded and a resolved session, poised to submit.
+  private func readyStateWithCatalog(composerText: String = "/status") -> ChatFeature.State {
+    var state = ChatFeature.State(connection: conn)
+    state.liveSessionID = "live123"
+    state.storedSessionID = "stored123"
+    state.commandCatalog = Self.expectedCatalog
+    state.composerText = composerText
+    return state
+  }
+
+  @Test func slashSubmitRunsExecPipelineAndRefreshesRuntime() async {
+    // The issue's core exec path: "/status" echoes a user row, goes out as
+    // `slash.exec {command (no slash), session_id}` — NOT prompt.submit — appends the
+    // ephemeral commandOutput row, unlocks the composer, and then the runtime-only
+    // refresh applies model/usage from `session.resume`'s info WITHOUT touching the
+    // transcript (the response's `messages` must not be reconstructed — that would wipe
+    // the output row).
+    let calls = LockIsolated<[String]>([])
+    let execParams = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "slash.exec":
+          execParams.setValue(params)
+          return .object(["output": .string("Session: all good")])
+        case "session.resume":
+          return .object([
+            "session_id": .string("live123"),
+            "messages": .array([
+              .object(["id": .number(1), "role": .string("user"), "text": .string("server history")]),
+            ]),
+            "running": .bool(false),
+            "info": .object([
+              "model": .string("claude-opus-4-9"),
+              "usage": .object(["context_used": .number(500), "context_max": .number(200_000)]),
+            ]),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/status", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+    }
+    await store.receive(\.slashCommandOutput) {
+      $0.transcript.append(ChatRow(id: self.uuid(1), kind: .commandOutput(text: "Session: all good")))
+      $0.isSending = false
+    }
+    await store.receive(\.slashRuntimeInfoRefreshed) {
+      $0.model = "claude-opus-4-9"
+      $0.usage = Usage(contextUsed: 500, contextMax: 200_000)
+    }
+    await store.finish()
+
+    // Exactly the pipeline RPCs — never prompt.submit; the command travels slash-less.
+    #expect(calls.value == ["slash.exec", "session.resume"])
+    #expect(execParams.value?["command"]?.stringValue == "status")
+    #expect(execParams.value?["session_id"]?.stringValue == "live123")
+    // The refresh applied runtime info only: the transcript is still the typed command +
+    // its output, NOT a rebuild of the server-history payload.
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "/status", isComplete: true),
+      .commandOutput(text: "Session: all good"),
+    ])
+    #expect(store.state.errorBanner == nil)
+  }
+
+  @Test func slashExecWarningAndEmptyOutputDegradeGracefully() async {
+    // Web-reference parity: a `warning` is prefixed above the body, and an empty/missing
+    // `output` degrades to "/name: no output" rather than an empty row.
+    let execCount = LockIsolated(0)
+    let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        switch method {
+        case "slash.exec":
+          let attempt = execCount.withValue { $0 += 1; return $0 }
+          if attempt == 1 {
+            return .object(["output": .string("done"), "warning": .string("deprecated")])
+          }
+          return .object([:]) // no output at all
+        case "session.resume":
+          // Runtime refresh with no `info` → no refresh action.
+          return .object([
+            "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "warning: deprecated\ndone"))
+
+    await store.send(.binding(.set(\.composerText, "/status"))) {
+      $0.composerText = "/status"
+    }
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    await store.finish()
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "/status: no output"))
+  }
+
+  @Test func slashExecFailureSurfacesBannerAndUnlocks() async {
+    // The pipeline failing outright must surface a banner and unlock the composer —
+    // never a swallowed `try?`. (Both pipeline RPCs fail here, so this test also covers
+    // the both-fail contract once the Task 7 dispatch fallback lands.)
+    let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        switch method {
+        case "slash.exec", "command.dispatch": throw GatewayError.server("boom")
+        default: return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/status", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+    }
+    await store.receive(\.slashCommandFailed) {
+      $0.errorBanner = "Command failed: boom"
+      $0.isSending = false
+    }
+    await store.finish()
+    // The typed command row stays visible; no output row was appended.
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "/status", isComplete: true),
+    ])
+  }
+
+  @Test func slashExecSelfHealsOnSessionNotFound() async {
+    // The exec rides the standard #17 self-heal: a stale live id answers "session not
+    // found" → re-resume for a fresh id, replay the exec ONCE against it, output lands
+    // with no banner.
+    let calls = LockIsolated<[(method: String, sid: String?)]>([])
+    var initial = readyStateWithCatalog()
+    initial.liveSessionID = "stale-live"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        let sid = params["session_id"]?.stringValue
+        calls.withValue { $0.append((method, sid)) }
+        switch method {
+        case "slash.exec":
+          if sid == "stale-live" { throw GatewayError.server("session not found") }
+          return .object(["output": .string("ok")])
+        case "session.resume":
+          // Serves both the heal and the post-exec runtime refresh (no `info` → silent).
+          return .object([
+            "session_id": .string("fresh-live"),
+            "stored_session_id": .string("stored123"),
+            "messages": .array([]),
+            "running": .bool(false),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.liveSessionIDRefreshed) {
+      $0.liveSessionID = "fresh-live"
+    }
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    await store.finish()
+
+    // Exec, heal-resume, single replay (against the fresh id), then the runtime refresh.
+    #expect(calls.value.map(\.method) == ["slash.exec", "session.resume", "slash.exec", "session.resume"])
+    #expect(calls.value[2].sid == "fresh-live")
+    #expect(store.state.errorBanner == nil)
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "ok"))
+  }
+
+  // MARK: Backward-compat guard (Task 6)
+
+  @Test func slashTextWithoutCatalogGoesThroughPlainPromptSubmit() async {
+    // An old agent (`commandsUnsupported` latched, catalog nil — the only reachable
+    // combination) sees "/status" as ordinary prompt text: one prompt.submit, no
+    // slash.exec, isSending follows the normal turn lifecycle. Byte-identical to today.
+    let calls = LockIsolated<[String]>([])
+    let submitParams = LockIsolated<JSONValue?>(nil)
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.commandsUnsupported = true
+    initial.composerText = "/status"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append(method) }
+        if method == "prompt.submit" { submitParams.setValue(params) }
+        return .object(["status": .string("streaming")])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/status", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+    }
+    await store.finish()
+
+    #expect(calls.value == ["prompt.submit"])
+    #expect(submitParams.value?["text"]?.stringValue == "/status")
+    #expect(store.state.isSending) // the turn streams via events, not the RPC ack
+    #expect(store.state.errorBanner == nil)
+  }
+
+  @Test func stagedAttachmentsForceThePlainPath() async {
+    // Attachments always take the plain upload→submit path even when the text is a valid
+    // slash command and the catalog is loaded — the exec pipeline has no attachment
+    // semantics, and bytes must upload first.
+    let calls = LockIsolated<[String]>([])
+    var initial = readyStateWithCatalog()
+    initial.attachments = [
+      ComposerAttachment(
+        id: uuid(99), kind: .image, filename: "a.png", mimeType: "image/png", data: Data([1])
+      ),
+    ]
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        return .object(["status": .string("streaming")])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.attachmentsSubmitted)
+    await store.finish()
+
+    #expect(calls.value == ["image.attach_bytes", "prompt.submit"])
+    #expect(!calls.value.contains("slash.exec"))
   }
 }

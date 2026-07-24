@@ -303,21 +303,31 @@ deterministic row ID (never random, never derived from mutable text).
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 
-- [ ] branch `composerSubmitted`: trimmed text starts with `/` AND catalog loaded
+- [x] branch `composerSubmitted`: trimmed text starts with `/` AND catalog loaded
       AND attachments empty → command branch (append user row, clear composer, set
       `isSending`); otherwise today's path byte-identical
-- [ ] add the `slash.exec` effect (`{command w/o slash, session_id}`) + response
+- [x] add the `slash.exec` effect (`{command w/o slash, session_id}`) + response
       action appending the `commandOutput` row (include `warning` when present) and
       clearing `isSending`; wrap with the existing session-not-found self-heal
-- [ ] add the runtime-only refresh after successful exec: `session.resume` →
+- [x] add the runtime-only refresh after successful exec: `session.resume` →
       `applyRuntimeInfo` only (no transcript touch); silent on failure
-- [ ] write TestStore tests: `/status` submit → user row + exec RPC + output row +
+- [x] write TestStore tests: `/status` submit → user row + exec RPC + output row +
       `isSending` cycle + runtime refresh applies model/usage without transcript
       change
-- [ ] write TestStore tests: unsupported/`nil`-catalog agent → `/text` goes through
+- [x] write TestStore tests: unsupported/`nil`-catalog agent → `/text` goes through
       plain `prompt.submit` untouched (backward-compat guard); staged attachments
       force the plain path
-- [ ] run `swift test --package-path HermesKit` — must pass before task 7
+- [x] run `swift test --package-path HermesKit` — must pass before task 7
+- ➕ `withSessionHeal` was made generic (`-> T`, `@discardableResult`) so the exec
+  pipeline reuses the shared #17 self-heal while consuming the RPC's response value
+  (existing Void callers unchanged); a dedicated heal test covers the exec replay
+- ➕ the slash terminal actions (`.slashCommandOutput` / `.slashCommandFailed`) emit
+  `runningChanged(false)` — a client-side "turn" end mirroring `.promptSubmitFailed`,
+  so a detached slot waiting on the exec is released (no server event will follow)
+- ➕ the slash branch sets NO turn anchor (an exec is not a turn — no `message.start`
+  follows, and a hydrate mid-exec must not resurrect a phantom elapsed timer)
+- ➕ web-reference parity in the output row: empty output degrades to
+  `"/name: no output"`, a `warning` is prefixed as `"warning: …\n<body>"` (tested)
 
 ### Task 7: command.dispatch fallback (alias, exec, skill/send directives)
 

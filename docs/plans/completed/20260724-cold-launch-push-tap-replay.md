@@ -115,14 +115,14 @@
 **Files:**
 - Modify: `HermesKit/Sources/HermesKit/Clients/PushClient.swift`
 
-- [ ] move the `PushBridge` class above the `#if canImport(UIKit)` block; keep the
+- [x] move the `PushBridge` class above the `#if canImport(UIKit)` block; keep the
       `liveValue` extension and app-delegate-facing UIKit code inside the guard
-- [ ] verify `PushBridge` compiles on macOS: only Foundation + pure `PushClient` helpers
+- [x] verify `PushBridge` compiles on macOS: only Foundation + pure `PushClient` helpers
       (`hexToken`, `tap(fromPayload:)`, `sessionID(fromPayload:)`,
       `shouldPresentForeground`) — no UIKit/UserNotifications symbols
-- [ ] write a smoke unit test in `PushClientTests.swift`: `tokenStream()` late-subscriber
+- [x] write a smoke unit test in `PushClientTests.swift`: `tokenStream()` late-subscriber
       replay via `PushBridge` (locks in existing behavior now that it's testable)
-- [ ] run tests — must pass before task 2
+- [x] run tests — must pass before task 2
 
 ### Task 2: Buffer the last undelivered tap in PushBridge (TDD)
 
@@ -130,16 +130,16 @@
 - Modify: `HermesKit/Tests/HermesKitTests/PushClientTests.swift`
 - Modify: `HermesKit/Sources/HermesKit/Clients/PushClient.swift`
 
-- [ ] write failing test: `tapReceived` before any subscriber → first `tapStream()`
+- [x] write failing test: `tapReceived` before any subscriber → first `tapStream()`
       subscriber receives the buffered tap
-- [ ] write failing test: buffered tap is consume-once — a second, later `tapStream()`
+- [x] write failing test: buffered tap is consume-once — a second, later `tapStream()`
       subscriber does NOT receive it again
-- [ ] write failing test: a tap delivered to a live subscriber is not buffered — a
+- [x] write failing test: a tap delivered to a live subscriber is not buffered — a
       subsequent new subscriber receives nothing
-- [ ] write test (existing behavior guard): tap with live subscribers reaches all of them
-- [ ] implement `pendingTap` cache in `tapReceived` + drain in `tapStream()` per
+- [x] write test (existing behavior guard): tap with live subscribers reaches all of them
+- [x] implement `pendingTap` cache in `tapReceived` + drain in `tapStream()` per
       Technical Details
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: Stash and replay the pre-home tap in AppFeature (TDD)
 
@@ -147,37 +147,45 @@
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 
-- [ ] write failing TestStore test: cold-launch order — `.pushTapped(tap)` with
+- [x] write failing TestStore test: cold-launch order — `.pushTapped(tap)` with
       `home == nil` stashes the tap (badge bookkeeping unchanged), then
       `.autoConnectSucceeded` clears the stash and replays into
       `.home(.delegate(.openSession))` with the placeholder `Session(id:)`
-- [ ] write failing TestStore test: same replay through
+- [x] write failing TestStore test: same replay through
       `.onboarding(.delegate(.connected))` (auto-connect-failed → manual login path)
-- [ ] write failing TestStore test: approval tap pre-home — badge set on the drop,
+- [x] write failing TestStore test: approval tap pre-home — badge set on the drop,
       replay arms `expectsPendingApproval` through the normal open flow and nets the
       badge entry to zero
-- [ ] write test (existing behavior guard): warm-path `.pushTapped` with `home` present
+- [x] write test (existing behavior guard): warm-path `.pushTapped` with `home` present
       never touches `pendingPushTap`; `.autoConnectSucceeded` without a stash emits no
       replay
-- [ ] add `pendingPushTap` to `AppFeature.State`; stash in the `home == nil` branch;
+- [x] add `pendingPushTap` to `AppFeature.State`; stash in the `home == nil` branch;
       consume + re-send `.pushTapped` from `.autoConnectSucceeded` and
       `.onboarding(.delegate(.connected))`
-- [ ] run tests — must pass before task 4
+- [x] run tests — must pass before task 4
+- ➕ reworked two existing tests that pinned the old "dropped tap stays badged until
+  manually opened" behavior: `approvalBadgeSetsWhenUnopenedAndClearsOnView` →
+  `approvalBadgeClearsAndThreadsHintWhenOpenedFromList` (the #30 badged-then-opened-later
+  route, now seeded via initial state since a replay auto-opens the stashed tap);
+  `multiplePendingApprovalsSetBadgeThenClearOne` now covers last-wins stashing (only the
+  newest pre-home tap replays; the older one stays badged until opened from the list)
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify both drop sites from issue #46 are closed (bridge buffer + reducer replay)
-- [ ] verify edge cases: tap for the session already in the slot after replay (slot-match
+- [x] verify both drop sites from issue #46 are closed (bridge buffer + reducer replay)
+- [x] verify edge cases: tap for the session already in the slot after replay (slot-match
       short-circuit still applies — replay goes through the same `.pushTapped` case);
       non-approval tap replay; approval badge netting
-- [ ] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] confirm no view changes → snapshot suite untouched, no re-record needed
+- [x] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
+      (741 tests in 49 suites passed)
+- [x] confirm no view changes → snapshot suite untouched, no re-record needed
+      (diff vs main touches only `HermesKit/Sources`, `HermesKit/Tests`, and this plan)
 
 ### Task 5: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` push-notifications bullet: note the cold-launch tap replay
+- [x] update `CLAUDE.md` push-notifications bullet: note the cold-launch tap replay
       (bridge consume-once buffer + `pendingPushTap` reducer stash)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — no checkboxes, informational only*

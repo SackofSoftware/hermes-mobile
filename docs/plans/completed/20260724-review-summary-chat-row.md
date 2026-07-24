@@ -4,9 +4,10 @@ GitHub issue: #47
 
 ## Overview
 
-- The agent's background self-improvement review broadcasts a **live-only** gateway event
+- The agent's background self-improvement review emits a **live-only** per-session gateway event
   `{"type": "review.summary", "session_id": "...", "payload": {"text": "💾 Self-improvement review: …"}}`
-  (emitted by `agent/background_review.py`, broadcast by `tui_gateway/server.py`). The desktop
+  (emitted by `agent/background_review.py`, routed by `tui_gateway/server.py`'s per-session
+  `_emit` to the session-owning transport — not a global broadcast). The desktop
   TUI renders it as a system line; Telegram persists it as an ordinary message. Mobile silently
   drops it: `GatewayEvent` has no case for it, so it decodes to `.unknown` and the reducer no-ops.
 - Fix (mobile side, per issue #47): decode the event and render it as a lightweight, bubble-less
@@ -103,11 +104,13 @@ GitHub issue: #47
 - Modify: `HermesKit/Sources/HermesKit/Models/GatewayEvent.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/GatewayEventDecodingTests.swift`
 
-- [ ] add `case reviewSummary(text: String)` to `GatewayEvent`
-- [ ] decode `"review.summary"` in `init(type:payload:)` → `.reviewSummary(text: p["text"]?.stringValue ?? "")`
-- [ ] write test: full frame with `session_id` + payload text decodes to `.reviewSummary` (text verbatim, 💾 prefix intact)
-- [ ] write tests: missing/absent `text` → empty string; unrelated unknown types still decode to `.unknown`
-- [ ] run `swift test --package-path HermesKit` — must pass before task 2
+- [x] add `case reviewSummary(text: String)` to `GatewayEvent`
+- [x] decode `"review.summary"` in `init(type:payload:)` → `.reviewSummary(text: p["text"]?.stringValue ?? "")`
+- [x] write test: full frame with `session_id` + payload text decodes to `.reviewSummary` (text verbatim, 💾 prefix intact)
+- [x] write tests: missing/absent `text` → empty string; unrelated unknown types still decode to `.unknown` (existing `unknownEventTypeDecodesToUnknownAndNeverThrows` still passes)
+- [x] run `swift test --package-path HermesKit` — must pass before task 2 (723 tests pass)
+- [x] ➕ handle the new case in `GatewayLogEntry` (`eventType` → `"review.summary"`, `debugSummary` → truncated text) — exhaustive switches
+- [x] ➕ add compile-only stubs in `ChatFeature` (`.reviewSummary` → `.none`; `persistRelevant` → `false`) — replaced with the real fold in Task 2
 
 ### Task 2: Fold `.reviewSummary` into a `.status` transcript row in ChatFeature
 
@@ -115,13 +118,13 @@ GitHub issue: #47
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatReductionTests.swift`
 
-- [ ] handle `.reviewSummary` in the gateway-event reduce: guard non-empty text, append `ChatRow(id: uuid(), kind: .status(kind: "review", text: text))`, then `keepThinkingLast(into: &state)`
-- [ ] add `.reviewSummary` to the snapshot-persist event list (`shouldPersistSnapshot`, ~line 1876)
-- [ ] write test: event appends the status row with verbatim text
-- [ ] write test: empty-text event is a no-op (no row appended)
-- [ ] write test: event during a running turn keeps the thinking row last
-- [ ] write test: event triggers a snapshot persist (matches the existing persist-trigger test pattern)
-- [ ] run `swift test --package-path HermesKit` — must pass before task 3
+- [x] handle `.reviewSummary` in the gateway-event reduce: guard non-empty text, append `ChatRow(id: uuid(), kind: .status(kind: "review", text: text))`, then `keepThinkingLast(into: &state)`
+- [x] add `.reviewSummary` to the snapshot-persist event list (`persistRelevant`, ~line 1877)
+- [x] write test: event appends the status row with verbatim text
+- [x] write test: empty-text event is a no-op (no row appended)
+- [x] write test: event during a running turn keeps the thinking row last
+- [x] write test: event triggers a snapshot persist (matches the existing persist-trigger test pattern)
+- [x] run `swift test --package-path HermesKit` — must pass before task 3 (727 tests pass)
 
 ### Task 3: Render review status rows readably in ChatView
 
@@ -129,22 +132,28 @@ GitHub issue: #47
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift`
 
-- [ ] in `rowView`, render `.status(kind: "review", …)` at `.footnote` + `.textSelection(.enabled)`; other status kinds keep `.caption` secondary styling
-- [ ] add/extend a chat snapshot fixture with a review status row (multi-sentence text to prove readability)
-- [ ] `make snapshot-record` to record the new/changed reference images
-- [ ] run `make snapshot` — must pass before task 4
+- [x] in `rowView`, render `.status(kind: "review", …)` at `.footnote` + `.textSelection(.enabled)`; other status kinds keep `.caption` secondary styling
+- [x] add/extend a chat snapshot fixture with a review status row (multi-sentence text to prove readability) (`testChatView_reviewSummaryStatusRow` — review row next to an "approval" caption row for contrast)
+- [x] `make snapshot-record` to record the new/changed reference images (recorded only the NEW baseline via SnapshotTesting's record-on-missing first run — a full `snapshot-record` wipes/re-renders every non-pixel-exact device image and would churn unrelated PNGs)
+- [x] run `make snapshot` — must pass before task 4 (81 tests pass)
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify issue #47 fix scope: event decoded, rendered live, no crash on old/unknown events
-- [ ] verify edge cases: empty text dropped, mid-turn arrival, snapshot-cache round-trip
-- [ ] run full package suite: `script -q /dev/null swift test --package-path HermesKit` (or `make test`)
-- [ ] run snapshot suite: `make snapshot`
+- [x] verify issue #47 fix scope: event decoded, rendered live, no crash on old/unknown events
+  (decode `GatewayEvent.swift:91` + 3 decoding tests; fold `ChatFeature.swift:1398` + 4 reducer
+  tests; render `ChatView.swift:189` + snapshot test; `default` still falls to `.unknown` and
+  `unknownEventTypeDecodesToUnknownAndNeverThrows` still passes; `GatewayLogEntry` switches exhaustive)
+- [x] verify edge cases: empty text dropped, mid-turn arrival, snapshot-cache round-trip
+  (first two covered by existing reducer tests; round-trip had no direct test — ➕ added
+  `snapshotRoundTripsReviewStatusRows` to `ChatSnapshotClientTests` pinning a `.status(kind: "review")`
+  row through `ChatSnapshotClient.inMemory()`)
+- [x] run full package suite: `script -q /dev/null swift test --package-path HermesKit` (728 tests pass)
+- [x] run snapshot suite: `make snapshot` (81 tests pass)
 
 ### Task 5: [Final] Update documentation
 
-- [ ] add a brief `review.summary` note to the CLAUDE.md conventions (live-only event → `.status(kind: "review")` row; never in history)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] add a brief `review.summary` note to the CLAUDE.md conventions (live-only event → `.status(kind: "review")` row; never in history)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

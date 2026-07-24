@@ -22,6 +22,12 @@ public struct ArchivedSessionsFeature {
     public var now: Date
     /// Ids whose restore (un-archive) PATCH is in flight — guards against a double tap.
     public var restoringIDs: Set<String>
+    /// Non-`nil` while the transient "Session ID copied" toast is showing. Purely transient
+    /// confirmation state: raised by a copy, cleared by the timed expiry. It's a counter
+    /// rather than a `Bool` so a re-copy while the toast is already up is still an
+    /// observable change — that's what re-announces the copy to VoiceOver (a `Bool` would
+    /// stay `true` and the announcement would be swallowed).
+    public var copiedIDToastToken: Int?
 
     public init(
       connection: ServerConnection,
@@ -30,7 +36,8 @@ public struct ArchivedSessionsFeature {
       isLoading: Bool = false,
       loadError: String? = nil,
       now: Date = Date(timeIntervalSince1970: 0),
-      restoringIDs: Set<String> = []
+      restoringIDs: Set<String> = [],
+      copiedIDToastToken: Int? = nil
     ) {
       self.connection = connection
       self.profileName = profileName
@@ -39,6 +46,7 @@ public struct ArchivedSessionsFeature {
       self.loadError = loadError
       self.now = now
       self.restoringIDs = restoringIDs
+      self.copiedIDToastToken = copiedIDToastToken
     }
   }
 
@@ -51,6 +59,10 @@ public struct ArchivedSessionsFeature {
     /// Restore PATCH failed — re-insert the session at its saved index and surface the error.
     case restoreFailed(id: Session.ID, session: Session, index: Int)
     case sessionTapped(id: Session.ID)
+    /// Put a row's session id on the pasteboard and raise the transient confirmation toast.
+    case copyIDButtonTapped(id: Session.ID)
+    /// The copy toast's dwell time elapsed — hide it.
+    case copiedIDToastExpired
     case delegate(Delegate)
 
     @CasePathable
@@ -60,9 +72,17 @@ public struct ArchivedSessionsFeature {
     }
   }
 
+  private enum CancelID { case copyIDToast }
+
+  /// How long a copy confirmation (the "Session ID copied" toast) stays up before
+  /// auto-dismissing. Same name/value in every feature that confirms a copy.
+  static let copiedFeedbackDuration: Duration = .seconds(1.5)
+
   @Dependency(\.hermesREST) var rest
   @Dependency(\.hermesProfiles) var profiles
   @Dependency(\.date.now) var now
+  @Dependency(\.continuousClock) var clock
+  @Dependency(\.pasteboard) var pasteboard
 
   public init() {}
 
@@ -134,6 +154,23 @@ public struct ArchivedSessionsFeature {
       case let .sessionTapped(id):
         guard let session = state.sessions[id: id] else { return .none }
         return .send(.delegate(.openSession(session)))
+
+      case let .copyIDButtonTapped(id):
+        state.copiedIDToastToken = (state.copiedIDToastToken ?? 0) + 1
+        // Copy now; hide the confirmation after a beat. A second copy while the toast is
+        // up restarts the dwell (cancelInFlight) so the latest copy owns the countdown.
+        return .merge(
+          .run { [pasteboard] _ in pasteboard.copy(id) },
+          .run { [clock] send in
+            try await clock.sleep(for: Self.copiedFeedbackDuration)
+            await send(.copiedIDToastExpired)
+          }
+          .cancellable(id: CancelID.copyIDToast, cancelInFlight: true)
+        )
+
+      case .copiedIDToastExpired:
+        state.copiedIDToastToken = nil
+        return .none
 
       case .delegate:
         return .none

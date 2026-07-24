@@ -79,6 +79,19 @@ struct ChatSnapshotClientTests {
     #expect(client.loadSnapshot("s1")?.rows == rows)
   }
 
+  @Test func snapshotRoundTripsReviewStatusRows() {
+    // Review-summary system lines (#47) are `.status(kind: "review")` rows appended live;
+    // they must survive the snapshot cache so the instant paint shows them until the next
+    // (authoritative) hydrate replaces the transcript wholesale.
+    let client = ChatSnapshotClient.inMemory()
+    let statusRow = ChatRow(
+      id: UUID(),
+      kind: .status(kind: "review", text: "💾 Self-improvement review: tightened the retry loop.")
+    )
+    client.saveSnapshot("s1", ChatSnapshot(rows: [statusRow]))
+    #expect(client.loadSnapshot("s1")?.rows == [statusRow])
+  }
+
   @Test func attachmentImagesDoNotRoundTrip() throws {
     // Attachment BYTES are stripped by `ChatRow`'s `Codable` (omitted from `CodingKeys`),
     // so they never reach — or come back from — the cache, regardless of the reducer.

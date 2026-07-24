@@ -74,6 +74,95 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   degrades to prose), rendered in `MarkdownText` (headings → scaled bold, blockquote → indented bar,
   table → `Grid`). **Only USER messages have a bubble** — assistant / tool / thinking rows render
   bubble-less plain content, and the assistant Markdown is fully selectable (`.textSelection`).
+- **Completed assistant messages get a `MessageActionBar`** (#34): **copy** reuses `.copyRow` with
+  checkmark feedback via the shared `copyWithFeedback`/`rowCopyToken` mechanism (row-scoped token,
+  1.5s clock expiry, `cancelInFlight`); **branch** is desktop parity — no branch RPC exists, so
+  `.branchFromMessage` fires a one-shot `session.create` seeded with ONLY the selected assistant
+  message (`messages`) + `parent_session_id` (**no `title`** — server auto-titles on first submit),
+  gated by `canBranch` (**requires `storedSessionID` AND `attachLiveSessionID == nil` AND
+  `branchSeed == nil`** — a live-only handle, or an unpersisted branch's row-less `session_key`,
+  would stamp a parent link no list row ever matches; a standing `branchSeed` covers the window
+  where an interrupted replay has already nilled `attachLiveSessionID` but `storedSessionID` still
+  points at the OLD dead session; turn not running; `isBranching` double-fire; **AND
+  `status == .ready`** — a `.gatewayClosed` finalizes a mid-stream row as `isComplete` and clears
+  `isSending` the instant the socket drops, so without the connected-status gate a truncated reply
+  would look branchable while `.reconnecting` and the RPC would just fail against the dead socket).
+  **`canSend` also requires `!isBranching`** — a branch `session.create` in flight must block a NEW
+  parent turn, since `AppFeature` tears down this whole slot on `branchCreated` and a just-submitted
+  turn would be silently lost (cancelled effects, no server response ever observed). **A fresh branch has NO
+  DB row until its first prompt** (server-lazy), so `Delegate.branchCreated` carries the
+  `SessionHandle` **plus the `BranchSeed`** (text + parent id) and `AppFeature` fills the slot
+  with a chat PRIMED from the create response (`resumeStoredID` + `attachLiveSessionID` +
+  `branchSeed`) + a list refetch — **never** the resume-by-stored-id `openSession` flow
+  (`session.resume` 4007s row-less ids and the self-heal would strand the user in an unrelated
+  empty session). The primed chat hydrates via **`session.activate` by LIVE id** (re-binds the new
+  socket's transport, returns the seeded history) until the first `message.start` clears
+  `attachLiveSessionID`/`branchSeed`. **The server reaps a detached never-prompted branch after
+  ~20s** (`_WS_ORPHAN_REAP_GRACE_S`) — a "session not found" (hydrate OR the submit heal)
+  **replays the SEEDED create from the client-held `branchSeed`** (one replay per hydrate via
+  `hasReplayedBranchSeed`; the heal keeps attach-by-live-id mode), rebuilding context + nesting.
+  **Before ever replaying the seed, a hydrate not-found from `session.activate` probes
+  `session.resume`, by the branch's PERSISTED `storedSessionID`**: the server persists the
+  branch's DB row in `prompt.submit` (`_ensure_session_db_row`/`_persist_branch_seed`)
+  **before** `message.start` reaches the client, under the row's primary key `session_key`
+  (`session.create`'s `stored_session_id`, i.e. mobile's `storedSessionID`) — a **DIFFERENT**
+  value from the live runtime `session_id` (`attachLiveSessionID`) `session.activate` just
+  404'd on (probing with the live id always 404s even when the row exists, fully defeating the
+  probe — fixed by probing with `storedSessionID`). A socket drop/server restart landing in
+  that window would otherwise land straight in the seed-replay path and DISCARD a real,
+  already-persisted turn. `session.activate` is live-only (no DB fallback) and 404s regardless
+  of a persisted row; `session.resume` DOES fall back to the DB by `session_key`. A probe
+  success is treated exactly like `message.start` (clears `attachLiveSessionID`/`branchSeed`,
+  hydrates wholesale via the normal path).
+  **STRUCTURAL INVARIANT (2026-07-24 review — replaced a one-shot spend/refund
+  `hasProbedBranchResume` flag that leaked its "spent" bit both on effect cancellation and on
+  non-not-found probe failures, either of which let a LATER not-found skip the probe entirely
+  and replay the bare seed over possibly-persisted history): there is no probe budget to spend
+  or refund.** The probe is read-only and safe to re-issue on EVERY not-found as long as this
+  hydrate hasn't already replayed the seed (`!hasReplayedBranchSeed` alone gates it). ONLY a
+  genuine not-found returned **by the probe itself** is positive evidence the row is absent and
+  falls through to the seed-replay branch; a probe **cancelled** by a superseding
+  `.foreground`/`.reattached`/`.teardownSocketOnly` (all share `CancelID.hydrate`; TCA drops a
+  cancelled task's trailing `send`, so no result ever lands for that attempt), a **transient**
+  failure (`.disconnected`/`.notConnected`/`.timedOut`, self-redialing on timeout), or **any
+  other non-not-found server error** (session cap, internal error, malformed payload — none of
+  which prove absence) all simply re-arm status-only, so the next `.ready`/`.foreground`/
+  `.reattached` retries the probe from scratch — never assuming absence without the probe's own
+  affirmative verdict. The companion half of the fix is in `canSend`: **the stale
+  `liveSessionID` a hydrate just 404'd on is nilled the INSTANT the probe decision is made** —
+  before the probe's result is even awaited — so a prompt submitted mid-recovery can't race the
+  reducer's own recovery with its own independent self-heal `session.create`
+  (`withSessionHeal`), which would otherwise birth two live sessions from one seed with the
+  typed message landing in the untracked one.
+  **Recovery keys on the DURABLE `branchSeed`, never the transient `attachLiveSessionID`** (the
+  replay trigger consumes the attach redirect before its create resolves, so an interrupted
+  replay must still recover on the next hydrate/`.ready`); a **transport-interrupted replay
+  (`.disconnected`/`.notConnected`/`.timedOut`) KEEPS the seed + refunds the budget** (status-only,
+  mirroring `.sessionResult(.failure(.disconnected))`; timeout redials itself — half-open socket),
+  never firing a create into a dead socket. Only a genuine server rejection (or `-32601`, or a
+  spent budget) degrades to a fresh create **with an honest "Couldn’t restore the branch" banner —
+  never silently** (the cached paint still shows the seed), always **clearing the seed** so it
+  can't dangle on the plain session and mis-arm attach mode via `liveSessionIDRefreshed`.
+  Old agents silently ignore the seed params (no `-32601` on create) → plain empty chat; no
+  capability gate. No optimistic list row — an abandoned branch never appears.
+- **Session-list branch nesting is display-only** (#34): `parent_session_id` decodes leniently
+  from REST onto `Session.parentSessionID` (`trimmedNonEmpty`); pure `flattenSessionsWithBranches`
+  (desktop algorithm — sibling recency sort, group-recency lift, recursion, cycle-safe, trailing
+  sweep, **`byVisibleID` lineage aliasing**: `_lineage_root_id` → `Session.lineageRootID` keeps a
+  branch nested after its parent auto-compresses and the row id rotates to the continuation tip)
+  runs per rendered lane (pinned / workspace / chronological) after the cron partition, emitting
+  `└─`/`├─` stems. Recency is `updatedAt ?? .distantPast` — deliberately the SAME rule the lanes
+  sort by (no desktop `started_at` fallback), so nesting never reorders flat rows. Orphans (parent
+  absent from the lane) de-nest — never hidden; the Pinned lane keeps pin order
+  (`sortTopLevelByRecency: false`; a pinned branch nests only when its parent is also pinned,
+  otherwise it de-nests); search / archived / cron stay flat. Row identity and swipe/context
+  affordances are unchanged.
+- **`review.summary` is a LIVE-ONLY event** (#47) — the agent's background self-improvement
+  review emits it to the session's own socket (per-session `_emit`, not a global broadcast) but
+  never writes it to session history, so a hydrate wipes the row (accepted until an upstream
+  hermes-agent change persists it). Decoded to `.reviewSummary`, folded into a bubble-less
+  `.status(kind: ChatRow.Kind.reviewStatusKind)` row rendered at footnote size (selectable);
+  blank (empty/whitespace-only) text is dropped.
 - **Decode leniently; never crash on unknown events** — unknown `type` → `.unknown`.
 - **Auth has two regimes**, modeled by `AuthSession` (`.token` | `.cookie(CookieSession)`) so
   the REST/Gateway clients adapt transport without scattering regime checks. **Token mode**
@@ -231,8 +320,20 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - **Destructive actions** use TCA `ConfirmationDialogState` (`@Presents`) so the
   confirm/cancel flow is driven by state and unit-testable.
 - **List-row affordances**: pin/unpin and archive are offered via both `.swipeActions`
-  and a long-press `.contextMenu` on the row (mirrors the desktop). Animations (the glow)
-  respect reduce-motion.
+  and a long-press `.contextMenu` on the row (mirrors the desktop); Copy ID is
+  context-menu-only. Animations (the glow) respect reduce-motion.
+- **Transient confirmation toasts live in the reducer** — a per-copy token
+  (`copiedIDToastToken: Int?`, **not** a `Bool`: `nil` hides it, every copy bumps it, so a
+  re-copy while it's already up is still an observable change) + a `cancelInFlight`
+  `continuousClock` dwell effect sending an expiry action (never a view-local `Task.sleep`, so
+  it's `TestClock`-drivable), duplicated per feature rather than hoisted into a shared toast
+  feature. The session-id copy is rendered by `CopiedToastView` (its message is hardcoded —
+  give a second toast its own view or parameterize this one); attach its
+  `.overlay(alignment: .bottom)` where nothing can swallow it — **before** a bottom
+  `.safeAreaInset` (list), on the `transcript` rather than the outer `VStack` (chat). It
+  **announces EVERY copy to VoiceOver** off the token (focus never moves to a transient
+  overlay, so it's the only confirmation channel). The dwell constant is
+  `copiedFeedbackDuration` in every feature that has one.
 - **Gate UI by server capability, not assumptions** — e.g. reasoning effort is shown only
   when `model.options` capabilities say the selected model supports it (`?? true` on
   unknown). Mirror the desktop's behaviour where one exists; check the Hermes source.
@@ -378,11 +479,30 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   requested on the sessions-list appearance** (right after login), per the product decision — NOT
   first launch. **`PushClient` is iOS-only-guarded** like `AudioRecorderClient` (`#if
   canImport(UIKit)`; non-iOS `liveValue = testValue`); keep pure logic (hex, `apnsEnv`, payload
-  parse, foreground-suppression) outside the guard. **All four triggers fire via real plugin
-  hooks** (CLI + gateway): approval (`pre_approval_request`), turn-complete (`post_llm_call`,
-  gated to ~>10s turns via a `pre_llm_call` start anchor), error (`on_session_end`, genuine
-  failures only — not success/interrupt), and clarify (`pre_tool_call` filtered to the `clarify`
-  tool, fired before the user is prompted — not duration-gated).
+  parse, foreground-suppression) — and `PushBridge` itself (Foundation-only: `NSLock` +
+  `AsyncStream`) — outside the guard so the stream/buffer behavior is macOS-tested. **All four
+  triggers fire via real plugin hooks** (CLI + gateway): approval (`pre_approval_request`),
+  turn-complete (`post_llm_call`, gated to ~>10s turns via a `pre_llm_call` start anchor),
+  error (`on_session_end`, genuine failures only — not success/interrupt), and clarify
+  (`pre_tool_call` filtered to the `clarify` tool, fired before the user is prompted — not
+  duration-gated). **Cold-launch taps replay**
+  (#46) — a launch-from-push tap is dropped at two independent points unless both are covered:
+  `PushBridge` buffers a tap that fires with no **live** `tapStream()` subscriber and the first
+  subscriber drains it **consume-once** (cleared after delivery — a stale tap must not
+  re-navigate a later re-subscriber, unlike the idempotent `lastToken` replay; terminated
+  continuations are pruned via `onTermination`, so a cancelled observer can't strand a dead
+  entry that defeats the `isEmpty` buffer gate); and a tap arriving before `state.home` exists
+  is stashed in `AppFeature.State.pendingPushTap` (single stash, last-wins; process-lifetime,
+  cleared on logout, badge bookkeeping unchanged) and re-sent as `.pushTapped` when `home`
+  is created (`.autoConnectSucceeded` AND the manual-login `.onboarding(.delegate(.connected))`)
+  — always replay through the one #32 routing path (slot dedup, approval-hint arming,
+  placeholder `Session(id:)` + `session.resume`), never call `openSession` directly. The stash
+  records the persisted server URL at stash time and a login to a **different** server drops it
+  (scrubbing its badge entry) instead of replaying — resuming a foreign session id would trip
+  the resume self-heal into creating a spurious empty chat; an unknown origin (logged out, no
+  stored URL) replays unverified. Home creation seeds the persisted profile selection
+  (`makeHomeState`) so the replayed open resumes under the right profile — the replay fires
+  before the list's `.task` prefs reload.
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky
@@ -406,6 +526,10 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - Snapshot tests: `make snapshot` (assert) / `make snapshot-record` (re-record). They
   render real views and **catch view regressions reducer tests can't** — re-record when
   UI changes intentionally. Row timestamps are pinned for determinism.
+  **`make snapshot-record` `rm -rf`s the whole `__Snapshots__` dir** and re-records every
+  baseline — use it only for a deliberate global re-render. To add ONE new snapshot test,
+  run `make snapshot` **twice**: the first run finds no baseline, records it and fails by
+  design; the second asserts clean. That keeps the commit to the single new PNG.
 
 ## Gotchas
 

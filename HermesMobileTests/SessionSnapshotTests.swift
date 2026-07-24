@@ -150,6 +150,43 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  /// The transient "Session ID copied" toast (`CopiedToastView`) shown after the row
+  /// context menu's Copy ID — a bottom overlay that floats above the "New chat" bar.
+  func testSessionList_copiedIDToast() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = (0..<3).map { i in
+      Session(id: "m\(i)",
+              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass"][i],
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
+              messageCount: 10)
+    }
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            copiedIDToastToken: 1
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   func testSessionList_pinnedSection() {
     let now = self.now
     let mobile = "/Users/me/dev/hermes-mobile"
@@ -209,6 +246,62 @@ final class SessionSnapshotTests: SnapshotTestCase {
             now: now,
             seenCounts: seen,
             groupingMode: .chronological
+          )
+        ) {
+          SessionListFeature()
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Branch nesting (#34): a parent session with two branch children renders the children
+  /// nested underneath with desktop-style elbow stems — newest sibling first (`├─`), last
+  /// sibling `└─` — indented, in the parent's workspace group; an unrelated session stays
+  /// a normal top-level row below the cluster.
+  func testSessionList_branchNesting() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let sessions: [Session] = [
+      Session(id: "m0", title: "Refactor the streaming parser",
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_556_800),
+              messageCount: 10),
+      // Two branches of m0 — b1 is fresher, so it renders first with the middle stem.
+      Session(id: "b1", title: "Try an actor-isolated fold",
+              updatedAt: Date(timeIntervalSince1970: 1_749_553_200),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_553_200),
+              messageCount: 4,
+              parentSessionID: "m0"),
+      Session(id: "b2", title: "Alternative delta parser",
+              updatedAt: Date(timeIntervalSince1970: 1_749_549_600),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_549_600),
+              messageCount: 3,
+              parentSessionID: "m0"),
+      Session(id: "m1", title: "Plan the iOS MVP",
+              updatedAt: Date(timeIntervalSince1970: 1_749_470_400),
+              cwd: mobile,
+              startedAt: Date(timeIntervalSince1970: 1_749_470_400),
+              messageCount: 10),
+    ]
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            seenCounts: seen,
+            expandedGroups: [mobile]
           )
         ) {
           SessionListFeature()
@@ -656,6 +749,43 @@ final class SessionSnapshotTests: SnapshotTestCase {
           ArchivedSessionsFeature()
         } withDependencies: {
           $0.hermesREST.archivedSessions = { _, _, _ in sessions }
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// The copied-ID toast inside the Archived sheet, whose `List` has no bottom
+  /// `safeAreaInset` — this is the screen that proves `CopiedToastView`'s
+  /// `.safeAreaPadding(.bottom)` keeps the capsule clear of the home indicator.
+  /// (The faint capsule silhouette at the very top edge is a deterministic offscreen-render
+  /// artifact of the iOS 26 nav-bar glass backdrop sampling the bottom-most content — it
+  /// tracks the toast's position and is not a second toast.)
+  func testArchivedSessions_copiedIDToast() {
+    let now = self.now
+    let sessions: [Session] = [
+      Session(id: "x0", title: "Old experiment",
+              updatedAt: Date(timeIntervalSince1970: 1_749_300_000),
+              cwd: "/Users/me/dev/hermes-mobile", messageCount: 6),
+      Session(id: "x1", title: "Scratch session",
+              updatedAt: Date(timeIntervalSince1970: 1_749_200_000),
+              cwd: "/Users/me/dev/hermes-agent", messageCount: 3),
+    ]
+    let view = NavigationStack {
+      ArchivedSessionsView(
+        store: Store(
+          initialState: ArchivedSessionsFeature.State(
+            connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            copiedIDToastToken: 1
+          )
+        ) {
+          ArchivedSessionsFeature()
+        } withDependencies: {
+          $0.hermesREST.archivedSessions = { _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
       )

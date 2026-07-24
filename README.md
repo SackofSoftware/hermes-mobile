@@ -39,7 +39,9 @@ from your desk and still keep your agent moving.
 - **Watch it work.** Streaming responses render as native Markdown, with tool/skill
   activity rows (tap for args, results, and diffs), a live "Thinking" indicator with an
   elapsed timer that collapses into a reviewable reasoning + status disclosure when the
-  turn ends, and a subtle glow on sessions that are actively running.
+  turn ends, and a subtle glow on sessions that are actively running. When the agent's
+  background self-improvement review posts a summary, it shows up right in the chat as
+  a system line (live sessions only).
 - **Compose hands-free or with files.** Dictate a message with voice input (a live
   waveform while recording; transcribed by your agent), and attach photos, camera
   captures, PDFs, or any file straight from the composer.
@@ -53,7 +55,13 @@ from your desk and still keep your agent moving.
   used/max tokens and percent (mirroring the Hermes TUI thresholds); tap it for a
   breakdown of input/output split, compactions, and estimated cost.
 - **Copy what you need.** Copy a whole message, or just a single code block with a
-  one-tap button and a green-check confirmation.
+  one-tap button and a green-check confirmation — or grab a session's id from its
+  long-press menu (or the chat's ⋯ menu) when you need to cross-reference it with the
+  agent's CLI or logs.
+- **Branch a reply into a new chat.** Every finished assistant message has a branch
+  button that starts a fresh session seeded with just that message — explore a tangent
+  without derailing the original conversation. Branches show nested under their parent
+  in the session list, desktop-style.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
   and `sudo`/`secret` prompts the moment they arrive. Even if the app was offline when
   an approval fired, tapping its push notification still surfaces an approve/deny card

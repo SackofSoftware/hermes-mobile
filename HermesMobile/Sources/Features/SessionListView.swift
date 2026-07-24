@@ -33,6 +33,11 @@ struct SessionListView: View {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
       }
     }
+    // Applied BEFORE the bottom `safeAreaInset` so the toast floats inside the list area,
+    // above the "New chat" bar rather than covering it.
+    .overlay(alignment: .bottom) {
+      CopiedToastView(token: store.copiedIDToastToken)
+    }
     // The profile pill is the centered (principal) title; "Sessions" is a list section
     // header instead, leaving room for future sibling sections (e.g. "Cron jobs"). The
     // pill needs the inline bar, so keep the nav title empty + inline in both cases.
@@ -129,8 +134,8 @@ struct SessionListView: View {
     // Pinned sessions float to the top in both grouping modes.
     if !store.pinnedSessions.isEmpty {
       Section("Pinned") {
-        ForEach(store.pinnedSessions) { session in
-          row(session)
+        ForEach(store.pinnedEntries) { entry in
+          row(entry)
         }
       }
     }
@@ -140,9 +145,10 @@ struct SessionListView: View {
         groupSection(group)
       }
     case .chronological:
-      // One flat, last-active-ordered list — no workspace headers.
-      ForEach(store.chronologicalSessions) { session in
-        row(session)
+      // One last-active-ordered list — no workspace headers; branches nest under
+      // their parent with elbow stems.
+      ForEach(store.chronologicalEntries) { entry in
+        row(entry)
       }
     }
     // Cron-scheduled sessions live in their own always-on section below the
@@ -329,7 +335,8 @@ struct SessionListView: View {
       .foregroundStyle(.primary)
       .padding(.horizontal, 12)
       .padding(.vertical, 6)
-      .modifier(GlassCapsule())
+      // Safari-style glass chip in the navigation bar.
+      .modifier(GlassBackground(shape: Capsule(), isInteractive: true))
     }
     .accessibilityLabel("Profile: \(store.selectedProfileName)")
   }
@@ -436,12 +443,12 @@ struct SessionListView: View {
 
   @ViewBuilder
   private func groupSection(_ group: SessionGroup) -> some View {
-    let visible = store.state.visibleSessions(in: group)
+    let visible = store.state.visibleEntries(in: group)
     let hidden = group.sessions.count - visible.count
     let isExpanded = store.expandedGroups.contains(group.id)
     Section(group.label) {
-      ForEach(visible) { session in
-        row(session)
+      ForEach(visible) { entry in
+        row(entry)
       }
       if hidden > 0 || isExpanded, group.sessions.count > SessionListFeature.State.collapsedLimit {
         Button(isExpanded ? "Show less" : "Show \(hidden) more") {
@@ -453,7 +460,17 @@ struct SessionListView: View {
     }
   }
 
-  private func row(_ session: Session, showsPreview: Bool = false) -> some View {
+  /// Stemmed-entry convenience: renders a lane's `SessionBranchEntry` — the standard row
+  /// with the branch elbow stem (`└─`/`├─`) and a leading indent when nested.
+  private func row(_ entry: SessionBranchEntry) -> some View {
+    row(entry.session, branchStem: entry.branchStem)
+  }
+
+  private func row(
+    _ session: Session,
+    branchStem: String? = nil,
+    showsPreview: Bool = false
+  ) -> some View {
     // Derive pinned state from the store so every row (search, grouped, Pinned section)
     // reflects the true state — search rows used to default to unpinned and offered a
     // no-op "Pin" for already-pinned sessions.
@@ -461,14 +478,25 @@ struct SessionListView: View {
     return Button {
       store.send(.sessionTapped(session.id))
     } label: {
-      SessionRowView(
-        session: session,
-        now: store.now,
-        showsPreview: showsPreview,
-        isUnread: store.unreadSessionIDs.contains(session.id),
-        isPinned: isPinned,
-        isActive: session.isActive == true
-      )
+      // Branch rows get the desktop-style elbow stem + indent; nesting is display-only,
+      // so the row content (and its swipe/context affordances below) stay unchanged.
+      HStack(alignment: .firstTextBaseline, spacing: 0) {
+        if let branchStem {
+          Text(branchStem)
+            .font(.caption.monospaced())
+            .foregroundStyle(.tertiary)
+            .accessibilityHidden(true)
+        }
+        SessionRowView(
+          session: session,
+          now: store.now,
+          showsPreview: showsPreview,
+          isUnread: store.unreadSessionIDs.contains(session.id),
+          isPinned: isPinned,
+          isActive: session.isActive == true
+        )
+      }
+      .padding(.leading, branchStem == nil ? 0 : 16)
     }
     .buttonStyle(.plain)
     .listRowSeparator(.hidden)
@@ -490,6 +518,11 @@ struct SessionListView: View {
       Button("Rename", systemImage: "pencil") {
         store.send(.renameButtonTapped(id: session.id))
       }
+      // Context menu only — copying an id is a rare debugging affordance, not worth a
+      // swipe slot next to Rename/Archive.
+      Button("Copy ID", systemImage: "doc.on.doc") {
+        store.send(.copyIDButtonTapped(id: session.id))
+      }
       Button("Archive", systemImage: "archivebox", role: .destructive) {
         store.send(.archiveButtonTapped(id: session.id))
       }
@@ -508,20 +541,6 @@ struct SessionListView: View {
       Button("Pin", systemImage: "pin") {
         store.send(.pinSession(id: session.id), animation: .snappy)
       }
-    }
-  }
-}
-
-/// Liquid-glass capsule background on iOS 26+, material + hairline fallback below.
-/// Gives the profile pill the Safari-style glass chip look in the navigation bar.
-private struct GlassCapsule: ViewModifier {
-  func body(content: Content) -> some View {
-    if #available(iOS 26.0, *) {
-      content.glassEffect(.regular.interactive(), in: .capsule)
-    } else {
-      content
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().stroke(.quaternary, lineWidth: 0.5))
     }
   }
 }

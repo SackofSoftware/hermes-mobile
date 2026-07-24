@@ -217,12 +217,12 @@ Files involved:
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 
-- [ ] add `.branchFromMessage(id: ChatRow.ID)`: guard completed assistant row with non-empty text, guard no running turn (mirror desktop's "stop the current turn first" → set `errorBanner` when running), guard a live/stored session id exists
-- [ ] one-shot `session.create` effect with the single-message seed + `parent_session_id` + threaded `profile` (byte-identical to the existing create otherwise; `[gateway]` captured explicitly)
-- [ ] on success emit `Delegate.branchCreated(sessionID:)`; on failure set `errorBanner` and clear any in-flight flag (no swallowed `try?`)
-- [ ] add a double-fire guard (in-flight flag) so a second tap is a no-op while the RPC runs
-- [ ] write tests: success path (RPC params asserted incl. seed + parent + profile-omitted-for-default, delegate emitted), failure → errorBanner, running-turn guard, empty-text guard, double-tap guard
-- [ ] run tests - must pass before task 7
+- [x] add `.branchFromMessage(id: ChatRow.ID)`: guard completed assistant row with non-empty text, guard no running turn (mirror desktop's "stop the current turn first" → set `errorBanner` when running), guard a live/stored session id exists
+- [x] one-shot `session.create` effect with the single-message seed + `parent_session_id` + threaded `profile` (byte-identical to the existing create otherwise; `[gateway]` captured explicitly)
+- [x] on success emit `Delegate.branchCreated(sessionID:)`; on failure set `errorBanner` and clear any in-flight flag (no swallowed `try?`)
+- [x] add a double-fire guard (in-flight flag: public `isBranching`) so a second tap is a no-op while the RPC runs
+- [x] write tests: success path (RPC params asserted incl. seed + parent + profile-omitted-for-default, delegate emitted), failure → errorBanner, running-turn guard, empty-text guard, double-tap guard (new `ChatBranchTests.swift` — the plan's `ChatFeatureTests.swift` doesn't exist; chat reducer tests are split by topic)
+- [x] run tests - must pass before task 7
 
 ### Task 7: AppFeature routes branchCreated through the slot flow
 

@@ -90,6 +90,10 @@ public struct ChatFeature {
     /// Set once the agent rejects an attach RPC as unknown (`-32601`) — too old to support
     /// uploads. Hides the attach affordance for the rest of the session.
     public var attachmentsUnsupported: Bool
+    /// True while a branch `session.create` is in flight (#34) — the double-fire guard so
+    /// a second tap on the branch button is a no-op until the RPC resolves. Public so the
+    /// view can dim the affordance while it runs.
+    public var isBranching: Bool
 
     /// Voice-input state machine: tap mic → permission → record (waveform) → stop →
     /// transcribe → text appended to the composer.
@@ -203,6 +207,7 @@ public struct ChatFeature {
       self.thinkingSeconds = 0
       self.attachments = []
       self.attachmentsUnsupported = false
+      self.isBranching = false
 
       // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
       // its cached tail + model/usage immediately, before `session.resume` lands. The
@@ -355,6 +360,12 @@ public struct ChatFeature {
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
     case copyFeedbackExpired(token: String)
+    /// Branch this assistant message into a new chat (#34): a one-shot `session.create`
+    /// seeded with ONLY that message's text + `parent_session_id` — desktop parity; no
+    /// dedicated branch RPC exists. Old agents silently ignore the extra params (the
+    /// method exists, so no `-32601`) and degrade to a plain empty chat.
+    case branchFromMessage(id: ChatRow.ID)
+    case branchResult(Result<SessionHandle, GatewayError>)
     // Voice input (#7)
     case voiceButtonTapped
     case recordingPermission(Bool)
@@ -401,6 +412,11 @@ public struct ChatFeature {
       /// rather than waiting for the next poll. Always server-confirmed — never a cached
       /// guess (the SQLite `running-guess` must never start a glow on its own).
       case runningChanged(sessionID: String, running: Bool)
+      /// A branch `session.create` resolved (#34) — the parent opens the new session
+      /// through the standard `openSession` slot-replacement flow. Carries the persisted
+      /// id when the server returned one (the id REST lists and `session.resume` accepts),
+      /// else the live handle.
+      case branchCreated(sessionID: String)
     }
   }
 
@@ -916,6 +932,41 @@ public struct ChatFeature {
 
       case let .copyFeedbackExpired(token):
         if state.recentlyCopiedToken == token { state.recentlyCopiedToken = nil }
+        return .none
+
+      // MARK: Branch a message into a new chat (#34)
+
+      case let .branchFromMessage(id):
+        // Only a COMPLETED assistant message with actual text can seed a branch. The view
+        // hides the button on other rows, but the reducer stays the authority — a
+        // streaming, empty, or non-message row is a silent no-op.
+        guard case let .message(role, text, isComplete)? = state.transcript[id: id]?.kind,
+              role == .assistant, isComplete,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return .none }
+        // Double-fire guard: one branch RPC at a time — a second tap is a no-op.
+        guard !state.isBranching else { return .none }
+        // Desktop parity: the running turn must be stopped before branching.
+        if state.isSending {
+          state.errorBanner = "Stop the current turn before branching."
+          return .none
+        }
+        // No session to parent to yet (a brand-new chat whose `session.create` hasn't
+        // resolved) — nothing to branch from.
+        guard let parentID = state.sessionKey else { return .none }
+        state.isBranching = true
+        return branchSession(text: text, parentSessionID: parentID, profile: state.scopedProfile)
+
+      case let .branchResult(.success(handle)):
+        state.isBranching = false
+        // Prefer the persisted id (what REST lists and the open flow resumes by); fall
+        // back to the live handle when the server returned no stored id at create time.
+        return .send(.delegate(.branchCreated(sessionID: handle.storedSessionID ?? handle.sessionID)))
+
+      case let .branchResult(.failure(error)):
+        // Surface the failure — never a swallowed `try?` (project convention).
+        state.isBranching = false
+        state.errorBanner = "Couldn’t branch the chat: \(error.message)"
         return .none
 
       // MARK: Voice input (#7)
@@ -1594,6 +1645,34 @@ public struct ChatFeature {
         await send(.sessionResult(.failure(error)))
       } catch {
         await send(.sessionResult(.failure(.disconnected)))
+      }
+    }
+  }
+
+  /// Branch a message into a new chat (#34): the desktop-parity `session.create` carrying
+  /// a single-message seed (`messages`) + `parent_session_id`. Otherwise byte-identical to
+  /// `createSession` — no `title` (the server auto-names on the first submit), the
+  /// default/nil profile omitted. The server stores the parent link in memory and creates
+  /// the DB row lazily on the first prompt, so an abandoned branch never appears in the
+  /// session list (documented v1 behavior — no optimistic insert).
+  private func branchSession(text: String, parentSessionID: String, profile: String?) -> Effect<Action> {
+    .run { [gateway] send in
+      var fields: [String: JSONValue] = [
+        "messages": .array([.object(["role": .string("assistant"), "content": .string(text)])]),
+        "parent_session_id": .string(parentSessionID),
+      ]
+      if let profile { fields["profile"] = .string(profile) }
+      do {
+        let result = try await gateway.send("session.create", .object(fields))
+        if let handle = result.decoded(SessionHandle.self) {
+          await send(.branchResult(.success(handle)))
+        } else {
+          await send(.branchResult(.failure(.server("Malformed session.create result"))))
+        }
+      } catch let error as GatewayError {
+        await send(.branchResult(.failure(error)))
+      } catch {
+        await send(.branchResult(.failure(.disconnected)))
       }
     }
   }

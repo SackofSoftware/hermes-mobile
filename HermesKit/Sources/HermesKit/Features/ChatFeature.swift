@@ -99,9 +99,31 @@ public struct ChatFeature {
     /// id (`parent_session_id` has to match a REST list row id for the branch to nest —
     /// a live-only handle would stamp a parent link no list row ever matches, so the
     /// branch would render flat forever; old agents that return no `stored_session_id`
-    /// at create simply can't branch), no turn may be streaming, and no other branch RPC
-    /// may be in flight. The view mirrors this; the reducer re-guards it.
-    public var canBranch: Bool { storedSessionID != nil && !isSending && !isBranching }
+    /// at create simply can't branch) that has an actual DB ROW — an unpersisted branch
+    /// (`attachLiveSessionID != nil`) holds only the create's row-less `session_key`, so
+    /// a grandchild branched from it would stamp that never-materializing key as its
+    /// parent (the slot replacement tears the never-prompted middle branch down for the
+    /// server to reap, so its row never lands) and render flat forever. No turn may be
+    /// streaming and no other branch RPC may be in flight. The view mirrors this; the
+    /// reducer re-guards it.
+    public var canBranch: Bool {
+      storedSessionID != nil && attachLiveSessionID == nil && !isSending && !isBranching
+    }
+
+    /// A branch's client-held reconstruction seed (#34): the assistant text seeded into
+    /// the branch `session.create` plus the parent's persisted id. Carried by the branch
+    /// chat while it is UNPERSISTED so a server-side reap of the never-prompted live
+    /// session (detached socket past the ~20s orphan grace) can be healed by replaying
+    /// the seeded create — the seed is only gone server-side, never client-side.
+    public struct BranchSeed: Equatable, Sendable {
+      public var text: String
+      public var parentSessionID: String
+
+      public init(text: String, parentSessionID: String) {
+        self.text = text
+        self.parentSessionID = parentSessionID
+      }
+    }
 
     /// Voice-input state machine: tap mic → permission → record (waveform) → stop →
     /// transcribe → text appended to the composer.
@@ -141,6 +163,24 @@ public struct ChatFeature {
     /// the first `message.start` (the first prompt persisted the row), after a heal
     /// re-bound fresh ids, and when a not-found self-heal recreates the session.
     var attachLiveSessionID: String?
+    /// The unpersisted branch's seed (#34), set alongside `attachLiveSessionID` when the
+    /// parent primes this chat from the branch create. A "session not found" while it is
+    /// set means the server reaped the never-prompted live session — replay the SEEDED
+    /// `session.create` from this (rebuilding context + nesting) instead of silently
+    /// degrading to a bare, context-less session under the still-painted seed. Cleared
+    /// with `attachLiveSessionID` on the first `message.start` (the seed is durable
+    /// server-side now) and when a failed replay degrades to a bannered fresh create.
+    var branchSeed: BranchSeed?
+    /// One-shot guard for the seed replay: at most ONE replayed `session.create` per
+    /// successful hydrate (reset in `applyActivate` and on `message.start`), so a server
+    /// answering "session not found" even for a just-recreated session can't loop
+    /// replay → attach → replay forever — the bounded fallback is the bannered fresh
+    /// create.
+    var hasReplayedBranchSeed: Bool
+    /// The PARENT side of a branch in flight: the seed stashed at `.branchFromMessage`
+    /// and handed to `Delegate.branchCreated` on success (so the replacement chat can
+    /// carry it as `branchSeed`). Distinct from `branchSeed`, which lives on the CHILD.
+    var pendingBranchSeed: BranchSeed?
     /// The stable key this chat's session is addressed by (`storedSessionID ??
     /// liveSessionID`) — what the parent's slot routing (push-tap dedup, re-open compare,
     /// archive matching, push suppression) and the snapshot/anchor store key on. `nil`
@@ -203,6 +243,9 @@ public struct ChatFeature {
       self.isSending = false
       self.liveSessionID = nil
       self.attachLiveSessionID = nil
+      self.branchSeed = nil
+      self.hasReplayedBranchSeed = false
+      self.pendingBranchSeed = nil
       self.streamingRowID = nil
       self.thinkingRowID = nil
       self.toolRowIDs = [:]
@@ -385,6 +428,10 @@ public struct ChatFeature {
     /// method exists, so no `-32601`) and degrade to a plain empty chat.
     case branchFromMessage(id: ChatRow.ID)
     case branchResult(Result<SessionHandle, GatewayError>)
+    /// The replayed seeded `session.create` after the server reaped an unpersisted
+    /// branch's live session (#34) — re-arms the attach bookkeeping on success rather
+    /// than emitting a second `branchCreated` slot replacement.
+    case branchReplayResult(Result<SessionHandle, GatewayError>)
     // Voice input (#7)
     case voiceButtonTapped
     case recordingPermission(Bool)
@@ -436,7 +483,22 @@ public struct ChatFeature {
       /// list/marker identity + live id for `session.activate` attach). The new session
       /// has no DB row until its first prompt, so it must NOT be opened through the
       /// resume-by-stored-id flow — `session.resume` hard-fails "session not found".
-      case branchCreated(handle: SessionHandle)
+      /// Also carries the SEED (text + parent id) the parent copies onto the replacement
+      /// chat's `branchSeed`, so a server-side reap of the never-prompted branch can be
+      /// healed by replaying the seeded create.
+      case branchCreated(BranchCreation)
+
+      /// The `branchCreated` payload: the create response's handle plus the client-held
+      /// seed that can rebuild the branch wholesale after an orphan reap.
+      public struct BranchCreation: Equatable, Sendable {
+        public var handle: SessionHandle
+        public var seed: State.BranchSeed
+
+        public init(handle: SessionHandle, seed: State.BranchSeed) {
+          self.handle = handle
+          self.seed = seed
+        }
+      }
     }
   }
 
@@ -610,16 +672,40 @@ public struct ChatFeature {
         return applyActivate(response, into: &state)
 
       case let .activateResult(.failure(error)):
+        // An unpersisted branch (#34) answering "session not found" means the server
+        // REAPED the never-prompted live session (detached socket past the ~20s orphan
+        // grace — routine on background→foreground). The seed is only gone SERVER-side;
+        // the client still holds it in `branchSeed`, so replay the SEEDED
+        // `session.create` (messages + parent_session_id), rebuilding the branch
+        // wholesale (context + nesting) instead of degrading to a bare session under the
+        // still-painted seed. One replay per hydrate (`hasReplayedBranchSeed`); a replay
+        // that fails — or a server that keeps answering not-found — degrades to the
+        // bannered fresh create below.
+        if state.attachLiveSessionID != nil, error.isSessionNotFound,
+           let seed = state.branchSeed, !state.hasReplayedBranchSeed {
+          state.status = .reconnecting
+          state.liveSessionID = nil
+          state.attachLiveSessionID = nil // re-armed by the replay's fresh live id
+          state.hasRequestedSession = true // the replayed create is the in-flight request
+          state.hasReplayedBranchSeed = true
+          return replayBranchSeed(seed, profile: state.scopedProfile)
+        }
         // A real server "session not found" from the foreground `session.resume` is NOT a
         // benign socket drop: the stored id the agent had is gone (e.g. it expired/rebuilt).
         // Don't leave a stale `liveSessionID` standing (the next prompt.submit would fail too) —
         // recreate a fresh session so the chat can keep sending (#17). Keep the cached paint.
-        // For an unpersisted branch (#34) "not found" means the live session was reaped
-        // (never prompted, socket down past the server's orphan grace) — the seed is gone
-        // server-side, so degrade to the same fresh create; an old agent without
-        // `session.activate` (`-32601`) degrades identically (it ignored the seed params
-        // anyway). Either way the branch bookkeeping must not stick to the fresh session.
+        // For an unpersisted branch (#34) that CAN'T seed-replay (no seed carried, or the
+        // one replay already failed to stick) — and for an old agent whose
+        // `session.activate` is unknown (`-32601`, it ignored the seed params anyway) —
+        // degrade to the same fresh create, but NEVER silently: the on-screen seeded
+        // message is not in the fresh session's context, and the user must know before
+        // asking follow-ups about it. The branch bookkeeping must not stick to the fresh
+        // session either way.
         if error.isSessionNotFound || (state.attachLiveSessionID != nil && error.isUnknownMethod) {
+          if state.attachLiveSessionID != nil {
+            state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
+            state.branchSeed = nil
+          }
           state.status = .reconnecting
           state.liveSessionID = nil
           state.attachLiveSessionID = nil
@@ -750,9 +836,11 @@ public struct ChatFeature {
           // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
           let anchor = setTurnAnchor(state)
           // An unpersisted branch's stored id has no DB row (#34) — a heal resuming it
-          // would 4007 again, so heal by creating fresh (the typed prompt is replayed;
-          // only the seed is lost, and it's already gone server-side when this fires).
+          // would 4007 again, so heal by recreating from the client-held seed (the typed
+          // prompt is replayed and the seeded context + parent link are rebuilt; the
+          // reap only removed them server-side).
           let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+          let seed = state.branchSeed
           let profile = state.scopedProfile
           return .merge(anchor, .run { [gateway, uuid] send in
             // The uploads + submit target the live id, which can be stale after a
@@ -778,7 +866,7 @@ public struct ChatFeature {
               // upload→submit sequence once (uploads are idempotent).
               try await withSessionHeal(
                 runUploadAndSubmit, sessionID: sessionID, storedSessionID: stored,
-                profile: profile, gateway: gateway, send: send
+                branchSeed: seed, profile: profile, gateway: gateway, send: send
               )
               // Echo images as thumbnails in the bubble; non-image files (no thumbnail)
               // fall back to their names when there's no typed text.
@@ -812,13 +900,15 @@ public struct ChatFeature {
         // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung). A stale
         // live id after background→foreground answers "session not found" — self-heal once by
         // re-resuming for a fresh id and replaying the submit (#17). An unpersisted branch's
-        // stored id has no DB row (#34) — its heal creates fresh instead of resuming.
+        // stored id has no DB row (#34) — its heal recreates from the client-held seed
+        // (context + parent link rebuilt) instead of resuming.
         let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+        let seed = state.branchSeed
         let profile = state.scopedProfile
         return .merge(anchor, .run { [gateway] send in
           await submitPrompt(
-            sessionID: sessionID, storedSessionID: stored, profile: profile,
-            gateway: gateway, send: send
+            sessionID: sessionID, storedSessionID: stored, branchSeed: seed,
+            profile: profile, gateway: gateway, send: send
           ) { healedID in
             _ = try await gateway.send("prompt.submit", .object([
               "session_id": .string(healedID), "text": .string(text),
@@ -847,9 +937,18 @@ public struct ChatFeature {
         // wholesale replace here would wipe the optimistic user/attachment row mid-retry).
         state.liveSessionID = liveSessionID
         state.storedSessionID = storedSessionID ?? state.storedSessionID
-        // The heal bound this chat to a real resumed/recreated session — any unpersisted-
-        // branch bookkeeping (#34) is stale now and must not redirect later hydrates.
-        state.attachLiveSessionID = nil
+        if state.branchSeed != nil {
+          // The heal replayed the SEEDED create for a reaped unpersisted branch (#34):
+          // the fresh session is again live-only (its DB row lands when the replayed
+          // submit's `message.start` fires moments later), so keep attaching by live id
+          // and keep the seed for a further reap.
+          state.attachLiveSessionID = liveSessionID
+        } else {
+          // The heal bound this chat to a real resumed/recreated session — any
+          // unpersisted-branch bookkeeping (#34) is stale now and must not redirect
+          // later hydrates.
+          state.attachLiveSessionID = nil
+        }
         state.status = .ready
         return .none
 
@@ -996,30 +1095,60 @@ public struct ChatFeature {
           state.errorBanner = "Stop the current turn before branching."
           return .none
         }
-        // Only a PERSISTED id may parent a branch: `parent_session_id` must match a REST
-        // list row id for the branch to nest — a live-only handle would stamp a link no
-        // list row ever matches (the branch would render flat forever). The view disables
-        // the button via `canBranch`; a race still gets honest feedback, not a silent no-op.
-        guard let parentID = state.storedSessionID else {
+        // Only a PERSISTED id with an actual DB ROW may parent a branch:
+        // `parent_session_id` must match a REST list row id for the branch to nest — a
+        // live-only handle would stamp a link no list row ever matches, and an
+        // UNPERSISTED branch (`attachLiveSessionID != nil`) holds only the row-less
+        // `session_key`; branching from it would dangle the grandchild's parent link
+        // forever (the slot replacement tears the never-prompted middle branch down for
+        // the server to reap, so its row never lands). The view disables the button via
+        // `canBranch`; a race still gets honest feedback, not a silent no-op.
+        guard let parentID = state.storedSessionID, state.attachLiveSessionID == nil else {
           state.errorBanner = "This chat can’t be branched yet."
           return .none
         }
+        let seed = State.BranchSeed(text: text, parentSessionID: parentID)
+        state.pendingBranchSeed = seed
         state.isBranching = true
-        return branchSession(text: text, parentSessionID: parentID, profile: state.scopedProfile)
+        return branchSession(seed: seed, profile: state.scopedProfile)
 
       case let .branchResult(.success(handle)):
         state.isBranching = false
-        // Hand the parent the full handle: the stored id is the branch's list/marker
+        // Hand the parent the full handle — the stored id is the branch's list/marker
         // identity, and the live id is what the replacement chat attaches to
-        // (`session.activate`) — the branch has no DB row until its first prompt, so it
-        // cannot be opened via `session.resume` by stored id.
-        return .send(.delegate(.branchCreated(handle: handle)))
+        // (`session.activate`; the branch has no DB row until its first prompt, so it
+        // cannot be opened via `session.resume` by stored id) — plus the stashed seed,
+        // which the replacement chat carries so an orphan-reaped branch can be rebuilt.
+        guard let seed = state.pendingBranchSeed else { return .none }
+        state.pendingBranchSeed = nil
+        return .send(.delegate(.branchCreated(.init(handle: handle, seed: seed))))
 
       case let .branchResult(.failure(error)):
         // Surface the failure — never a swallowed `try?` (project convention).
         state.isBranching = false
+        state.pendingBranchSeed = nil
         state.errorBanner = "Couldn’t branch the chat: \(error.message)"
         return .none
+
+      case let .branchReplayResult(.success(handle)):
+        // The reaped branch was rebuilt from the client-held seed (#34): bind the FRESH
+        // live session — still unpersisted (no DB row until its first prompt), so re-arm
+        // the attach-by-live-id bookkeeping and KEEP the seed for a further reap — then
+        // attach for the authoritative seeded history. `hasReplayedBranchSeed` stays set
+        // until that attach lands (`applyActivate` resets it), bounding a pathological
+        // replay → attach-fail → replay loop to one round before the bannered degrade.
+        state.liveSessionID = handle.sessionID
+        state.storedSessionID = handle.storedSessionID ?? state.storedSessionID
+        state.attachLiveSessionID = handle.sessionID
+        return attachLive(sessionID: handle.sessionID)
+
+      case let .branchReplayResult(.failure):
+        // The rebuild itself failed — degrade to a fresh session so the chat still
+        // works, but NEVER silently: the on-screen seeded message is not in the fresh
+        // session's context, and the user must know before asking follow-ups about it.
+        state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
+        state.branchSeed = nil
+        return createSession(profile: state.scopedProfile)
 
       // MARK: Voice input (#7)
 
@@ -1342,8 +1471,11 @@ public struct ChatFeature {
       state.isSending = true
       // A turn started, so the first prompt landed — the server has persisted the DB row
       // for an unpersisted branch (#34); from here the standard `session.resume` by
-      // stored id serves every subsequent hydrate.
+      // stored id serves every subsequent hydrate, the client-held seed is durable
+      // server-side (drop it), and the replay budget resets.
       state.attachLiveSessionID = nil
+      state.branchSeed = nil
+      state.hasReplayedBranchSeed = false
       // Defensive: a second message.start without an intervening message.complete would
       // otherwise orphan the prior live thinking row (shimmering forever). Freeze/clear it
       // first (idempotent; removes the row if it carried no reasoning/status) before
@@ -1704,13 +1836,23 @@ public struct ChatFeature {
   /// default/nil profile omitted. The server stores the parent link in memory and creates
   /// the DB row lazily on the first prompt, so an abandoned branch never appears in the
   /// session list (documented v1 behavior — no optimistic insert).
-  private func branchSession(text: String, parentSessionID: String, profile: String?) -> Effect<Action> {
+  private func branchSession(seed: State.BranchSeed, profile: String?) -> Effect<Action> {
     .run { [gateway] send in
-      let fields: [String: JSONValue] = [
-        "messages": .array([.object(["role": .string("assistant"), "content": .string(text)])]),
-        "parent_session_id": .string(parentSessionID),
-      ]
-      await send(.branchResult(createSessionRPC(fields: fields, profile: profile, gateway: gateway)))
+      await send(.branchResult(
+        createSessionRPC(fields: branchSeedFields(seed), profile: profile, gateway: gateway)
+      ))
+    }
+  }
+
+  /// Replay the seeded branch `session.create` after the server reaped the unpersisted
+  /// live session (#34) — the same wire shape as `branchSession`, routed to
+  /// `.branchReplayResult` so the fresh handle re-arms the attach bookkeeping in place
+  /// instead of emitting a second `branchCreated` slot replacement.
+  private func replayBranchSeed(_ seed: State.BranchSeed, profile: String?) -> Effect<Action> {
+    .run { [gateway] send in
+      await send(.branchReplayResult(
+        createSessionRPC(fields: branchSeedFields(seed), profile: profile, gateway: gateway)
+      ))
     }
   }
 
@@ -1802,6 +1944,7 @@ public struct ChatFeature {
     state.storedSessionID = response.storedSessionID ?? state.storedSessionID
     state.status = .ready
     state.hydrateRetriedAfterTimeout = false // hydrate landed: the timeout-retry budget resets
+    state.hasReplayedBranchSeed = false // and so does the branch seed-replay budget (#34)
     // A successful hydrate means we're connected — clear any stale connection banner.
     state.errorBanner = nil
 
@@ -2137,6 +2280,7 @@ private func backoffDelay(attempt: Int) -> Duration {
 /// profile is omitted so single-profile/token-mode requests stay byte-identical.
 private func healLiveSessionID(
   storedSessionID: String?,
+  branchSeed: ChatFeature.State.BranchSeed? = nil,
   profile: String?,
   gateway: HermesGatewayClient,
   send: Send<ChatFeature.Action>
@@ -2153,8 +2297,11 @@ private func healLiveSessionID(
     ))
     return response.sessionID
   }
-  // No stored id to resume against — recreate a fresh session so the heal still has a target.
-  var fields: [String: JSONValue] = [:]
+  // No stored id to resume against — recreate a fresh session so the heal still has a
+  // target. An unpersisted branch (#34) whose live session was orphan-reaped recreates
+  // WITH its client-held seed + parent link, so the replayed prompt lands in a session
+  // that still contains the on-screen seeded context and still nests under its parent.
+  var fields: [String: JSONValue] = branchSeed.map(branchSeedFields) ?? [:]
   if let profile { fields["profile"] = .string(profile) }
   let result = try await gateway.send("session.create", .object(fields))
   guard let handle = result.decoded(SessionHandle.self) else {
@@ -2164,6 +2311,18 @@ private func healLiveSessionID(
     liveSessionID: handle.sessionID, storedSessionID: handle.storedSessionID
   ))
   return handle.sessionID
+}
+
+/// The branch `session.create` extras (#34): the single-assistant-message seed + the
+/// parent link. Shared by the first branch create, the orphan-reap replay, and the
+/// submit-heal recreate so all three rebuild an identical session.
+private func branchSeedFields(_ seed: ChatFeature.State.BranchSeed) -> [String: JSONValue] {
+  [
+    "messages": .array([.object([
+      "role": .string("assistant"), "content": .string(seed.text),
+    ])]),
+    "parent_session_id": .string(seed.parentSessionID),
+  ]
 }
 
 /// One `session.create` round-trip shared by the fresh-chat and branch (#34) effects:
@@ -2202,6 +2361,7 @@ private func withSessionHeal(
   _ op: (_ targetID: String) async throws -> Void,
   sessionID: String,
   storedSessionID: String?,
+  branchSeed: ChatFeature.State.BranchSeed? = nil,
   profile: String?,
   gateway: HermesGatewayClient,
   send: Send<ChatFeature.Action>
@@ -2210,7 +2370,8 @@ private func withSessionHeal(
     try await op(sessionID)
   } catch let error as GatewayError where error.isSessionNotFound {
     let healedID = try await healLiveSessionID(
-      storedSessionID: storedSessionID, profile: profile, gateway: gateway, send: send
+      storedSessionID: storedSessionID, branchSeed: branchSeed, profile: profile,
+      gateway: gateway, send: send
     )
     try await op(healedID)
   }
@@ -2222,6 +2383,7 @@ private func withSessionHeal(
 private func submitPrompt(
   sessionID: String,
   storedSessionID: String?,
+  branchSeed: ChatFeature.State.BranchSeed? = nil,
   profile: String?,
   gateway: HermesGatewayClient,
   send: Send<ChatFeature.Action>,
@@ -2230,7 +2392,7 @@ private func submitPrompt(
   do {
     try await withSessionHeal(
       submit, sessionID: sessionID, storedSessionID: storedSessionID,
-      profile: profile, gateway: gateway, send: send
+      branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
     )
   } catch let error as GatewayError {
     await send(.promptSubmitFailed(message: error.message))

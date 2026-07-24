@@ -286,6 +286,21 @@ The code-review phase reworked the branch-open flow and hardened the nesting:
   fallback) so nesting never reorders flat rows the lanes already placed.
 - **Action-bar hit targets padded** (8pt + `contentShape`) and reducer/view guards aligned.
 
+Iteration 2 (orphan-reap resilience):
+
+- **Unpersisted branches can't be branched again** — `canBranch` (and the reducer guard)
+  now also requires `attachLiveSessionID == nil`: the branch's `session_key` has no DB
+  row, so a grandchild's `parent_session_id` would dangle forever once the slot
+  replacement lets the server reap the never-prompted middle branch.
+- **The client-held seed survives the server's ~20s orphan reap** — `branchCreated`
+  carries a `BranchSeed` (text + parent id) that `AppFeature` copies onto the primed
+  chat; a "session not found" while unattached replays the SEEDED `session.create`
+  (hydrate path: `branchReplayResult` → re-attach; submit path: the heal recreates with
+  the seed and keeps attach-by-live-id mode), rebuilding context + nesting. One replay
+  per hydrate (`hasReplayedBranchSeed`); a failed replay or `-32601` degrades to a fresh
+  create with an honest "Couldn’t restore the branch" banner — never the old silent swap
+  under the still-painted seed.
+
 ## Post-Completion
 
 **Manual verification:**

@@ -301,9 +301,10 @@ struct AppFeatureTests {
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
-    await store.send(.liveChat(.delegate(.branchCreated(
-      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1")
-    ))))
+    await store.send(.liveChat(.delegate(.branchCreated(.init(
+      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1"),
+      seed: .init(text: "seeded answer", parentSessionID: "parent")
+    )))))
     // Slot replacement goes through the mandatory nil-out, never a direct state swap —
     // the parent's snapshot is flushed FIRST, then teardown, clear, fill, and only then
     // the list reload (so the refetch can't interleave into a half-replaced slot).
@@ -315,6 +316,9 @@ struct AppFeatureTests {
     await store.receive(\.fillLiveChat) {
       var chat = ChatFeature.State(connection: self.connection, resumeStoredID: "branch-1")
       chat.attachLiveSessionID = "branch-live"
+      // The seed rides along so a server-side orphan reap of the never-prompted branch
+      // can be healed by replaying the seeded create.
+      chat.branchSeed = .init(text: "seeded answer", parentSessionID: "parent")
       $0.liveChat = chat
     }
     // List reload requested so the nested branch row appears once it exists server-side.
@@ -355,14 +359,16 @@ struct AppFeatureTests {
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
-    await store.send(.liveChat(.delegate(.branchCreated(
-      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1")
-    ))))
+    await store.send(.liveChat(.delegate(.branchCreated(.init(
+      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1"),
+      seed: .init(text: "seeded answer", parentSessionID: "parent")
+    )))))
     await store.receive(\.fillLiveChat) {
       var chat = ChatFeature.State(
         connection: self.connection, resumeStoredID: "branch-1", profileName: "work"
       )
       chat.attachLiveSessionID = "branch-live"
+      chat.branchSeed = .init(text: "seeded answer", parentSessionID: "parent")
       $0.liveChat = chat
     }
     await store.receive(\.home.pulledToRefresh)
@@ -382,9 +388,10 @@ struct AppFeatureTests {
       AppFeature()
     }
 
-    await store.send(.liveChat(.delegate(.branchCreated(
-      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1")
-    ))))
+    await store.send(.liveChat(.delegate(.branchCreated(.init(
+      handle: SessionHandle(sessionID: "branch-live", storedSessionID: "branch-1"),
+      seed: .init(text: "seeded answer", parentSessionID: "parent")
+    )))))
     await store.finish()
   }
 

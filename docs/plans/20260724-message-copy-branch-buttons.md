@@ -251,11 +251,11 @@ Files involved:
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify all Overview requirements: visible copy with feedback, branch creates seeded session and opens it, session list nests branches with elbow stems, orphans de-nest
-- [ ] verify edge cases: old-agent degradation (params ignored → empty chat opens, no crash), running-turn guard, empty-text guard, branch-of-branch rendering
-- [ ] run full suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run `make snapshot`
-- [ ] build the app target (`tuist generate` + xcodebuild) to confirm the new view files compile
+- [x] verify all Overview requirements: visible copy with feedback, branch creates seeded session and opens it, session list nests branches with elbow stems, orphans de-nest
+- [x] verify edge cases: old-agent degradation (params ignored → empty chat opens, no crash — by design, no capability gate; client-side covered by the malformed-result failure test), running-turn guard, empty-text guard, branch-of-branch rendering
+- [x] run full suite: `script -q /dev/null swift test --package-path HermesKit` (760 tests, all pass)
+- [x] run `make snapshot` (TEST SUCCEEDED)
+- [x] build the app target (`tuist generate` + xcodebuild) to confirm the new view files compile (BUILD SUCCEEDED, exit 0)
 
 ### Task 10: [Final] Update documentation
 

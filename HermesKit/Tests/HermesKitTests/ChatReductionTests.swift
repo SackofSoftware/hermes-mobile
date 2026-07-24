@@ -1197,22 +1197,65 @@ struct ChatReductionTests {
 
   // MARK: Copy a row to the pasteboard
 
-  @Test func copyRowPutsTextOnPasteboard() async {
+  @Test func copyRowPutsRawMarkdownOnPasteboardAndShowsThenClearsCheckmark() async {
     let copied = LockIsolated<String?>(nil)
+    let clock = TestClock()
     var initial = ChatFeature.State(connection: conn)
-    initial.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "copy me", isComplete: true))]
+    initial.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "# copy **me**", isComplete: true))]
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+      $0.continuousClock = clock
     }
 
-    await store.send(.copyRow(id: uuid(0)))
-    await store.finish()
-    #expect(copied.value == "copy me")
+    // The pasteboard gets the raw Markdown, and the row-scoped token drives the
+    // action bar's transient checkmark (#34).
+    await store.send(.copyRow(id: uuid(0))) {
+      $0.recentlyCopiedToken = ChatFeature.rowCopyToken(self.uuid(0))
+    }
+    #expect(copied.value == "# copy **me**")
+
+    await clock.advance(by: .seconds(1.5))
+    await store.receive(\.copyFeedbackExpired) {
+      $0.recentlyCopiedToken = nil
+    }
+  }
+
+  @Test func reCopyingARowRestartsTheFeedbackTimer() async {
+    let clock = TestClock()
+    var initial = ChatFeature.State(connection: conn)
+    initial.transcript = [
+      ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "first", isComplete: true)),
+      ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "second", isComplete: true)),
+    ]
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable _ in }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copyRow(id: uuid(0))) {
+      $0.recentlyCopiedToken = ChatFeature.rowCopyToken(self.uuid(0))
+    }
+    // Copying another row before the first expiry cancels it (cancelInFlight) — the
+    // checkmark moves and only the second expiry arrives, 1.5s after the second copy.
+    await clock.advance(by: .seconds(1.0))
+    await store.send(.copyRow(id: uuid(1))) {
+      $0.recentlyCopiedToken = ChatFeature.rowCopyToken(self.uuid(1))
+    }
+    await clock.advance(by: .seconds(1.0)) // 2.0s after first copy — first timer is dead
+    await clock.advance(by: .seconds(0.5))
+    await store.receive(\.copyFeedbackExpired) { $0.recentlyCopiedToken = nil }
   }
 
   @Test func copyUnknownRowIsNoOp() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() }
     await store.send(.copyRow(id: uuid(9))) // no such row → no effect, no state change
+  }
+
+  @Test func copyEmptyTextRowIsNoOp() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.transcript = [ChatRow(id: uuid(0), kind: .message(role: .assistant, text: "", isComplete: true))]
+    let store = TestStore(initialState: initial) { ChatFeature() }
+    await store.send(.copyRow(id: uuid(0))) // empty copyText → no pasteboard, no token
   }
 
   // MARK: Copy a code block with transient checkmark feedback (#9)

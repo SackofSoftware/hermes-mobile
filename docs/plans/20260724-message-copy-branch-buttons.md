@@ -207,9 +207,9 @@ Files involved:
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
 
-- [ ] generalize the copy-feedback state so `.copyRow` sets a row-scoped token (e.g. `"row:<id>"`) with the same 1.5s clock expiry + `cancelInFlight` semantics as `.copyCode`
-- [ ] write tests: copy sets token + pasteboard receives raw Markdown; token clears after 1.5s via `TestClock`; re-copy restarts the timer; empty-text row is a no-op
-- [ ] run tests - must pass before task 6
+- [x] generalize the copy-feedback state so `.copyRow` sets a row-scoped token (e.g. `"row:<id>"`) with the same 1.5s clock expiry + `cancelInFlight` semantics as `.copyCode` (shared `copyWithFeedback` helper; public `ChatFeature.rowCopyToken(_:)` so the view derives the same token)
+- [x] write tests: copy sets token + pasteboard receives raw Markdown; token clears after 1.5s via `TestClock`; re-copy restarts the timer; empty-text row is a no-op
+- [x] run tests - must pass before task 6
 
 ### Task 6: branchFromMessage action + delegate in ChatFeature
 

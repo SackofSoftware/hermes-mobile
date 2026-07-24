@@ -71,8 +71,9 @@ public struct ChatFeature {
     /// Draft text for the rename alert. `nil` = alert closed; non-nil = alert open
     /// with the in-progress title (Task 4).
     public var renameDraft: String?
-    /// Token of the code block whose copy button was most recently tapped, for the
-    /// transient "copied" checkmark. Cleared by a clock-driven effect (#9).
+    /// Token of the copy target most recently tapped — a code block (#9) or a whole
+    /// message row (`ChatFeature.rowCopyToken(_:)`, #34) — for the transient "copied"
+    /// checkmark. Cleared by a clock-driven effect; the latest copy owns the feedback.
     public var recentlyCopiedToken: String?
     /// Voice-input recording lifecycle (#7).
     public var recording: RecordingState
@@ -907,21 +908,11 @@ public struct ChatFeature {
 
       case let .copyRow(id):
         guard let text = state.transcript[id: id]?.copyText, !text.isEmpty else { return .none }
-        return .run { [pasteboard] _ in pasteboard.copy(text) }
+        return copyWithFeedback(text, token: Self.rowCopyToken(id), state: &state)
 
       case let .copyCode(text, token):
         guard !text.isEmpty else { return .none }
-        state.recentlyCopiedToken = token
-        // Copy now; clear the checkmark after a beat. Re-tapping any block restarts
-        // the timer (cancelInFlight) so the latest copy owns the feedback.
-        return .merge(
-          .run { [pasteboard] _ in pasteboard.copy(text) },
-          .run { [clock] send in
-            try await clock.sleep(for: .seconds(1.5))
-            await send(.copyFeedbackExpired(token: token))
-          }
-          .cancellable(id: CancelID.copyFeedback, cancelInFlight: true)
-        )
+        return copyWithFeedback(text, token: token, state: &state)
 
       case let .copyFeedbackExpired(token):
         if state.recentlyCopiedToken == token { state.recentlyCopiedToken = nil }
@@ -1398,6 +1389,26 @@ public struct ChatFeature {
     case .unknown:
       return .none
     }
+  }
+
+  /// The feedback token for a whole-row copy (#34). Public so the view's action bar can
+  /// derive the same token to drive its checkmark-swap without duplicating the format.
+  public static func rowCopyToken(_ id: ChatRow.ID) -> String { "row:\(id.uuidString)" }
+
+  /// Shared copy-with-checkmark path for code blocks (#9) and whole rows (#34): put the
+  /// text on the pasteboard, mark `token` as recently copied, and clear it after a beat.
+  /// Re-tapping any copy target restarts the timer (`cancelInFlight`) so the latest copy
+  /// owns the feedback.
+  private func copyWithFeedback(_ text: String, token: String, state: inout State) -> Effect<Action> {
+    state.recentlyCopiedToken = token
+    return .merge(
+      .run { [pasteboard] _ in pasteboard.copy(text) },
+      .run { [clock] send in
+        try await clock.sleep(for: .seconds(1.5))
+        await send(.copyFeedbackExpired(token: token))
+      }
+      .cancellable(id: CancelID.copyFeedback, cancelInFlight: true)
+    )
   }
 
   private func appendToStreamingMessage(_ text: String, into state: inout State) {

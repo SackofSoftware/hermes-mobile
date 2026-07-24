@@ -348,6 +348,43 @@ Iteration 6 (external codex review, 4 findings — 3 confirmed, 1 false positive
   send in the first place, so the branch omitting it is consistent, not a regression.
   No code change.
 
+Iteration 7 (external codex re-review of the iteration-6 probe fix, 2 findings, both
+confirmed — the probe fix itself had two history-loss regressions):
+
+- **CONFIRMED (a) — the resume probe was issued with the wrong id, so it always 404'd.**
+  `probeBranchResume` sent `session.resume` with `attachLiveSessionID` (the live runtime
+  `session_id`), but the server persists the branch's DB row (`_ensure_session_db_row`)
+  keyed by `session_key` (`session.create`'s `stored_session_id`, mobile's
+  `storedSessionID`) — verified against `tui_gateway/server.py`: `session.create` returns
+  `session_id: sid` (runtime) and `stored_session_id: key` (DB primary key) as two
+  DIFFERENT values; `session.resume`'s handler does `db.get_session(params["session_id"])`
+  against that same `session_key` namespace. Probing with the live id therefore always
+  got "session not found" even when the row existed, fully defeating the iteration-6 fix
+  and falling straight through to the seed replay — the exact history-loss bug the probe
+  was built to prevent. Fix: probe with `state.storedSessionID` instead. Also updated the
+  probe's gate to require `state.storedSessionID != nil` (still requires
+  `attachLiveSessionID != nil` to confirm this is an unpersisted-branch attach flow).
+- **CONFIRMED (b) — the probe budget was spent (not refunded) on a transient/cancelled
+  failure.** `hasProbedBranchResume` was set `true` before firing the probe and never
+  reset on `.branchResumeProbeResult(.failure)` except via the shared
+  `handleActivateFailure` path, which only clears it on success paths elsewhere. A
+  transport-shaped probe failure (disconnect/timeout/cancelled teardown) left the budget
+  permanently spent, so the NEXT not-found from `session.activate` skipped the probe gate
+  (`!hasProbedBranchResume` now false) and replayed the bare seed without ever getting a
+  confirming not-found from `session.resume` — reopening the exact race the probe exists
+  to close. Fix: mirror the established `hasReplayedBranchSeed` transient-refund pattern
+  from `.branchReplayResult(.failure)` — `.branchResumeProbeResult(.failure)` now refunds
+  `hasProbedBranchResume` and goes status-only on `.disconnected`/`.notConnected` (the
+  companion `.gatewayClosed` owns the backoff redial) and self-redials on `.timedOut`
+  (half-open-socket case); only a genuine server rejection (not-found or other) falls
+  through to `handleActivateFailure` with the budget permanently spent.
+- Tests: `probeIssuedWithStoredIDNotLiveID` (asserts the probe's wire params carry
+  `storedSessionID`, not `attachLiveSessionID`) + a probe-success test asserting recovery
+  hydrates the persisted session with NO seed replay; `transientProbeFailureRefundsBudget`
+  (disconnected probe → next not-found re-probes rather than replaying); the existing
+  not-found → seed-replay test extended to confirm exactly one replay after a confirming
+  probe not-found. `swift test --package-path HermesKit` green before commit.
+
 ## Post-Completion
 
 **Manual verification:**

@@ -15,29 +15,14 @@ struct ScrollToBottomButton: View {
       .font(.body.weight(.semibold))
       .foregroundStyle(.primary)
       .frame(width: 44, height: 44)
-      .modifier(GlassCircle())
+      // Interactive glass gives the press highlight; it coexists with our `.onTapGesture`,
+      // which owns the actual tap action.
+      .modifier(GlassBackground(shape: Circle(), isInteractive: true, fallbackShadowRadius: 4, fallbackShadowY: 2))
       .contentShape(Circle())
       .onTapGesture(perform: action)
       .accessibilityElement()
       .accessibilityLabel("Scroll to latest")
       .accessibilityAddTraits(.isButton)
       .accessibilityAction(.default, action)
-  }
-}
-
-/// Liquid-glass circular background on iOS 26+, material + hairline fallback below.
-private struct GlassCircle: ViewModifier {
-  func body(content: Content) -> some View {
-    if #available(iOS 26.0, *) {
-      // `.interactive()` gives the Liquid Glass press highlight (the glass reacts to the touch on
-      // its own — it doesn't require a `Button`), so it coexists with our `.onTapGesture` which
-      // owns the actual tap action.
-      content.glassEffect(.regular.interactive(), in: .circle)
-    } else {
-      content
-        .background(.regularMaterial, in: Circle())
-        .overlay(Circle().stroke(.quaternary, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
-    }
   }
 }

@@ -474,4 +474,84 @@ struct ChatInteractionTests {
     await store.finish()
     #expect(sent.value == "session.interrupt")
   }
+
+  // MARK: Copy session ID (transient toast)
+
+  // The stored id is the session key the rest of the app addresses this chat by, so it
+  // wins over the live id — copying must hand out that same key.
+  @Test func copySessionIDCopiesTheSessionKeyAndAutoDismissesToast() async {
+    let copied = LockIsolated<String?>(nil)
+    let clock = TestClock()
+    var initial = readyState()
+    initial.storedSessionID = "20260724_abc"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copySessionIDTapped) { $0.copiedIDToastToken = 1 }
+
+    await clock.advance(by: .seconds(1.5))
+    await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
+    // Asserted after the effects have been drained — `send` alone doesn't guarantee the
+    // merged copy effect has run.
+    #expect(copied.value == "20260724_abc")
+  }
+
+  // A brand-new chat whose `session.create` hasn't resolved has nothing to copy: no
+  // pasteboard write, no toast, no effect to leak.
+  @Test func copySessionIDWithoutASessionIsANoOp() async {
+    let copied = LockIsolated<String?>(nil)
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) {
+      ChatFeature()
+    } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+      $0.continuousClock = TestClock()
+    }
+
+    await store.send(.copySessionIDTapped) // no state change, no effect
+    #expect(copied.value == nil)
+    #expect(store.state.copiedIDToastToken == nil)
+  }
+
+  @Test func recopyingTheSessionIDWhileToastVisibleRestartsTheDwellTimer() async {
+    let copied = LockIsolated<[String]>([])
+    let clock = TestClock()
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable text in copied.withValue { $0.append(text) } }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copySessionIDTapped) { $0.copiedIDToastToken = 1 }
+    await clock.advance(by: .seconds(1)) // first dwell is 2/3 elapsed…
+    // …a second copy cancels it (cancelInFlight) so the toast does NOT dismiss early. The
+    // token bumps even though the toast never hid — that bump is what the view turns into
+    // a second VoiceOver announcement.
+    await store.send(.copySessionIDTapped) { $0.copiedIDToastToken = 2 }
+    await clock.advance(by: .seconds(1)) // past the first timer's deadline — still visible
+    #expect(store.state.copiedIDToastToken == 2)
+
+    await clock.advance(by: .seconds(0.5)) // completes the restarted dwell
+    await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
+    #expect(copied.value == ["live", "live"])
+  }
+
+  // `.teardown` deliberately does NOT cancel the toast dwell (it doesn't cancel the
+  // code-block `copyFeedback` one either): a 1.5s timer that only clears a transient bool
+  // isn't worth teardown bookkeeping, and `AppFeature`'s `ifLet` nil-out cancels it along
+  // with everything else. Pinned here so the dangling-effect contract is explicit — the
+  // TestStore would fail this test if the dwell were silently dropped OR left unresolved.
+  @Test func tearingDownWhileTheToastIsUpLeavesTheDwellToFinish() async {
+    let clock = TestClock()
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.pasteboard.copy = { @Sendable _ in }
+      $0.continuousClock = clock
+    }
+
+    await store.send(.copySessionIDTapped) { $0.copiedIDToastToken = 1 }
+    await store.send(.teardown)
+
+    await clock.advance(by: .seconds(1.5))
+    await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
+  }
 }

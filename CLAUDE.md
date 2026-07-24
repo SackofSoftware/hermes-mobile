@@ -237,8 +237,20 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - **Destructive actions** use TCA `ConfirmationDialogState` (`@Presents`) so the
   confirm/cancel flow is driven by state and unit-testable.
 - **List-row affordances**: pin/unpin and archive are offered via both `.swipeActions`
-  and a long-press `.contextMenu` on the row (mirrors the desktop). Animations (the glow)
-  respect reduce-motion.
+  and a long-press `.contextMenu` on the row (mirrors the desktop); Copy ID is
+  context-menu-only. Animations (the glow) respect reduce-motion.
+- **Transient confirmation toasts live in the reducer** — a per-copy token
+  (`copiedIDToastToken: Int?`, **not** a `Bool`: `nil` hides it, every copy bumps it, so a
+  re-copy while it's already up is still an observable change) + a `cancelInFlight`
+  `continuousClock` dwell effect sending an expiry action (never a view-local `Task.sleep`, so
+  it's `TestClock`-drivable), duplicated per feature rather than hoisted into a shared toast
+  feature. The session-id copy is rendered by `CopiedToastView` (its message is hardcoded —
+  give a second toast its own view or parameterize this one); attach its
+  `.overlay(alignment: .bottom)` where nothing can swallow it — **before** a bottom
+  `.safeAreaInset` (list), on the `transcript` rather than the outer `VStack` (chat). It
+  **announces EVERY copy to VoiceOver** off the token (focus never moves to a transient
+  overlay, so it's the only confirmation channel). The dwell constant is
+  `copiedFeedbackDuration` in every feature that has one.
 - **Gate UI by server capability, not assumptions** — e.g. reasoning effort is shown only
   when `model.options` capabilities say the selected model supports it (`?? true` on
   unknown). Mirror the desktop's behaviour where one exists; check the Hermes source.
@@ -313,6 +325,10 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - Snapshot tests: `make snapshot` (assert) / `make snapshot-record` (re-record). They
   render real views and **catch view regressions reducer tests can't** — re-record when
   UI changes intentionally. Row timestamps are pinned for determinism.
+  **`make snapshot-record` `rm -rf`s the whole `__Snapshots__` dir** and re-records every
+  baseline — use it only for a deliberate global re-render. To add ONE new snapshot test,
+  run `make snapshot` **twice**: the first run finds no baseline, records it and fails by
+  design; the second asserts clean. That keeps the commit to the single new PNG.
 
 ## Gotchas
 

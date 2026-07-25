@@ -198,8 +198,39 @@ private func requestID(_ frame: String) -> Int? {
     await clock.advance(by: .seconds(75))
     await task.value
     #expect(thrown.value as? GatewayError == .timedOut(method: "slash.exec"))
-    // The long budget is scoped to the slash pipeline — the method list is the contract.
-    #expect(HermesGatewayClient.longRunningMethods == ["slash.exec", "command.dispatch"])
+    // The long budget is scoped to the slash pipeline + the dedicated compress RPC — the
+    // method list is the contract. `session.compress` runs the same unbounded inline LLM
+    // summarisation and MUST get the 120s budget (`/compress`/`/compact` now call it directly).
+    #expect(HermesGatewayClient.longRunningMethods == ["slash.exec", "command.dispatch", "session.compress"])
+  }
+
+  @Test func sessionCompressGetsTheLongPerRequestBudget() async throws {
+    // `/compress`/`/compact` now call the dedicated `session.compress` RPC, whose handler runs
+    // the same UNBOUNDED inline LLM summarisation. Under the 30s default it would time out on
+    // exactly the large sessions worth compressing — so it must ride the 120s long budget.
+    let clock = TestClock()
+    let transport = FakeTransport() // never answers
+    let client = HermesGatewayClient.make(
+      requestTimeout: .seconds(30), longRequestTimeout: .seconds(120), clock: clock
+    ) { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    let thrown = LockIsolated<(any Error)?>(nil)
+    let task = Task {
+      do { _ = try await client.send("session.compress", .object(["session_id": .string("s1")])) }
+      catch { thrown.setValue(error) }
+    }
+    for _ in 0..<20 { await Task.yield() }
+    // Well past the default budget: the compress call must still be waiting.
+    await clock.advance(by: .seconds(45))
+    for _ in 0..<20 { await Task.yield() }
+    #expect(thrown.value == nil)
+
+    // …and it does still time out eventually, at the long budget.
+    await clock.advance(by: .seconds(75))
+    await task.value
+    #expect(thrown.value as? GatewayError == .timedOut(method: "session.compress"))
   }
 
   @Test func normalResponseResolvesAndTimeoutDoesNotFire() async throws {

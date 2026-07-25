@@ -42,8 +42,12 @@ public struct HermesGatewayClient: Sendable {
   /// reference hit the same wall and budgets 120s for its equivalent `session.compress`
   /// call (`use-prompt-actions/slash.ts`). `command.dispatch` is included because the
   /// gateway routes `/compress`/`/compact` through it (`_PENDING_INPUT_COMMANDS`) and
-  /// because it is this client's `slash.exec` fallback.
-  public static let longRunningMethods: Set<String> = ["slash.exec", "command.dispatch"]
+  /// because it is this client's `slash.exec` fallback. `session.compress` is the DEDICATED
+  /// RPC `/compress`/`/compact` now call directly (bypassing the slash worker for
+  /// version-independent, desktop-parity behavior): its handler runs the same unbounded
+  /// inline LLM summarisation, so it needs the identical 120s budget (the desktop's
+  /// `SESSION_COMPRESS_TIMEOUT_MS`).
+  public static let longRunningMethods: Set<String> = ["slash.exec", "command.dispatch", "session.compress"]
 }
 
 public enum GatewayError: Error, Equatable, Sendable {

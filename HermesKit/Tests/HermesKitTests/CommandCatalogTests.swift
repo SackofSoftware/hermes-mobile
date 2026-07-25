@@ -238,6 +238,39 @@ struct CommandCatalogTests {
     #expect(!catalog.resolvesCommand(named: ""))
   }
 
+  // MARK: canonicalizedCommandText (alias → canonical WIRE command, #36 follow-up)
+
+  @Test func canonicalizedCommandTextResolvesAliasToCanonical() throws {
+    let catalog = try decode(fullFixture)
+    // The bare alias becomes its canonical name — the wire command sent to slash.exec.
+    #expect(catalog.canonicalizedCommandText("/compact") == "/compress")
+  }
+
+  @Test func canonicalizedCommandTextPreservesTheArgumentVerbatim() throws {
+    let catalog = try decode(fullFixture)
+    // Only the first token is rewritten; the argument (and its separating whitespace) is
+    // left untouched — including interior/multiline whitespace.
+    #expect(catalog.canonicalizedCommandText("/compact here 5") == "/compress here 5")
+    #expect(catalog.canonicalizedCommandText("/compact focus\ntopic") == "/compress focus\ntopic")
+  }
+
+  @Test func canonicalizedCommandTextLeavesCanonicalAndUnknownUnchanged() throws {
+    let catalog = try decode(fullFixture)
+    // An already-canonical name (self-mapping in `canon`) round-trips unchanged.
+    #expect(catalog.canonicalizedCommandText("/compress here 5") == "/compress here 5")
+    #expect(catalog.canonicalizedCommandText("/model gpt") == "/model gpt")
+    // A token with no alias entry (skill route / unknown) is never mangled.
+    #expect(catalog.canonicalizedCommandText("/research quantum") == "/research quantum")
+    #expect(catalog.canonicalizedCommandText("/totallyunknown foo") == "/totallyunknown foo")
+  }
+
+  @Test func canonicalizedCommandTextIsCaseInsensitiveOnTheName() throws {
+    let catalog = try decode(fullFixture)
+    // The name resolves case-insensitively (matching `resolvesCommand` / the filter); the
+    // canonical spelling comes from the map, the argument keeps its original casing.
+    #expect(catalog.canonicalizedCommandText("/COMPACT Keep This ARG") == "/compress Keep This ARG")
+  }
+
   // MARK: Lenient decoding
 
   @Test func emptyObjectDecodesToEmptyCatalog() throws {

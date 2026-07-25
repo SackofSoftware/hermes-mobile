@@ -1053,6 +1053,44 @@ public struct ChatFeature {
           state.errorBanner = "Command failed: empty command"
           return .none
         }
+        // The compress family (`/compress` + alias `/compact`) routes to the DEDICATED
+        // `session.compress` gateway RPC — NEVER the generic `slash.exec` pipeline (desktop
+        // parity: `use-prompt-actions/slash.ts`). This detection is BY CANONICAL INTENT — a
+        // hardcoded `compressCommandNames` set matched on the parsed first token — and runs
+        // BEFORE (and independent of) the `resolvesCommand`/canonicalization gate below,
+        // because an OLDER agent's `commands.catalog` mislabels the alias (its `canon`
+        // self-maps `/compact → /compact` instead of `→ /compress`): the client-side
+        // canonicalization is then a no-op and the raw `/compact` would fall through
+        // `slash.exec` to the isolated slash-worker subprocess whose registry can't resolve
+        // the alias → "Unknown command: /compact". `session.compress` (a first-class RPC
+        // since 2026-04-03) sidesteps the worker entirely, so it works version-independently.
+        // Gated on a loaded catalog like the slash branch (a nil-catalog / `commandsUnsupported`
+        // old agent keeps today's byte-identical plain `prompt.submit` path). The RAW typed
+        // `/compress`/`/compact` is echoed as the user row; a typed argument becomes the
+        // compression `focus_topic`.
+        if SlashSuggestionFilter.isCommandShaped(text), state.commandCatalog != nil,
+           compressCommandNames.contains(parseSlashCommand(text).name.lowercased()) {
+          let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+          state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
+          maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+          state.composerText = ""
+          state.errorBanner = nil
+          state.isSending = true
+          state.slashExecInFlight = true
+          // Thread storedSessionID/branchSeed/profile through the same #17 session-heal the
+          // slash and prompt paths use (an unpersisted branch heals by recreating from its
+          // client-held seed, not by resuming a row-less stored id).
+          let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+          let seed = state.branchSeed
+          let profile = state.scopedProfile
+          let focusTopic = parseSlashCommand(text).arg
+          return .run { [gateway] send in
+            await executeCompress(
+              focusTopic: focusTopic, sessionID: sessionID, storedSessionID: stored,
+              branchSeed: seed, profile: profile, gateway: gateway, send: send
+            )
+          }
+        }
         // Take the slash pipeline ONLY when the command RESOLVES in the curated catalog (a
         // visible command/skill route or a known alias — `CommandCatalog.resolvesCommand`).
         // A manually-typed HIDDEN command (`/new`, `/quit`, `/branch`, `/yolo`, … — the
@@ -1082,9 +1120,14 @@ public struct ChatFeature {
           let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
           let seed = state.branchSeed
           let profile = state.scopedProfile
+          // Resolve a typed ALIAS to its canonical name for the WIRE command only (#36
+          // follow-up): the gateway's live handler recognizes only canonical names, so a
+          // raw alias (`/compact`) would fall through to the isolated slash-worker and
+          // report "Unknown command". The echoed user row above keeps the RAW typed text.
+          let wireCommand = catalog.canonicalizedCommandText(text)
           return .run { [gateway] send in
             await executeSlashCommand(
-              command: text, sessionID: sessionID, storedSessionID: stored,
+              command: wireCommand, sessionID: sessionID, storedSessionID: stored,
               branchSeed: seed, profile: profile, gateway: gateway, send: send
             )
           }
@@ -1634,7 +1677,9 @@ public struct ChatFeature {
         // draft). The rewound turns are removed from the transcript by the refresh below,
         // which is server-authoritative precisely because the rewind IS a history change.
         if let notice { appendCommandOutput(notice, into: &state) }
-        if !message.isEmpty { state.composerText = message }
+        // The prefilled draft is set straight into the composer (not through
+        // `appendCommandOutput`), so strip ANSI here too (#36 follow-up).
+        if !message.isEmpty { state.composerText = message.strippingANSI }
         return finishSlashExec(refresh: true, into: &state)
 
       case let .slashCommandFailed(message):
@@ -2743,7 +2788,11 @@ public struct ChatFeature {
   /// streaming append (a scrolled-up user is never yanked).
   private func appendCommandOutput(_ text: String, into state: inout State) {
     let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-    state.transcript.append(ChatRow(id: uuid(), kind: .commandOutput(text: text)))
+    // Strip ANSI/VT100 escapes (#36 follow-up): slash output/warnings/notices are formatted
+    // for a terminal and render as literal garbage on mobile. This is the single chokepoint
+    // for every ephemeral `commandOutput` row (`.slashCommandOutput`, `.slashCommandNotice`,
+    // and the prefill notice), so nothing terminal-formatted leaks into the transcript.
+    state.transcript.append(ChatRow(id: uuid(), kind: .commandOutput(text: text.strippingANSI)))
     maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
   }
 
@@ -3020,11 +3069,22 @@ func parseSlashCommand(_ command: String) -> (name: String, arg: String) {
 /// An ERROR for one of these is therefore an error from a dispatch that ALREADY RAN, so the
 /// client's `command.dispatch` fallback must be skipped: re-issuing it would re-enter the
 /// same handler a second time. Mostly benign (handlers guard-then-act) but not universally —
-/// a `/compact` that reached the "compress failed" path has already mutated history and
-/// would be re-compressed. Same double-execution class as the transport-failure guard.
+/// a `/retry` that reached its truncate-and-resend path has already mutated history and would
+/// run twice. Same double-execution class as the transport-failure guard.
+///
+/// `compress`/`compact` are deliberately ABSENT: they no longer reach `executeSlashCommand`
+/// at all (routed to the dedicated `session.compress` RPC before the slash branch), so
+/// listing them here would be dead + misleading.
 private let serverRoutedSlashCommands: Set<String> = [
-  "retry", "queue", "q", "steer", "plan", "goal", "moa", "undo", "learn", "compress", "compact",
+  "retry", "queue", "q", "steer", "plan", "goal", "moa", "undo", "learn",
 ]
+
+/// The compress family — the parsed first token (lowercased) that routes to the dedicated
+/// `session.compress` gateway RPC rather than the generic `slash.exec` pipeline. HARDCODED
+/// on purpose: it must NOT depend on the server `commands.catalog`, because an older agent's
+/// catalog mislabels the `/compact` alias (its `canon` self-maps `/compact → /compact`), so a
+/// catalog-derived resolution would send `/compact` back down the broken slash-worker path.
+private let compressCommandNames: Set<String> = ["compress", "compact"]
 
 /// The typed `command.dispatch` directive `type`s the client acts on — the SINGLE source of
 /// truth for both `isDispatchDirective` (the gate) and `runDispatchDirective`'s switch (the
@@ -3290,6 +3350,73 @@ private func executeSlashCommand(
   } catch {
     await send(.slashCommandFailed(message: GatewayError.disconnected.message))
   }
+}
+
+/// Run `/compress` / `/compact` through the DEDICATED `session.compress` gateway RPC — the
+/// desktop's version-independent path (`use-prompt-actions/slash.ts`), sidestepping the
+/// `slash.exec` slash-worker subprocess whose registry can't resolve the `compact` alias on
+/// older agents ("Unknown command: /compact"). A typed argument threads through as the
+/// compression `focus_topic` (the server reads `focus_topic`; omitted when empty for a
+/// byte-minimal request). The RPC rides the standard #17 session-not-found self-heal, exactly
+/// like the slash / prompt paths.
+///
+/// Terminal handling reuses the SLASH pipeline's own actions so the composer-lock,
+/// `runningChanged`, cross-client `thinkingRowID` guard, and post-command server-authoritative
+/// refresh (`session.resume` → context-usage pill + rewritten transcript) all behave
+/// identically: success → `.slashCommandOutput(confirmation)` (`finishSlashExec(refresh:true)`),
+/// failure → `.slashCommandFailed` (`finishSlashExec(refresh:false)`). Never a swallowed `try?`.
+private func executeCompress(
+  focusTopic: String,
+  sessionID: String,
+  storedSessionID: String?,
+  branchSeed: ChatFeature.State.BranchSeed? = nil,
+  profile: String?,
+  gateway: HermesGatewayClient,
+  send: Send<ChatFeature.Action>
+) async {
+  do {
+    let result = try await withSessionHeal(
+      { targetID in
+        var fields: [String: JSONValue] = ["session_id": .string(targetID)]
+        let topic = focusTopic.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !topic.isEmpty { fields["focus_topic"] = .string(topic) }
+        return try await gateway.send("session.compress", .object(fields))
+      },
+      sessionID: sessionID, storedSessionID: storedSessionID,
+      branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
+    )
+    await send(.slashCommandOutput(compressConfirmation(from: result)))
+  } catch let error as GatewayError {
+    await send(.slashCommandFailed(message: error.message))
+  } catch {
+    await send(.slashCommandFailed(message: GatewayError.disconnected.message))
+  }
+}
+
+/// Build the transcript confirmation for a `session.compress` response, preferring the
+/// server's own display text and degrading to a synthesized line so the user always gets an
+/// honest acknowledgement (the response shape varies: a rich `summary`, a lock-held
+/// `message`, a compute-host `host_ack.output`, a bare `removed` count, or nothing). ANSI is
+/// stripped downstream by `appendCommandOutput`.
+private func compressConfirmation(from result: JSONValue) -> String {
+  // The rich summary (headline + token line + note) — the most informative, when present.
+  if let headline = result["summary"]?["headline"]?.stringValue?.nonEmpty {
+    let lines = [headline, result["summary"]?["token_line"]?.stringValue, result["summary"]?["note"]?.stringValue]
+      .compactMap { $0?.nonEmpty }
+    return lines.joined(separator: "\n")
+  }
+  // Lock-held (another compression already running) carries a human-readable `message`.
+  if let message = result["message"]?.stringValue?.nonEmpty { return message }
+  // Compute-host isolated sessions return their acknowledgement text under `host_ack`.
+  if let hostOutput = result["host_ack"]?["output"]?.stringValue?
+    .trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty {
+    return hostOutput
+  }
+  // A plain compressed count, then the honest catch-all confirmation.
+  if let removed = result["removed"]?.intValue, removed > 0 {
+    return "Compressed \(removed) message\(removed == 1 ? "" : "s")."
+  }
+  return "Context compressed."
 }
 
 /// Run a `prompt.submit` with transparent self-heal on "session not found" (#17): replay the

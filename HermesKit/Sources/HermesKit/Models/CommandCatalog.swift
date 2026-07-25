@@ -62,6 +62,34 @@ public struct CommandCatalog: Equatable, Sendable, Decodable {
     return commands.contains { $0.name.lowercased() == key }
   }
 
+  /// Resolve a typed command's FIRST TOKEN to its canonical spelling via the `canonical`
+  /// alias map, leaving the argument (and its separating whitespace) untouched, so a typed
+  /// alias reaches `slash.exec` as its canonical name — `/compact here 5` → `/compress here 5`.
+  /// Matching is case-insensitive on the name (mirroring `resolvesCommand`/the suggestion
+  /// filter). A token that is NOT a known alias — an already-canonical command, a skill route,
+  /// or anything absent from the map — is returned UNCHANGED so raw text is never mangled.
+  ///
+  /// This is applied to the WIRE command only; the user still sees the RAW `/compact` they
+  /// typed in the transcript. Mirrors the desktop/web reference, which resolves through the
+  /// `canon` map before calling `slash.exec`: the gateway's live handler recognizes only
+  /// canonical names (`_LIVE_SESSION_DIRECT_COMMANDS`, `tui_gateway/server.py`), so a raw
+  /// alias falls through to the isolated slash-worker subprocess and reports "Unknown command".
+  public func canonicalizedCommandText(_ text: String) -> String {
+    let body = text.drop(while: { $0 == "/" })
+    let name: Substring
+    let remainder: Substring // includes the leading whitespace before the argument
+    if let space = body.firstIndex(where: \.isWhitespace) {
+      name = body[..<space]
+      remainder = body[space...]
+    } else {
+      name = body
+      remainder = ""
+    }
+    // `canonical` values already carry the leading slash (e.g. "/compress").
+    guard let canon = canonical["/" + name.lowercased()] else { return text }
+    return canon + remainder
+  }
+
   /// Commands with no usable mobile surface. Static and unit-tested; applied at decode.
   /// Two groups, both verified against `tui_gateway/server.py` + `hermes_cli/commands.py`:
   ///

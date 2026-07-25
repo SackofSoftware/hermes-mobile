@@ -645,7 +645,11 @@ struct ChatReductionTests {
       $0.continuousClock = ImmediateClock()
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
       $0.hermesGateway.send = { @Sendable method, params in
-        sent.setValue(.object(["method": .string(method), "params": params]))
+        // The async slash-catalog fetch (#36) fires after create resolves — don't let it
+        // clobber the recorded `session.create` call this test asserts on.
+        if method != "commands.catalog" {
+          sent.setValue(.object(["method": .string(method), "params": params]))
+        }
         return .object([
           "session_id": .string("live123"),
           "stored_session_id": .string("stored123"),
@@ -684,7 +688,11 @@ struct ChatReductionTests {
       $0.continuousClock = ImmediateClock()
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
       $0.hermesGateway.send = { @Sendable method, params in
-        sent.setValue(.object(["method": .string(method), "params": params]))
+        // Ignore the async slash-catalog fetch (#36) — it must not clobber the recorded
+        // `session.create` call these assertions read.
+        if method != "commands.catalog" {
+          sent.setValue(.object(["method": .string(method), "params": params]))
+        }
         return .object([
           "session_id": .string("live123"),
           "stored_session_id": .string("stored123"),
@@ -722,7 +730,11 @@ struct ChatReductionTests {
       $0.continuousClock = ImmediateClock()
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
       $0.hermesGateway.send = { @Sendable method, params in
-        sent.setValue(.object(["method": .string(method), "params": params]))
+        // Ignore the async slash-catalog fetch (#36) — it must not clobber the recorded
+        // `session.create` call these assertions read.
+        if method != "commands.catalog" {
+          sent.setValue(.object(["method": .string(method), "params": params]))
+        }
         return .object([
           "session_id": .string("live123"),
           "stored_session_id": .string("stored123"),
@@ -837,8 +849,9 @@ struct ChatReductionTests {
         contextUsed: 150_000, contextMax: 200_000, contextPercent: 75
       )
     }
-    #expect(methods.value == ["session.resume"])
-    // Usage came from `info` — no fallback `session.usage` fetch.
+    // Hydrate itself is the single `session.resume` (the trailing slash-catalog fetch, #36,
+    // is a separate concern) — no activate, and no fallback `session.usage` fetch.
+    #expect(methods.value.filter { $0 != "commands.catalog" } == ["session.resume"])
     #expect(!methods.value.contains("session.usage"))
     await store.receive(\.delegate.runningChanged)
     await store.send(.teardown)
@@ -940,8 +953,9 @@ struct ChatReductionTests {
         SessionMessage(id: 2, role: "assistant", content: "hello"),
       ]))
     }
-    // Single resume call — no activate, no fallback dance.
-    #expect(methods.value == ["session.resume"])
+    // Single resume call — no activate, no fallback dance. (The trailing slash-catalog
+    // fetch, #36, is a separate concern.)
+    #expect(methods.value.filter { $0 != "commands.catalog" } == ["session.resume"])
     await store.receive(\.delegate.runningChanged)
     await store.send(.teardown)
   }

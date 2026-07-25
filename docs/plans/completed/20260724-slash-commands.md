@@ -1,0 +1,565 @@
+# Slash-Command Support in the Chat Composer
+
+GitHub issue: #36
+
+## Overview
+
+Support the agent's slash commands from the mobile chat composer, mirroring desktop:
+typing `/` surfaces a filtering autocomplete panel of available commands (built-ins +
+dynamic skill routes), selection inserts the command, and sending executes it through
+the gateway's dedicated slash pipeline (`slash.exec` → `command.dispatch` →
+`prompt.submit` for skill/send directives) — **not** as plain prompt text. Command
+output renders as a new bubble-less transcript row. The whole affordance is
+capability-gated: old agents without `commands.catalog` behave byte-identically to
+today.
+
+Key benefit: mid-conversation session control from the phone (`/compress`, `/undo`,
+`/retry`, `/steer`, `/queue`, `/status`, …) plus invoking installed skills (`/plan`,
+…) — none of which have native mobile UI.
+
+## Context (from discovery)
+
+Protocol facts verified in the Hermes source clone
+(`/Users/eugene/Documents/Development/Personal/hermes-agent`):
+
+- **Discovery is WS JSON-RPC only** (no REST endpoint): `commands.catalog`
+  (`tui_gateway/server.py:13871`) returns
+  `{pairs: [[name, desc]], sub: {"/cmd": [subs]}, canon: {alias: canonical}, categories: [{name, pairs}], skill_count, warning}`.
+  Dynamic skill routes are appended to `pairs` only (never in `categories`).
+- **Execution**: `slash.exec {command, session_id}` → `{output, warning?}`
+  (`server.py:15746`); on error fall back to `command.dispatch {name, arg, session_id}`
+  → typed directive `{type:'exec'|'plugin', output}` / `{type:'alias', target}` /
+  `{type:'skill'|'send', message}` — skill/send messages then go through the normal
+  `prompt.submit` (`server.py:14060`). Reference pipeline: `web/src/lib/slashExec.ts`
+  (explicitly written for future SwiftUI clients to copy).
+- The catalog is TUI-flavored: excludes messaging-only commands but **includes
+  terminal-only ones**; no surface flags on the wire. Desktop filters client-side
+  (`apps/desktop/src/lib/desktop-slash-commands.ts`) — mobile does the same.
+- **Verified: `slash.exec` output is ephemeral** — never written to persisted history;
+  `session.resume` never returns it; desktop and web both accept output loss on
+  reload.
+
+Mobile codebase anchors:
+
+- `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` — `composerText` (~38),
+  `BindingReducer` (~428), `composerSubmitted` handler (~679–768, `prompt.submit`
+  ~764), attach capability pattern (`isUnknownMethod` catch ~731–734 →
+  `attachmentsUnsupportedDetected` ~1099–1109), `model.options` fetch convention
+  (~1120–1136).
+- `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift` — `send` (~25),
+  `GatewayError.isUnknownMethod` (~53–61).
+- `HermesMobile/Sources/Features/Chat/ChatView.swift` — stack: connectionBanner →
+  transcript → footer → pendingCard → `Divider()` → `ComposerView` (~18–40).
+- `HermesMobile/Sources/Features/Chat/ComposerView.swift` — `attachmentChips` above
+  the TextField (~72–81) prove the "strip above composer" slot.
+
+## Development Approach
+
+- **Testing approach**: Regular (code first, then tests, within each task)
+- Complete each task fully before moving to the next; small focused changes
+- **Commit at each task completion** (per project memory) — capitalized verb, no
+  conventional-commit prefixes, concise
+- **CRITICAL: every task MUST include new/updated tests** — success and error paths,
+  listed as separate checklist items; not optional
+- **CRITICAL: all tests must pass before starting the next task**
+- **CRITICAL: update this plan file when scope changes during implementation**
+- Backward compatibility is a hard guard: agents without `commands.catalog` must see
+  byte-identical behavior to today
+
+## Testing Strategy
+
+- **Unit tests (HermesKit, `swift test`)**: pure decode + filter logic, and
+  `TestStore` reducer tests for every new action path (highest-value suite per
+  project conventions). Use
+  `script -q /dev/null swift test --package-path HermesKit` (or `make test`) for
+  live output.
+- **Snapshot tests (`HermesMobileTests`)**: the suggestion panel and the
+  command-output row. `make snapshot` to assert, `make snapshot-record` to record
+  new baselines. Row timestamps pinned for determinism.
+- No e2e suite in this project.
+
+## Progress Tracking
+
+- Mark completed items `[x]` immediately when done
+- Add newly discovered tasks with ➕ prefix
+- Document issues/blockers with ⚠️ prefix
+- Keep the plan in sync with actual work
+
+## Solution Overview
+
+Locked design decisions (from the 2026-07-24 brainstorm):
+
+1. **Curation — mirror desktop**: show the full catalog minus a static client-side
+   `mobileHiddenCommands` hide-list of terminal-only commands. Redundant-with-native-UI
+   commands (`/model`, `/stop`, `/new`, `/title`, `/sessions`, `/resume`, `/usage`,
+   `/reasoning`) ARE shown for muscle-memory parity.
+2. **Filtering — client-side only** over the cached catalog. NO `complete.slash` in
+   v1 (server arg-completion is a possible follow-up).
+3. **UI — inline suggestion panel** between transcript and composer, ~5 visible rows
+   with internal scroll, monospaced name + secondary description, skill rows marked
+   with an icon, reduce-motion-respecting transition, tap inserts and keeps the
+   keyboard up.
+4. **No new dependency client** — catalog fetch is a one-shot
+   `gateway.send("commands.catalog", …)` effect in `ChatFeature` (the `model.options`
+   convention). Capability gate = the attach pattern verbatim.
+5. **No stored suggestion state** — a computed property derives suggestions from
+   `composerText` + `commandCatalog` via a pure filter. Nothing to keep in sync.
+6. **Ephemerality (desktop parity)** — command rows are local-only and vanish on the
+   next wholesale hydrate; NO #26-style preservation for them (skill/send invocations
+   persist naturally as real `prompt.submit` messages). NO full hydrate after exec
+   (it would wipe the output row) — instead a **runtime-only refresh**
+   (`session.resume` → `applyRuntimeInfo` only, transcript untouched).
+
+## Technical Details
+
+### CommandCatalog model (HermesKit)
+
+```swift
+public struct SlashCommand: Equatable, Sendable {
+    public let name: String        // "/compress" (canonical, leading slash)
+    public let description: String
+    public let category: String?   // "Session" … nil for skills
+    public let isSkill: Bool
+}
+public struct CommandCatalog: Equatable, Sendable {
+    public let commands: [SlashCommand]        // hide-list already applied, category order, skills last
+    public let subcommands: [String: [String]] // "/reasoning" → ["none", "low", …]
+    public let canonical: [String: String]     // "/reset" → "/new"
+}
+```
+
+- Decoded leniently from the `commands.catalog` JSON — unknown/missing fields never
+  throw (same rule as events).
+- `categories` gives categorized built-ins; entries in `pairs` appearing in **no**
+  category are the appended skill routes → `isSkill = true`.
+- `mobileHiddenCommands: Set<String>` (static, unit-tested) applied at decode:
+  `/clear /redraw /history /prompt /snapshot /config /statusbar /timestamps /skin
+  /indicator /busy /copy /paste /image /quit /handoff /tools /toolsets /pet /hatch
+  /reload /reload-mcp /reload-skills /browser /plugins /billing /platforms /journey`.
+
+### SlashSuggestionFilter (pure)
+
+`SlashSuggestionFilter.suggestions(for: composerText, catalog:) -> [SlashSuggestion]`:
+
+- Text must **begin with `/`** and contain no newline — else `[]` (mid-sentence
+  slashes never trigger).
+- Bare `/` → full filtered catalog in category order, skills last.
+- First token, no space yet (`/qu`) → case-insensitive **prefix** match on canonical
+  names AND aliases (via `canonical`; matched aliases display their canonical row).
+  Prefix-only, no fuzzy.
+- Known command + space + partial (`/reasoning l`) → subcommand suggestions from the
+  `sub` map. Any other post-space text → `[]` (args are freeform).
+
+### ChatFeature changes
+
+- State: `commandCatalog: CommandCatalog?`, `commandsUnsupported: Bool`, computed
+  `slashSuggestions`.
+- Catalog fetch: one-shot effect after hydrate reaches ready;
+  `isUnknownMethod` → `commandsUnsupported = true` (attach pattern); transient
+  failure → catalog stays `nil`, silent, retried on next hydrate.
+- `.slashSuggestionTapped` → sets `composerText = "/name "` (trailing space) or
+  `"/cmd sub"`; suggestions update/clear automatically via the computed property.
+- `composerSubmitted` command branch — only when trimmed text starts with `/` AND
+  catalog is loaded AND no staged attachments (attachments always take the plain
+  prompt path): append the typed command as a normal **user row**, clear composer,
+  set `isSending`. Effect chain:
+  1. `slash.exec {command (no leading slash), session_id}` → `{output, warning?}` →
+     append a `commandOutput` row, clear `isSending`, then **runtime-only refresh**.
+  2. `slash.exec` error → `command.dispatch {name, arg, session_id}`:
+     `exec`/`plugin` → output row (as above); `alias` → re-enter the pipeline once
+     with the target (**single hop**, no loop); `skill`/`send` → hand `message` to
+     the existing `prompt.submit` flow **suppressing the duplicate optimistic user
+     row** (the `/cmd` row is already in the transcript) — streaming/thinking takes
+     over and `isSending` follows the normal turn lifecycle.
+  3. Both fail → `errorBanner` + clear `isSending` (never a swallowed `try?`). The
+     session-not-found self-heal wraps these RPCs like any other outbound call.
+- Runtime-only refresh: `session.resume(sessionID)` applying `applyRuntimeInfo`
+  (model/reasoning/usage/title) **without** `reconstructTranscript`/inflight seeding;
+  failure is silent (cosmetic refresh only).
+
+### commandOutput row
+
+New `ChatRow.Kind.commandOutput(String)`: bubble-less, dimmed system styling,
+monospaced, selectable. Own stable kind-discriminator token feeding the FNV-1a
+deterministic row ID (never random, never derived from mutable text).
+
+## What Goes Where
+
+- **Implementation Steps** (checkboxes): all code, tests, and doc updates in this
+  repo.
+- **Post-Completion** (no checkboxes): manual on-device verification against a live
+  agent; nothing in external repos (no agent/plugin/gateway changes).
+
+## Implementation Steps
+
+### Task 1: CommandCatalog model with lenient decode and mobile hide-list
+
+**Files:**
+- Create: `HermesKit/Sources/HermesKit/Models/CommandCatalog.swift`
+- Create: `HermesKit/Tests/HermesKitTests/CommandCatalogTests.swift`
+
+- [x] add `SlashCommand` + `CommandCatalog` structs (public, `Equatable`, `Sendable`)
+- [x] implement lenient decode from the `commands.catalog` JSON response
+      (`pairs`/`sub`/`canon`/`categories`): categorized pairs keep their category,
+      uncategorized pairs → `isSkill = true` appended last; malformed/missing fields
+      degrade, never throw
+- [x] add static `mobileHiddenCommands: Set<String>` (list in Technical Details) and
+      apply it at decode (also drop hidden names from `subcommands`/`canonical`)
+- [x] write tests: full fixture decode (categories, skills marked, hide-list
+      applied, aliases mapped, subcommands mapped)
+- [x] write tests: malformed/empty/partial payloads decode leniently without throwing
+- [x] run `swift test --package-path HermesKit` — must pass before task 2
+
+### Task 2: SlashSuggestionFilter pure filtering logic
+
+**Files:**
+- Create: `HermesKit/Sources/HermesKit/Models/SlashSuggestionFilter.swift`
+- Create: `HermesKit/Tests/HermesKitTests/SlashSuggestionFilterTests.swift`
+
+- [x] add `SlashSuggestion` (id/name/description/isSkill or subcommand variant —
+      whatever the panel needs, `Equatable`) and
+      `SlashSuggestionFilter.suggestions(for:catalog:)` implementing the rules in
+      Technical Details (leading-`/` + no-newline guard, bare `/` full list, prefix
+      match on names + aliases, subcommand mode after `/cmd `, `[]` otherwise)
+- [x] write tests: bare `/` → full list in category order with skills last; `/qu`
+      prefix filtering; alias lookup (`/fork` → `/branch` row); case-insensitivity
+- [x] write tests: subcommand mode (`/reasoning l` → `low`); freeform args → `[]`;
+      mid-sentence `/` and multiline text → `[]`; nil catalog → `[]`
+- [x] run `swift test --package-path HermesKit` — must pass before task 3
+
+### Task 3: Catalog fetch and capability gate in ChatFeature
+
+**Files:**
+- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
+
+- [x] add `commandCatalog: CommandCatalog?` + `commandsUnsupported: Bool` to State
+      and actions `.commandCatalogLoaded(CommandCatalog)` /
+      `.commandsUnsupportedDetected`
+- [x] fire a one-shot `gateway.send("commands.catalog", …)` effect once hydrate
+      reaches ready (mirror the `model.options` convention; `[gateway]` capture per
+      `@Sendable` gotcha); decode via Task 1
+- [x] on `GatewayError.isUnknownMethod` → `.commandsUnsupportedDetected` (attach
+      pattern verbatim); any other failure → silent no-op (catalog stays `nil`,
+      naturally retried on next hydrate); skip the fetch when `commandsUnsupported`
+- [x] write TestStore tests: successful fetch populates the catalog; unknown-method
+      flips `commandsUnsupported` and suppresses future fetches
+- [x] write TestStore tests: transient failure leaves catalog `nil` and a later
+      hydrate refetches
+- [x] run `swift test --package-path HermesKit` — must pass before task 4
+- ➕ also fire the catalog fetch when `session.create` resolves (`.sessionResult`
+  success): a brand-new chat never hydrates, so without this fresh chats would have
+  no slash panel until the first foreground re-hydrate (tested:
+  `freshSessionCreateFetchesCatalog`)
+- ➕ skip the fetch when the catalog is already loaded (repeated hydrates don't
+  refetch), and treat an EMPTY decoded catalog as not-loaded (lenient decode never
+  throws, so garbage payloads must not latch a dead catalog) — both unit-tested
+- ➕ tests live in a new `SlashCommandChatTests.swift` (there is no single
+  `ChatFeatureTests.swift`; the chat suite is split by concern) — Tasks 4/6/7 reducer
+  tests land there too
+
+### Task 4: Computed suggestions and selection action
+
+**Files:**
+- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
+
+- [x] add computed `State.slashSuggestions` delegating to `SlashSuggestionFilter`
+      (empty when catalog is `nil` or `commandsUnsupported`)
+- [x] add `.slashSuggestionTapped(SlashSuggestion)` → set `composerText` to
+      `"/name "` (trailing space) or `"/cmd sub"`; no other state changes
+- [x] write TestStore tests (the issue's required four): typing `/` yields
+      suggestions; typing filters; tap inserts the command; non-`/` input never
+      produces suggestions
+- [x] write test: suggestions stay empty when `commandsUnsupported`
+- [x] run `swift test --package-path HermesKit` — must pass before task 5
+
+### Task 5: commandOutput transcript row kind
+
+**Files:**
+- Modify: `HermesKit/Sources/HermesKit/Models/ChatRow.swift` (or wherever
+  `ChatRow.Kind` + the FNV-1a discriminator live)
+- Modify: `HermesKit/Tests/HermesKitTests/` (the existing row-ID test file)
+
+- [x] add `ChatRow.Kind.commandOutput(String)` with its own stable
+      kind-discriminator token for the deterministic ID (extend every exhaustive
+      `switch` the compiler flags)
+- [x] write tests: commandOutput row IDs are deterministic across rebuilds and
+      distinct from other kinds at the same ordinal
+- [x] write test: `reconstructTranscript` output is unaffected (server history never
+      contains commandOutput; wholesale replace drops local ones — desktop parity)
+- [x] run `swift test --package-path HermesKit` — must pass before task 6
+- ➕ the app target's exhaustive `rowView` switch (`ChatView.swift`) was extended in
+  this task too (bubble-less dimmed monospaced selectable render) so the app keeps
+  compiling between tasks 5 and 8; Task 8 snapshot-tests that render
+- ➕ row-ID tests span the existing suites by concern: determinism/distinctness +
+  reconstruction guard in `TranscriptReconstructionTests.swift` (including the
+  collision sweep widened to 5 discriminators), the wholesale-replace drop in
+  `RowIdentityTests.swift`, and `copyText` in `ChatRowCopyTests.swift`
+
+### Task 6: slash.exec pipeline in composerSubmitted
+
+**Files:**
+- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
+
+- [x] branch `composerSubmitted`: trimmed text starts with `/` AND catalog loaded
+      AND attachments empty → command branch (append user row, clear composer, set
+      `isSending`); otherwise today's path byte-identical
+- [x] add the `slash.exec` effect (`{command w/o slash, session_id}`) + response
+      action appending the `commandOutput` row (include `warning` when present) and
+      clearing `isSending`; wrap with the existing session-not-found self-heal
+- [x] add the runtime-only refresh after successful exec: `session.resume` →
+      `applyRuntimeInfo` only (no transcript touch); silent on failure
+- [x] write TestStore tests: `/status` submit → user row + exec RPC + output row +
+      `isSending` cycle + runtime refresh applies model/usage without transcript
+      change
+- [x] write TestStore tests: unsupported/`nil`-catalog agent → `/text` goes through
+      plain `prompt.submit` untouched (backward-compat guard); staged attachments
+      force the plain path
+- [x] run `swift test --package-path HermesKit` — must pass before task 7
+- ➕ `withSessionHeal` was made generic (`-> T`, `@discardableResult`) so the exec
+  pipeline reuses the shared #17 self-heal while consuming the RPC's response value
+  (existing Void callers unchanged); a dedicated heal test covers the exec replay
+- ➕ the slash terminal actions (`.slashCommandOutput` / `.slashCommandFailed`) emit
+  `runningChanged(false)` — a client-side "turn" end mirroring `.promptSubmitFailed`,
+  so a detached slot waiting on the exec is released (no server event will follow)
+- ➕ the slash branch sets NO turn anchor (an exec is not a turn — no `message.start`
+  follows, and a hydrate mid-exec must not resurrect a phantom elapsed timer)
+- ➕ web-reference parity in the output row: empty output degrades to
+  `"/name: no output"`, a `warning` is prefixed as `"warning: …\n<body>"` (tested)
+
+### Task 7: command.dispatch fallback (alias, exec, skill/send directives)
+
+**Files:**
+- Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift`
+
+- [x] on `slash.exec` failure (non-unknown-method) → `command.dispatch
+      {name, arg, session_id}`; decode the typed directive leniently
+- [x] handle directives: `exec`/`plugin` → output row (as Task 6); `alias` →
+      re-enter the pipeline once with the target (single hop — a second alias fails
+      to the error path); `skill`/`send` → route `message` into the existing
+      `prompt.submit` flow suppressing the duplicate optimistic user row;
+      `isSending` then follows the normal turn lifecycle
+- [x] both-fail path → `errorBanner` + clear `isSending` (no swallowed `try?`)
+- [x] write TestStore tests: dispatch `exec` output row; alias single hop resolves;
+      double-alias hits the error path
+- [x] write TestStore tests: `skill` directive submits the message with exactly one
+      user row (the typed `/cmd`); both-RPCs-fail → `errorBanner` and composer
+      unlocked
+- [x] run `swift test --package-path HermesKit` — must pass before task 8
+- ➕ a `-32601` from `slash.exec` itself skips the dispatch fallback and fails
+  directly — `command.dispatch` shipped alongside `slash.exec` (same pipeline), so
+  the fallback would only add a second unknown-method roundtrip
+- ➕ lenient directive handling: unknown `type` / missing `alias` target →
+  `"invalid response: command.dispatch"` banner; skill/send empty-message wording
+  mirrors the web reference (`skill payload missing message` / `empty message`) —
+  covered by `malformedDirectiveFailsCleanly`
+- ➕ the skill/send `prompt.submit` rides `withSessionHeal` like every outbound RPC;
+  success sends NO action (the typed `/cmd` row is the one optimistic user row,
+  `isSending` follows the normal turn lifecycle, and `message.start` writes the turn
+  anchor — the slash branch still sets none itself)
+
+### Task 8: SlashSuggestionPanel view, ChatView wiring, row rendering
+
+**Files:**
+- Create: `HermesMobile/Sources/Features/Chat/SlashSuggestionPanel.swift`
+- Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
+- Modify: the chat row view rendering (`rowView` site) for `.commandOutput`
+- Modify: `HermesMobileTests/` (snapshot tests)
+
+- [x] build `SlashSuggestionPanel(suggestions:onTap:)` — thin view: rows of
+      monospaced name + secondary description, skill icon for `isSkill`, ~5 visible
+      rows max with internal scroll, reduce-motion-respecting transition
+- [x] slot it in `ChatView` between the transcript and `Divider()`/`ComposerView`,
+      rendered only when `store.slashSuggestions` is non-empty; taps send
+      `.slashSuggestionTapped`; keyboard stays up
+- [x] render `.commandOutput` rows bubble-less, dimmed, monospaced, selectable
+- [x] run `tuist generate` so the new source file joins the app target
+- [x] write snapshot tests: panel with built-ins + a skill row; a commandOutput row;
+      record via `make snapshot-record`
+- [x] run `make snapshot` — must pass before task 9
+
+### Task 9: Verify acceptance criteria
+
+- [x] verify the issue's expected behavior end-to-end in tests: `/` opens the list,
+      filtering works, selection inserts, commands submit through the slash
+      pipeline, non-`/` input unaffected
+- [x] verify backward compat: `commandsUnsupported` path leaves every existing test
+      untouched (no snapshot or reducer diffs outside the new feature)
+- [x] run the full HermesKit suite:
+      `script -q /dev/null swift test --package-path HermesKit`
+- [x] run `make snapshot`
+- [x] build the app: `tuist generate` + simulator build succeeds
+
+### Review fixes (2026-07-24 post-completion code review)
+
+Protocol gaps found by review against the current hermes-agent source (the plan's
+`slashExec.ts` web reference predates a server change):
+
+- ➕ **A successful `slash.exec` can answer a typed dispatch directive** — the server
+  routes `_PENDING_INPUT_COMMANDS` (`/retry`, `/queue`, `/steer`, `/goal`, `/moa`,
+  `/undo`, `/learn`, `/compress`, …) and skill-bundle commands through `command.dispatch`
+  *inside* `slash.exec` and returns the directive as the exec SUCCESS result
+  (`tui_gateway/server.py`). The success path now parses the directive FIRST (desktop
+  parity: `slash.ts` `parseCommandDispatch`), falling back to the `{output, warning}`
+  shape only when no directive type is recognized.
+- ➕ **`prefill` directive handled** (`/undo` answers `{type:"prefill", message, notice}`
+  after rewinding history): the undone message lands in the composer for editing and the
+  notice renders as the output row (`.slashCommandPrefill`).
+- ➕ **`send` directive `notice` rendered** before the submit (`.slashCommandNotice`,
+  row-append only — the submit owns the turn lifecycle) — `/goal`/`/moa`'s only feedback.
+- ➕ **Transport-shaped exec failures (timeout/drop) skip the dispatch fallback** — the
+  exec may still be running server-side (45s worker budget vs 30s client RPC timeout), so
+  the fallback could double-execute (`/retry` would truncate-and-resend twice).
+- ➕ **Empty command name guards locally** ("/" → "empty command", no roundtrip — web
+  parity) and the runtime-only refresh now applies **title** too (`/title x` updates the
+  open nav title; `SessionInfo` gained the `title` field).
+- ➕ **Cross-client unlock guard**: the slash terminal actions unlock + emit
+  `runningChanged(false)` only when no real server turn started meanwhile
+  (`thinkingRowID == nil`) — the delegate stays server-confirmed.
+- ➕ Filter/panel polish: leading whitespace trimmed like submit (" /status" now
+  autocompletes), exact subcommand match suppressed (the panel clears after a tap);
+  `sub`/`canon` keys lowercased once at decode; `SlashSuggestion.id` derived from
+  `insertionText`.
+- [decision] **Mid-turn slash submission is out of scope**: `canSend` gates on
+  `!isSending` and the composer's send affordance becomes Interrupt mid-turn, so
+  `/steer`-while-running and mid-turn `/queue` are unreachable by design; their idle-time
+  `send` directives work normally. Documented in `CLAUDE.md`.
+- [decision] The alias-loop banner names the hop that failed (not the originally typed
+  alias) — accurate for the level it describes; threading the original name through the
+  hop was judged not worth the extra parameter for a rare registry misconfiguration.
+
+### Review fixes, round 2 (2026-07-24 critical re-review)
+
+- ➕ **Slash SHAPE gate replaces `hasPrefix("/")`** — ported the desktop's
+  `SLASH_COMMAND_RE = /^\/[^\s/]*(?:\s|$)/` into
+  `SlashSuggestionFilter.isCommandShaped`, shared by the submit gate AND the panel so
+  they can never disagree. `/tmp/agent.log look at this`, `/Users/me/notes.md summarize`
+  and `// TODO fix this` were being routed into the slash pipeline, failing twice, and
+  DESTROYING the typed text (composer cleared on submit, echo row local-only).
+- ➕ **Degenerate `/` / `/ <payload>` no longer loses the payload** — the empty-name case
+  now fails in the reducer BEFORE clearing the composer or echoing a row (desktop
+  restores the draft for exactly this case).
+- ➕ **The slash pipeline gets a 120s per-request budget**
+  (`HermesGatewayClient.longRunningMethods` = `slash.exec` + `command.dispatch`,
+  method-keyed so no call site can forget it). `/compress` runs an *unbounded* inline LLM
+  summarisation (`_live_slash_command_output` → `_mirror_slash_side_effects`), so under
+  the 30s default it reliably timed out on exactly the sessions worth compressing — while
+  the compression SUCCEEDED server-side. Desktop budgets 120s for its equivalent
+  `session.compress` call.
+  - [decision] Chose the method-keyed timeout over routing `/compress` to `session.compress`:
+    a per-call budget is needed either way (the 30s cap applies to every `send`), the
+    method-keyed form needs no client-API/arity change (94 test `send` overrides would have
+    had to change), and it also covers worker-routed commands in the 30–45s band. The
+    dedicated RPC's richer summary payload buys nothing here — the mobile refresh is a full
+    hydrate anyway.
+- ➕ **The post-command refresh is the FULL server-authoritative hydrate**, not a
+  runtime-only patch. `/undo` rewinds history (`db.rewind_to_message`), `/compress`
+  rewrites it, `/retry` truncates it — the rewound/compressed turns previously stayed on
+  screen indefinitely and were re-persisted into the snapshot cache. Same `session.resume`
+  round-trip (it always returned the whole cooked history; the old path decoded it and
+  threw it away); the ephemeral `commandOutput` rows are carried across the wholesale
+  replace and re-appended, so the command's own output survives.
+- ➕ **`slashExecInFlight` holds the composer lock across a mid-exec hydrate** — an exec is
+  not a turn, so `applyActivate`'s `isSending = running` unlocked the composer mid-command
+  and let a SECOND slash command be submitted whose state the first exec's terminal action
+  would then tear down. `isSending = running || slashExecInFlight`; cleared by the exec's
+  terminal action or `.slashCommandHandedOff` (after a `skill`/`send` submit).
+- ➕ **The dispatch fallback is skipped for `serverRoutedSlashCommands`** (a verbatim mirror
+  of the gateway's `_PENDING_INPUT_COMMANDS`): `slash.exec` already ran `command.dispatch`
+  for those itself, so an error came FROM that dispatch and re-issuing it re-enters the
+  same handler (`/compact` past "compress failed" has already mutated history).
+- ➕ **Hide-list extended with commands that have no live effect on mobile** — verified
+  per-command against `tui_gateway/server.py`: the slash worker is a separate
+  `python -m tui_gateway.slash_worker` process and only
+  `model`/`personality`/`prompt`/`compress`/`fast`/`reload-mcp`/`stop` are mirrored onto the
+  live session. Hidden: `/new`+`/reset`, `/sessions`, `/resume` (all rebind the WORKER's
+  session), `/reasoning` (session-scoped to the worker's agent, not mirrored), and the
+  `_TUI_EXTRA` chrome `/density`, `/logs`, `/mouse`. All have native affordances.
+  - [deviation] This reverses the plan's decision 1 ("keep `/new`, `/sessions`, `/resume`,
+    `/reasoning` visible for muscle-memory parity") — they render worker output that reads
+    like success while this session is untouched. `/title` was verified to WORK (the worker
+    is constructed with `resume=<session_key>`, so its DB title write lands here) and stays
+    visible; so do `/model` and `/compress` (both mirrored).
+- ➕ Subcommand lists are deduped case-insensitively at decode (`SlashSuggestion.id` is its
+  insertion text — a repeated server entry would give the panel's `ForEach` duplicate ids).
+
+### Review fixes, round 3 (2026-07-24 codex review)
+
+Confirmed and fixed:
+- ➕ **`canSend` also gates on `!slashExecInFlight`** (#1) — an interrupt tap
+  (`.interruptTapped`) or a socket finalization can clear `isSending` while the exec's
+  round-trip is still outstanding, so `!isSending` alone left a window for a SECOND
+  submission that `finishSlashExec` would then clobber.
+- ➕ **The submit gate requires catalog MEMBERSHIP, not just a loaded catalog** (#2) — the
+  hide-list only filtered the panel; a manually-typed HIDDEN command (`/new`, `/quit`,
+  `/branch`, `/yolo`) still reached `slash.exec` and ran in the isolated worker, reporting
+  fake success. `composerSubmitted` now takes the slash branch ONLY when
+  `CommandCatalog.resolvesCommand(named:)` (a visible command/skill route or a known alias);
+  hidden/unknown fall through to plain `prompt.submit` (byte-identical to the nil-catalog
+  path). Skill routes still resolve and exec.
+- ➕ **Hide-list += `/branch`(+`/fork`), `/yolo`, `/voice`** (#3) — verified worker-isolated
+  against `_mirror_slash_side_effects`: none is in the mirror set, `/branch` branches only
+  the worker's DB session, `/yolo` toggles the worker's own approval-bypass (desktop uses a
+  dedicated `session.yolo` RPC), `/voice` toggles voice on the worker subprocess (the app
+  owns its own mic UI).
+- ➕ **The post-command refresh carries ONLY the just-produced `commandOutput` row** (#5) —
+  carrying every historical output re-appended earlier ones after the whole server
+  transcript, out of chronological order once >1 exec had run. The [decision] is to keep the
+  current command's feedback (the last row, freshly produced, correctly ordered) and drop
+  stale older ones like any real hydrate does — NOT to drop the carry entirely (that would
+  vanish a `/undo` "↶ Undid …" notice the instant it appeared).
+- ➕ **The refresh is a no-op if a new turn/exec started while it was in flight** (#6) — the
+  composer is unlocked for the refresh's async `session.resume` window, so a new
+  `prompt.submit` could start; the stale response (which predates it) would wholesale-replace
+  the transcript and reset `isSending`. Guarded on `isSending`/`slashExecInFlight`/
+  `thinkingRowID`.
+- ➕ **The original `slash.exec` error survives the fallback** (#9) — when both the exec and
+  the `command.dispatch` fallback fail and the fallback only reports the routing-noise "not a
+  quick/…/skill command" (server code 4018), the original worker error is now surfaced
+  instead of being buried under the noise (desktop parity, `slash.ts` ~270-278).
+
+Documented as accepted bounded limitations (server-internal, no clean client fix):
+- [decision] **#4 fresh-session mirror race** — on a FRESH `session.create` the gateway
+  defers the live-agent build, and the `model`/`personality`/`fast`/`compress` mirror is
+  gated on `session["agent"]`; one of those typed before the first message can report worker
+  success while the not-yet-built live agent keeps the default. Rare, bounded, no clean
+  client signal for "agent ready" — documented in `CLAUDE.md`, re-issue after the first turn.
+- [decision] **#7 cross-client refresh suppression** — if another client starts a real turn
+  mid-exec, the `thinkingRowID` guard suppresses the post-command refresh (correct: it must
+  not clobber the live turn), so a `/undo`/`/retry`/compression mutation stays unreconciled
+  until the next real hydrate (foreground/reattach). Bounded staleness, not permanent.
+- [decision] **#8 skill/send generated-prompt divergence** — a `skill`/`send` directive
+  echoes the typed `/cmd` locally but persists the GENERATED message via `prompt.submit`, so
+  the next hydrate shows the generated prompt in place of the `/cmd`. Inherent (the server
+  stores the generated message; desktop-consistent), same ephemerality as the local echo row.
+
+False positives: none — all nine were genuine (six fixed, three documented).
+
+### Task 10: [Final] Update documentation
+
+- [x] add a slash-command convention bullet to `CLAUDE.md` (catalog fetch + gate,
+      client-side filter, exec pipeline, ephemerality rule)
+- [x] update `README.md` feature list if it enumerates chat features
+- [x] move this plan to `docs/plans/completed/`
+
+## Post-Completion
+
+**Manual verification** (on-device against a live agent):
+- Type `/` in a real session: panel appears with built-ins + installed skills;
+  `/status` returns output; `/reasoning low` subcommand completion works
+- `/compress` on a long session: output row appears, context pill drops after the
+  runtime refresh
+- A skill route (e.g. `/plan …`): streams as a normal turn, single user row
+- Old-agent regression check (or simulated `-32601`): no panel, plain sends
+  unchanged
+- Confirm command output visibly disappearing after backgrounding/re-hydrate feels
+  acceptable (known desktop-parity behavior, documented above)
+
+**Possible follow-ups** (out of scope):
+- `complete.slash` server-driven argument completion (checkpoint ids, personality
+  names)
+- Command palette entry point (a `/` button in the composer toolbar) if
+  discoverability turns out poor

@@ -58,4 +58,12 @@ import Testing
     let row = ChatRow(id: UUID(), kind: .status(kind: "search", text: "searching the web…"))
     #expect(row.copyText == "searching the web…")
   }
+
+  @Test func commandOutputCopiesText() {
+    let row = ChatRow(
+      id: UUID(),
+      kind: .commandOutput(text: "Session compressed.\n12 messages → 3 summaries")
+    )
+    #expect(row.copyText == "Session compressed.\n12 messages → 3 summaries")
+  }
 }

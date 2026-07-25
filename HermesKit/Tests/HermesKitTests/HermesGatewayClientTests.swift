@@ -168,6 +168,40 @@ private func requestID(_ frame: String) -> Int? {
     #expect(thrown.value as? GatewayError == .timedOut(method: "prompt.submit"))
   }
 
+  @Test func slashPipelineGetsTheLongPerRequestBudget() async throws {
+    // `slash.exec` blocks the gateway dispatcher "for seconds to minutes": worker-routed
+    // commands have a 45s pipe budget of their own and `/compress` runs an UNBOUNDED inline
+    // LLM summarisation. Under the 30s default it reliably timed out on exactly the sessions
+    // big enough to warrant compressing — while the compression SUCCEEDED server-side, so the
+    // user saw a flat failure and a stale context pill. The slash methods therefore get the
+    // long budget (desktop budgets 120s for its equivalent `session.compress` call).
+    let clock = TestClock()
+    let transport = FakeTransport() // never answers
+    let client = HermesGatewayClient.make(
+      requestTimeout: .seconds(30), longRequestTimeout: .seconds(120), clock: clock
+    ) { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    defer { withExtendedLifetime(stream) {} }
+
+    let thrown = LockIsolated<(any Error)?>(nil)
+    let task = Task {
+      do { _ = try await client.send("slash.exec", .object(["command": .string("compress")])) }
+      catch { thrown.setValue(error) }
+    }
+    for _ in 0..<20 { await Task.yield() }
+    // Well past the default budget: the slash call must still be waiting.
+    await clock.advance(by: .seconds(45))
+    for _ in 0..<20 { await Task.yield() }
+    #expect(thrown.value == nil)
+
+    // …and it does still time out eventually, at the long budget.
+    await clock.advance(by: .seconds(75))
+    await task.value
+    #expect(thrown.value as? GatewayError == .timedOut(method: "slash.exec"))
+    // The long budget is scoped to the slash pipeline — the method list is the contract.
+    #expect(HermesGatewayClient.longRunningMethods == ["slash.exec", "command.dispatch"])
+  }
+
   @Test func normalResponseResolvesAndTimeoutDoesNotFire() async throws {
     // A fast response resolves `send` and cancels its timer. Advancing the TestClock well
     // past the timeout afterwards must produce no spurious late throw — the result stands.

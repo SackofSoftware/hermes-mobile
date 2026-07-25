@@ -100,6 +100,99 @@ final class ChatSnapshotTests: SnapshotTestCase {
     assertChatView(rows: rows, title: "Vision chat", status: .ready)
   }
 
+  // MARK: Slash commands (#36)
+
+  private static func suggestion(
+    _ name: String, _ description: String, isSkill: Bool = false
+  ) -> SlashSuggestion {
+    SlashSuggestion(
+      name: name, description: description, isSkill: isSkill,
+      insertionText: name + " "
+    )
+  }
+
+  /// Built-ins plus a skill route (sparkles icon) — the panel's standard shape.
+  func testSlashSuggestionPanel() {
+    let view = SlashSuggestionPanel(
+      suggestions: [
+        Self.suggestion("/compress", "Summarize and compact the conversation"),
+        Self.suggestion("/status", "Show session status"),
+        Self.suggestion("/undo", "Revert to the previous checkpoint"),
+        Self.suggestion("/plan", "Draft an implementation plan", isSkill: true),
+      ],
+      onTap: { _ in }
+    )
+    .padding(.vertical, 8)
+    .frame(width: device.size?.width ?? 390)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// More rows than the visible cap: the panel stops at ~5.5 rows (half-row hints the
+  /// internal scroll) instead of growing unbounded.
+  func testSlashSuggestionPanel_overflowCapsHeight() {
+    let view = SlashSuggestionPanel(
+      suggestions: [
+        Self.suggestion("/compress", "Summarize and compact the conversation"),
+        Self.suggestion("/status", "Show session status"),
+        Self.suggestion("/undo", "Revert to the previous checkpoint"),
+        Self.suggestion("/retry", "Retry the last turn"),
+        Self.suggestion("/steer", "Steer the running turn"),
+        Self.suggestion("/queue", "Queue a follow-up prompt"),
+        Self.suggestion("/plan", "Draft an implementation plan", isSkill: true),
+      ],
+      onTap: { _ in }
+    )
+    .padding(.vertical, 8)
+    .frame(width: device.size?.width ?? 390)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// Full chat screen with the catalog loaded and "/" typed: the panel slots between the
+  /// transcript and the composer.
+  func testChatView_slashSuggestionPanel() {
+    var state = ChatFeature.State(
+      connection: connection,
+      title: "Slash commands",
+      transcript: IdentifiedArray(uniqueElements: [
+        ChatRow(id: id(0), kind: .message(role: .user, text: "Hello!", isComplete: true)),
+        ChatRow(id: id(1), kind: .message(role: .assistant, text: "Hi — ready when you are.", isComplete: true)),
+      ]),
+      composerText: "/",
+      status: .ready
+    )
+    state.commandCatalog = CommandCatalog(commands: [
+      SlashCommand(name: "/compress", description: "Summarize and compact the conversation", category: "Session"),
+      SlashCommand(name: "/status", description: "Show session status", category: "Session"),
+      SlashCommand(name: "/undo", description: "Revert to the previous checkpoint", category: "Session"),
+      SlashCommand(name: "/plan", description: "Draft an implementation plan", isSkill: true),
+    ])
+    let view = NavigationStack {
+      ChatView(
+        store: Store(initialState: state) {
+          ChatFeature()
+        } withDependencies: {
+          $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+          $0.continuousClock = ImmediateClock()
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Ephemeral slash-command output (#36): the typed command as a normal user bubble,
+  /// the output bubble-less, dimmed, and monospaced.
+  func testChatView_commandOutputRow() {
+    let rows: [ChatRow] = [
+      ChatRow(id: id(0), kind: .message(role: .user, text: "/status", isComplete: true)),
+      ChatRow(id: id(1), kind: .commandOutput(
+        text: "model: claude-fable-5\nreasoning: medium\ncontext: 62k/200k tokens (31%)"
+      )),
+    ]
+    assertChatView(rows: rows, title: "Slash commands", status: .ready)
+  }
+
   // MARK: Message action bar (#34)
 
   /// Completed assistant message: the copy + branch action row renders under the text

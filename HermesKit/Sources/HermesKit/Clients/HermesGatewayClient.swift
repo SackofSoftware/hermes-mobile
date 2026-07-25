@@ -22,9 +22,28 @@ public struct HermesGatewayClient: Sendable {
     AsyncStream { $0.finish() }
   }
   /// Send a JSON-RPC request on the current connection and await its result.
+  ///
+  /// The per-request timeout is chosen by METHOD (see `longRunningMethods`) rather than
+  /// passed per call — the budget is a property of the server handler, not of the call
+  /// site, so it can't be forgotten by a caller.
   public var send: @Sendable (_ method: String, _ params: JSONValue) async throws -> JSONValue
   /// Tear down the current connection.
   public var disconnect: @Sendable () -> Void
+
+  /// Methods whose server-side handler legitimately outlives the default budget, so they
+  /// get `longRequestTimeout` instead.
+  ///
+  /// The gateway's slash pipeline is documented as blocking its dispatcher "for seconds to
+  /// minutes" (`tui_gateway/server.py`): worker-routed commands have a 45s pipe budget of
+  /// their own, and `/compress` doesn't even use the worker — it runs an **unbounded**
+  /// inline LLM summarisation (`_live_slash_command_output` → `_mirror_slash_side_effects`).
+  /// Under the default budget `/compress` reliably timed out on exactly the sessions big
+  /// enough to warrant it, while the compression SUCCEEDED server-side. The desktop
+  /// reference hit the same wall and budgets 120s for its equivalent `session.compress`
+  /// call (`use-prompt-actions/slash.ts`). `command.dispatch` is included because the
+  /// gateway routes `/compress`/`/compact` through it (`_PENDING_INPUT_COMMANDS`) and
+  /// because it is this client's `slash.exec` fallback.
+  public static let longRunningMethods: Set<String> = ["slash.exec", "command.dispatch"]
 }
 
 public enum GatewayError: Error, Equatable, Sendable {
@@ -98,10 +117,12 @@ public enum GatewayError: Error, Equatable, Sendable {
 public extension HermesGatewayClient {
   static func live(
     session: URLSession = URLSession(configuration: .default),
-    requestTimeout: Duration = .seconds(30)
+    requestTimeout: Duration = .seconds(30),
+    longRequestTimeout: Duration = .seconds(120)
   ) -> HermesGatewayClient {
     .make(
       requestTimeout: requestTimeout,
+      longRequestTimeout: longRequestTimeout,
       mintTicket: { baseURL, cookieSession in
         try await wsTicket(baseURL: baseURL, cookieSession: cookieSession, session: session)
       },
@@ -118,6 +139,7 @@ public extension HermesGatewayClient {
   ///
   /// `clock` drives the per-request timeout — injectable so tests can use a `TestClock`
   /// and fire/hold the timeout deterministically instead of racing real wall-clock time.
+  /// `longRequestTimeout` is the budget for `longRunningMethods` (the slash pipeline).
   ///
   /// For `.cookie` auth, `connect` mints a fresh ws-ticket **per connect** (never cached) and
   /// connects with `?ticket=`. `.token` auth skips the mint entirely and uses `?token=`,
@@ -126,6 +148,7 @@ public extension HermesGatewayClient {
   /// stream like a dropped socket so the reducer's existing backoff retries.
   static func make(
     requestTimeout: Duration = .seconds(30),
+    longRequestTimeout: Duration = .seconds(120),
     clock: any Clock<Duration> = ContinuousClock(),
     mintTicket: @escaping @Sendable (_ baseURL: URL, _ cookieSession: CookieSession) async throws -> String = { _, _ in
       throw GatewayError.ticketUnavailable
@@ -147,6 +170,7 @@ public extension HermesGatewayClient {
             transport: makeTransport(wsURL),
             events: continuation,
             requestTimeout: requestTimeout,
+            longRequestTimeout: longRequestTimeout,
             clock: clock
           )
           store.set(connection)
@@ -228,6 +252,7 @@ actor GatewayConnection {
   private let transport: any WebSocketTransport
   private let events: AsyncStream<GatewayEvent>.Continuation
   private let requestTimeout: Duration
+  private let longRequestTimeout: Duration
   private let clock: any Clock<Duration>
   private var idCounter = 0
   private var pending: [Int: CheckedContinuation<JSONValue, any Error>] = [:]
@@ -239,11 +264,13 @@ actor GatewayConnection {
     transport: any WebSocketTransport,
     events: AsyncStream<GatewayEvent>.Continuation,
     requestTimeout: Duration = .seconds(30),
+    longRequestTimeout: Duration = .seconds(120),
     clock: any Clock<Duration> = ContinuousClock()
   ) {
     self.transport = transport
     self.events = events
     self.requestTimeout = requestTimeout
+    self.longRequestTimeout = longRequestTimeout
     self.clock = clock
   }
 
@@ -265,8 +292,12 @@ actor GatewayConnection {
       pending[id] = continuation
       // Per-id timeout: if the server never acks (`prompt.submit` acks fast, so this
       // only catches a stuck server), reject with `.timedOut` rather than hang forever.
-      timeoutTasks[id] = Task { [requestTimeout, clock] in
-        do { try await clock.sleep(for: requestTimeout) } catch { return }
+      // The slash pipeline gets the longer budget — its handlers do unbounded server-side
+      // work (see `HermesGatewayClient.longRunningMethods`).
+      let budget = HermesGatewayClient.longRunningMethods.contains(method)
+        ? longRequestTimeout : requestTimeout
+      timeoutTasks[id] = Task { [budget, clock] in
+        do { try await clock.sleep(for: budget) } catch { return }
         await fireTimeout(id: id, method: method)
       }
       Task { await transmit(id: id, text: text) }

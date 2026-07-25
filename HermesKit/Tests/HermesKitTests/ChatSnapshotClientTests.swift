@@ -67,6 +67,18 @@ struct ChatSnapshotClientTests {
     #expect(client.loadSnapshot("s1")?.rows == [toolRow])
   }
 
+  @Test func snapshotRoundTripsCommandOutputRows() {
+    // The ephemeral slash-output kind (#36) survives the cache round-trip like any other
+    // row — a silent decode miss here would drop it from the instant-paint snapshot.
+    let client = ChatSnapshotClient.inMemory()
+    let rows = [
+      messageRow("ran /status"),
+      ChatRow(id: UUID(), kind: .commandOutput(text: "Session: all good")),
+    ]
+    client.saveSnapshot("s1", ChatSnapshot(rows: rows))
+    #expect(client.loadSnapshot("s1")?.rows == rows)
+  }
+
   @Test func snapshotRoundTripsReviewStatusRows() {
     // Review-summary system lines (#47) are `.status(kind: "review")` rows appended live;
     // they must survive the snapshot cache so the instant paint shows them until the next

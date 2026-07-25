@@ -271,6 +271,9 @@ struct ChatBranchTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
+        // The slash catalog fetch (#36) fires on every hydrate; it is orthogonal to the
+        // branch RPC under test — answer it benignly and don't record it.
+        if method == "commands.catalog" { return .object([:]) }
         sent.setValue((method, params))
         // `session.activate` live payload: stored id under `session_key`, seeded history.
         return .object([
@@ -326,6 +329,8 @@ struct ChatBranchTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, _ in
+        // Orthogonal slash catalog fetch (#36) — answer benignly, don't record.
+        if method == "commands.catalog" { return .object([:]) }
         methods.withValue { $0.append(method) }
         return .object([
           "session_id": .string("branch-live"),
@@ -402,6 +407,8 @@ struct ChatBranchTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
+        // Orthogonal slash catalog fetch (#36) — answer benignly, don't record.
+        if method == "commands.catalog" { return .object([:]) }
         calls.withValue { $0.append((method, params)) }
         switch method {
         case "session.resume":
@@ -595,6 +602,8 @@ struct ChatBranchTests {
     initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.hermesGateway.send = { @Sendable method, params in
+        // Orthogonal slash catalog fetch (#36) — answer benignly, don't record.
+        if method == "commands.catalog" { return .object([:]) }
         methods.withValue { $0.append(method) }
         // The degrade create is BARE — no seed fields against an agent this old.
         #expect(params["messages"] == nil)
@@ -777,6 +786,8 @@ struct ChatBranchTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
+        // Orthogonal slash catalog fetch (#36) — answer benignly, don't record.
+        if method == "commands.catalog" { return .object([:]) }
         calls.withValue { $0.append((method, params)) }
         switch method {
         case "session.resume":
@@ -970,6 +981,8 @@ struct ChatBranchTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
+        // Orthogonal slash catalog fetch (#36) — answer benignly, don't record.
+        if method == "commands.catalog" { return .object([:]) }
         calls.withValue { $0.append((method, params)) }
         switch method {
         case "session.create":
@@ -1044,6 +1057,8 @@ struct ChatBranchTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
+        // Orthogonal slash catalog fetch (#36) — answer benignly, don't record.
+        if method == "commands.catalog" { return .object([:]) }
         calls.withValue { $0.append((method, params)) }
         // Real, persisted history — including a follow-up turn the seed alone (just the
         // original assistant message) does not carry, and a seed replay would discard.
@@ -1119,6 +1134,8 @@ struct ChatBranchTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(.init(timeIntervalSince1970: 0))
       $0.hermesGateway.send = { @Sendable method, params in
+        // Orthogonal slash catalog fetch (#36) — answer benignly, don't record.
+        if method == "commands.catalog" { return .object([:]) }
         calls.withValue { $0.append((method, params)) }
         guard method == "session.resume" else {
           Issue.record("unexpected \(method) — a re-armed probe must re-probe, never replay")

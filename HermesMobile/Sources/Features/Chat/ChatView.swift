@@ -7,6 +7,7 @@ import SwiftUI
 struct ChatView: View {
   @Bindable var store: StoreOf<ChatFeature>
   @FocusState private var composerFocused: Bool
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     VStack(spacing: 0) {
@@ -19,6 +20,7 @@ struct ChatView: View {
         }
       footer
       pendingCard
+      suggestionPanel
       Divider()
       ComposerView(
         text: $store.composerText,
@@ -44,6 +46,10 @@ struct ChatView: View {
         onRemoveAttachment: { store.send(.removeAttachment(id: $0)) }
       )
     }
+    // Animates the suggestion panel in/out (and the layout shift it causes). Keyed to
+    // emptiness so mere filtering while typing never animates; nil under reduce-motion,
+    // so the panel then appears/disappears instantly.
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: store.slashSuggestions.isEmpty)
     .navigationTitle(store.title ?? "Chat")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
@@ -225,6 +231,26 @@ struct ChatView: View {
       } else {
         Text(text).font(.caption).foregroundStyle(.secondary)
       }
+    case let .commandOutput(text):
+      // Ephemeral slash-command output (#36): bubble-less, dimmed, monospaced, selectable.
+      Text(text)
+        .font(.system(.callout, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+  }
+
+  /// The slash-command autocomplete panel (#36), anchored just above the composer.
+  /// Rendered only while the reducer's computed `slashSuggestions` is non-empty (catalog
+  /// loaded, composer text is a slash query); a tap inserts via `.slashSuggestionTapped`
+  /// and leaves focus untouched, so the keyboard stays up.
+  @ViewBuilder
+  private var suggestionPanel: some View {
+    let suggestions = store.slashSuggestions
+    if !suggestions.isEmpty {
+      SlashSuggestionPanel(suggestions: suggestions) { store.send(.slashSuggestionTapped($0)) }
+        .transition(.opacity)
     }
   }
 

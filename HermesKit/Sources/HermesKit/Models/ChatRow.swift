@@ -48,6 +48,10 @@ public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
     case thinking(reasoning: String, status: String?, elapsedSeconds: Int, isComplete: Bool)
     /// A transient status line (e.g. "searching…"); `kind` is an open string.
     case status(kind: String, text: String)
+    /// The ephemeral output of a slash command (`slash.exec` / `command.dispatch`, #36).
+    /// Local-only, desktop parity: never present in server history, so a wholesale hydrate
+    /// replace drops it — `reconstructTranscript` never emits this kind.
+    case commandOutput(text: String)
 
     /// The `kind` token for self-improvement review-summary rows (#47) — the one status
     /// kind the VIEW branches on (footnote + selectable rendering in `ChatView`). The
@@ -64,6 +68,7 @@ public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
       case .tool: return "tool"
       case .thinking: return "thinking"
       case .status: return "status"
+      case .commandOutput: return "commandOutput"
       }
     }
 
@@ -86,6 +91,7 @@ public struct ChatRow: Equatable, Sendable, Identifiable, Codable {
       guard let status, !status.isEmpty else { return reasoning }
       return reasoning.isEmpty ? status : reasoning + "\n\n" + status
     case let .status(_, text): return text
+    case let .commandOutput(text): return text
     }
   }
 

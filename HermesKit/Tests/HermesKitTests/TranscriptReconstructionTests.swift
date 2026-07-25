@@ -265,9 +265,9 @@ struct TranscriptReconstructionTests {
     // MUST be collision-free over the realistic transcript space, or two distinct rows would
     // silently merge in the diffable data source. Enumerate every (sequenceIndex, role,
     // kindDiscriminator) combination a long session could produce and assert all ids are
-    // distinct — 1000 indices × 3 roles × 4 discriminators = 12000 seeds.
+    // distinct — 1000 indices × 3 roles × 5 discriminators = 15000 seeds.
     let roles: [ChatRow.Role?] = [.user, .assistant, nil]
-    let discriminators = ["message", "tool", "thinking", "status"]
+    let discriminators = ["message", "tool", "thinking", "status", "commandOutput"]
     var ids = Set<UUID>()
     var count = 0
     for index in 0..<1000 {
@@ -282,7 +282,7 @@ struct TranscriptReconstructionTests {
         }
       }
     }
-    #expect(count == 12000)
+    #expect(count == 15000)
     #expect(ids.count == count)  // zero collisions across the realistic range
   }
 
@@ -293,6 +293,52 @@ struct TranscriptReconstructionTests {
       let b = ChatRow.deterministicID(sequenceIndex: index, role: .assistant, kindDiscriminator: "thinking")
       #expect(a == b)
     }
+  }
+
+  @Test func commandOutputRowIDDeterministicAndDistinctFromOtherKinds() {
+    // The slash-command output row (#36) has its own stable discriminator feeding the
+    // deterministic id: rebuilt ids are byte-identical, and at the same ordinal it never
+    // collides with any other kind.
+    let kind = ChatRow.Kind.commandOutput(text: "compressed 12 messages")
+    #expect(kind.discriminator == "commandOutput")
+    // The discriminator excludes the mutable payload — different output text, same token.
+    #expect(kind.discriminator == ChatRow.Kind.commandOutput(text: "other").discriminator)
+    // commandOutput is not a message — no role component in its id.
+    #expect(kind.role == nil)
+
+    let id = ChatRow.deterministicID(
+      sequenceIndex: 3, role: kind.role, kindDiscriminator: kind.discriminator
+    )
+    // Deterministic across rebuilds.
+    #expect(id == ChatRow.deterministicID(sequenceIndex: 3, role: nil, kindDiscriminator: "commandOutput"))
+    // Distinct from every other kind at the same ordinal.
+    for other in ["message", "tool", "thinking", "status"] {
+      #expect(id != ChatRow.deterministicID(sequenceIndex: 3, role: nil, kindDiscriminator: other))
+    }
+    #expect(id != ChatRow.deterministicID(sequenceIndex: 3, role: .user, kindDiscriminator: "message"))
+    #expect(id != ChatRow.deterministicID(sequenceIndex: 3, role: .assistant, kindDiscriminator: "message"))
+    // And distinct from itself at a different ordinal.
+    #expect(id != ChatRow.deterministicID(sequenceIndex: 4, role: nil, kindDiscriminator: "commandOutput"))
+  }
+
+  @Test func reconstructionNeverEmitsCommandOutput() {
+    // slash.exec output is ephemeral and never written to persisted history (verified in the
+    // Hermes source) — reconstructTranscript must be unaffected by the new kind: no server
+    // role maps to it, and ids of the kinds it does emit are unchanged.
+    let rows = reconstructTranscript([
+      msg(1, "user", text: "hi"),
+      msg(2, "assistant", text: "hello", reasoning: "hmm"),
+      msg(3, "tool", name: "search", context: "q"),
+      msg(4, "command", text: "not a real server role"),
+    ])
+    #expect(rows.allSatisfy { $0.kind.discriminator != "commandOutput" })
+    // Same ids as before the kind existed — derived only from the emitted kinds.
+    #expect(rows.map(\.id) == [
+      ChatRow.deterministicID(sequenceIndex: 0, role: .user, kindDiscriminator: "message"),
+      ChatRow.deterministicID(sequenceIndex: 1, role: nil, kindDiscriminator: "thinking"),
+      ChatRow.deterministicID(sequenceIndex: 2, role: .assistant, kindDiscriminator: "message"),
+      ChatRow.deterministicID(sequenceIndex: 3, role: nil, kindDiscriminator: "tool"),
+    ])
   }
 
   @Test func kindDiscriminatorSingleSourceMatchesReconstruction() {

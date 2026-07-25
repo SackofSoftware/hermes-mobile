@@ -669,6 +669,84 @@ struct SlashCommandChatTests {
     #expect(store.state.transcript.last?.kind == .commandOutput(text: "ok"))
   }
 
+  @Test func slashExecOnUnpersistedBranchHealsViaSeededCreate() async {
+    // Merge-gap fix: a slash command on an UNPERSISTED branch (#34) — attach-by-live-id, a
+    // durable `branchSeed`, a stored id that has NO DB row — must self-heal EXACTLY like the
+    // plain-prompt/attachments paths when `slash.exec` answers "session not found" (a routine
+    // reap after background→foreground). Because `attachLiveSessionID != nil`, the captured
+    // stored id is dropped and the heal recreates the SEEDED session (`session.create` with
+    // messages + parent_session_id — NOT a `session.resume` of the row-less stored id, which
+    // would 4007 again and throw), then replays the exec once. Mirrors
+    // `ChatBranchTests.submitHealRecreatesSeededSessionAndKeepsAttachMode` for the slash path.
+    let calls = LockIsolated<[(method: String, params: JSONValue)]>([])
+    var initial = readyStateWithCatalog()
+    initial.liveSessionID = "branch-live"
+    initial.attachLiveSessionID = "branch-live"
+    initial.branchSeed = .init(text: "seeded answer", parentSessionID: "parent-1")
+    initial.storedSessionID = "branch-stored" // a bare session_key with no DB row
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append((method, params)) }
+        switch method {
+        case "slash.exec":
+          if params["session_id"]?.stringValue == "branch-live" {
+            throw GatewayError.server("session not found") // the reaped live id
+          }
+          return .object(["output": .string("ok")])
+        case "session.create":
+          return .object([
+            "session_id": .string("fresh-live"), "stored_session_id": .string("fresh-stored"),
+          ])
+        case "session.resume":
+          // Only the post-command refresh should reach here (against the healed id) —
+          // NEVER the #17 heal, which must take the seeded-create path for a row-less branch.
+          return .object([
+            "session_id": .string("fresh-live"),
+            "messages": .array([]),
+            "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    // The heal recreated the SEEDED session and kept attach-by-live-id + the seed (its DB
+    // row lands when the replayed command's own history refresh persists it).
+    await store.receive(\.liveSessionIDRefreshed) {
+      $0.liveSessionID = "fresh-live"
+      $0.storedSessionID = "fresh-stored"
+      $0.attachLiveSessionID = "fresh-live"
+    }
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    await store.finish()
+
+    // slash.exec (reaped) → SEEDED session.create → replay slash.exec → post-command refresh.
+    #expect(calls.value.map(\.method) == ["slash.exec", "session.create", "slash.exec", "session.resume"])
+    // The heal's create carried the branch seed + parent link — never a bare create.
+    let createParams = calls.value[1].params
+    guard case let .array(messages)? = createParams["messages"] else {
+      Issue.record("heal create missing the seed messages")
+      return
+    }
+    #expect(messages.first?["content"]?.stringValue == "seeded answer")
+    #expect(createParams["parent_session_id"]?.stringValue == "parent-1")
+    // The replayed exec targeted the fresh live id.
+    #expect(calls.value[2].params["session_id"]?.stringValue == "fresh-live")
+    #expect(store.state.errorBanner == nil)
+    #expect(store.state.branchSeed == .init(text: "seeded answer", parentSessionID: "parent-1"))
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "ok"))
+  }
+
   @Test func slashExecUnknownMethodFailsDirectlyWithoutDispatchFallback() async {
     // A `-32601` from slash.exec fails directly — `command.dispatch` shipped alongside
     // `slash.exec` (same pipeline), so the fallback could only answer a second `-32601`.

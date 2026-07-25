@@ -1076,12 +1076,16 @@ public struct ChatFeature {
           state.errorBanner = nil
           state.isSending = true
           state.slashExecInFlight = true
-          let stored = state.storedSessionID
+          // An unpersisted branch's stored id has no DB row (#34) — a heal resuming it
+          // would 4007 again, so heal by recreating from the client-held seed (context +
+          // parent link rebuilt) exactly like the plain-prompt / attachments paths do.
+          let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+          let seed = state.branchSeed
           let profile = state.scopedProfile
           return .run { [gateway] send in
             await executeSlashCommand(
               command: text, sessionID: sessionID, storedSessionID: stored,
-              profile: profile, gateway: gateway, send: send
+              branchSeed: seed, profile: profile, gateway: gateway, send: send
             )
           }
         }
@@ -3051,6 +3055,7 @@ private func runDispatchDirective(
   arg: String,
   sessionID: String,
   storedSessionID: String?,
+  branchSeed: ChatFeature.State.BranchSeed? = nil,
   profile: String?,
   gateway: HermesGatewayClient,
   send: Send<ChatFeature.Action>,
@@ -3077,7 +3082,8 @@ private func runDispatchDirective(
     await executeSlashCommand(
       command: "/\(target)\(arg.isEmpty ? "" : " \(arg)")",
       sessionID: sessionID, storedSessionID: storedSessionID,
-      profile: profile, gateway: gateway, send: send, allowAliasHop: false
+      branchSeed: branchSeed, profile: profile, gateway: gateway, send: send,
+      allowAliasHop: false
     )
 
   case "prefill":
@@ -3125,7 +3131,7 @@ private func runDispatchDirective(
           ]))
         },
         sessionID: sessionID, storedSessionID: storedSessionID,
-        profile: profile, gateway: gateway, send: send
+        branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
       )
       await send(.slashCommandHandedOff)
     } catch let error as GatewayError {
@@ -3172,6 +3178,7 @@ private func executeSlashCommand(
   command: String,
   sessionID: String,
   storedSessionID: String?,
+  branchSeed: ChatFeature.State.BranchSeed? = nil,
   profile: String?,
   gateway: HermesGatewayClient,
   send: Send<ChatFeature.Action>,
@@ -3201,7 +3208,7 @@ private func executeSlashCommand(
         ]))
       },
       sessionID: sessionID, storedSessionID: storedSessionID,
-      profile: profile, gateway: gateway, send: send
+      branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
     )
     // Directive-shaped success FIRST (desktop parity): `/retry`, `/queue`, `/goal`,
     // `/undo`, bundle skills, … answer their `command.dispatch` directive as the exec
@@ -3210,7 +3217,8 @@ private func executeSlashCommand(
       await runDispatchDirective(
         result, name: name, arg: arg,
         sessionID: sessionID, storedSessionID: storedSessionID,
-        profile: profile, gateway: gateway, send: send, allowAliasHop: allowAliasHop
+        branchSeed: branchSeed, profile: profile, gateway: gateway, send: send,
+        allowAliasHop: allowAliasHop
       )
     } else {
       let body = result["output"]?.stringValue?.nonEmpty ?? "/\(name): no output"
@@ -3259,12 +3267,13 @@ private func executeSlashCommand(
         ]))
       },
       sessionID: sessionID, storedSessionID: storedSessionID,
-      profile: profile, gateway: gateway, send: send
+      branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
     )
     await runDispatchDirective(
       directive, name: name, arg: arg,
       sessionID: sessionID, storedSessionID: storedSessionID,
-      profile: profile, gateway: gateway, send: send, allowAliasHop: allowAliasHop
+      branchSeed: branchSeed, profile: profile, gateway: gateway, send: send,
+      allowAliasHop: allowAliasHop
     )
   } catch let error as GatewayError {
     // If the fallback ONLY reports the routing-noise "not a quick/plugin/bundle/skill

@@ -527,6 +527,85 @@ struct SlashCommandChatTests {
     #expect(snapshot.turnAnchor("stored123") == nil)
   }
 
+  @Test func slashAliasIsCanonicalizedForTheWireCommand() async {
+    // BUG (#36 follow-up): typing the ALIAS `/compact` in FULL must reach `slash.exec` as its
+    // CANONICAL name `compress`. The gateway's live handler recognizes only canonical names
+    // (`_LIVE_SESSION_DIRECT_COMMANDS`), so a raw alias falls through to the isolated
+    // slash-worker subprocess and reports "Unknown command: /compact". The user still SEES
+    // the raw `/compact` they typed in the transcript — only the wire command is canonical.
+    let execParams = LockIsolated<JSONValue?>(nil)
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    initial.commandCatalog = CommandCatalog(
+      commands: [SlashCommand(name: "/compress", description: "Compress context", category: "Session", isSkill: false)],
+      subcommands: [:],
+      canonical: ["/compress": "/compress", "/compact": "/compress"]
+    )
+    initial.composerText = "/compact here 5"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        if method == "slash.exec" {
+          execParams.setValue(params)
+          return .object(["output": .string("compressed 20 → 8 messages")])
+        }
+        return .object([
+          "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+          "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      // The RAW typed alias is echoed as the user row — only the WIRE command is canonical.
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/compact here 5", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+      $0.slashExecInFlight = true
+    }
+    await store.receive(\.slashCommandOutput)
+    await store.finish()
+    // The alias was resolved: slash.exec got "compress here 5", NEVER "compact here 5".
+    #expect(execParams.value?["command"]?.stringValue == "compress here 5")
+    #expect(execParams.value?["session_id"]?.stringValue == "live123")
+  }
+
+  @Test func slashExecOutputIsStrippedOfANSIEscapes() async {
+    // BUG (#36 follow-up): the agent formats slash output for a terminal (SGR colors,
+    // box-drawing color runs). On mobile the ESC byte is invisible, so the sequences render
+    // as literal garbage (`[1;31m`, `[0m`, `[38;2;255;215;0m`). The `commandOutput` row must
+    // be clean — the mascot and box-drawing chrome are kept, only ESC sequences removed.
+    let esc = "\u{1B}"
+    let ansi = "\(esc)[1;31mUnknown command: /foo\(esc)[0m\n\(esc)[38;2;255;215;0m(^_^)?\(esc)[0m +---+"
+    let store = TestStore(initialState: readyStateWithCatalog()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "slash.exec" { return .object(["output": .string(ansi)]) }
+        return .object([
+          "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+          "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandOutput)
+    await store.finish()
+    // The ephemeral row (carried across the post-command refresh) is clean text.
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "Unknown command: /foo\n(^_^)? +---+"))
+  }
+
   @Test func slashExecWarningAndEmptyOutputDegradeGracefully() async {
     // Web-reference parity: a `warning` is prefixed above the body, and an empty/missing
     // `output` degrades to "/name: no output" rather than an empty row.

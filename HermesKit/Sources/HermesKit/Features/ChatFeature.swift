@@ -1082,9 +1082,14 @@ public struct ChatFeature {
           let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
           let seed = state.branchSeed
           let profile = state.scopedProfile
+          // Resolve a typed ALIAS to its canonical name for the WIRE command only (#36
+          // follow-up): the gateway's live handler recognizes only canonical names, so a
+          // raw alias (`/compact`) would fall through to the isolated slash-worker and
+          // report "Unknown command". The echoed user row above keeps the RAW typed text.
+          let wireCommand = catalog.canonicalizedCommandText(text)
           return .run { [gateway] send in
             await executeSlashCommand(
-              command: text, sessionID: sessionID, storedSessionID: stored,
+              command: wireCommand, sessionID: sessionID, storedSessionID: stored,
               branchSeed: seed, profile: profile, gateway: gateway, send: send
             )
           }
@@ -1634,7 +1639,9 @@ public struct ChatFeature {
         // draft). The rewound turns are removed from the transcript by the refresh below,
         // which is server-authoritative precisely because the rewind IS a history change.
         if let notice { appendCommandOutput(notice, into: &state) }
-        if !message.isEmpty { state.composerText = message }
+        // The prefilled draft is set straight into the composer (not through
+        // `appendCommandOutput`), so strip ANSI here too (#36 follow-up).
+        if !message.isEmpty { state.composerText = message.strippingANSI }
         return finishSlashExec(refresh: true, into: &state)
 
       case let .slashCommandFailed(message):
@@ -2743,7 +2750,11 @@ public struct ChatFeature {
   /// streaming append (a scrolled-up user is never yanked).
   private func appendCommandOutput(_ text: String, into state: inout State) {
     let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-    state.transcript.append(ChatRow(id: uuid(), kind: .commandOutput(text: text)))
+    // Strip ANSI/VT100 escapes (#36 follow-up): slash output/warnings/notices are formatted
+    // for a terminal and render as literal garbage on mobile. This is the single chokepoint
+    // for every ephemeral `commandOutput` row (`.slashCommandOutput`, `.slashCommandNotice`,
+    // and the prefill notice), so nothing terminal-formatted leaks into the transcript.
+    state.transcript.append(ChatRow(id: uuid(), kind: .commandOutput(text: text.strippingANSI)))
     maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
   }
 

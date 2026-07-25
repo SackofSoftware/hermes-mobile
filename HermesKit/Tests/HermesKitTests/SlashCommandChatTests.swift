@@ -528,21 +528,23 @@ struct SlashCommandChatTests {
   }
 
   @Test func slashAliasIsCanonicalizedForTheWireCommand() async {
-    // BUG (#36 follow-up): typing the ALIAS `/compact` in FULL must reach `slash.exec` as its
-    // CANONICAL name `compress`. The gateway's live handler recognizes only canonical names
-    // (`_LIVE_SESSION_DIRECT_COMMANDS`), so a raw alias falls through to the isolated
-    // slash-worker subprocess and reports "Unknown command: /compact". The user still SEES
-    // the raw `/compact` they typed in the transcript — only the wire command is canonical.
+    // #36 follow-up (still live for NON-compress aliases): typing an ALIAS in FULL must reach
+    // `slash.exec` as its CANONICAL name — the gateway's live handler recognizes only canonical
+    // names (`_LIVE_SESSION_DIRECT_COMMANDS`), so a raw alias would fall through to the isolated
+    // slash-worker subprocess and report "Unknown command". The user still SEES the raw alias
+    // they typed in the transcript — only the wire command is canonical. (`/compress`/`/compact`
+    // no longer exercise this path — they route to the dedicated `session.compress` RPC — so
+    // this uses the generic `/st → /status` alias, proving the retained canonicalization helper.)
     let execParams = LockIsolated<JSONValue?>(nil)
     var initial = ChatFeature.State(connection: conn)
     initial.liveSessionID = "live123"
     initial.storedSessionID = "stored123"
     initial.commandCatalog = CommandCatalog(
-      commands: [SlashCommand(name: "/compress", description: "Compress context", category: "Session", isSkill: false)],
+      commands: [SlashCommand(name: "/status", description: "Show status", category: "Session", isSkill: false)],
       subcommands: [:],
-      canonical: ["/compress": "/compress", "/compact": "/compress"]
+      canonical: ["/status": "/status", "/st": "/status"]
     )
-    initial.composerText = "/compact here 5"
+    initial.composerText = "/st here 5"
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -551,7 +553,7 @@ struct SlashCommandChatTests {
       $0.hermesGateway.send = { @Sendable method, params in
         if method == "slash.exec" {
           execParams.setValue(params)
-          return .object(["output": .string("compressed 20 → 8 messages")])
+          return .object(["output": .string("status: all good")])
         }
         return .object([
           "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
@@ -564,7 +566,7 @@ struct SlashCommandChatTests {
     await store.send(.composerSubmitted) {
       // The RAW typed alias is echoed as the user row — only the WIRE command is canonical.
       $0.transcript = [
-        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/compact here 5", isComplete: true)),
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/st here 5", isComplete: true)),
       ]
       $0.composerText = ""
       $0.isSending = true
@@ -572,8 +574,8 @@ struct SlashCommandChatTests {
     }
     await store.receive(\.slashCommandOutput)
     await store.finish()
-    // The alias was resolved: slash.exec got "compress here 5", NEVER "compact here 5".
-    #expect(execParams.value?["command"]?.stringValue == "compress here 5")
+    // The alias was resolved: slash.exec got "status here 5", NEVER "st here 5".
+    #expect(execParams.value?["command"]?.stringValue == "status here 5")
     #expect(execParams.value?["session_id"]?.stringValue == "live123")
   }
 
@@ -1018,13 +1020,15 @@ struct SlashCommandChatTests {
   }
 
   @Test func serverRoutedCommandFailureSkipsTheDispatchFallback() async {
-    // The gateway routes `_PENDING_INPUT_COMMANDS` (`/undo`, `/retry`, `/compact`, …)
+    // The gateway routes `_PENDING_INPUT_COMMANDS` (`/undo`, `/retry`, `/steer`, …)
     // through `command.dispatch` ITSELF, inside `slash.exec`. An error therefore comes FROM
     // a dispatch that already ran, so re-issuing our own would re-enter the same handler —
-    // a `/compact` that reached "compress failed" has already mutated history and would be
-    // recompressed. Same double-execution class as the transport-failure guard.
+    // a `/retry` that reached its truncate-and-resend has already mutated history and would
+    // run twice. Same double-execution class as the transport-failure guard. (`/compress`/
+    // `/compact` are NOT here: they route to the dedicated `session.compress` RPC and never
+    // reach `slash.exec` — covered by the compress tests.)
     let calls = LockIsolated<[String]>([])
-    for command in ["/undo", "/compact", "/retry"] {
+    for command in ["/undo", "/retry", "/steer"] {
       let store = TestStore(
         initialState: readyStateWithCatalog(composerText: command, extraCommands: [command])
       ) { ChatFeature() } withDependencies: {
@@ -1069,6 +1073,301 @@ struct SlashCommandChatTests {
     await store.receive(\.slashCommandFailed)
     await store.finish()
     #expect(other.value == ["slash.exec", "command.dispatch"])
+  }
+
+  // MARK: session.compress (dedicated RPC — desktop parity, version-independent)
+
+  @Test func compressRoutesToSessionCompressNotSlashExec() async {
+    // The reported bug's fix: `/compress` calls the DEDICATED `session.compress` gateway RPC
+    // — NEVER `slash.exec` (which falls through to an isolated worker on older agents). It
+    // locks/unlocks the composer via the SAME slash terminal path, appends a confirmation
+    // commandOutput row (from the server summary), and runs the server-authoritative refresh
+    // so the transcript + context-usage pill update (compression rewrites history + usage).
+    // NOTE: the shared catalog does NOT contain `/compress` — detection is hardcoded
+    // (`compressCommandNames`), NOT catalog-derived, proving it works even when the catalog
+    // omits or mislabels it.
+    let calls = LockIsolated<[String]>([])
+    let compressParams = LockIsolated<JSONValue?>(nil)
+    let snapshot = ChatSnapshotClient.inMemory()
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/compress")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = snapshot
+      $0.hermesGateway.send = { @Sendable method, params in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "session.compress":
+          compressParams.setValue(params)
+          return .object([
+            "status": .string("compressed"),
+            "removed": .number(8),
+            "summary": .object([
+              "headline": .string("Compressed 12 → 4 messages"),
+              "token_line": .string("~40,000 → ~12,000 tokens"),
+              "note": .string("Older turns summarized."),
+              "aborted": .bool(false),
+            ]),
+            "usage": .object(["context_used": .number(12000), "context_max": .number(200_000)]),
+          ])
+        case "session.resume":
+          return .object([
+            "session_id": .string("live123"),
+            "messages": .array([
+              .object(["id": .number(1), "role": .string("user"), "text": .string("compressed history")]),
+            ]),
+            "running": .bool(false),
+            "info": .object([
+              "model": .string("claude-opus-4-8"),
+              "usage": .object(["context_used": .number(12000), "context_max": .number(200_000)]),
+            ]),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/compress", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+      $0.slashExecInFlight = true
+    }
+    await store.receive(\.slashCommandOutput) {
+      $0.transcript.append(ChatRow(
+        id: self.uuid(1),
+        kind: .commandOutput(text: "Compressed 12 → 4 messages\n~40,000 → ~12,000 tokens\nOlder turns summarized.")
+      ))
+      $0.isSending = false
+      $0.slashExecInFlight = false
+    }
+    await store.receive({ action in
+      guard case let .delegate(.runningChanged(sessionID, running)) = action else { return false }
+      return sessionID == "stored123" && running == false
+    })
+    await store.receive(\.slashHistoryRefreshed) {
+      $0.usage = Usage(contextUsed: 12000, contextMax: 200_000)
+    }
+    await store.finish()
+
+    // Exactly the dedicated RPC + the post-command refresh — NEVER slash.exec/command.dispatch.
+    #expect(calls.value == ["session.compress", "session.resume"])
+    #expect(compressParams.value?["session_id"]?.stringValue == "live123")
+    // No focus topic typed → the param is omitted (byte-minimal request).
+    #expect(compressParams.value?["focus_topic"] == nil)
+    // Server-authoritative: the transcript is the server's post-compress history with the
+    // ephemeral confirmation carried across the wholesale replace.
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "compressed history", isComplete: true),
+      .commandOutput(text: "Compressed 12 → 4 messages\n~40,000 → ~12,000 tokens\nOlder turns summarized."),
+    ])
+    #expect(store.state.errorBanner == nil)
+    // An exec-style command sets NO turn anchor (a hydrate mid-command must not resurrect a
+    // phantom elapsed timer).
+    #expect(snapshot.turnAnchor("stored123") == nil)
+  }
+
+  @Test func compactAliasAlsoRoutesToSessionCompress() async {
+    // The ACTUAL reported bug: the ALIAS `/compact` must ALSO reach `session.compress`, never
+    // `slash.exec`. This holds even with an OLDER agent's MISLABELING catalog whose `canon`
+    // self-maps `/compact → /compact` (so client-side canonicalization is a no-op) — detection
+    // is by hardcoded canonical intent, not the catalog. The RAW `/compact` is echoed as the
+    // user row.
+    let calls = LockIsolated<[String]>([])
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live123"
+    initial.storedSessionID = "stored123"
+    // The buggy old-agent catalog: alias self-maps instead of resolving to /compress.
+    initial.commandCatalog = CommandCatalog(
+      commands: [SlashCommand(name: "/compress", description: "Compress context", category: "Session", isSkill: false)],
+      subcommands: [:],
+      canonical: ["/compress": "/compress", "/compact": "/compact"]
+    )
+    initial.composerText = "/compact"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "session.compress":
+          return .object(["status": .string("compressed"), "removed": .number(3)])
+        case "session.resume":
+          return .object([
+            "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      // The RAW typed alias is echoed as the user row.
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/compact", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+      $0.slashExecInFlight = true
+    }
+    await store.receive(\.slashCommandOutput) {
+      $0.transcript.append(ChatRow(id: self.uuid(1), kind: .commandOutput(text: "Compressed 3 messages.")))
+      $0.isSending = false
+      $0.slashExecInFlight = false
+    }
+    await store.receive({ action in
+      guard case .delegate(.runningChanged) = action else { return false }
+      return true
+    })
+    await store.receive(\.slashHistoryRefreshed)
+    await store.finish()
+
+    // `/compact` reached session.compress — NEVER slash.exec / command.dispatch.
+    #expect(calls.value == ["session.compress", "session.resume"])
+    #expect(store.state.errorBanner == nil)
+  }
+
+  @Test func compressThreadsFocusTopicAndSynthesizesConfirmation() async {
+    // A typed argument becomes the compression `focus_topic`, and when the server returns no
+    // display text (no summary / message / host_ack / removed count) the confirmation is
+    // synthesized to a sensible "Context compressed." so the user always gets feedback.
+    let compressParams = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/compress just the auth flow")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        switch method {
+        case "session.compress":
+          compressParams.setValue(params)
+          return .object(["status": .string("compressed")]) // no display text at all
+        case "session.resume":
+          return .object([
+            "session_id": .string("live123"), "messages": .array([]), "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    await store.finish()
+    #expect(compressParams.value?["focus_topic"]?.stringValue == "just the auth flow")
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "Context compressed."))
+  }
+
+  @Test func compressFailureSurfacesBannerAndUnlocks() async {
+    // A `session.compress` failure surfaces `.slashCommandFailed` (banner + unlocked composer)
+    // — never a swallowed `try?` — and runs NO history refresh (a failure lands no change).
+    let calls = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: readyStateWithCatalog(composerText: "/compress")
+    ) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        throw GatewayError.server("compress boom")
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted) {
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "/compress", isComplete: true)),
+      ]
+      $0.composerText = ""
+      $0.isSending = true
+      $0.slashExecInFlight = true
+    }
+    await store.receive(\.slashCommandFailed) {
+      $0.errorBanner = "Command failed: compress boom"
+      $0.isSending = false
+      $0.slashExecInFlight = false
+    }
+    await store.receive({ action in
+      guard case let .delegate(.runningChanged(sessionID, running)) = action else { return false }
+      return sessionID == "stored123" && running == false
+    })
+    await store.finish()
+    // Only the compress RPC ran — no dispatch fallback, no refresh.
+    #expect(calls.value == ["session.compress"])
+    #expect(store.state.transcript.map(\.kind) == [
+      .message(role: .user, text: "/compress", isComplete: true),
+    ])
+  }
+
+  @Test func compressSelfHealsOnSessionNotFound() async {
+    // The compress RPC rides the standard #17 self-heal: a stale live id answers "session not
+    // found" → re-resume for a fresh id, replay session.compress ONCE against it, confirmation
+    // lands with no banner. Mirrors the slash-exec heal test shape.
+    let calls = LockIsolated<[(method: String, sid: String?)]>([])
+    var initial = readyStateWithCatalog(composerText: "/compress")
+    initial.liveSessionID = "stale-live"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = ImmediateClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        let sid = params["session_id"]?.stringValue
+        calls.withValue { $0.append((method, sid)) }
+        switch method {
+        case "session.compress":
+          if sid == "stale-live" { throw GatewayError.server("session not found") }
+          return .object(["status": .string("compressed"), "removed": .number(2)])
+        case "session.resume":
+          // Serves both the #17 heal and the post-command refresh.
+          return .object([
+            "session_id": .string("fresh-live"),
+            "stored_session_id": .string("stored123"),
+            "messages": .array([]),
+            "running": .bool(false),
+            "info": .object(["usage": .object(["context_used": .number(1), "context_max": .number(200_000)])]),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.liveSessionIDRefreshed) {
+      $0.liveSessionID = "fresh-live"
+    }
+    await store.receive(\.slashCommandOutput) {
+      $0.isSending = false
+    }
+    await store.finish()
+
+    // compress (stale) → heal-resume → single replay (fresh id) → post-command refresh.
+    #expect(calls.value.map(\.method) == ["session.compress", "session.resume", "session.compress", "session.resume"])
+    #expect(calls.value[2].sid == "fresh-live")
+    #expect(store.state.errorBanner == nil)
+    #expect(store.state.transcript.last?.kind == .commandOutput(text: "Compressed 2 messages."))
   }
 
   @Test func hydrateMidExecKeepsTheComposerLocked() async {

@@ -1590,7 +1590,7 @@ struct ChatReductionTests {
     ]
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
-      $0.attachmentPicker.pickFiles = { @Sendable in picked }
+      $0.attachmentPicker.pickFiles = { @Sendable in PickedBatch(items: picked) }
     }
 
     await store.send(.attachFilesTapped)
@@ -1602,12 +1602,343 @@ struct ChatReductionTests {
     }
   }
 
+  /// A picked photo that never loaded (an iCloud original that wouldn't download in time, a
+  /// type that couldn't be re-encoded) used to be a *silent* no-op: the sheet dismissed and
+  /// nothing appeared. The sheet can't distinguish that from a cancel on its own, so the
+  /// drop count does.
+  @Test func aPickThatLoadsNothingIsReported() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.attachmentPicker.pickPhotos = { @Sendable in PickedBatch(droppedCount: 1) }
+    }
+
+    await store.send(.attachPhotosTapped)
+    await store.receive(\.attachmentsDropped) {
+      $0.errorBanner = "Couldn’t add the selected item."
+    }
+  }
+
+  /// A partial loss is reported too — the chips that made it are staged first, so the banner
+  /// is about the ones that didn't.
+  @Test func aPartiallyLoadedPickStagesWhatSurvivedAndSaysWhatDidNot() async {
+    let picked = [PickedItem(data: Data([1]), filename: "a.png", mimeType: "image/png", kind: .image)]
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.attachmentPicker.pickPhotos = { @Sendable in PickedBatch(items: picked, droppedCount: 2) }
+    }
+
+    await store.send(.attachPhotosTapped)
+    await store.receive(\.attachmentAdded) {
+      $0.attachments = [picked[0].attachment(id: self.uuid(0))]
+    }
+    await store.receive(\.attachmentsDropped) {
+      $0.errorBanner = "Couldn’t add 2 of the selected items."
+    }
+  }
+
+  /// A re-pick that *works* takes the previous failure's banner down with it — the same rule a
+  /// successful paste follows. (The staging runs before the shortfall is reported, so the
+  /// partial-loss test above still ends with its banner up.)
+  @Test func aSuccessfulRePickClearsAStaleDropBanner() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.errorBanner = "Couldn’t add the selected item."
+    let picked = [PickedItem(data: Data([1]), filename: "a.png", mimeType: "image/png", kind: .image)]
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.attachmentPicker.pickPhotos = { @Sendable in PickedBatch(items: picked) }
+    }
+
+    await store.send(.attachPhotosTapped)
+    await store.receive(\.attachmentAdded) {
+      $0.errorBanner = nil
+      $0.attachments = [picked[0].attachment(id: self.uuid(0))]
+    }
+  }
+
+  // MARK: Pasted images (#54)
+
+  private func pastedImage(_ n: Int) -> PickedItem {
+    PickedItem(
+      data: Data([0x89, 0x50, UInt8(n)]),
+      filename: n == 0 ? "pasted-image.png" : "pasted-image-\(n + 1).png",
+      mimeType: "image/png",
+      kind: .image
+    )
+  }
+
+  @Test func pastingImagesStagesThemInOrderWithFreshIDs() async {
+    let items = [pastedImage(0), pastedImage(1)]
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(items: items))) {
+      $0.pendingPasteCount = 0
+      $0.attachments = [
+        items[0].attachment(id: self.uuid(0)),
+        items[1].attachment(id: self.uuid(1)),
+      ]
+    }
+  }
+
+  @Test func pastingImagesAppendsAfterAlreadyStagedAttachments() async {
+    var initial = ChatFeature.State(connection: conn)
+    let existing = imageAttachment(9)
+    initial.attachments = [existing]
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    let pasted = pastedImage(0)
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(items: [pasted]))) {
+      $0.pendingPasteCount = 0
+      $0.attachments = [existing, pasted.attachment(id: self.uuid(0))]
+    }
+  }
+
+  /// The view only hands over a paste it *claimed* (the clipboard advertised an image), so an
+  /// empty batch means every provider failed to load or re-encode. iOS offered **Paste**, the
+  /// user tapped it — the one outcome that must not happen is silence.
+  @Test func pastingImagesThatAllFailedToLoadSurfacesABanner() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(droppedCount: 1))) {
+      $0.pendingPasteCount = 0
+      $0.errorBanner = "Couldn’t paste the image."
+    }
+    #expect(store.state.attachments.isEmpty)
+  }
+
+  /// …and a paste that *works* takes the stale banner down with it — a failure message left
+  /// hanging over a freshly staged chip reads as a verdict on that chip.
+  @Test func aSuccessfulPasteClearsAStaleBanner() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.errorBanner = "Couldn’t paste the image."
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    let pasted = pastedImage(0)
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(items: [pasted]))) {
+      $0.pendingPasteCount = 0
+      $0.errorBanner = nil
+      $0.attachments = [pasted.attachment(id: self.uuid(0))]
+    }
+  }
+
+  /// …except when the agent can't take attachments at all: that flip banners its own
+  /// explanation, and a second one on top would be noise.
+  @Test func pastingNothingIsSilentWhenAttachmentsUnsupported() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.attachmentsUnsupported = true
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(droppedCount: 1))) { $0.pendingPasteCount = 0 }
+  }
+
+  @Test func pastingImagesIsIgnoredWhenAttachmentsUnsupported() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.attachmentsUnsupported = true
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    // Backstop for the window the view's own gate can't cover (the capability can flip while
+    // the pasted providers are still loading): nothing staged.
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(items: [pastedImage(0), pastedImage(1)]))) {
+      $0.pendingPasteCount = 0
+    }
+  }
+
+  /// A paste that only *partly* survived says so. Only the survivors used to come back, so a
+  /// three-image paste that yielded two was indistinguishable from a two-image paste — and the
+  /// user sent an incomplete set believing it complete. The banner lands **after** the staging,
+  /// so it is not the chips' own clear that wipes it.
+  @Test func aPartiallyLostPasteStagesWhatSurvivedAndSaysSo() async {
+    let pasted = pastedImage(0)
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(items: [pasted], droppedCount: 2))) {
+      $0.pendingPasteCount = 0
+      $0.attachments = [pasted.attachment(id: self.uuid(0))]
+      $0.errorBanner = "Couldn’t paste 2 of the images."
+    }
+  }
+
+  @Test func aSinglyLostPasteIsWordedInTheSingular() async {
+    let pasted = pastedImage(0)
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(items: [pasted], droppedCount: 1))) {
+      $0.pendingPasteCount = 0
+      $0.attachments = [pasted.attachment(id: self.uuid(0))]
+      $0.errorBanner = "Couldn’t paste 1 of the images."
+    }
+  }
+
+  /// A paste is the one attachment source with no modal sheet over it: the composer, with the
+  /// user's typed text already in it, stays fully interactive while the clipboard providers
+  /// load. Submitting in that window shipped the message *without* the image, which then
+  /// reappeared orphaned in the next draft.
+  @Test func aPasteInFlightBlocksSubmissionUntilItLands() async {
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    initial.composerText = "look at this"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    #expect(store.state.canSend)
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    #expect(!store.state.canSend, "Send has to wait for the bytes it is meant to carry")
+    // A submit racing the load is a no-op — the text stays put rather than going out alone.
+    await store.send(.composerSubmitted)
+    #expect(store.state.composerText == "look at this")
+
+    let pasted = pastedImage(0)
+    await store.send(.attachmentsPasted(PickedBatch(items: [pasted]))) {
+      $0.pendingPasteCount = 0
+      $0.attachments = [pasted.attachment(id: self.uuid(0))]
+    }
+    #expect(store.state.canSend)
+  }
+
+  /// Two fast pastes are both outstanding at once (the view's coordinator chains their loads),
+  /// which is why the gate is a counter: a `Bool` would unlock on the first delivery while the
+  /// second batch was still loading.
+  @Test func overlappingPastesEachHoldTheGate() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 2 }
+
+    let first = pastedImage(0)
+    await store.send(.attachmentsPasted(PickedBatch(items: [first]))) {
+      $0.pendingPasteCount = 1
+      $0.attachments = [first.attachment(id: self.uuid(0))]
+    }
+    let second = pastedImage(1)
+    await store.send(.attachmentsPasted(PickedBatch(items: [second]))) {
+      $0.pendingPasteCount = 0
+      $0.attachments.append(second.attachment(id: self.uuid(1)))
+    }
+  }
+
+  /// The gate is released on **every** terminal outcome, not just the happy one — a paste that
+  /// loaded nothing, or one that arrived after the capability was withdrawn, must not leave the
+  /// composer locked for the rest of the session.
+  @Test func theGateIsReleasedByAPasteThatStagesNothing() async {
+    var initial = ChatFeature.State(connection: conn)
+    initial.attachmentsUnsupported = true
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(droppedCount: 1))) { $0.pendingPasteCount = 0 }
+  }
+
+  /// A batch that arrives at a chat which never pasted is **not this chat's** and is dropped.
+  /// The paste load is the one attachment source outside TCA's effect lifecycle — the pickers
+  /// are `.run` effects that `ifLet` cancels on teardown, while the coordinator's `Task`
+  /// delivers unconditionally through the store `ChatView` captured, which the root's
+  /// `ifLet(\.liveChat)` routes to whatever chat now occupies the slot. Over the whole load
+  /// window (up to `clipboardLoadTimeout`) an idle pop + open, a push tap (#32) or a branch
+  /// creation can have replaced it, and without the pairing check the image would silently
+  /// appear in — and upload to — a conversation it was never pasted into.
+  @Test func aPasteBatchFromAnotherChatIsIgnored() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    // No `attachmentsPasting`: nothing staged, no banner, and the gate stays where it was.
+    await store.send(.attachmentsPasted(PickedBatch(items: [pastedImage(0)], droppedCount: 1)))
+    #expect(store.state.attachments.isEmpty)
+    #expect(store.state.errorBanner == nil)
+    #expect(store.state.pendingPasteCount == 0)
+  }
+
+  /// …and a stray batch can't rob a paste this chat *is* waiting on: it is dropped whole
+  /// rather than decrementing someone else's gate.
+  @Test func aStrayPasteBatchDoesNotConsumeThisChatsPendingPaste() async {
+    let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    let mine = pastedImage(0)
+    await store.send(.attachmentsPasted(PickedBatch(items: [mine]))) {
+      $0.pendingPasteCount = 0
+      $0.attachments = [mine.attachment(id: self.uuid(0))]
+    }
+    // The other chat's batch, arriving late: the staged attachments are untouched.
+    await store.send(.attachmentsPasted(PickedBatch(items: [pastedImage(1)])))
+    #expect(store.state.attachments.count == 1)
+  }
+
+  /// The pasted→uploaded path end to end: a `PickedItem` handed over by the paste coordinator
+  /// is staged and then uploaded through the same `image.attach_bytes` hop a picked photo uses.
+  @Test func pastedImagesUploadOnSubmitLikePickedOnes() async {
+    let methods = LockIsolated<[String]>([])
+    let pasted = pastedImage(0)
+    var initial = ChatFeature.State(connection: conn, status: .ready)
+    initial.liveSessionID = "live"
+    initial.composerText = "look"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.hermesGateway.send = { @Sendable method, _ in
+        methods.withValue { $0.append(method) }
+        return .object(["attached": .bool(true)])
+      }
+    }
+
+    await store.send(.attachmentsPasting) { $0.pendingPasteCount = 1 }
+    await store.send(.attachmentsPasted(PickedBatch(items: [pasted]))) {
+      $0.pendingPasteCount = 0
+      $0.attachments = [pasted.attachment(id: self.uuid(0))]
+    }
+    await store.send(.composerSubmitted) {
+      $0.isSending = true
+      $0.attachments[0].uploadState = .uploading
+    }
+    await store.receive(\.attachmentsSubmitted) {
+      $0.transcript = [ChatRow(
+        id: self.uuid(1),
+        kind: .message(role: .user, text: "look", isComplete: true),
+        attachmentImages: [pasted.data] // the pasted bytes echo back as the thumbnail
+      )]
+      $0.composerText = ""
+      $0.attachments = []
+    }
+    #expect(methods.value == ["image.attach_bytes", "prompt.submit"])
+  }
+
+  /// A cancel carries no items *and* no drops, so it stays silent — the distinction the drop
+  /// count exists to draw.
   @Test func cancelledPhotoPickerAddsNothing() async {
     let store = TestStore(initialState: ChatFeature.State(connection: conn)) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing // captured by the effect even though no item needs an id
-      $0.attachmentPicker.pickPhotos = { @Sendable in [] }
+      $0.attachmentPicker.pickPhotos = { @Sendable in PickedBatch() }
     }
-    await store.send(.attachPhotosTapped) // empty selection → no attachmentAdded, no change
+    await store.send(.attachPhotosTapped) // empty selection → no attachmentAdded, no banner
   }
 
   // MARK: Attachment upload + submit (#8)

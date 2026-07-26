@@ -119,6 +119,23 @@ public struct ChatFeature {
     /// view can dim the affordance while it runs.
     public var isBranching: Bool
 
+    /// Pastes whose clipboard providers are still loading (#54) — a counter, not a flag,
+    /// because two pastes in quick succession chain in the view's coordinator and both must
+    /// be outstanding at once.
+    ///
+    /// It holds `canSend` down. A paste is the one attachment source with no modal sheet over
+    /// it, so the user is looking at a composer that already holds their typed text while the
+    /// load runs: submitting in that window sent the message *without* the image, which then
+    /// reappeared, orphaned, in the next draft. Every load is
+    /// deadline-bounded and the coordinator delivers its batch unconditionally, so
+    /// `attachmentsPasting` / `attachmentsPasted` are a balanced pair and this cannot leak.
+    ///
+    /// It is also the **pairing token** that keeps a paste in the chat it was made in: the
+    /// load runs outside TCA's effect lifecycle, so its batch can arrive after the live-chat
+    /// slot has been replaced. A `0` here means this state never saw the paste's
+    /// `attachmentsPasting` half, and `attachmentsPasted` ignores the batch (see the reducer).
+    public var pendingPasteCount: Int
+
     /// Whether the branch affordance is enabled (#34): the session must have a PERSISTED
     /// id (`parent_session_id` has to match a REST list row id for the branch to nest —
     /// a live-only handle would stamp a parent link no list row ever matches, so the
@@ -352,6 +369,7 @@ public struct ChatFeature {
       self.commandsUnsupported = false
       self.slashExecInFlight = false
       self.isBranching = false
+      self.pendingPasteCount = 0
 
       // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
       // its cached tail + model/usage immediately, before `session.resume` lands. The
@@ -425,6 +443,12 @@ public struct ChatFeature {
         // to open the replacement chat, and a just-submitted turn would be silently lost
         // (its socket/effects cancelled with no server response ever observed).
         && !isBranching
+        // A paste whose providers are still loading (#54). Unlike the three pickers there is
+        // no sheet in the way, so Send is right there and reachable — and a submit that wins
+        // the race ships the typed text without the image the user pasted to send it with,
+        // stranding the chip on the *next* message. Bounded by the loader's per-provider
+        // deadline, so the lock is always released.
+        && pendingPasteCount == 0
     }
 
     /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
@@ -580,6 +604,29 @@ public struct ChatFeature {
     case attachCameraTapped
     case attachFilesTapped
     case attachmentAdded(ComposerAttachment)
+    /// Images pasted into the composer (#54) — the fourth attachment source, entering at the
+    /// same point as the three pickers. The view's paste coordinator already resolved the
+    /// clipboard's `NSItemProvider`s into `PickedItem`s (the implicit pasteboard grant is
+    /// scoped to the paste command, so the load cannot be deferred into an effect), which is
+    /// why this arrives pre-loaded rather than as an `attachPastedTapped`-style trigger.
+    /// One action per paste — one user act, one capability check, one ordering assertion.
+    /// An **empty** batch is meaningful: the clipboard advertised an image (that is the only
+    /// reason the view claims **Paste**) and none of it could be loaded → error banner. A
+    /// batch with a non-zero `droppedCount` is just as meaningful: some of a multi-image paste
+    /// survived and the rest did not, which the user has to be told before sending what looks
+    /// like the complete set. Only honoured by the state that sent the matching
+    /// `attachmentsPasting` — a batch reaching a replacement chat is dropped.
+    case attachmentsPasted(PickedBatch)
+    /// A paste was claimed and its providers are loading. Sent synchronously from the view's
+    /// paste coordinator, and always followed by exactly one `attachmentsPasted`; the pair
+    /// brackets the window in which `canSend` must stay down (see `pendingPasteCount`) and
+    /// identifies the chat the batch belongs to.
+    case attachmentsPasting
+    /// A picker returned fewer files than the user chose (an iCloud original that never
+    /// downloaded, an unreadable file, a type that could not be re-encoded). A **cancel**
+    /// never sends this — `PickedBatch.droppedCount` is what separates the two — so the
+    /// banner only ever fires on something the user actually asked for and lost.
+    case attachmentsDropped(count: Int)
     case removeAttachment(id: ComposerAttachment.ID)
     case attachmentsSubmitted(displayText: String, images: [Data], rowID: UUID)
     case attachmentUploadFailed(message: String)
@@ -1572,27 +1619,94 @@ public struct ChatFeature {
 
       case .attachPhotosTapped:
         return .run { [attachmentPicker, uuid] send in
-          for item in await attachmentPicker.pickPhotos() {
-            await send(.attachmentAdded(item.attachment(id: uuid())))
-          }
+          await stagePicked(await attachmentPicker.pickPhotos(), uuid: uuid, send: send)
         }
 
       case .attachCameraTapped:
         return .run { [attachmentPicker, uuid] send in
-          for item in await attachmentPicker.capturePhoto() {
-            await send(.attachmentAdded(item.attachment(id: uuid())))
-          }
+          await stagePicked(await attachmentPicker.capturePhoto(), uuid: uuid, send: send)
         }
 
       case .attachFilesTapped:
         return .run { [attachmentPicker, uuid] send in
-          for item in await attachmentPicker.pickFiles() {
-            await send(.attachmentAdded(item.attachment(id: uuid())))
-          }
+          await stagePicked(await attachmentPicker.pickFiles(), uuid: uuid, send: send)
         }
 
       case let .attachmentAdded(attachment):
+        // A pick that worked takes the stale banner down with it, exactly as a successful
+        // paste does — a "Couldn’t add the selected item." left hanging over the chip the
+        // *next* pick just staged reads as a verdict on that chip. `stagePicked` stages every
+        // surviving item before reporting the shortfall, so a partial loss still ends with its
+        // own banner up.
+        state.errorBanner = nil
         state.attachments.append(attachment)
+        return .none
+
+      case .attachmentsPasting:
+        state.pendingPasteCount += 1
+        return .none
+
+      case let .attachmentsPasted(batch):
+        // **Pairing check, not a defensive clamp.** The paste load is the one attachment
+        // source that runs outside TCA's effect lifecycle — the three pickers are `.run`
+        // effects, which `ifLet` cancels when `AppFeature` nils the live-chat slot, but the
+        // load lives in the view coordinator's own `Task` and delivers unconditionally
+        // through the store `ChatView` captured. An ordinary `store.send` on an invalidated
+        // child store is still forwarded to the root, where `.ifLet(\.liveChat)` applies it
+        // to WHATEVER chat now occupies the slot — and the window is the whole load (seconds
+        // for a Universal Clipboard item, up to `clipboardLoadTimeout` for a hung one), long
+        // enough for an idle pop + open, a push tap for another session (#32), or a branch
+        // creation to have replaced it. Without this guard the image silently appears in a
+        // conversation it was never pasted into, and uploads there on Send.
+        //
+        // A zero count means this state never saw the paste's `attachmentsPasting` half, so
+        // the batch is not ours: drop it. Sound because `attachmentsPasting` is sent
+        // SYNCHRONOUSLY inside `paste(_:)` (it always lands on the state that owns the
+        // paste), a replacement slot is a fresh `State` and therefore starts at `0`, and
+        // hydrate mutates state in place rather than rebuilding it — nothing else anywhere
+        // writes `pendingPasteCount`.
+        guard state.pendingPasteCount > 0 else { return .none }
+        // Released first and unconditionally from here on: every branch below is a terminal
+        // outcome for this paste, and a `return` that skipped the decrement would lock the
+        // composer for the rest of the session.
+        state.pendingPasteCount -= 1
+        // The view already refuses to claim **Paste** without the capability
+        // (`ComposerInputTextView.acceptsPastedImages`), so this is the backstop for the
+        // async window it can't cover: the providers load asynchronously, and an
+        // `attachmentsUnsupportedDetected` can land between the paste and the finished items.
+        // Drop them silently — no chip that could never upload, and that flip already
+        // bannered its own explanation.
+        guard !state.attachmentsUnsupported else { return .none }
+        guard !batch.items.isEmpty else {
+          // The view only hands over a paste it claimed, i.e. one the clipboard advertised as
+          // an image, so an empty batch means every provider failed to load or re-encode. The
+          // user asked for this and the menu promised it — a silent no-op is the one outcome
+          // the composer must not have.
+          state.errorBanner = "Couldn’t paste the image."
+          return .none
+        }
+        // A paste that worked clears whatever failure was still on screen — including this
+        // path's own previous banner, which would otherwise read as a verdict on the chip
+        // that just appeared.
+        state.errorBanner = nil
+        for item in batch.items { state.attachments.append(item.attachment(id: uuid())) }
+        // …but a paste that only *partly* worked says so, after staging, exactly as a partial
+        // pick does (`.attachmentsDropped`). Silence here let a user send two chips believing
+        // they had pasted three. Worded for the clipboard rather than reusing the picker's
+        // "selected item" copy.
+        if batch.droppedCount > 0 {
+          state.errorBanner = batch.droppedCount == 1
+            ? "Couldn’t paste 1 of the images."
+            : "Couldn’t paste \(batch.droppedCount) of the images."
+        }
+        return .none
+
+      case let .attachmentsDropped(count):
+        // Something the user picked never became a chip. The sheet has already dismissed, so
+        // without this the whole gesture is a silent no-op (see `PickedBatch.droppedCount`).
+        state.errorBanner = count == 1
+          ? "Couldn’t add the selected item."
+          : "Couldn’t add \(count) of the selected items."
         return .none
 
       case let .removeAttachment(id):
@@ -3441,6 +3555,21 @@ private func submitPrompt(
   } catch {
     await send(.promptSubmitFailed(message: GatewayError.disconnected.message))
   }
+}
+
+/// Stage what a picker returned: one `attachmentAdded` per loaded file, plus one
+/// `attachmentsDropped` when the user's selection was **lost** rather than never made.
+///
+/// Shared by all three pickers so none of them can quietly go back to swallowing a failed
+/// pick: the sheet dismisses either way, so a drop that says nothing is indistinguishable
+/// from a cancel. A cancel carries no drops and therefore stays silent.
+private func stagePicked(
+  _ batch: PickedBatch,
+  uuid: UUIDGenerator,
+  send: Send<ChatFeature.Action>
+) async {
+  for item in batch.items { await send(.attachmentAdded(item.attachment(id: uuid()))) }
+  if batch.droppedCount > 0 { await send(.attachmentsDropped(count: batch.droppedCount)) }
 }
 
 /// Upload one staged attachment to the session via the method its kind dictates (#8).

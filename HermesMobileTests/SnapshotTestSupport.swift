@@ -59,16 +59,3 @@ class SnapshotTestCase: XCTestCase {
     }
   }
 }
-
-/// Hosts a `@FocusState` so `ComposerView` (which takes a `FocusState.Binding`) can be
-/// snapshotted standalone. Focus defaults to `false`, matching the unfocused baseline render.
-struct ComposerHost<Content: View>: View {
-  @FocusState private var focused: Bool
-  let content: (FocusState<Bool>.Binding) -> Content
-
-  init(@ViewBuilder content: @escaping (FocusState<Bool>.Binding) -> Content) {
-    self.content = content
-  }
-
-  var body: some View { content($focused) }
-}

@@ -6,7 +6,6 @@ import SwiftUI
 /// the composer. Streams over the gateway via `ChatFeature`.
 struct ChatView: View {
   @Bindable var store: StoreOf<ChatFeature>
-  @FocusState private var composerFocused: Bool
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
@@ -34,7 +33,6 @@ struct ChatView: View {
         recordingSeconds: store.recordingSeconds,
         attachmentsSupported: !store.attachmentsUnsupported,
         attachments: store.attachments,
-        focused: $composerFocused,
         onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) },
@@ -43,7 +41,9 @@ struct ChatView: View {
         onAttachPhotos: { store.send(.attachPhotosTapped) },
         onAttachCamera: { store.send(.attachCameraTapped) },
         onAttachFiles: { store.send(.attachFilesTapped) },
-        onRemoveAttachment: { store.send(.removeAttachment(id: $0)) }
+        onRemoveAttachment: { store.send(.removeAttachment(id: $0)) },
+        onPasteBegan: { store.send(.attachmentsPasting) },
+        onPasteImages: { store.send(.attachmentsPasted($0)) }
       )
     }
     // Animates the suggestion panel in/out (and the layout shift it causes). Keyed to

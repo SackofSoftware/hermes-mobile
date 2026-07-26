@@ -21,8 +21,6 @@ struct ComposerView: View {
   /// Attachments (#8): hide the attach control when the agent can't accept uploads.
   var attachmentsSupported: Bool = true
   var attachments: [ComposerAttachment] = []
-  /// Owned by the parent's `@FocusState` so the transcript can dismiss the keyboard.
-  var focused: FocusState<Bool>.Binding
   let onModelTap: () -> Void
   let onSend: () -> Void
   let onInterrupt: () -> Void
@@ -32,6 +30,13 @@ struct ComposerView: View {
   var onAttachCamera: () -> Void = {}
   var onAttachFiles: () -> Void = {}
   var onRemoveAttachment: (ComposerAttachment.ID) -> Void = { _ in }
+  /// A paste has been claimed and its providers are loading (#54) — fires before
+  /// `onPasteImages` so the reducer can hold Send down for the async window.
+  var onPasteBegan: () -> Void = {}
+  /// Images pasted into the input itself (#54) — the fourth attachment source, already
+  /// loaded by `ComposerTextView`'s coordinator. Defaulted so the snapshot call sites (which
+  /// never paste) stay unchanged.
+  var onPasteImages: (PickedBatch) -> Void = { _ in }
 
   var body: some View {
     Group {
@@ -50,10 +55,18 @@ struct ComposerView: View {
   private var textComposer: some View {
     VStack(spacing: 10) {
       if !attachments.isEmpty { attachmentChips }
-      TextField("Message", text: $text, axis: .vertical)
-        .lineLimit(1 ... 6)
-        .focused(focused)
-        .onSubmit(onSend)
+      // A `UITextView`-backed field rather than `TextField(axis: .vertical)`: only UIKit
+      // exposes the paste hooks an image paste needs (#54). Placeholder, 1–6 line growth and
+      // Return-key submit are parity with what it replaced (all defaulted on the type).
+      ComposerTextView(
+        text: $text,
+        // Same capability gate as the paperclip: no Paste offer for an image-only clipboard
+        // when the agent can't accept uploads.
+        attachmentsSupported: attachmentsSupported,
+        onSubmit: onSend,
+        onPasteBegan: onPasteBegan,
+        onPasteImages: onPasteImages
+      )
 
       HStack(spacing: 12) {
         // Let the model chip claim its ideal width before the Spacer, so the model name

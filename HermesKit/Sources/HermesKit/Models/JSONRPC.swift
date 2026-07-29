@@ -99,6 +99,32 @@ public struct JSONRPCRequest: Encodable, Equatable, Sendable {
     self.method = method
     self.params = params
   }
+
+  /// The encoder every outbound request goes through — **`.withoutEscapingSlashes` is
+  /// load-bearing, not cosmetic.**
+  ///
+  /// `/` never needs escaping in JSON (RFC 8259 lists it as optional) and the agent parses
+  /// with Python's stdlib `json`, which reads it either way — but the default `JSONEncoder`
+  /// writes `\/`, two bytes for one character. That silently doubles part of an attachment
+  /// upload: base64's alphabet includes `/`, so `image.attach_bytes`'s `content_base64` is
+  /// the one field where an *adversarial* (or merely unlucky) payload is mostly slashes —
+  /// `0xFF 0xFF 0xFF` encodes to `////`, i.e. 100 %. With escaping on, an 11 MiB attachment
+  /// whose base64 is more than ~9 % slashes exceeds uvicorn's 16 MiB frame ceiling
+  /// (`PickedImageLoader.maxWebSocketFrameBytes`) and the socket is closed mid-upload, so the
+  /// client-side byte budget could not actually guarantee what it promised. Off, the encoded
+  /// size is a function of the bytes' *length* alone and the budget is exact.
+  static let wireEncoder: JSONEncoder = {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    return encoder
+  }()
+
+  /// Exactly the text this request is transmitted as. Shared with the tests that pin the
+  /// attachment budget against the frame ceiling, so the budget is measured against the wire
+  /// rather than against arithmetic that only approximates it.
+  func wireText() throws -> String {
+    String(decoding: try Self.wireEncoder.encode(self), as: UTF8.self)
+  }
 }
 
 // MARK: - Inbound frame

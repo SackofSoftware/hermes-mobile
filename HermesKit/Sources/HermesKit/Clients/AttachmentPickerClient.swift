@@ -23,13 +23,31 @@ public struct PickedItem: Equatable, Sendable {
   }
 }
 
+/// What one picker presentation produced: the files that loaded, plus how many of the user's
+/// selections were lost on the way (a provider that failed, an iCloud original that never
+/// downloaded, a type that could not be re-encoded).
+///
+/// The count is what lets the reducer tell **"chose nothing"** from **"chose and lost it"**: a
+/// cancel is the empty batch (no items *and* no drops) and stays silent, while a selection
+/// that produced nothing gets said out loud instead of dismissing the sheet onto an unchanged
+/// composer.
+public struct PickedBatch: Equatable, Sendable {
+  public var items: [PickedItem]
+  public var droppedCount: Int
+
+  public init(items: [PickedItem] = [], droppedCount: Int = 0) {
+    self.items = items
+    self.droppedCount = droppedCount
+  }
+}
+
 /// Presents the native photo / camera / document pickers and returns the selected files.
 /// UIKit/PhotosUI live behind this dependency so reducers stay testable and platform-free.
 @DependencyClient
 public struct AttachmentPickerClient: Sendable {
-  public var pickPhotos: @Sendable () async -> [PickedItem] = { [] }
-  public var capturePhoto: @Sendable () async -> [PickedItem] = { [] }
-  public var pickFiles: @Sendable () async -> [PickedItem] = { [] }
+  public var pickPhotos: @Sendable () async -> PickedBatch = { PickedBatch() }
+  public var capturePhoto: @Sendable () async -> PickedBatch = { PickedBatch() }
+  public var pickFiles: @Sendable () async -> PickedBatch = { PickedBatch() }
 }
 
 extension AttachmentPickerClient: DependencyKey {
@@ -80,10 +98,10 @@ public extension DependencyValues {
   /// Bridges `PHPickerViewController` (multi-select images) to an async result.
   @MainActor
   private final class PhotoPickerPresenter: NSObject, PHPickerViewControllerDelegate {
-    private var continuation: CheckedContinuation<[PickedItem], Never>?
+    private var continuation: CheckedContinuation<PickedBatch, Never>?
     private static var retained: PhotoPickerPresenter?
 
-    static func present() async -> [PickedItem] {
+    static func present() async -> PickedBatch {
       await withCheckedContinuation { continuation in
         let presenter = PhotoPickerPresenter()
         presenter.continuation = continuation
@@ -96,7 +114,7 @@ public extension DependencyValues {
         picker.delegate = presenter
 
         guard let host = topViewController() else {
-          presenter.finish([])
+          presenter.finish(PickedBatch())
           return
         }
         host.present(picker, animated: true)
@@ -105,36 +123,28 @@ public extension DependencyValues {
 
     func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
       picker.dismiss(animated: true)
-      guard !results.isEmpty else { finish([]); return }
+      // A cancel: nothing chosen, so nothing to report.
+      guard !results.isEmpty else { finish(PickedBatch()); return }
 
       Task {
-        var items: [PickedItem] = []
-        for result in results {
-          guard let item = await Self.loadImage(from: result.itemProvider) else { continue }
-          items.append(item)
-        }
-        finish(items)
+        // Shared with the composer's clipboard paste (#54) so the two image sources cannot
+        // drift: same type-identifier choice, same `suggestedName ?? fallbackName` naming,
+        // same original-bytes load. `fallbackName: "photo"` preserves today's picker naming.
+        //
+        // The **timeout is the picker's own**, not the clipboard's: a `PHPickerResult`'s
+        // provider downloads a non-resident iCloud original inside `loadDataRepresentation`,
+        // which the clipboard's 15 s budget would abort on a weak connection (see
+        // `PickedImageLoader.pickerLoadTimeout`).
+        finish(await PickedImageLoader.pickedItems(
+          from: results.map(\.itemProvider),
+          fallbackName: "photo",
+          timeout: PickedImageLoader.pickerLoadTimeout
+        ))
       }
     }
 
-    private static func loadImage(from provider: NSItemProvider) async -> PickedItem? {
-      // Prefer PNG; fall back to whatever image type the provider offers.
-      let preferred = provider.registeredTypeIdentifiers.first {
-        UTType($0)?.conforms(to: .image) == true
-      } ?? UTType.image.identifier
-      return await withCheckedContinuation { continuation in
-        provider.loadDataRepresentation(forTypeIdentifier: preferred) { data, _ in
-          guard let data else { continuation.resume(returning: nil); return }
-          let ext = UTType(preferred)?.preferredFilenameExtension ?? "img"
-          let mime = UTType(preferred)?.preferredMIMEType ?? "image/png"
-          let name = (provider.suggestedName ?? "photo") + "." + ext
-          continuation.resume(returning: PickedItem(data: data, filename: name, mimeType: mime, kind: .image))
-        }
-      }
-    }
-
-    private func finish(_ items: [PickedItem]) {
-      continuation?.resume(returning: items)
+    private func finish(_ batch: PickedBatch) {
+      continuation?.resume(returning: batch)
       continuation = nil
       Self.retained = nil
     }
@@ -143,13 +153,20 @@ public extension DependencyValues {
   /// Bridges `UIImagePickerController` (camera capture) to an async result.
   @MainActor
   private final class CameraPresenter: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-    private var continuation: CheckedContinuation<[PickedItem], Never>?
+    private var continuation: CheckedContinuation<PickedBatch, Never>?
     private static var retained: CameraPresenter?
 
-    static func present() async -> [PickedItem] {
+    /// JPEG quality for a fresh camera capture. Lower than
+    /// `PickedImageLoader.jpegCompressionQuality` on purpose: that path re-encodes bytes that
+    /// could not be sent at all (fidelity traded against a certain rejection), whereas this one
+    /// compresses a raw full-resolution capture, where the last few points of quality cost
+    /// megabytes on the wire for no visible gain.
+    private static let jpegQuality: CGFloat = 0.85
+
+    static func present() async -> PickedBatch {
       await withCheckedContinuation { continuation in
         guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
-          continuation.resume(returning: [])
+          continuation.resume(returning: PickedBatch())
           return
         }
         let presenter = CameraPresenter()
@@ -161,7 +178,7 @@ public extension DependencyValues {
         picker.delegate = presenter
 
         guard let host = topViewController() else {
-          presenter.finish([])
+          presenter.finish(PickedBatch())
           return
         }
         host.present(picker, animated: true)
@@ -173,19 +190,34 @@ public extension DependencyValues {
       didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
     ) {
       picker.dismiss(animated: true)
-      guard let image = info[.originalImage] as? UIImage, let data = image.jpegData(compressionQuality: 0.85) else {
-        finish([]); return
+      guard let image = info[.originalImage] as? UIImage,
+            let data = image.jpegData(compressionQuality: Self.jpegQuality)
+      else {
+        // A shot was taken and then lost — reported, unlike a cancel.
+        finish(PickedBatch(droppedCount: 1)); return
       }
-      finish([PickedItem(data: data, filename: "photo.jpg", mimeType: "image/jpeg", kind: .image)])
+      let captured = PickedItem(
+        data: data, filename: "photo.jpg", mimeType: "image/jpeg", kind: .image
+      )
+      Task {
+        // A compression *quality* bounds no byte count: a high-detail capture at 48 MP still
+        // encodes past the transport budget, and staging it would produce a chip that can never
+        // upload on any retry. Normally a no-op that reads the JPEG header and hands the same
+        // bytes straight back.
+        guard let item = await PickedImageLoader.rescuedImageItem(captured) else {
+          finish(PickedBatch(droppedCount: 1)); return
+        }
+        finish(PickedBatch(items: [item]))
+      }
     }
 
     func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
       picker.dismiss(animated: true)
-      finish([])
+      finish(PickedBatch())
     }
 
-    private func finish(_ items: [PickedItem]) {
-      continuation?.resume(returning: items)
+    private func finish(_ batch: PickedBatch) {
+      continuation?.resume(returning: batch)
       continuation = nil
       Self.retained = nil
     }
@@ -194,10 +226,10 @@ public extension DependencyValues {
   /// Bridges `UIDocumentPickerViewController` (multi-select any file) to an async result.
   @MainActor
   private final class DocumentPickerPresenter: NSObject, UIDocumentPickerDelegate {
-    private var continuation: CheckedContinuation<[PickedItem], Never>?
+    private var continuation: CheckedContinuation<PickedBatch, Never>?
     private static var retained: DocumentPickerPresenter?
 
-    static func present() async -> [PickedItem] {
+    static func present() async -> PickedBatch {
       await withCheckedContinuation { continuation in
         let presenter = DocumentPickerPresenter()
         presenter.continuation = continuation
@@ -208,7 +240,7 @@ public extension DependencyValues {
         picker.delegate = presenter
 
         guard let host = topViewController() else {
-          presenter.finish([])
+          presenter.finish(PickedBatch())
           return
         }
         host.present(picker, animated: true)
@@ -216,27 +248,39 @@ public extension DependencyValues {
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-      var items: [PickedItem] = []
-      for url in urls {
-        // asCopy: true delivers files into a temp dir we can read directly.
-        guard let data = try? Data(contentsOf: url) else { continue }
-        let mime = mimeType(for: url)
-        items.append(PickedItem(
-          data: data,
-          filename: url.lastPathComponent,
-          mimeType: mime,
-          kind: .infer(mimeType: mime, filename: url.lastPathComponent)
-        ))
+      Task {
+        var items: [PickedItem] = []
+        for url in urls {
+          // asCopy: true delivers files into a temp dir we can read directly.
+          guard let data = try? Data(contentsOf: url) else { continue }
+          let mime = mimeType(for: url)
+          let item = PickedItem(
+            data: data,
+            filename: url.lastPathComponent,
+            mimeType: mime,
+            kind: .infer(mimeType: mime, filename: url.lastPathComponent)
+          )
+          guard item.kind == .image else { items.append(item); continue }
+          // Images take the same rescue the photo picker and the clipboard do. Files hands
+          // over the on-disk original, which on iOS is routinely a HEIC (the agent answers
+          // 4016) and from a Mac's iCloud Drive an uncompressed TIFF past the frame budget —
+          // so the *same picture* used to attach fine from Photos and fail forever from Files.
+          guard let rescued = await PickedImageLoader.rescuedImageItem(item) else { continue }
+          items.append(rescued)
+        }
+        // An unreadable pick (an iCloud Drive file that never materialised) or an image that
+        // could not be rescued is a loss, not a cancel — the reducer says so rather than
+        // dismissing onto an unchanged composer.
+        finish(PickedBatch(items: items, droppedCount: urls.count - items.count))
       }
-      finish(items)
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-      finish([])
+      finish(PickedBatch())
     }
 
-    private func finish(_ items: [PickedItem]) {
-      continuation?.resume(returning: items)
+    private func finish(_ batch: PickedBatch) {
+      continuation?.resume(returning: batch)
       continuation = nil
       Self.retained = nil
     }

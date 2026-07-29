@@ -44,7 +44,8 @@ from your desk and still keep your agent moving.
   a system line (live sessions only).
 - **Compose hands-free or with files.** Dictate a message with voice input (a live
   waveform while recording; transcribed by your agent), and attach photos, camera
-  captures, PDFs, or any file straight from the composer.
+  captures, PDFs, or any file straight from the composer — or just paste a copied
+  screenshot into the message field.
 - **Run slash commands.** Type `/` in the composer to pull up the agent's command
   catalog — built-ins like `/compress`, `/undo`, `/status`, plus your installed
   skills — with as-you-type filtering and tap-to-insert. Commands execute through

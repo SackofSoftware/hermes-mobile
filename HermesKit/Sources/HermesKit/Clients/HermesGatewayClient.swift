@@ -290,7 +290,10 @@ actor GatewayConnection {
     idCounter += 1
     let id = idCounter
     let request = JSONRPCRequest(id: id, method: method, params: params)
-    let text = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
+    // `JSONRPCRequest.wireText()`, not a bare `JSONEncoder`: it turns slash escaping off, which
+    // an attachment upload depends on to stay inside the server's WebSocket frame (see
+    // `JSONRPCRequest.wireEncoder`).
+    let text = try request.wireText()
     return try await withCheckedThrowingContinuation { continuation in
       // Register before transmitting so a fast response can't race ahead of us.
       pending[id] = continuation

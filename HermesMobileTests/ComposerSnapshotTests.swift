@@ -10,74 +10,87 @@ final class ComposerSnapshotTests: SnapshotTestCase {
   // MARK: ComposerView
 
   func testComposer_idle() {
-    let view = ComposerHost {
-      ComposerView(
-        text: .constant(""),
-        isSending: false,
-        canSend: false,
-        model: "claude-opus-4-8",
-        reasoningEffort: "high",
-        focused: $0,
-        onModelTap: {}, onSend: {}, onInterrupt: {}
-      )
-    }
+    let view = ComposerView(
+      text: .constant(""),
+      isSending: false,
+      canSend: false,
+      model: "claude-opus-4-8",
+      reasoningEffort: "high",
+      onModelTap: {}, onSend: {}, onInterrupt: {}
+    )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
   }
 
   func testComposer_typingAndSending() {
     let view = VStack(spacing: 20) {
-      ComposerHost {
-        ComposerView(
-          text: .constant("Summarize the streaming protocol"),
-          isSending: false, canSend: true,
-          model: "claude-sonnet-4-6", reasoningEffort: "medium",
-          focused: $0,
-          onModelTap: {}, onSend: {}, onInterrupt: {}
-        )
-      }
-      ComposerHost {
-        ComposerView(
-          text: .constant(""),
-          isSending: true, canSend: false,
-          model: "claude-opus-4-8", reasoningEffort: nil,
-          focused: $0,
-          onModelTap: {}, onSend: {}, onInterrupt: {}
-        )
-      }
+      ComposerView(
+        text: .constant("Summarize the streaming protocol"),
+        isSending: false, canSend: true,
+        model: "claude-sonnet-4-6", reasoningEffort: "medium",
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+      ComposerView(
+        text: .constant(""),
+        isSending: true, canSend: false,
+        model: "claude-opus-4-8", reasoningEffort: nil,
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+    }
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// The `1 ... 6` line growth of the UIKit-backed input (#54): a few lines of prose grow the
+  /// field, and a long paragraph stops at the six-line ceiling and scrolls internally. Nothing
+  /// else in the suite renders a multi-line composer.
+  func testComposer_multilineGrowth() {
+    let paragraph = """
+    Can you take the streaming fold apart for me? I want to know exactly how the thinking row \
+    is created, when the elapsed timer starts, and what happens to it if the socket drops \
+    halfway through a turn — including which parts survive a foreground re-hydrate and which \
+    ones the server replaces wholesale.
+    """
+    let view = VStack(spacing: 20) {
+      ComposerView(
+        text: .constant("Two lines of prose, just enough to make the field grow past one."),
+        isSending: false, canSend: true,
+        model: "claude-opus-4-8", reasoningEffort: "high",
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
+      ComposerView(
+        text: .constant(paragraph),
+        isSending: false, canSend: true,
+        model: "claude-opus-4-8", reasoningEffort: "high",
+        onModelTap: {}, onSend: {}, onInterrupt: {}
+      )
     }
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
   }
 
   func testComposer_recordingWaveform() {
-    let view = ComposerHost {
-      ComposerView(
-        text: .constant(""),
-        isSending: false, canSend: false,
-        model: "claude-opus-4-8", reasoningEffort: "high",
-        recording: .recording,
-        waveformLevels: [0.1, 0.35, 0.6, 0.8, 0.5, 0.25, 0.4, 0.7, 0.9, 0.55, 0.3, 0.15, 0.45, 0.65],
-        recordingSeconds: 7,
-        focused: $0,
-        onModelTap: {}, onSend: {}, onInterrupt: {}
-      )
-    }
+    let view = ComposerView(
+      text: .constant(""),
+      isSending: false, canSend: false,
+      model: "claude-opus-4-8", reasoningEffort: "high",
+      recording: .recording,
+      waveformLevels: [0.1, 0.35, 0.6, 0.8, 0.5, 0.25, 0.4, 0.7, 0.9, 0.55, 0.3, 0.15, 0.45, 0.65],
+      recordingSeconds: 7,
+      onModelTap: {}, onSend: {}, onInterrupt: {}
+    )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
   }
 
   func testComposer_transcribing() {
-    let view = ComposerHost {
-      ComposerView(
-        text: .constant(""),
-        isSending: false, canSend: false,
-        model: "claude-opus-4-8", reasoningEffort: "high",
-        recording: .transcribing,
-        focused: $0,
-        onModelTap: {}, onSend: {}, onInterrupt: {}
-      )
-    }
+    let view = ComposerView(
+      text: .constant(""),
+      isSending: false, canSend: false,
+      model: "claude-opus-4-8", reasoningEffort: "high",
+      recording: .transcribing,
+      onModelTap: {}, onSend: {}, onInterrupt: {}
+    )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
   }
@@ -88,16 +101,13 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       ComposerAttachment(id: id(2), kind: .pdf, filename: "report.pdf", mimeType: "application/pdf", data: Data([0x25])),
       ComposerAttachment(id: id(3), kind: .file, filename: "notes.txt", mimeType: "text/plain", data: Data([0x41])),
     ]
-    let view = ComposerHost {
-      ComposerView(
-        text: .constant("What's in these?"),
-        isSending: false, canSend: true,
-        model: "claude-opus-4-8", reasoningEffort: "high",
-        attachments: attachments,
-        focused: $0,
-        onModelTap: {}, onSend: {}, onInterrupt: {}
-      )
-    }
+    let view = ComposerView(
+      text: .constant("What's in these?"),
+      isSending: false, canSend: true,
+      model: "claude-opus-4-8", reasoningEffort: "high",
+      attachments: attachments,
+      onModelTap: {}, onSend: {}, onInterrupt: {}
+    )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
   }
@@ -107,16 +117,13 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       ComposerAttachment(id: id(1), kind: .image, filename: "photo.png", mimeType: "image/png", data: solidPNG(.systemBlue), uploadState: .uploading),
       ComposerAttachment(id: id(2), kind: .file, filename: "data.csv", mimeType: "text/csv", data: Data([0x41]), uploadState: .failed("boom")),
     ]
-    let view = ComposerHost {
-      ComposerView(
-        text: .constant(""),
-        isSending: true, canSend: false,
-        model: "claude-opus-4-8", reasoningEffort: "high",
-        attachments: attachments,
-        focused: $0,
-        onModelTap: {}, onSend: {}, onInterrupt: {}
-      )
-    }
+    let view = ComposerView(
+      text: .constant(""),
+      isSending: true, canSend: false,
+      model: "claude-opus-4-8", reasoningEffort: "high",
+      attachments: attachments,
+      onModelTap: {}, onSend: {}, onInterrupt: {}
+    )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
   }

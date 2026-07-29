@@ -35,6 +35,40 @@ struct SelfHealTests {
     ])
   }
 
+  // MARK: runtime config self-heal
+
+  @Test func reasoningSelectionSelfHealsOnSessionNotFoundThenSucceeds() async {
+    let calls = LockIsolated<[(method: String, sessionID: String?)]>([])
+    let store = TestStore(initialState: healableState()) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable method, params in
+        let sid = params["session_id"]?.stringValue
+        calls.withValue { $0.append((method, sid)) }
+        switch method {
+        case "config.set":
+          if sid == "stale-live" { throw GatewayError.server("session not found") }
+          return .object(["key": .string("reasoning"), "value": .string("xhigh")])
+        case "session.resume":
+          return self.resumePayload(liveID: "fresh-live")
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.reasoningSelected("xhigh")) {
+      $0.reasoningEffort = "xhigh"
+    }
+    await store.receive(\.liveSessionIDRefreshed) {
+      $0.liveSessionID = "fresh-live"
+    }
+    await store.finish()
+
+    #expect(calls.value.map(\.method) == ["config.set", "session.resume", "config.set"])
+    #expect(calls.value.last?.sessionID == "fresh-live")
+    #expect(store.state.reasoningEffort == "xhigh")
+  }
+
   // MARK: prompt.submit self-heal
 
   @Test func promptSubmitSelfHealsOnSessionNotFoundThenSucceeds() async {

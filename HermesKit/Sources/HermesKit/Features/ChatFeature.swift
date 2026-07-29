@@ -1881,12 +1881,20 @@ public struct ChatFeature {
         // Blocked mid-turn (server returns 4009); the picker disables selection too.
         guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
         state.model = model // optimistic; reconciled by the next session.info
-        return configSet(key: "model", value: model, sessionID: sessionID)
+        return configSet(
+          key: "model", value: model, sessionID: sessionID,
+          storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
+          profile: state.scopedProfile
+        )
 
       case let .reasoningSelected(effort):
         guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
         state.reasoningEffort = effort
-        return configSet(key: "reasoning", value: effort, sessionID: sessionID)
+        return configSet(
+          key: "reasoning", value: effort, sessionID: sessionID,
+          storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
+          profile: state.scopedProfile
+        )
 
       case .modelPickerDismissed:
         state.modelPicker = nil
@@ -3030,15 +3038,25 @@ public struct ChatFeature {
     }
   }
 
-  /// Change a session setting (model / reasoning) over the gateway. Fire-and-forget —
-  /// the authoritative value comes back on the next `session.info`.
-  private func configSet(key: String, value: String, sessionID: String) -> Effect<Action> {
-    .run { [gateway] _ in
-      _ = try? await gateway.send("config.set", .object([
-        "session_id": .string(sessionID),
-        "key": .string(key),
-        "value": .string(value),
-      ]))
+  /// Change a session setting (model / reasoning) over the gateway. If iOS resumed with a
+  /// reaped live id, refresh it and replay once rather than letting the optimistic picker value
+  /// snap back when the next authoritative `session.info` arrives.
+  private func configSet(
+    key: String, value: String, sessionID: String,
+    storedSessionID: String?, branchSeed: State.BranchSeed?, profile: String?
+  ) -> Effect<Action> {
+    .run { [gateway] send in
+      func setConfig(_ targetID: String) async throws {
+        _ = try await gateway.send("config.set", .object([
+          "session_id": .string(targetID),
+          "key": .string(key),
+          "value": .string(value),
+        ]))
+      }
+      _ = try? await withSessionHeal(
+        setConfig, sessionID: sessionID, storedSessionID: storedSessionID,
+        branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
+      )
     }
   }
 

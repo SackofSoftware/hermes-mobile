@@ -29,7 +29,8 @@ struct MarkdownText: View {
         case let .blockquote(value):
           blockquote(value)
         case let .table(headers, rows):
-          tableView(headers: headers, rows: rows)
+          // Capped columns + horizontal panning live in the dedicated view (#59).
+          MarkdownTableView(headers: headers, rows: rows)
         case let .code(value, language):
           let token = "\(tokenPrefix)#\(index)"
           CodeBlockView(
@@ -41,9 +42,15 @@ struct MarkdownText: View {
         }
       }
     }
-    // Make every rendered text run (headings, prose, blockquotes, list items, table
-    // cells) selectable so any part of an agent response can be copied — not just the
-    // per-code-block copy button (which keeps its own `.textSelection`/copy button). (#27b)
+    // Offer selection on every rendered text run so any part of an agent response can be
+    // copied, not just the per-code-block copy button (which keeps its own
+    // `.textSelection`/copy button). (#27b)
+    //
+    // Only PROSE is guaranteed: it renders through `SelectableText` (a real `UITextView`,
+    // which owns gestures the transcript's collection view can't pre-empt). Headings,
+    // blockquotes and table cells rely on this modifier, which `SelectableText`'s own doc
+    // comment records as unreliable inside that collection view — unverified on device and
+    // tracked on #59.
     .textSelection(.enabled)
   }
 
@@ -57,7 +64,7 @@ struct MarkdownText: View {
 
   /// An ATX header: scaled bold text, level 1–6 mapping to decreasing font sizes.
   private func heading(level: Int, text: String) -> some View {
-    Text(inline(text))
+    Text(Self.inline(text))
       .font(Self.headingFont(level: level))
       .fontWeight(.bold)
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -83,7 +90,7 @@ struct MarkdownText: View {
         .frame(width: 3)
       VStack(alignment: .leading, spacing: 3) {
         ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-          Text(inline(line))
+          Text(Self.inline(line))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -92,34 +99,10 @@ struct MarkdownText: View {
     .fixedSize(horizontal: false, vertical: true)
   }
 
-  /// A pipe table rendered as a `Grid`: an emphasized header row, a divider, then body
-  /// rows. Cells are left-aligned, inline Markdown applied, and allowed to wrap.
-  private func tableView(headers: [String], rows: [[String]]) -> some View {
-    let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
-    return Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 6) {
-      GridRow {
-        ForEach(0..<columnCount, id: \.self) { col in
-          Text(inline(col < headers.count ? headers[col] : ""))
-            .fontWeight(.semibold)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-      }
-      Divider()
-      ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-        GridRow {
-          ForEach(0..<columnCount, id: \.self) { col in
-            Text(inline(col < row.count ? row[col] : ""))
-              .frame(maxWidth: .infinity, alignment: .leading)
-          }
-        }
-      }
-    }
-    .frame(maxWidth: .infinity, alignment: .leading)
-  }
-
   /// Inline-only Markdown so bold/code/links render but block layout (which `Text`
-  /// can't show) is avoided; whitespace is preserved.
-  private func inline(_ value: String) -> AttributedString {
+  /// can't show) is avoided; whitespace is preserved. Shared with `MarkdownTableView`'s
+  /// cells so the two cannot drift on parsing options.
+  static func inline(_ value: String) -> AttributedString {
     let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
     return (try? AttributedString(markdown: value, options: options)) ?? AttributedString(value)
   }

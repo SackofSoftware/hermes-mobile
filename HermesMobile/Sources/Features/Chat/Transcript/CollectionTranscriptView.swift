@@ -10,6 +10,31 @@ enum TurnState: Equatable {
   case streaming
 }
 
+/// The transcript's row geometry and its compositional-layout recipe, in one namespace so
+/// content rendered *into* a row can size itself against the same numbers the layout uses —
+/// `MarkdownTableView`'s column ceiling is ``narrowestRowWidth``, so widening the section
+/// insets here moves the ceiling with it instead of silently re-opening a panning regression.
+///
+/// The measurements live here; the `UICollectionViewLayout` factory is in the
+/// `#if canImport(UIKit)` extension below, so pure-SwiftUI views can name the namespace on
+/// any platform.
+enum TranscriptLayout {
+  /// Inset applied to each horizontal edge of the transcript section, i.e. a row is
+  /// `screen width − 2 × this`.
+  static let horizontalSectionInset: CGFloat = 16
+
+  /// The narrowest logical screen width this app can be rendered at.
+  ///
+  /// Not the narrowest *default* iPhone width (that is 375pt): 320pt is what **Display Zoom**
+  /// ("Zoomed" in Settings → Display & Brightness) renders at on every iOS-18 iPhone — SE 2/3
+  /// at 320×568, the X-class and later at 320×693 (Apple's device metrics).
+  static let narrowestLayoutWidth: CGFloat = 320
+
+  /// The width a transcript row gets on the narrowest layout: 288pt. Anything that must fit a
+  /// row on *every* device sizes against this.
+  static let narrowestRowWidth: CGFloat = narrowestLayoutWidth - 2 * horizontalSectionInset
+}
+
 #if canImport(UIKit)
 import UIKit
 
@@ -35,6 +60,38 @@ final class TranscriptCollectionView: UICollectionView {
     }
     lastViewportHeight = height
     onLayout?()
+  }
+}
+
+extension TranscriptLayout {
+  /// The transcript's single-section vertical compositional layout, with **self-sizing** items:
+  /// the `UIHostingConfiguration` measures its SwiftUI content, so heights track streaming deltas.
+  ///
+  /// Built here rather than inline in `makeUIView` so the measured layout tests can lay a row
+  /// out under the *production* recipe instead of a hand-copied one that could drift from it.
+  static func makeLayout() -> UICollectionViewLayout {
+    let item = NSCollectionLayoutItem(
+      layoutSize: NSCollectionLayoutSize(
+        widthDimension: .fractionalWidth(1),
+        heightDimension: .estimated(60)
+      )
+    )
+    let group = NSCollectionLayoutGroup.vertical(
+      layoutSize: NSCollectionLayoutSize(
+        widthDimension: .fractionalWidth(1),
+        heightDimension: .estimated(60)
+      ),
+      subitems: [item]
+    )
+    let section = NSCollectionLayoutSection(group: group)
+    section.interGroupSpacing = 10
+    section.contentInsets = NSDirectionalEdgeInsets(
+      top: 12,
+      leading: horizontalSectionInset,
+      bottom: 12,
+      trailing: horizontalSectionInset
+    )
+    return UICollectionViewCompositionalLayout(section: section)
   }
 }
 
@@ -89,7 +146,7 @@ struct CollectionTranscriptView<Cell: View>: UIViewRepresentable {
   }
 
   func makeUIView(context: Context) -> UICollectionView {
-    let layout = Self.makeLayout()
+    let layout = TranscriptLayout.makeLayout()
     let collectionView = TranscriptCollectionView(frame: .zero, collectionViewLayout: layout)
     collectionView.backgroundColor = .clear
     collectionView.keyboardDismissMode = .interactive
@@ -117,28 +174,6 @@ struct CollectionTranscriptView<Cell: View>: UIViewRepresentable {
     context.coordinator.turnState = turnState
     context.coordinator.canLoadOlder = canLoadOlder
     context.coordinator.apply(rows: rows)
-  }
-
-  /// Single-section vertical compositional layout with **self-sizing** items: the
-  /// `UIHostingConfiguration` measures its SwiftUI content, so heights track streaming deltas.
-  private static func makeLayout() -> UICollectionViewLayout {
-    let item = NSCollectionLayoutItem(
-      layoutSize: NSCollectionLayoutSize(
-        widthDimension: .fractionalWidth(1),
-        heightDimension: .estimated(60)
-      )
-    )
-    let group = NSCollectionLayoutGroup.vertical(
-      layoutSize: NSCollectionLayoutSize(
-        widthDimension: .fractionalWidth(1),
-        heightDimension: .estimated(60)
-      ),
-      subitems: [item]
-    )
-    let section = NSCollectionLayoutSection(group: group)
-    section.interGroupSpacing = 10
-    section.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16)
-    return UICollectionViewCompositionalLayout(section: section)
   }
 
   // MARK: - Coordinator

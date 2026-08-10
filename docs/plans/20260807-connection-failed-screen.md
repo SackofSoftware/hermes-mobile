@@ -205,16 +205,39 @@ are opt-in.
 - Modify: `HermesMobile/Sources/AppView.swift`
 - Create: `HermesMobileTests/ConnectionFailedSnapshotTests.swift`
 
-- [ ] build the view: `wifi.exclamationmark` icon, "Can't reach the server" title,
+- [x] build the view: `wifi.exclamationmark` icon, "Can't reach the server" title,
       server URL (monospaced, breaks long URLs), reason line, prominent Retry button
       (swaps to `ProgressView` while `isRetrying`), plain/secondary Log Out button
-- [ ] add the `connectionFailed` branch to `AppView.content` (after `autoConnecting`,
+- [x] add the `connectionFailed` branch to `AppView.content` (after `autoConnecting`,
       before onboarding)
-- [ ] run `tuist generate` so the new source file joins the app target
-- [ ] write snapshot tests: offline variant, unreachable variant with a long URL,
+- [x] run `tuist generate` so the new source file joins the app target
+- [x] write snapshot tests: offline variant, unreachable variant with a long URL,
       retrying state — record via `make snapshot` run twice (never
       `make snapshot-record`)
-- [ ] run `make snapshot` — must pass before task 5
+- [x] run `make snapshot` — `ConnectionFailedSnapshotTests` records then asserts clean
+      (3/3 green on the second run); see the ⚠️ note below for the pre-existing
+      failures in the rest of the suite
+
+⚠️ **Pre-existing snapshot drift, unrelated to this branch.** The first full
+`make snapshot` reported 60/119 failures spread across `SettingsSnapshotTests`,
+`ThinkingIndicatorSnapshotTests`, `ChatSnapshotTests` and friends. None of those views
+are touched by this branch — `git diff --stat main...HEAD` lists only HermesKit sources,
+HermesKit tests and this plan, plus the new `ConnectionFailedView`/`AppView` branch that
+those suites never render. Two candidate causes were ruled out:
+- **Dependency bump:** `tuist generate` had silently re-resolved swift-snapshot-testing
+  1.19.3 → 1.19.4 (the only `HermesKit/Package.resolved` churn). Reverted to the
+  committed 1.19.3 pin and regenerated — `ThinkingIndicatorSnapshotTests` still fails
+  5/5, so the bump is not the cause. `Package.resolved` is left at 1.19.3, uncommitted
+  churn discarded.
+- **Simulator contention:** another agent's `xcodebuild` was running against the same
+  simulator, but `ThinkingIndicatorSnapshotTests` uses the `componentImage()` layer
+  render (no host app / key window), so it can't explain those failures either.
+The remaining likely cause is environment drift (the baselines date to 2026-06-17 and
+two iOS 26.x runtimes — 26.2 and 26.5 — are now installed, so `scripts/snapshot.sh`'s
+`SIM_OS=26` major-version match can resolve to a different runtime than the one that
+recorded them). Re-recording the whole suite is out of scope here (CLAUDE.md forbids
+`make snapshot-record` for a targeted change); the new baselines were verified in
+isolation with `-only-testing:HermesMobileTests/ConnectionFailedSnapshotTests`.
 
 ### Task 5: Verify acceptance criteria
 

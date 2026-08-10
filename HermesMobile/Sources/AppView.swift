@@ -43,6 +43,14 @@ struct AppView: View {
       }
     } else if store.autoConnecting {
       ProgressView("Connecting…")
+    } else if let failedStore = store.scope(
+      state: \.connectionFailed,
+      action: \.connectionFailed
+    ) {
+      // Launch auto-connect failed for a *transport* reason: the stored credentials are
+      // fine, so keep them and offer a retry instead of dropping to onboarding. Auth
+      // failures never populate this slot — they fall through to the branch below.
+      ConnectionFailedView(store: failedStore)
     } else {
       NavigationStack {
         ConnectionView(store: store.scope(state: \.onboarding, action: \.onboarding))

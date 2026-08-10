@@ -1,0 +1,50 @@
+import ComposableArchitecture
+import HermesKit
+import SnapshotTesting
+import SwiftUI
+import XCTest
+
+@testable import HermesMobile
+
+/// The launch-time "can't reach the server" screen (#62). The three baselines pin the two
+/// reason variants (which drive different copy) and the in-flight retry state (which swaps
+/// the button label for a spinner).
+final class ConnectionFailedSnapshotTests: SnapshotTestCase {
+  private func store(
+    url: String = "http://mac.tailnet:9119",
+    reason: RESTError,
+    isRetrying: Bool = false
+  ) -> StoreOf<ConnectionFailedFeature> {
+    Store(
+      initialState: ConnectionFailedFeature.State(
+        connection: ServerConnection(baseURL: URL(string: url)!, token: "t"),
+        reason: reason,
+        isRetrying: isRetrying
+      )
+    ) { ConnectionFailedFeature() }
+  }
+
+  /// Offline: "check Wi-Fi/cellular" copy — no point pointing the user at their VPN.
+  func testConnectionFailedView_offline() {
+    let view = ConnectionFailedView(store: store(reason: .offline))
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Unreachable, with a long URL: the VPN/Tailscale hint, and the URL must wrap rather
+  /// than truncate — naming the server is the screen's whole job.
+  func testConnectionFailedView_unreachableLongURL() {
+    let view = ConnectionFailedView(
+      store: store(
+        url: "http://very-long-machine-name.tail9f3c2b.ts.net:9119",
+        reason: .unreachable
+      )
+    )
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Retry in flight: the button shows a spinner and both buttons are disabled.
+  func testConnectionFailedView_retrying() {
+    let view = ConnectionFailedView(store: store(reason: .unreachable, isRetrying: true))
+    assertSnapshot(of: view, as: deviceImage())
+  }
+}

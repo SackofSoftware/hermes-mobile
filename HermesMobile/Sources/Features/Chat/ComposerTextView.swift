@@ -270,7 +270,11 @@ struct ComposerTextView: UIViewRepresentable {
   ///
   /// **Resign, not disable.** The field stays live and editable, so a user who deliberately
   /// taps it can still draft their next message while they think about the card (the card's
-  /// bounded region absorbs the keyboard coming back — that is what it is built for). It fires
+  /// bounded region absorbs the keyboard coming back — that is what it is built for).
+  /// *Live* means typing, not sending: **Return is a silent no-op while a card stands** —
+  /// `shouldChangeTextIn` swallows the `\n` and routes it to `onSubmit`, which `canSend`
+  /// (false on any `pendingInteraction`) then drops, so the draft neither goes out nor gains
+  /// a newline. Pre-existing and unchanged here; Shift+Return still inserts one. It fires
   /// once per *raised card*, keyed on the token rather than on `nil`-ness, so a replacement
   /// card drops the keyboard too and a re-focus is never fought over: `ChatView` re-renders on
   /// every streamed token, and an unkeyed "resign while blocked" would resign again on each one,

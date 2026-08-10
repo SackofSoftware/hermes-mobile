@@ -49,6 +49,27 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// terms of it so they read as "N lines" rather than as magic point values.
   private static let calloutLineHeight: CGFloat = 20.9
 
+  /// Ceiling on the card's **compressed** fitting height: its floor
+  /// (``ApprovalCardView/contentMinHeight``) plus the rigid chrome around the content region —
+  /// the title, the spacing and the Deny/Approve row. Measured at 254.7pt at `.large`; pinned
+  /// about a quarter-line above that, so ordinary font-metric drift does not trip it but a rigid
+  /// row added to the card does. See ``testTheCardsCompressedFittingSizeIsPinned`` for why the
+  /// number matters.
+  private static let compressedFittingBudget: CGFloat = 260
+
+  /// How far a sampled pixel may sit from the command block's own fill (as a sum of the three
+  /// 0–255 channel differences) and still count as the block. Small on purpose: the scan's job
+  /// is to tell the block's fill from the *card's* fill, which are adjacent system greys, so the
+  /// tolerance has to stay well under the distance between them — the second half of the test
+  /// (nearer to the block than to the card) is what actually decides the ambiguous pixels.
+  private static let blockColorTolerance = 8
+
+  /// Rows of non-block pixels tolerated inside the block before the scan calls it the end.
+  /// A row can miss at every sample when a glyph or an anti-aliased edge covers it, and a
+  /// `.callout` glyph is a couple of points tall — so this must exceed that and stay far below
+  /// one line (``calloutLineHeight``), or the scan would walk straight past the block's bottom.
+  private static let maxBlockInteriorGap: CGFloat = 3
+
   /// Kept alive for the duration of a test: a hosted view only lays out for real while its
   /// window exists, and SwiftUI won't materialise the `UIScrollView` otherwise.
   private var windows: [UIWindow] = []
@@ -69,9 +90,10 @@ final class ApprovalCardLayoutTests: XCTestCase {
   ///
   /// This is the assertion the previous take on the fix could not satisfy: the card's region
   /// is *less* flexible than the greedy transcript, so a plain `VStack` offers it roughly half
-  /// of what is left and it lands on its floor. Measured at 88pt here without `ChatView`'s
-  /// `.layoutPriority` and 155pt with it (227 before the region started handing a tap target's
-  /// worth of the offer back to the transcript) — from about one line of command to about six.
+  /// of what is left and it lands on its floor. Measured here at its floor (96pt) without
+  /// `ChatView`'s `.layoutPriority` and 155pt with it — from about one line of command to about
+  /// six. (88 and 227 when first measured, before the floor was raised and the region started
+  /// handing a tap target's worth of the offer back to the transcript.)
   ///
   /// The assertion is on the **command's own painted geometry**, not on the viewport's height:
   /// the viewport also holds the detail and the session toggle, so a line-count floor on the
@@ -88,11 +110,12 @@ final class ApprovalCardLayoutTests: XCTestCase {
       and a long command is read a line or two at a time, which is the report.
       """
     )
+    let region = try chat.region
     XCTAssertGreaterThan(
-      chat.region.contentSize.height, chat.region.bounds.height * 4,
+      region.contentSize.height, region.bounds.height * 4,
       "…and the rest of the command must still be there, behind the viewport"
     )
-    assertNothingIsPushedOffScreen(chat)
+    try assertNothingIsPushedOffScreen(chat)
   }
 
   /// The smallest supported phone (320×568 under Display Zoom) with the keyboard up: the
@@ -103,9 +126,10 @@ final class ApprovalCardLayoutTests: XCTestCase {
   @MainActor
   func testChatViewOnTheShortestScreenKeepsSeveralLinesOfTheCommand() throws {
     let chat = try hostedChat(width: 320, height: 352)
+    let region = try chat.region
 
     XCTAssertEqual(
-      chat.region.bounds.height, ApprovalCardView.contentMinHeight, accuracy: 1,
+      region.bounds.height, ApprovalCardView.contentMinHeight, accuracy: 1,
       "Sanity: this is the configuration where the region lands exactly on its floor"
     )
     XCTAssertGreaterThanOrEqual(
@@ -115,8 +139,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
       the fade ramp — not several lines of header and detail with the command below the fold.
       """
     )
-    XCTAssertGreaterThan(chat.region.contentSize.height, chat.region.bounds.height, "…and scroll")
-    assertNothingIsPushedOffScreen(chat)
+    XCTAssertGreaterThan(region.contentSize.height, region.bounds.height, "…and scroll")
+    try assertNothingIsPushedOffScreen(chat)
   }
 
   /// The floor's "three legible command lines" is a **`.large`** contract, and this is the
@@ -165,9 +189,9 @@ final class ApprovalCardLayoutTests: XCTestCase {
       // The shortest screen and a mainstream one, both with the keyboard up.
       for (width, height) in [(CGFloat(320), CGFloat(352)), (393, 516)] {
         let chat = try hostedChat(width: width, height: height, dynamicType: size)
-        assertNothingIsPushedOffScreen(chat)
+        try assertNothingIsPushedOffScreen(chat)
         XCTAssertGreaterThan(
-          chat.region.bounds.height, 0, "\(chat.label): the region must still be laid out"
+          try chat.region.bounds.height, 0, "\(chat.label): the region must still be laid out"
         )
       }
     }
@@ -201,7 +225,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   @MainActor
   func testAnUnboundedDetailCannotDisplaceTheCommand() throws {
     let long = try hostedChat(width: 393, height: 516, detail: Self.longDetail)
-    assertNothingIsPushedOffScreen(long)
+    try assertNothingIsPushedOffScreen(long)
     XCTAssertGreaterThanOrEqual(
       try readableCommandLines(long), 4,
       "A long detail must be absorbed by the scroll BELOW the command, not in front of it"
@@ -290,7 +314,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
         """
       )
       XCTAssertLessThan(
-        chat.region.bounds.height, ApprovalCardView.contentMaxHeightBase,
+        try chat.region.bounds.height, ApprovalCardView.contentMaxHeightBase,
         "\(chat.label): sanity — the region is genuinely squeezed here, which is what makes it the test"
       )
     }
@@ -312,7 +336,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
     // …but not at the command's expense: the card still gets the lion's share.
     XCTAssertGreaterThan(
-      chat.region.bounds.height, chat.transcript.bounds.height,
+      try chat.region.bounds.height, chat.transcript.bounds.height,
       "The blocking card still outranks the transcript for the fixed region"
     )
   }
@@ -452,7 +476,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// state at all takes a deliberate re-focus of the composer while the card stands; when it
   /// is reached, the order of precedence is the right one — the region lands on its floor, the
   /// Deny/Approve row stays inside the window
-  /// (``testLandscapeWithTheKeyboardUpKeepsTheButtonRowInsideTheWindow``), and the composer is
+  /// (``testLandscapeWithTheKeyboardUpKeepsTheAnswerInsideTheWindow``), and the composer is
   /// what goes under the keyboard. Note the composer is *live*, not disabled: only Send is
   /// blocked while a card stands, so what is off screen there is the user's own focused field.
   func testTheCardsCompressedFittingSizeIsPinned() throws {
@@ -463,7 +487,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
     let compressed = host.sizeThatFits(in: CGSize(width: Self.viewportWidth, height: 1)).height
     XCTAssertLessThanOrEqual(
-      compressed, 260,
+      compressed, Self.compressedFittingBudget,
       """
       Compressed, the card must stay inside the fixed region a portrait phone has with the \
       keyboard up — every rigid point added here comes out of that budget.
@@ -489,6 +513,51 @@ final class ApprovalCardLayoutTests: XCTestCase {
       With the session toggle on, the primary button must say so: the toggle can be flipped, \
       scrolled away from, and committed blind otherwise.
       """
+    )
+  }
+
+  /// The same mirror, **rendered** — the wiring, not just the pure function behind it.
+  ///
+  /// `approveTitle(all:)` being right says nothing about the button being handed the toggle's
+  /// state: a card that passed `false` unconditionally (or read a different flag) would keep
+  /// the assertion above green while showing "Approve" over a session-wide whitelist. That
+  /// title is the *only* on-screen confirmation of what an approve is about to do — with a
+  /// long command the toggle itself is below the fold — so it is asserted where the user reads
+  /// it: off the accessibility tree, after flipping the toggle the way a tap does
+  /// (`accessibilityActivate()`; SwiftUI draws the switch, so there is no `UISwitch` to set).
+  func testFlippingTheSessionToggleRetitlesTheButtonOnScreen() throws {
+    let host = hostedCard(ApprovalRequest(command: "rm -rf build", detail: "Run the build"))
+    let window = try XCTUnwrap(windows.last)
+
+    XCTAssertTrue(
+      Self.accessibilityLabels(in: window).contains(ApprovalCardView.approveTitle(all: false)),
+      "Sanity: with the toggle off, the button on screen is the plain Approve"
+    )
+
+    let toggle = try XCTUnwrap(
+      Self.accessibilityObjects(in: window)
+        // The card's own literal. Spelled out rather than shared through a constant so the
+        // production view stays untouched by a test-only need; if it ever drifts this unwrap
+        // fails loudly (unlike a title mismatch, which would silently match nothing).
+        .first { $0.accessibilityLabel == "Approve all in this session" },
+      "the session toggle must be in the accessibility tree — it is what a user flips"
+    )
+    XCTAssertTrue(toggle.accessibilityActivate(), "the session toggle must be activatable")
+
+    host.view.setNeedsLayout()
+    host.view.layoutIfNeeded()
+
+    let labels = Self.accessibilityLabels(in: window)
+    XCTAssertTrue(
+      labels.contains(ApprovalCardView.approveTitle(all: true)),
+      """
+      With the toggle on, the button the user taps must read "Approve all" — the title is \
+      where the session-wide whitelist is disclosed.
+      """
+    )
+    XCTAssertFalse(
+      labels.contains(ApprovalCardView.approveTitle(all: false)),
+      "…and the plain Approve must be gone, not sitting next to it"
     )
   }
 
@@ -878,9 +947,12 @@ final class ApprovalCardLayoutTests: XCTestCase {
     /// effect on the UIKit views can be read.
     var relayout: () -> Void
 
-    /// The approval card's region. Force-unwrapped on purpose: every caller has an approval
-    /// standing, and `hostedChat` already fails the test with a message when it is missing.
-    var region: UIScrollView { regionIfAny! }
+    /// The approval card's region. Every caller has an approval standing, so a missing one is a
+    /// failure — but a *throwing* one, like every other lookup in this suite: a force-unwrap here
+    /// would take the whole test process down instead of failing the one test that asked.
+    var region: UIScrollView {
+      get throws { try XCTUnwrap(regionIfAny, "\(label): the approval card's region must be hosted") }
+    }
   }
 
   /// Hosts the **real** `ChatView` with an approval standing, in a window the size of the
@@ -969,9 +1041,10 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// matter, and the row is the safety-critical half.
   private func assertNothingIsPushedOffScreen(
     _ chat: HostedChat, file: StaticString = #filePath, line: UInt = #line
-  ) {
+  ) throws {
     let composer = chat.composer.convert(chat.composer.bounds, to: nil)
-    let region = chat.region.convert(chat.region.bounds, to: nil)
+    let cardRegion = try chat.region
+    let region = cardRegion.convert(cardRegion.bounds, to: nil)
     XCTAssertLessThanOrEqual(
       composer.maxY, chat.windowHeight,
       "\(chat.label): the card must not push the composer (and the buttons above it) off screen",
@@ -1009,7 +1082,9 @@ final class ApprovalCardLayoutTests: XCTestCase {
   private func answerRow(
     in chat: HostedChat, file: StaticString = #filePath, line: UInt = #line
   ) throws -> CGRect {
-    let titles = ["Deny", ApprovalCardView.approveTitle(all: false), .init(true)]
+    let titles = [
+      "Deny", ApprovalCardView.approveTitle(all: false), ApprovalCardView.approveTitle(all: true),
+    ]
     let buttons = Self.accessibilityElements(in: chat.window)
       .filter { titles.contains($0.label) }
       .map(\.frame)
@@ -1025,20 +1100,35 @@ final class ApprovalCardLayoutTests: XCTestCase {
 
   /// Every labelled element in the accessibility tree, flattened. Containers publish their
   /// children through `accessibilityElement(at:)`; plain views are walked by `subviews`.
-  private static func accessibilityElements(in object: NSObject) -> [(label: String, frame: CGRect)]
-  {
-    var found: [(String, CGRect)] = []
+  ///
+  /// The elements themselves, not a snapshot of them, so a caller can also *drive* one —
+  /// `accessibilityActivate()` is the only way to flip a SwiftUI control from a test (there is
+  /// no `UISwitch`, no `UIButton`: SwiftUI draws them).
+  private static func accessibilityObjects(in object: NSObject) -> [NSObject] {
+    var found: [NSObject] = []
     let count = object.accessibilityElementCount()
     if count != NSNotFound, count > 0 {
       for index in 0..<count {
         guard let child = object.accessibilityElement(at: index) as? NSObject else { continue }
-        if let label = child.accessibilityLabel { found.append((label, child.accessibilityFrame)) }
-        found += accessibilityElements(in: child)
+        if child.accessibilityLabel != nil { found.append(child) }
+        found += accessibilityObjects(in: child)
       }
     } else if let view = object as? UIView {
-      for sub in view.subviews { found += accessibilityElements(in: sub) }
+      for sub in view.subviews { found += accessibilityObjects(in: sub) }
     }
     return found
+  }
+
+  /// The same walk reduced to what the measuring callers need: each labelled element's label
+  /// and where it actually ended up.
+  private static func accessibilityElements(in object: NSObject) -> [(label: String, frame: CGRect)]
+  {
+    accessibilityObjects(in: object).map { ($0.accessibilityLabel ?? "", $0.accessibilityFrame) }
+  }
+
+  /// …and reduced further, for a plain "is this title on screen?" membership check.
+  private static func accessibilityLabels(in object: NSObject) -> Set<String> {
+    Set(accessibilityElements(in: object).map(\.label))
   }
 
   // MARK: - Measuring the COMMAND (not the viewport it happens to sit in)
@@ -1065,7 +1155,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     _ chat: HostedChat, file: StaticString = #filePath, line: UInt = #line
   ) throws -> CGFloat {
     try readableCommandHeight(
-      window: chat.window, region: chat.region, file: file, line: line)
+      window: chat.window, region: try chat.region, file: file, line: line)
   }
 
   @MainActor
@@ -1097,17 +1187,15 @@ final class ApprovalCardLayoutTests: XCTestCase {
       // column would land on one at any indentation.
       let isBlock = stride(from: 0.04, through: 0.98, by: 0.02).contains { fraction in
         let pixel = rendered.color(x: region.bounds.width * fraction, y: y)
-        return Self.distance(pixel, block) < 8 && Self.distance(pixel, block)
-          < Self.distance(pixel, card)
+        return Self.distance(pixel, block) < Self.blockColorTolerance
+          && Self.distance(pixel, block) < Self.distance(pixel, card)
       }
       if isBlock {
         bottom = y + step
         gap = 0
       } else {
         gap += step
-        // A couple of points of fully-covered row (a glyph row, an anti-aliased edge) is not
-        // the end of the block; anything more is.
-        if gap > 3 { break }
+        if gap > Self.maxBlockInteriorGap { break }
       }
       y += step
     }
@@ -1145,18 +1233,27 @@ final class ApprovalCardLayoutTests: XCTestCase {
         view.layer.render(in: context.cgContext)
       }
     let cg = try XCTUnwrap(image.cgImage, "the view must render", file: file, line: line)
-    var pixels = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
+    return RenderedWindow(
+      pixels: try pixels(of: cg, file: file, line: line),
+      pixelWidth: cg.width, pixelHeight: cg.height,
+      scale: CGFloat(cg.height) / view.bounds.height
+    )
+  }
+
+  /// A `CGImage`'s pixels as a flat RGBA buffer (8 bits per component, premultiplied alpha last,
+  /// device RGB) — the one place this suite goes from an image to bytes it can sample.
+  private static func pixels(
+    of cg: CGImage, file: StaticString = #filePath, line: UInt = #line
+  ) throws -> [UInt8] {
+    var buffer = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
     let context = try XCTUnwrap(
       CGContext(
-        data: &pixels, width: cg.width, height: cg.height, bitsPerComponent: 8,
+        data: &buffer, width: cg.width, height: cg.height, bitsPerComponent: 8,
         bytesPerRow: cg.width * 4, space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
       ), file: file, line: line)
     context.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
-    return RenderedWindow(
-      pixels: pixels, pixelWidth: cg.width, pixelHeight: cg.height,
-      scale: CGFloat(cg.height) / view.bounds.height
-    )
+    return buffer
   }
 
   private static func rgb(_ color: UIColor, _ traits: UITraitCollection) -> (Int, Int, Int) {
@@ -1210,17 +1307,9 @@ final class ApprovalCardLayoutTests: XCTestCase {
     renderer.scale = 1
     let image = try XCTUnwrap(renderer.uiImage, "the mask must render")
     let cg = try XCTUnwrap(image.cgImage)
-    var pixels = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
-    let context = try XCTUnwrap(
-      CGContext(
-        data: &pixels, width: cg.width, height: cg.height, bitsPerComponent: 8,
-        bytesPerRow: cg.width * 4, space: CGColorSpaceCreateDeviceRGB(),
-        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-      )
-    )
-    context.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+    let buffer = try pixels(of: cg)
     // Sample the middle column; row 0 of a bitmap context's buffer is the image's top edge.
     let x = cg.width / 2
-    return (0..<cg.height).map { y in Int(pixels[(y * cg.width + x) * 4 + 3]) }
+    return (0..<cg.height).map { y in Int(buffer[(y * cg.width + x) * 4 + 3]) }
   }
 }

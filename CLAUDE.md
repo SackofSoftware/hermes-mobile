@@ -367,8 +367,9 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   gives the card `.layoutPriority(1)`** (at the `VStack` call site — a trait written inside
   `pendingCard`'s `@ViewBuilder` branch does not reach the stack): without it the stack offers each
   child `remaining / remainingCount` in flexibility order, the card is less flexible than the
-  transcript, and the region collapses onto its floor with the keyboard up (measured 88pt vs 227pt on
-  an iPhone 15). It is **scoped to `.approval`** (`State.isApprovalPending`) — `ClarifyCardView` is
+  transcript, and the region collapses onto its floor with the keyboard up (measured on an iPhone 15:
+  its floor, 96pt, without the priority vs 155pt with it — 88 and 227 when first measured, before the
+  floor was raised and the region started handing a 44pt reserve back). It is **scoped to `.approval`** (`State.isApprovalPending`) — `ClarifyCardView` is
   rigid stacked content that cannot use the extra room, so priority there only blanks the transcript
   (measured 160pt → 13pt). And because a priority-1 child is offered everything the others do not
   strictly need — the greedy transcript's minimum is 0 — the region **hands a fixed 44pt of its offer

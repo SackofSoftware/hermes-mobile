@@ -26,7 +26,8 @@ import SwiftUI
 ///    detail above it, a 1000-char `detail` pushed the command *entirely* below the fold at
 ///    first paint (measured: no command pixels in the viewport at all on a 393×516 keyboard-up
 ///    window), and on the shortest screen the title + a two-line detail alone filled the whole
-///    88pt floor — the user was asked to approve a command they could not see.
+///    floor (88pt when that was measured; ``contentMinHeight`` is 96 now) — the user was asked
+///    to approve a command they could not see.
 /// 3. **The toggle's state is mirrored on the Approve button** (``approveTitle(all:)``). The
 ///    toggle itself has to live inside the scroll (rule 1), so with a long command it sits
 ///    below the fold — and a session-wide whitelist committed from a control the user cannot
@@ -106,8 +107,8 @@ struct ApprovalCardView: View {
   /// Tallest the bottom ramp that signals "there is more below" is allowed to be.
   static let bottomFadeHeight: CGFloat = 24
 
-  /// Padding inside the command's tinted block. Public to the test suite because the measured
-  /// "how many command lines are legible" assertions have to discount it.
+  /// Padding inside the command's tinted block. Internal rather than private so the measured
+  /// "how many command lines are legible" tests can discount it.
   static let commandPadding: CGFloat = 8
 
   /// Points of the fixed region the content region hands back, so the transcript — the context
@@ -370,15 +371,20 @@ struct BoundedHeightLayout: Layout {
     // The floor outranks the reserve: handing points back to a sibling is for the *comfortable*
     // case, and must never be the thing that squeezes the card below what it needs.
     let claimable = max(minHeight, offered - reserve)
-    return max(min(minHeight, bounded), min(bounded, claimable))
+    // One `min` covers both halves of the rule: `claimable` is at least `minHeight`, so the
+    // result is at least `min(bounded, minHeight)` — i.e. the floor, or the content itself when
+    // the content is shorter than the floor. No second clamp needed.
+    return min(bounded, claimable)
   }
 
   func placeSubviews(
     in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
   ) {
-    let size = ProposedViewSize(bounds.size)
-    for subview in subviews {
-      subview.place(at: CGPoint(x: bounds.minX, y: bounds.minY), anchor: .topLeading, proposal: size)
-    }
+    // Only the first subview, matching what `sizeThatFits` measures (and `CappedWidthLayout`).
+    subviews.first?.place(
+      at: CGPoint(x: bounds.minX, y: bounds.minY),
+      anchor: .topLeading,
+      proposal: ProposedViewSize(bounds.size)
+    )
   }
 }

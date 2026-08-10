@@ -17,7 +17,9 @@
   bottom fade hinting at the overflow (mirroring the #59 table treatment). Every byte
   of the command stays reachable and Approve/Deny always stay on screen — the user
   must be able to read what they're approving before they approve it.
-- View-only change: no reducer, model, or protocol work.
+- ~~View-only change: no reducer, model, or protocol work.~~ **Superseded during review** —
+  the shipped fix also adds `ChatFeature.State.present(_:)` / `pendingInteractionToken` in
+  HermesKit (card view identity + handing the keyboard back). Kept for history.
 
 ## Context (from discovery)
 
@@ -100,7 +102,14 @@
   gesture beats the new scroll gesture is a manual-check item (same caveat family as
   the #59 table cells) — not a tested contract.
 
-## Technical Details
+## Technical Details (superseded during review — kept for history)
+
+> This section describes the abandoned first shape. What shipped instead: the whole
+> region between the title and the button row scrolls (not just the command), sized by a
+> `BoundedHeightLayout` (`Layout`, not a measured `@State` height) with a 320pt base cap
+> clamped to a mandatory derived ceiling, a fade driven by **live scroll geometry** rather
+> than by a measurement, and `ChatFeature.State.present(_:)` / `pendingInteractionToken`
+> in HermesKit. See the implementation steps below and `ApprovalCardView`'s own doc comments.
 
 - `ApprovalCardView` additions: `@State private var commandContentHeight: CGFloat?`,
   `@ScaledMetric(relativeTo: .callout) private var commandMaxHeight = 220` (clamped

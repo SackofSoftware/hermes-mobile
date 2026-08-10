@@ -440,7 +440,7 @@ final class ChatSnapshotTests: SnapshotTestCase {
   }
 
   /// A command far taller than the cap (#65): the block stops growing at
-  /// `commandMaxHeight`, shows the first screenful, and fades its bottom edge to signal the
+  /// `contentMaxHeight`, shows the first screenful, and fades its bottom edge to signal the
   /// rest is reachable by scrolling — while Deny/Approve stay on the card.
   ///
   /// The frame is pinned in **both** axes: `componentImage()` renders at `.sizeThatFits`,

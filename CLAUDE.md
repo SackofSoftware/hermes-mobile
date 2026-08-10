@@ -242,6 +242,24 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   footer, token-disclaimer link — all toggle one local `@State` (presentation stays out
   of the reducer). It **replaced** the token-first `SecureConnectionInfoView`; keep the
   README quick-start and the sheet's commands verbatim-identical.
+- **A launch auto-connect TRANSPORT failure raises the retry screen, never onboarding** (#62) —
+  stored credentials that are still perfectly valid must not be thrown away because Tailscale is
+  off. `RESTError` distinguishes `.offline` (`URLError.notConnectedToInternet`/`.dataNotAllowed`/
+  `.internationalRoamingOff`, mapped in the one shared `RESTError.init(transport:)` that every
+  request helper's transport catch funnels through) from `.unreachable` (timeout, DNS, refused,
+  non-HTTP response); `.autoConnectFailed` carries the `RESTError`, and **only** those two cases
+  populate `AppFeature.State.connectionFailed` (`ConnectionFailedFeature`, an `ifLet` child) — the
+  screen names the server URL, states the reason, and offers a manual **Retry**, a foreground
+  auto-retry (`.scenePhaseChanged(.active)` → `.sceneBecameActive`, guarded by `isRetrying` so a
+  foreground can't double-probe one already in flight) and a full **Log Out**. **Every other error —
+  401 included — keeps today's prefilled-onboarding fallback byte-identical**: retrying can't fix
+  dead credentials, so a retry failing with a non-transport error delegates `.credentialsRejected`
+  and drops to onboarding. **Scope is the launch auto-connect path only** — a manual login failure
+  still shows the onboarding inline footer, and a post-login socket drop still shows the chat
+  reconnect banner. The child reducer is pure routing + probe (`rest.sessions(connection, 1, 0,
+  .recent)`); **the logout clearing lives in `AppFeature`'s delegate handler** (keychain session,
+  server URL, identity-scoped prefs, grouping reset, `chatSnapshot.wipeAll()`, badge reset,
+  `unregisterPushOnLogout`), next to the two existing logout recipes, landing on a fresh onboarding.
 - **Session re-hydration is server-authoritative** via one unified `hydrate(sessionID)`
   (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.resume`
   (NOT `session.activate` — that is live-only and 404s any stored session opened from the list;

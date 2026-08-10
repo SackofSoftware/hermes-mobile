@@ -286,10 +286,20 @@ isolation with `-only-testing:HermesMobileTests/ConnectionFailedSnapshotTests`.
 
 ### Task 6: [Final] Update documentation
 
-- [ ] add the connection-failed screen convention to `CLAUDE.md` (routing rule: launch
-      transport failures → retry screen, auth failures → onboarding)
-- [ ] comment on issue #62 and close it (or note for closure after TestFlight)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] add the connection-failed screen convention to `CLAUDE.md` (routing rule: launch
+      transport failures → retry screen, auth failures → onboarding) — added next to the
+      `AgentSetupGuideView` login bullet: the `.offline`/`.unreachable` → retry-screen
+      routing, the byte-identical prefilled-onboarding fallback for every other error
+      (401 included), the launch-auto-connect-only scope limit (manual login keeps the
+      onboarding footer, post-login drops keep the chat reconnect banner), and the note
+      that logout clearing lives in `AppFeature`'s delegate handler
+- [x] comment on issue #62 and close it (or note for closure after TestFlight) —
+      commented (#62 comment 5238735643) with what shipped; **deliberately left OPEN**:
+      the Post-Completion device checks (Tailscale off, airplane mode, password-mode
+      session) are not done, so the comment states it is implemented on branch
+      `connection-failed-screen` and pending manual device verification / TestFlight
+- [x] move this plan to `docs/plans/completed/` — handled by the exec orchestrator after
+      the review phases (not moved here)
 
 ## Post-Completion
 

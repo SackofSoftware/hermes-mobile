@@ -496,8 +496,19 @@ public struct ChatFeature {
     /// state, nothing to keep in sync. Empty when the catalog isn't loaded yet or the
     /// agent predates slash commands (`commandsUnsupported`), so the panel simply never
     /// appears on old agents.
+    ///
+    /// Also empty while a **blocking card stands** (#65): the panel is a fixed slab (up to 5.5
+    /// rows) in the same non-scrolling region as the card and the composer, so a slash draft
+    /// left in the composer when a card is raised mid-turn — or typed into it afterwards, since
+    /// the card only resigns the field, never disables it — stacked the two and pushed the
+    /// Deny/Approve row off screen on a small phone (measured: the composer's bottom at 431pt in
+    /// a 352pt window). Nothing is lost: `composerText` is untouched, so the draft and its panel
+    /// come straight back when the card is answered, and the command the panel completes could
+    /// not have been submitted meanwhile anyway — `canSend` is false while `pendingInteraction`
+    /// is non-nil. Gated here rather than in the view so the whole derivation stays one pure
+    /// rule with no stored suggestion state.
     public var slashSuggestions: [SlashSuggestion] {
-      guard !commandsUnsupported else { return [] }
+      guard !commandsUnsupported, pendingInteraction == nil else { return [] }
       return SlashSuggestionFilter.suggestions(for: composerText, catalog: commandCatalog)
     }
 

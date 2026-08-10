@@ -270,6 +270,13 @@ struct ChatView: View {
   /// Rendered only while the reducer's computed `slashSuggestions` is non-empty (catalog
   /// loaded, composer text is a slash query); a tap inserts via `.slashSuggestionTapped`
   /// and leaves focus untouched, so the keyboard stays up.
+  ///
+  /// The panel and a blocking card share this non-scrolling `VStack`, and the panel is a fixed
+  /// slab of up to 5.5 rows — so a slash draft standing when a card is raised used to stack the
+  /// two and push the Deny/Approve row and the composer off a small screen (#65 rebuilt out of
+  /// different parts; measured 431pt of content in a 352pt window). `slashSuggestions` is
+  /// therefore empty while `pendingInteraction` is non-nil — a reducer rule, not a condition
+  /// added here, so the derivation stays in one place. The draft itself is untouched.
   @ViewBuilder
   private var suggestionPanel: some View {
     let suggestions = store.slashSuggestions

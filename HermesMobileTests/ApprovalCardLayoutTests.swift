@@ -368,6 +368,43 @@ final class ApprovalCardLayoutTests: XCTestCase {
       composer.maxY, chat.windowHeight, "…and the clarify card must not push the composer out")
   }
 
+  /// A **slash draft standing in the composer** when the card is raised must not also open the
+  /// suggestion panel. The panel is a fixed 220pt slab in the same non-scrolling `VStack` as the
+  /// card and the composer, so the two together are #65's overflow rebuilt out of different
+  /// parts — and the panel has nothing to offer here: `canSend` is false while a card stands, so
+  /// the command it would complete could not be submitted anyway.
+  ///
+  /// The draft is reachable in two ordinary ways even though raising a card resigns the
+  /// composer: the text may already be there when the card arrives mid-turn, and the field stays
+  /// live so a deliberate re-focus (which this branch keeps working) can add to it.
+  ///
+  /// The **positive control comes first** — the identical draft with no card standing must open
+  /// the panel — because an absence assertion on a harness that could never see the panel would
+  /// pass no matter what the view does.
+  @MainActor
+  func testASlashDraftDoesNotStackTheSuggestionPanelUnderACard() throws {
+    let open = try hostedChat(
+      width: 320, height: 352, raiseACard: false, composerText: "/", catalog: Self.fullCatalog)
+    XCTAssertEqual(
+      Self.plainScrollViews(in: open.window).count, 1,
+      "sanity: with no card standing, a slash draft opens the suggestion panel"
+    )
+
+    let chat = try hostedChat(width: 320, height: 352, composerText: "/", catalog: Self.fullCatalog)
+    XCTAssertEqual(
+      Self.plainScrollViews(in: chat.window).count, 1,
+      """
+      \(chat.label): a blocking card and the 220pt suggestion panel must not share the fixed \
+      region — the card's own content region must be the only plain scroll view on screen.
+      """
+    )
+    XCTAssertEqual(
+      chat.store.composerText, "/",
+      "…and suppressing the panel must not cost the user the draft they typed"
+    )
+    try assertNothingIsPushedOffScreen(chat)
+  }
+
   // MARK: - Overflow (the #65 fix), card alone
 
   func testLongCommandScrollsInsteadOfBeingTruncated() throws {
@@ -841,6 +878,16 @@ final class ApprovalCardLayoutTests: XCTestCase {
   private static let longDetail = String(
     repeating: "This deletes everything under the build directory. ", count: 20)
 
+  /// Enough commands that `SlashSuggestionPanel` opens at its full height (its cap is 5.5
+  /// rows), so a composition test measures the panel's worst case rather than a two-row stub.
+  private static let fullCatalog = CommandCatalog(
+    commands: (1...8).map {
+      SlashCommand(name: "/status\($0)", description: "Show session status", category: "Session")
+    },
+    canonical: Dictionary(
+      uniqueKeysWithValues: (1...8).map { ("/status\($0)", "/status\($0)") })
+  )
+
   /// Ten times longer again: the card must not notice.
   private static let veryLongCommand = (1...200)
     .map { "step \($0): xcodebuild -workspace HermesMobile.xcworkspace -scheme Target\($0) test" }
@@ -966,6 +1013,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
     detail: String = "Delete the build directory and all untracked files",
     interaction: ChatFeature.State.PendingInteraction? = nil,
     raiseACard: Bool = true,
+    composerText: String = "",
+    catalog: CommandCatalog? = nil,
     file: StaticString = #filePath,
     line: UInt = #line
   ) throws -> HostedChat {
@@ -982,6 +1031,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
       ),
       status: .ready
     )
+    state.composerText = composerText
+    state.commandCatalog = catalog
     // Through `present(_:)`, like the reducer: a bare assignment leaves the token behind, and
     // the token is the card's view identity.
     if raiseACard {
@@ -1286,6 +1337,14 @@ final class ApprovalCardLayoutTests: XCTestCase {
   private static func onlyScrollView(in view: UIView) -> UIScrollView? {
     let found = scrollViews(in: view)
     return found.count == 1 ? found[0] : nil
+  }
+
+  /// The scroll views `ChatView` renders *itself* — the approval card's content region and the
+  /// slash suggestion panel. The transcript is a `UICollectionView` and both the composer's
+  /// input and a `SelectableText` row are `UITextView`s, so filtering those two classes out
+  /// leaves exactly the plain ones, which is what makes counting them a usable presence test.
+  private static func plainScrollViews(in view: UIView) -> [UIScrollView] {
+    scrollViews(in: view).filter { !($0 is UICollectionView) && !($0 is UITextView) }
   }
 
   /// Every scroll view in the view hierarchy.

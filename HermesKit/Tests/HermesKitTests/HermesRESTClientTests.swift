@@ -413,15 +413,10 @@ struct HermesRESTClientTests {
   }
 
   /// A reachable network whose server didn't answer stays `.unreachable` — retrying
-  /// (rather than "you're offline" copy) is the right advice there.
-  @Test(arguments: [
-    URLError.Code.cannotConnectToHost,
-    .timedOut,
-    .cannotFindHost,
-    .networkConnectionLost,
-    .secureConnectionFailed,
-    .cancelled,
-  ])
+  /// (rather than "you're offline" copy) is the right advice there. Two representative codes
+  /// are enough: they all exercise the one `default:` arm (the *offline* codes above are the
+  /// enumerated branch, so those stay fully parameterized).
+  @Test(arguments: [URLError.Code.cannotConnectToHost, .timedOut])
   func nonOfflineURLErrorCodesMapToUnreachable(code: URLError.Code) async throws {
     #expect(RESTError(transport: URLError(code)) == .unreachable)
   }

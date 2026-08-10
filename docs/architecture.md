@@ -24,13 +24,22 @@ approval/clarify requests).
 ## Feature tree (TCA reducers, in `HermesKit`)
 
 ```
-AppFeature                 // root nav + launch auto-connect; onboarding until connected;
+AppFeature                 // root nav + launch auto-connect; onboarding until connected
+│                          //   (a RETRYABLE launch failure raises ConnectionFailedFeature instead);
 │                          //   presents ReauthFeature on .sessionExpired (identity-aware routing);
 │                          //   owns the LIVE-CHAT SLOT (liveChat: ChatFeature.State? via .ifLet)
 │                          //   and a nav path of thin ChatScreen markers — slot teardown (idle
 │                          //   pop, detached turn end, replacement, archive, logout) is
 │                          //   AppFeature policy, never a view event
 ├─ ConnectionFeature       // auto-validating URL + capability-aware auth toggle (Password | Token)
+├─ ConnectionFailedFeature // launch-only "can't reach the server" retry screen (ifLet slot):
+│                          //   raised when the launch probe fails for a reason that isn't a
+│                          //   verdict on the credentials — i.e. EVERYTHING except 401/403
+│                          //   (see ConnectionFailedFeature.isRetryable) — keeping the
+│                          //   stored session; manual Retry + foreground auto-retry (the
+│                          //   foreground supersedes an in-flight probe rather than being
+│                          //   swallowed); delegates connected / credentialsRejected /
+│                          //   changeServerRequested / logoutTapped (all clearing lives in AppFeature)
 ├─ ReauthFeature           // re-auth modal: fixed URL, prefilled identity, password/token field;
 │                          //   same-user resume vs different-user switch vs Quit→onboarding
 ├─ SessionListFeature      // flat list, grouped by workspace OR chronological (persisted) /
@@ -149,6 +158,42 @@ session list, force a reload, and clear identity-scoped prefs; **Quit** → full
 onboarding. Token mode reuses the same modal with a token field (identity compare skipped).
 The gated foreground-reconnect flow shares the same `connect` (which re-mints the ticket) — see
 backlog **#18** (session state-sync).
+
+**Launch-probe failures split by kind (#62).** The auto-connect probe's error decides the
+landing. `RESTError.init(transport:)` — the single funnel every request helper's transport
+`catch` uses, and the one `asRESTError` defers to for a raw error — maps the
+device-has-no-network `URLError` codes (`.notConnectedToInternet` / `.dataNotAllowed` /
+`.internationalRoamingOff`) to `.offline` and every other transport failure to `.unreachable`.
+`ConnectionFailedFeature.isRetryable` is then the ONE routing rule, shared by `AppFeature`'s
+launch handler and the retry screen's own failure branch, and it is inverted from the obvious
+one: **only a credentials verdict — 401 (`.unauthorized`) or 403 — keeps the pre-existing
+prefilled-onboarding fallback; everything else raises `ConnectionFailedFeature` with the stored
+`AuthSession` untouched.** A stored connection was a working Hermes agent when onboarding
+persisted it, so a launch failure that isn't 401/403 — a proxy's `502`/`503`/`504`, the agent's
+own `500`, a vanished route's `404`, a `429`, a captive portal's HTML (`.decoding`) — means the
+network or the server changed, not the saved sign-in. Retrying can't repair dead credentials,
+but it can repair every one of those, and the screen states the real failure where prefilled
+onboarding states nothing. The screen's own way *out* without a logout is
+**Change server**, which lands on that same prefilled onboarding. The `AgentSetupGuideView`
+connection-help sheet is reached from the screen **directly** (a tertiary link, view-local
+`@State` as on the login screen), since these failures are the ones the guide explains. The
+reason line splits a `.server` status **three ways**: a 5xx (matched explicitly as `500..<600`)
+may clear on its own ("try again in a moment"), and so may the transient refusals **408 / 425 /
+429** — `validate` maps 429/503 onto their own cases only for the login-specific call, so a
+proxy's rate limiter reaches the launch probe as a bare `.server(429)`; every *other* 4xx is a
+refusal that repeats identically, so the server's `detail` is surfaced, which is what makes the
+agent's own host-header `400` ("Invalid Host header…", raised on every request when it restarts
+without `--host 0.0.0.0`) actionable instead of a futile retry loop. That quote is sanitized
+first (`sanitizedServerDetail`: markup dropped, first line, ~200 chars) because
+`serverDetail(from:)` falls back to the whole response body and an intermediary answers 4xx with
+an HTML page. The launch probe itself is **once per process**
+(`AppFeature.State.didRunLaunchProbe`), so a re-sent `.task` can't restart it behind the user —
+notably after **Change server**, which deliberately clears nothing. Scope is the launch
+path only: manual login keeps `ConnectionFeature`'s inline footer — on the **server-URL
+auto-probe** footer specifically, `.offline` shares `.unreachable`'s status so the help link
+still shows; the token/password login arms map `.offline` through `default:` to
+`.failed("No internet connection.")`, which carries no help link — and a post-login drop keeps
+the chat reconnect banner.
 
 A few protocol facts that shape the reducer (verified against the real Hermes source,
 not assumed):

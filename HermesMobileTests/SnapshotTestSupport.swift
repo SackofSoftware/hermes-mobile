@@ -37,9 +37,16 @@ class SnapshotTestCase: XCTestCase {
 
   /// Whole-screen snapshot: composites the iOS 26 system chrome (`drawHierarchyInKeyWindow`),
   /// so it needs the host app and isn't pixel-exact — runs at `perceptualPrecision: 0.98`.
-  func deviceImage<V: SwiftUI.View>() -> Snapshotting<V, UIImage> {
+  ///
+  /// `precision` (the fraction of pixels that must clear that perceptual bar) defaults to a
+  /// strict `1`. Lower it ONLY for a view containing a genuinely non-deterministic region —
+  /// an indeterminate `ProgressView` spinner is captured at whatever rotation the render
+  /// server happens to be at — and keep the allowance just big enough for that region, so the
+  /// rest of the screen is still asserted pixel-for-pixel.
+  func deviceImage<V: SwiftUI.View>(precision: Float = 1) -> Snapshotting<V, UIImage> {
     .image(
       drawHierarchyInKeyWindow: true,
+      precision: precision,
       perceptualPrecision: 0.98,
       layout: .device(config: device),
       traits: Self.darkTraits

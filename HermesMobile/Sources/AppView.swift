@@ -22,9 +22,37 @@ struct AppView: View {
       }
   }
 
+  /// Which root branch wins. Extracted from the `if`/`else` chain **only** so its
+  /// PRECEDENCE is unit-testable: the connection-failed screen is reachable purely by
+  /// sitting between `autoConnecting` and the onboarding fallback, and reordering it would
+  /// silently disable the whole feature with every other test still green.
+  enum RootScreen: Equatable {
+    case home
+    case connecting
+    case connectionFailed
+    case onboarding
+
+    static func resolve(
+      hasHome: Bool, autoConnecting: Bool, hasConnectionFailed: Bool
+    ) -> RootScreen {
+      if hasHome { return .home }
+      if autoConnecting { return .connecting }
+      if hasConnectionFailed { return .connectionFailed }
+      return .onboarding
+    }
+  }
+
+  private var rootScreen: RootScreen {
+    .resolve(
+      hasHome: store.home != nil,
+      autoConnecting: store.autoConnecting,
+      hasConnectionFailed: store.connectionFailed != nil
+    )
+  }
+
   @ViewBuilder
   private var content: some View {
-    if let homeStore = store.scope(state: \.home, action: \.home) {
+    if rootScreen == .home, let homeStore = store.scope(state: \.home, action: \.home) {
       NavigationStack(path: $store.scope(state: \.path, action: \.path)) {
         SessionListView(store: homeStore)
       } destination: { _ in
@@ -41,15 +69,17 @@ struct AppView: View {
             .onDisappear { store.send(.chatViewDisappeared) }
         }
       }
-    } else if store.autoConnecting {
+    } else if rootScreen == .connecting {
       ProgressView("Connecting…")
-    } else if let failedStore = store.scope(
-      state: \.connectionFailed,
-      action: \.connectionFailed
-    ) {
-      // Launch auto-connect failed for a *transport* reason: the stored credentials are
-      // fine, so keep them and offer a retry instead of dropping to onboarding. Auth
-      // failures never populate this slot — they fall through to the branch below.
+    } else if rootScreen == .connectionFailed,
+              let failedStore = store.scope(
+                state: \.connectionFailed,
+                action: \.connectionFailed
+              ) {
+      // Launch auto-connect failed for a reason that isn't a verdict on the credentials
+      // (no network, or a proxy reporting the agent down): the stored credentials are fine,
+      // so keep them and offer a retry instead of dropping to onboarding. Auth failures never
+      // populate this slot — they fall through to the branch below.
       ConnectionFailedView(store: failedStore)
     } else {
       NavigationStack {

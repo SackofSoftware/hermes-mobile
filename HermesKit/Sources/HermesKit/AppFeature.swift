@@ -21,11 +21,14 @@ public struct AppFeature {
     /// True during the launch auto-connect probe — `AppView` shows a brief placeholder
     /// instead of flashing the onboarding screen.
     public var autoConnecting: Bool
-    /// The "can't reach the server" screen, shown instead of onboarding when launch
-    /// auto-connect failed for a purely *transport* reason (`.offline`/`.unreachable`).
-    /// Stored credentials stay untouched — a password-mode user must never be made to
-    /// re-type a password that never expired just because Tailscale was off. Any other
-    /// failure (401 and friends) keeps today's onboarding fallback.
+    /// The "can't reach the server" screen, raised for **every** launch auto-connect failure
+    /// that isn't a verdict on the stored credentials — transport (`.offline`/`.unreachable`)
+    /// *and* a server that answered badly (500, 404, 429, 503, a captive portal's
+    /// `.decoding`). Only `.unauthorized` / a 401-403 `.server` falls back to prefilled
+    /// onboarding; the single rule lives in `ConnectionFailedFeature.isRetryable`, which this
+    /// routing defers to. Stored credentials stay untouched — a password-mode user must never
+    /// be made to re-type a password that never expired just because Tailscale was off or the
+    /// agent threw a 500.
     public var connectionFailed: ConnectionFailedFeature.State?
     /// The re-auth modal, presented when a live (gated) session dies mid-use. While shown,
     /// the dead chat's reconnect stays paused (it pauses itself via `awaitingReauth`).
@@ -39,6 +42,19 @@ public struct AppFeature {
     /// `.active`). Guards `.backgroundGraceExpired`: an expiry whose send escaped just as
     /// the user returned must not tear down the socket `.active` freshly redialed.
     var isSceneBackgrounded = false
+    /// The launch auto-connect probe has been started once this process — it never runs
+    /// again, whatever the rest of the state looks like.
+    ///
+    /// `.task` can be re-sent (a re-created `AppView`), and every *other* condition in its
+    /// guard is satisfiable again after the user has already been through the launch flow:
+    /// `changeServerRequested` deliberately clears nothing — the keychain session and the
+    /// stored URL both survive, and `connectionFailed` is nil'd — so without this flag a
+    /// re-sent `.task` would restart the launch probe, flip the root back to "Connecting…",
+    /// and on the same failure dump the user straight back onto the retry screen they were
+    /// escaping, discarding whatever URL they had typed (`fallBackToOnboarding` rebuilds
+    /// `onboarding` from scratch). "Already ran" must be its own bit, not an inference from
+    /// slots that are deliberately cleared.
+    var didRunLaunchProbe = false
     /// A push tap that arrived before the session list existed (cold launch — #46): the
     /// routing in `.pushTapped` can't open anything without `home`, so the tap is stashed
     /// here (single stash, last-wins) and replayed once `.autoConnectSucceeded` / a manual
@@ -104,9 +120,11 @@ public struct AppFeature {
   public enum Action {
     case task
     case autoConnectSucceeded(ServerConnection)
-    /// The launch probe failed. The `RESTError` decides where we land: a transport failure
-    /// (`.offline`/`.unreachable`) raises the retry screen with the session intact;
-    /// anything else falls back to onboarding for credential re-entry.
+    /// The launch probe failed. The `RESTError` decides where we land, via the one rule in
+    /// `ConnectionFailedFeature.isRetryable`: only a credentials verdict (`.unauthorized`, or
+    /// a `.server` with status 401/403) falls back to onboarding for re-entry — **every**
+    /// other failure (transport, 500, 404, 429, 503, `.decoding`) raises the retry screen with
+    /// the session intact.
     case autoConnectFailed(ServerConnection, RESTError)
     /// The app's scene phase changed (foreground/background) — observed at the app shell and
     /// fanned out: `.active` reconnects + re-hydrates the open chat and refreshes the list;
@@ -188,7 +206,15 @@ public struct AppFeature {
         // URL exist, silently validate and skip onboarding. Only runs once, before we have
         // a home. `loadSession` rehydrates a `.cookie` session's cookies into `.shared` so
         // the REST/WS transports authenticate on this fresh launch.
-        guard state.home == nil, !state.autoConnecting,
+        // `!didRunLaunchProbe` is the real once-per-process gate (see the property): a
+        // re-sent `.task` (a re-created `AppView`) must never start a SECOND launch probe —
+        // not while the retry screen is up (it would flip the UI back to the "Connecting…"
+        // spinner and, on success, build `home` beside a still-populated slot), and not after
+        // the user took **Change server**, which deliberately clears nothing and would
+        // otherwise satisfy every other condition here and bounce them back. The
+        // `home`/`connectionFailed`/`autoConnecting` checks stay as cheap belt-and-braces.
+        guard !state.didRunLaunchProbe, state.home == nil, state.connectionFailed == nil,
+              !state.autoConnecting,
               let session = keychain.loadSession(.shared),
               let urlString = preferences.loadServerURL(),
               let url = parseServerURL(urlString)
@@ -196,6 +222,7 @@ public struct AppFeature {
         // A `.token` session with an empty token is treated as "no creds" (matches the old
         // `loadToken()`-non-empty guard) so we stay on onboarding rather than probe blindly.
         if case .token("") = session { return tapObserver }
+        state.didRunLaunchProbe = true
         state.autoConnecting = true
         let connection = ServerConnection(baseURL: url, auth: session)
         return .merge(
@@ -212,30 +239,27 @@ public struct AppFeature {
 
       case let .autoConnectSucceeded(connection):
         state.autoConnecting = false
+        // Defensive: a retry screen and a live list must never coexist (see the `.task` guard).
+        state.connectionFailed = nil
         state.home = makeHomeState(connection: connection)
         return replayPendingPushTap(&state)
 
       case let .autoConnectFailed(connection, error):
         state.autoConnecting = false
-        switch error {
-        case .offline, .unreachable:
-          // We never reached the server, so the stored session is presumed fine — keep it and
-          // offer a Retry instead of dropping to onboarding (which, in password mode, would
-          // demand a password that never expired just because the VPN was off).
-          state.connectionFailed = ConnectionFailedFeature.State(
-            connection: connection, reason: error
-          )
-          return .none
-        default:
-          // Stored creds didn't validate (expired token / dead cookies / server moved) — fall
-          // back to onboarding. Token mode prefills the fields so the user can fix them; cookie
-          // mode prefills only the URL (the password is never persisted), so they re-enter it.
-          state.onboarding = ConnectionFeature.State(
-            serverURL: connection.baseURL.absoluteString,
-            token: connection.auth.token ?? ""
-          )
+        guard ConnectionFailedFeature.isRetryable(error) else {
+          // Stored creds didn't validate (expired token / dead cookies) — fall back to
+          // onboarding for re-entry; retrying can't repair dead credentials.
+          fallBackToOnboarding(&state, connection: connection)
           return .none
         }
+        // Either we never reached the server, or a proxy told us the agent is down — the
+        // stored session is presumed fine, so keep it and offer a Retry instead of dropping to
+        // onboarding (which, in password mode, would demand a password that never expired just
+        // because the VPN was off).
+        state.connectionFailed = ConnectionFailedFeature.State(
+          connection: connection, reason: error
+        )
+        return .none
 
       case let .connectionFailed(.delegate(.connected(connection))):
         // The retry validated the stored session — identical landing to a successful launch
@@ -244,34 +268,22 @@ public struct AppFeature {
         state.home = makeHomeState(connection: connection)
         return replayPendingPushTap(&state)
 
-      case let .connectionFailed(.delegate(.credentialsRejected(connection))):
-        // The retry reached the server and it turned us away — retrying can't fix that, so
-        // land exactly where a launch auth failure lands.
+      case let .connectionFailed(.delegate(.credentialsRejected(connection))),
+           let .connectionFailed(.delegate(.changeServerRequested(connection))):
+        // Either the retry reached the server and it turned us away (retrying can't fix that),
+        // or the user asked to edit the URL because the agent moved host/port. Both land
+        // exactly where a launch auth failure lands — prefilled onboarding, nothing cleared,
+        // which is also where the connection-help sheet's entry points live.
         state.connectionFailed = nil
-        state.onboarding = ConnectionFeature.State(
-          serverURL: connection.baseURL.absoluteString,
-          token: connection.auth.token ?? ""
-        )
+        fallBackToOnboarding(&state, connection: connection)
         return .none
 
       case .connectionFailed(.delegate(.logoutTapped)):
-        // "Log Out" from the retry screen: the user is abandoning the stored session, so run
-        // the FULL logout recipe (same as Settings' clear-token and the reauth quit path) —
-        // keychain session, server URL, identity-scoped prefs, grouping mode, the snapshot
-        // cache, the badge, and the device's push registration — and land on a *fresh*
-        // onboarding (nothing prefilled: there is no session left to repair).
+        // "Log Out" from the retry screen (confirmed): the user is abandoning the stored
+        // session, so run the FULL logout recipe and land on a *fresh* onboarding (nothing
+        // prefilled — there is no session left to repair).
         let connection = state.connectionFailed?.connection
-        try? keychain.deleteSession()
-        preferences.clearServerURL()
-        preferences.clearIdentityScopedPrefs()
-        preferences.saveGroupingMode(.default)
-        chatSnapshot.wipeAll()
-        state.connectionFailed = nil
-        state.onboarding = .init()
-        state.pendingPushTap = nil
-        state.pendingPushTapServerURL = nil
-        state.pendingApprovalSessionIDs = []
-        return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
+        return fullLogout(&state, connection: connection)
 
       case let .scenePhaseChanged(phase):
         // Fan lifecycle out to the live chat slot (if any) and the session list — no
@@ -291,8 +303,14 @@ public struct AppFeature {
             state.liveChat != nil ? .send(.liveChat(.foreground)) : .none,
             state.home != nil ? .send(.home(.pulledToRefresh)) : .none,
             // Stuck on the retry screen? Foregrounding is exactly the moment the user just
-            // flipped the VPN back on — re-probe without making them tap (the child guards
-            // its own in-flight probe, so this can't fan out).
+            // flipped the VPN back on — re-probe without making them tap. The child SUPERSEDES
+            // whatever is in flight (`cancelInFlight` on its probe), so this can't fan out
+            // into parallel probes; a stalled one is simply abandoned. Accepted trade-off:
+            // `.active` also fires for Control Center / notification-pull / app-switcher
+            // blips, so churn can restart the probe more often than the user asked. Gating on
+            // "was really backgrounded" would break the main case — flipping airplane mode or
+            // Wi-Fi from Control Center never backgrounds the app — and swallowing the
+            // foreground is the latch bug this design exists to avoid. One GET per blip.
             state.connectionFailed != nil ? .send(.connectionFailed(.sceneBecameActive)) : .none
           )
         case .background:
@@ -390,6 +408,10 @@ public struct AppFeature {
         return .send(.home(.delegate(.openSession(session))))
 
       case let .onboarding(.delegate(.connected(connection))):
+        // Defensive, mirroring `.autoConnectSucceeded`: a retry screen and a live list must
+        // never coexist. `AppView` would render `home` while the `ifLet` child stayed alive,
+        // re-probing on every foreground for the process lifetime.
+        state.connectionFailed = nil
         state.home = makeHomeState(connection: connection)
         // Auto-connect failure falls back to onboarding, so a manual login must also replay
         // a stashed cold-launch tap (#46).
@@ -552,23 +574,12 @@ public struct AppFeature {
         return setBadge(state)
 
       case .reauth(.presented(.delegate(.quit))):
-        // "Quit to start" → full logout (Keychain session + every pref) → onboarding.
-        // The tap stash and the approval badge set die with the identity (same clears
-        // as `.disconnect`, through the other logout path); badge reset to zero.
+        // "Quit to start" → full logout (Keychain session + every pref + the snapshot cache)
+        // → onboarding. The tap stash and the approval badge set die with the identity (same
+        // clears as `.disconnect`, through the other logout path); badge reset to zero.
         let connection = state.home?.connection ?? state.liveChat?.connection
-        try? keychain.deleteSession()
-        preferences.clearServerURL()
-        preferences.clearIdentityScopedPrefs()
-        preferences.saveGroupingMode(.default)
         state.reauth = nil
-        state.path = .init()
-        state.liveChat = nil
-        state.home = nil
-        state.onboarding = .init()
-        state.pendingPushTap = nil
-        state.pendingPushTapServerURL = nil
-        state.pendingApprovalSessionIDs = []
-        return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
+        return fullLogout(&state, connection: connection)
 
       case let .liveChat(.delegate(.branchCreated(creation))):
         // A branch `session.create` resolved (#34). The new session lives ONLY in server
@@ -746,6 +757,48 @@ public struct AppFeature {
     state.liveChat = chat
     state.path.removeAll()
     state.path.append(ChatScreen.State(sessionKey: chat.sessionKey))
+  }
+
+  /// The ONE full-logout recipe in `AppFeature` — "Log Out" from the launch retry screen and
+  /// "Quit to start" from the re-auth modal both run it, so the two can't drift (they already
+  /// had: only one of the copies wiped the snapshot cache). Everything identity-scoped goes:
+  /// the Keychain session, the server URL, identity-scoped prefs, the grouping pref, the
+  /// non-authoritative chat cache, the nav/live-chat/list state, the cold-launch tap stash and
+  /// the pending-approval badge set — landing on a *fresh* (nothing prefilled) onboarding,
+  /// with the icon badge zeroed and the device's push registration released.
+  ///
+  /// `connection` is the server to release the push registration against (best-effort; `nil`
+  /// still clears the local push state). Read it from state BEFORE calling — this clears it.
+  ///
+  /// Settings' clear-token path deliberately stays separate: it does its own clearing inside
+  /// `SettingsFeature` (it owns the sheet dismissal) and only delegates the nav reset here.
+  private func fullLogout(_ state: inout State, connection: ServerConnection?) -> Effect<Action> {
+    try? keychain.deleteSession()
+    preferences.clearServerURL()
+    preferences.clearIdentityScopedPrefs()
+    preferences.saveGroupingMode(.default)
+    chatSnapshot.wipeAll()
+    state.connectionFailed = nil
+    state.path = .init()
+    state.liveChat = nil
+    state.home = nil
+    state.onboarding = .init()
+    state.pendingPushTap = nil
+    state.pendingPushTapServerURL = nil
+    state.pendingApprovalSessionIDs = []
+    return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
+  }
+
+  /// The prefilled-onboarding landing for a connection that needs *editing* rather than
+  /// retrying: token mode prefills both fields so the user can fix them; cookie mode prefills
+  /// only the URL (the password is never persisted), so they re-enter it. Shared by the launch
+  /// auth-failure fallback and the retry screen's `.credentialsRejected` /
+  /// `.changeServerRequested` delegates so those three stay byte-identical.
+  private func fallBackToOnboarding(_ state: inout State, connection: ServerConnection) {
+    state.onboarding = ConnectionFeature.State(
+      serverURL: connection.baseURL.absoluteString,
+      token: connection.auth.token ?? ""
+    )
   }
 
   /// Best-effort push cleanup on logout: unregister the last-known device token with the

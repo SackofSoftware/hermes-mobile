@@ -238,28 +238,79 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   shares the same `connect` (re-mints the ticket) — see #18 (state-sync).
 - **The login screen's single connection-help surface is the `AgentSetupGuideView` sheet**
   (password-first setup recipe; `--insecure` + token demoted to a collapsed "Advanced"
-  disclosure). Three entry points — top form row, `.unreachable`/`.notHermes` failure
-  footer, token-disclaimer link — all toggle one local `@State` (presentation stays out
+  disclosure). Four entry points — top form row, `.unreachable`/`.notHermes` failure
+  footer, token-disclaimer link, and the launch retry screen's tertiary "Need help setting
+  up your agent?" link (`ConnectionFailedView`, whose failures — a host-header 400, a moved
+  route's 404, a `.decoding` reply — are exactly what the guide answers, and which no longer
+  pass through onboarding at all) — all toggle one local `@State` (presentation stays out
   of the reducer). It **replaced** the token-first `SecureConnectionInfoView`; keep the
   README quick-start and the sheet's commands verbatim-identical.
-- **A launch auto-connect TRANSPORT failure raises the retry screen, never onboarding** (#62) —
-  stored credentials that are still perfectly valid must not be thrown away because Tailscale is
-  off. `RESTError` distinguishes `.offline` (`URLError.notConnectedToInternet`/`.dataNotAllowed`/
-  `.internationalRoamingOff`, mapped in the one shared `RESTError.init(transport:)` that every
-  request helper's transport catch funnels through) from `.unreachable` (timeout, DNS, refused,
-  non-HTTP response); `.autoConnectFailed` carries the `RESTError`, and **only** those two cases
-  populate `AppFeature.State.connectionFailed` (`ConnectionFailedFeature`, an `ifLet` child) — the
-  screen names the server URL, states the reason, and offers a manual **Retry**, a foreground
-  auto-retry (`.scenePhaseChanged(.active)` → `.sceneBecameActive`, guarded by `isRetrying` so a
-  foreground can't double-probe one already in flight) and a full **Log Out**. **Every other error —
-  401 included — keeps today's prefilled-onboarding fallback byte-identical**: retrying can't fix
-  dead credentials, so a retry failing with a non-transport error delegates `.credentialsRejected`
-  and drops to onboarding. **Scope is the launch auto-connect path only** — a manual login failure
-  still shows the onboarding inline footer, and a post-login socket drop still shows the chat
-  reconnect banner. The child reducer is pure routing + probe (`rest.sessions(connection, 1, 0,
-  .recent)`); **the logout clearing lives in `AppFeature`'s delegate handler** (keychain session,
-  server URL, identity-scoped prefs, grouping reset, `chatSnapshot.wipeAll()`, badge reset,
-  `unregisterPushOnLogout`), next to the two existing logout recipes, landing on a fresh onboarding.
+- **A launch auto-connect failure that isn't a verdict on the credentials raises the retry
+  screen, never onboarding** (#62) — stored credentials that are still perfectly valid must not
+  be thrown away because Tailscale is off. `RESTError` distinguishes `.offline`
+  (`URLError.notConnectedToInternet`/`.dataNotAllowed`/`.internationalRoamingOff`, mapped in the
+  one shared `RESTError.init(transport:)` that every request helper's transport catch funnels
+  through — and that `asRESTError` defers to for a raw error, so the split survives any client
+  that surfaces a bare `URLError`) from `.unreachable` (timeout, DNS, refused, non-HTTP response).
+  **`ConnectionFailedFeature.isRetryable` is the ONE routing rule**, shared by `.autoConnectFailed`
+  and the child's own retry-failure branch, and it is **inverted from the obvious one: ONLY a
+  credentials verdict — 401 (`.unauthorized`) or 403 (`credentialsRejectionStatuses`) — goes to
+  onboarding; EVERYTHING else populates `AppFeature.State.connectionFailed`**
+  (`ConnectionFailedFeature`, an `ifLet` child). A stored connection was, by construction, a
+  working Hermes agent when onboarding persisted it, so a launch failure that isn't a 401/403 —
+  a proxy's 502/503/504, the agent's own 500, a vanished route's 404, a 429, a captive portal's
+  HTML (`.decoding`) — says the *network or server* changed, not the saved sign-in; making that
+  user retype a password is #62's exact symptom and buys nothing, since the retry screen states
+  the real failure (`HTTP 500`, `HTTP 404`, "didn't look like a Hermes agent") where prefilled
+  onboarding shows a blank field and no explanation, and **Change server** reaches that same
+  prefilled onboarding in one tap when the address really is the problem. The screen names the
+  server URL, states the reason (its `reasonText` switch is
+  **exhaustive** so a new `RESTError` case can't silently inherit VPN advice), and offers a manual
+  **Retry**, a foreground auto-retry (`.scenePhaseChanged(.active)` → `.sceneBecameActive`), a
+  non-destructive **Change server**, and a confirmed **Log Out**. **The foreground SUPERSEDES an
+  in-flight probe** (`.cancellable(cancelInFlight:)`) rather than being swallowed by `isRetrying`
+  — that guard is for rapid taps only; swallowing the foreground would let a probe whose result
+  never lands (URLSession's default request timeout is 60s) brick the screen with a latched
+  spinner. For the same reason **only Retry is disabled while probing** — the two ways *off* the
+  screen never are. (Foreground churn — Control Center, notification pull, an app-switcher peek
+  — can therefore restart the probe more often than the user asked: an accepted trade-off, since
+  gating on "was really backgrounded" would miss the main case, flipping airplane mode or Wi-Fi
+  from Control Center, which never backgrounds the app.) **A credentials verdict keeps today's
+  prefilled-onboarding fallback byte-identical**: retrying can't fix dead credentials, so a retry
+  failing with a 401/403 delegates `.credentialsRejected` and drops to onboarding.
+  **`.changeServerRequested` lands on that SAME prefilled onboarding without touching the
+  keychain** — deliberately, because an agent that moved host/port is a first-class `.unreachable`
+  cause. (The `AgentSetupGuideView` help sheet is reachable from the retry screen **directly**,
+  as a tertiary link with its own view-local `@State` — help must not cost a detour through
+  onboarding hoping its re-probe renders the footer link, which only `.unreachable`/`.notHermes`
+  do.) **`reasonText` splits a `.server` status THREE ways and surfaces the server's `detail`
+  only on a permanent 4xx**: a 5xx (matched as `500..<600`, so a 3xx can't inherit it) is the
+  server faulting on a request it accepted, so "may be down or restarting — try again in a
+  moment" is honest; a *permanent* 4xx is a refusal that will repeat identically, and the
+  motivating case is the agent's own `host_header_middleware` 400 ("Invalid Host header…"),
+  which answers **every** request once the agent restarts without `--host 0.0.0.0` — its
+  sentence is the only actionable fact in the failure, so discarding it (as the first cut did)
+  left a permanently-futile retry loop under "try again in a moment" copy. The
+  `transientRefusalStatuses` (**408 / 425 / 429**) are carved back out into the "try again"
+  branch: `validate` only maps 429/503 onto `.rateLimited`/`.serviceUnavailable` when
+  `loginSpecific` is set and the launch probe is a plain `get`, so a proxy's `limit_req` 429
+  arrives here as a bare `.server(429)` and would otherwise be told retrying can't help;
+  anything outside both bands gets neutral copy. The quoted `detail` is **sanitized**
+  (`sanitizedServerDetail`: HTML/XML bodies dropped, first line only, ~200 chars) because
+  `serverDetail(from:)` falls back to the ENTIRE response body — an intermediary's 4xx is a
+  whole HTML page, and the reason line sits ABOVE the screen's three escape routes inside the
+  `ScrollView` (`.lineLimit(6)` on the `Text` is the belt-and-braces half).
+  **The launch probe is strictly once-per-process** (`AppFeature.State.didRunLaunchProbe`, set
+  when it starts): `.task` can be re-sent, and after **Change server** — which deliberately
+  clears nothing — every other guard condition is satisfied again, so inferring "already ran"
+  from the slots would bounce the user back onto the retry screen mid-URL-edit.
+  **Scope is the launch auto-connect path only** — a manual login failure still shows the
+  onboarding inline footer, and a post-login socket drop still shows the chat reconnect banner.
+  The child reducer is pure routing + probe (`rest.sessions(connection, 1, 0, .recent)`);
+  **the logout clearing lives in `AppFeature.fullLogout`** — the ONE recipe, shared with the
+  reauth "Quit to start" path so the two can't drift (keychain session, server URL,
+  identity-scoped prefs, grouping reset, `chatSnapshot.wipeAll()`, nav/slot/home clears, tap
+  stash, badge reset, `unregisterPushOnLogout`), landing on a fresh onboarding.
 - **Session re-hydration is server-authoritative** via one unified `hydrate(sessionID)`
   (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.resume`
   (NOT `session.activate` — that is live-only and 404s any stored session opened from the list;

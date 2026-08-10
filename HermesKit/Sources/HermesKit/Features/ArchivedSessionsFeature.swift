@@ -103,10 +103,8 @@ public struct ArchivedSessionsFeature {
               sessions = try await rest.archivedSessions(connection, 100, 0)
             }
             await send(.archivedResponse(.success(sessions)))
-          } catch let error as RESTError {
-            await send(.archivedResponse(.failure(error)))
           } catch {
-            await send(.archivedResponse(.failure(.unreachable)))
+            await send(.archivedResponse(.failure(asRESTError(error))))
           }
         }
 

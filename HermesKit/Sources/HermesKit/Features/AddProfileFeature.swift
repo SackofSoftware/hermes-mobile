@@ -93,10 +93,8 @@ public struct AddProfileFeature {
               try await profiles.updateSoul(connection, name, soul)
             }
             await send(.createResponse(.success(name)))
-          } catch let error as RESTError {
-            await send(.createResponse(.failure(error)))
           } catch {
-            await send(.createResponse(.failure(.unreachable)))
+            await send(.createResponse(.failure(asRESTError(error))))
           }
         }
 

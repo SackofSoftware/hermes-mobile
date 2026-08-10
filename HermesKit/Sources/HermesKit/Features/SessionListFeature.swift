@@ -519,10 +519,11 @@ public struct SessionListFeature {
             do {
               let result = try await profiles.list(connection)
               await send(.profilesResponse(.success(result)))
-            } catch let error as RESTError {
-              await send(.profilesResponse(.failure(error)))
             } catch {
-              await send(.profilesResponse(.failure(.unreachable)))
+              // `asRESTError` keeps a typed `RESTError` verbatim and classifies a raw
+              // transport failure through the shared funnel, so an offline device gets the
+              // "No internet connection." banner instead of a blanket "couldn't reach".
+              await send(.profilesResponse(.failure(asRESTError(error))))
             }
           }
           .cancellable(id: CancelID.fetch, cancelInFlight: true),
@@ -1268,10 +1269,8 @@ private func fetchCronJobs(
 ) async -> SessionListFeature.Action {
   do {
     return .cronJobsResponse(.success(try await rest.cronJobs(connection, profile)))
-  } catch let error as RESTError {
-    return .cronJobsResponse(.failure(error))
   } catch {
-    return .cronJobsResponse(.failure(.unreachable))
+    return .cronJobsResponse(.failure(asRESTError(error)))
   }
 }
 
@@ -1297,9 +1296,7 @@ private func fetchSessions(
       sessions = try await rest.sessions(connection, 50, 0, .recent)
     }
     return .sessionsResponse(.success(sessions))
-  } catch let error as RESTError {
-    return .sessionsResponse(.failure(error))
   } catch {
-    return .sessionsResponse(.failure(.unreachable))
+    return .sessionsResponse(.failure(asRESTError(error)))
   }
 }

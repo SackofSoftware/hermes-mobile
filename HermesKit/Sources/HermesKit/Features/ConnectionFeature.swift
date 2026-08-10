@@ -298,11 +298,16 @@ public struct ConnectionFeature {
   }
 }
 
-/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel both auth
-/// reducers (`ConnectionFeature`, `ReauthFeature`) use after every `rest.*` call: a typed
-/// `RESTError` passes through verbatim; a raw transport failure maps to `.unreachable`.
+/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel every
+/// reducer (`ConnectionFeature`, `ReauthFeature`, `ConnectionFailedFeature`, `AppFeature`)
+/// uses after a `rest.*` call: a typed `RESTError` passes through verbatim, and anything else
+/// goes through `RESTError.init(transport:)`, the SAME classifier `HermesRESTClient`'s own
+/// transport catches use. Routing raw errors through that init (rather than a blanket
+/// `.unreachable`) is what keeps the offline-vs-unreachable split intact for any client
+/// implementation that surfaces a bare `URLError` — a wrapper, a future non-`URLSession`
+/// transport, a test double — instead of it working only when the live client classified first.
 func asRESTError(_ error: any Error) -> RESTError {
-  error as? RESTError ?? .unreachable
+  error as? RESTError ?? RESTError(transport: error)
 }
 
 /// Lenient URL parsing: accept `host:port` by defaulting to `http://`.

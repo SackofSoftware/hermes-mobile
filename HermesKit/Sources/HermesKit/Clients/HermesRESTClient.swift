@@ -79,6 +79,10 @@ public enum RESTError: Error, Equatable, Sendable {
   /// everything else — timeout, DNS failure, connection refused, TLS, cancellation, a
   /// non-`URLError` — stays `.unreachable`, because from the client's point of view the
   /// network was usable and the server simply didn't answer.
+  ///
+  /// Only ever hand this a RAW transport failure: an already-typed `RESTError` is not a
+  /// `URLError`, so it would be flattened to `.unreachable`. Reducers normalise via
+  /// `asRESTError`, which checks the typed case first and then defers here.
   public init(transport error: any Error) {
     guard let urlError = error as? URLError else {
       self = .unreachable

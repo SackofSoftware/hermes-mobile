@@ -159,18 +159,18 @@ are opt-in.
 - Create: `HermesKit/Sources/HermesKit/Features/ConnectionFailedFeature.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ConnectionFailedFeatureTests.swift`
 
-- [ ] create the reducer: State (`connection`, `reason`, `isRetrying`), Actions and
+- [x] create the reducer: State (`connection`, `reason`, `isRetrying`), Actions and
       Delegate per Technical Details, `@Dependency(\.hermesREST)` probe effect
-- [ ] `.retryTapped` / `.sceneBecameActive`: guard `!isRetrying`, set spinner, run
+- [x] `.retryTapped` / `.sceneBecameActive`: guard `!isRetrying`, set spinner, run
       probe; `.retryResult(.success)` → `.delegate(.connected)`;
       `.offline`/`.unreachable` failure → update `reason`, clear spinner;
       any other `RESTError` → `.delegate(.credentialsRejected)`
-- [ ] `.logoutTapped` → `.delegate(.logoutTapped)` (clears live in AppFeature)
-- [ ] public inits for State (app/snapshot targets need them)
-- [ ] write TestStore tests: retry success, retry transport failure updates reason,
+- [x] `.logoutTapped` → `.delegate(.logoutTapped)` (clears live in AppFeature)
+- [x] public inits for State (app/snapshot targets need them)
+- [x] write TestStore tests: retry success, retry transport failure updates reason,
       retry auth failure delegates rejection, `sceneBecameActive` triggers retry,
       double-fire guarded while `isRetrying`, logout delegates
-- [ ] run `swift test --package-path HermesKit` — must pass before task 3
+- [x] run `swift test --package-path HermesKit` — must pass before task 3
 
 ### Task 3: Route auto-connect failures in `AppFeature`
 

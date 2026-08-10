@@ -51,6 +51,20 @@ struct ConnectionFeatureTests {
     await store.receive(\.serverStatusResponse) { $0.status = .unreachable }
   }
 
+  /// `.offline` is a transport failure too — it lands on the same footer as `.unreachable`
+  /// (which is the one that offers the setup-guide link), never a generic `.failed` (#62).
+  @Test func offlineDeviceUsesTheUnreachableFooter() async {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "http://nope.local:1")) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.status = { @Sendable _ in throw RESTError.offline }
+    }
+
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .checking }
+    await store.receive(\.serverStatusResponse) { $0.status = .unreachable }
+  }
+
   @Test func reachableButNotHermes() async {
     let store = TestStore(initialState: ConnectionFeature.State(serverURL: "http://something.local:80")) {
       ConnectionFeature()

@@ -134,17 +134,24 @@
   `RESTError` switch is exhaustive)
 - Modify: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift`
 
-- [ ] add `RESTError.offline` case + `message` copy ("No internet connection.")
-- [ ] add `RESTError.init(transport: Error)` (or a free `mapTransportError`) mapping
+- [x] add `RESTError.offline` case + `message` copy ("No internet connection.")
+- [x] add `RESTError.init(transport: Error)` (or a free `mapTransportError`) mapping
       `URLError.notConnectedToInternet`/`.dataNotAllowed`/`.internationalRoamingOff` →
       `.offline`, everything else → `.unreachable`
-- [ ] replace every bare `catch { throw RESTError.unreachable }` transport catch in
-      the file's request helpers with the shared mapping
-- [ ] check `ConnectionFeature`'s failure classification handles `.offline` (map to
+- [x] replace every bare `catch { throw RESTError.unreachable }` transport catch in
+      the file's request helpers with the shared mapping (`login`, `get`, `postJSON`,
+      `send`; the non-transport `guard let http` / `makeURL` throws stay `.unreachable`)
+- [x] check `ConnectionFeature`'s failure classification handles `.offline` (map to
       the same footer as `.unreachable`)
-- [ ] write tests: mapping for each offline `URLError` code, a non-offline `URLError`
+- [x] write tests: mapping for each offline `URLError` code, a non-offline `URLError`
       (e.g. `.cannotConnectToHost`, `.timedOut`), and a non-URLError input
-- [ ] run `swift test --package-path HermesKit` — must pass before task 2
+- [x] run `swift test --package-path HermesKit` — must pass before task 2
+
+➕ [decision] `MockURLProtocol`'s `fail: true` stub raised `URLError(.notConnectedToInternet)`,
+which now maps to `.offline` and would have flipped three existing "transport failure →
+unreachable" assertions. Gave the stub a `failCode` parameter defaulting to the generic
+`.cannotConnectToHost`, so those tests keep their original meaning and the offline codes
+are opt-in.
 
 ### Task 2: `ConnectionFailedFeature` reducer
 

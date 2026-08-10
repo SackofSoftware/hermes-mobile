@@ -10,6 +10,10 @@ final class MockURLProtocol: URLProtocol {
     var statusCode = 200
     var body = Data()
     var failWithError = false
+    /// Which `URLError` a `fail: true` stub raises. Defaults to a *generic* transport
+    /// failure (server didn't answer) — the offline codes are opt-in, since
+    /// `RESTError(transport:)` maps only those to `.offline`.
+    var failCode: URLError.Code = .cannotConnectToHost
     var headers: [String: String] = [:]
   }
 
@@ -17,9 +21,13 @@ final class MockURLProtocol: URLProtocol {
   nonisolated(unsafe) static var lastRequest: URLRequest?
 
   static func set(
-    status: Int = 200, json: String = "", fail: Bool = false, headers: [String: String] = [:]
+    status: Int = 200, json: String = "", fail: Bool = false,
+    failCode: URLError.Code = .cannotConnectToHost, headers: [String: String] = [:]
   ) {
-    stub = Stub(statusCode: status, body: Data(json.utf8), failWithError: fail, headers: headers)
+    stub = Stub(
+      statusCode: status, body: Data(json.utf8), failWithError: fail, failCode: failCode,
+      headers: headers
+    )
     lastRequest = nil
   }
 
@@ -30,7 +38,7 @@ final class MockURLProtocol: URLProtocol {
   override func startLoading() {
     MockURLProtocol.lastRequest = request
     if MockURLProtocol.stub.failWithError {
-      client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+      client?.urlProtocol(self, didFailWithError: URLError(MockURLProtocol.stub.failCode))
       return
     }
     let http = HTTPURLResponse(
@@ -389,6 +397,67 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(fail: true)
     await #expect(throws: RESTError.unreachable) {
       _ = try await makeClient().status(baseURL)
+    }
+  }
+
+  // MARK: Offline vs unreachable (#62)
+
+  /// Only the "this device has no network" codes become `.offline`.
+  @Test(arguments: [
+    URLError.Code.notConnectedToInternet,
+    .dataNotAllowed,
+    .internationalRoamingOff,
+  ])
+  func offlineURLErrorCodesMapToOffline(code: URLError.Code) async throws {
+    #expect(RESTError(transport: URLError(code)) == .offline)
+  }
+
+  /// A reachable network whose server didn't answer stays `.unreachable` — retrying
+  /// (rather than "you're offline" copy) is the right advice there.
+  @Test(arguments: [
+    URLError.Code.cannotConnectToHost,
+    .timedOut,
+    .cannotFindHost,
+    .networkConnectionLost,
+    .secureConnectionFailed,
+    .cancelled,
+  ])
+  func nonOfflineURLErrorCodesMapToUnreachable(code: URLError.Code) async throws {
+    #expect(RESTError(transport: URLError(code)) == .unreachable)
+  }
+
+  /// A non-`URLError` (anything `URLSession` or a wrapper could surface) is unreachable.
+  @Test func nonURLErrorMapsToUnreachable() async throws {
+    struct Boom: Error {}
+    #expect(RESTError(transport: Boom()) == .unreachable)
+    #expect(RESTError(transport: CocoaError(.fileNoSuchFile)) == .unreachable)
+  }
+
+  @Test func offlineHasItsOwnMessage() async throws {
+    #expect(RESTError.offline.message == "No internet connection.")
+    #expect(RESTError.unreachable.message == "Couldn’t reach the server.")
+  }
+
+  /// End-to-end through the live transport: every request helper (`get`, `postJSON`,
+  /// `send`) funnels its catch through the shared mapping.
+  @Test func getTransportOfflineMapsToOffline() async throws {
+    MockURLProtocol.set(fail: true, failCode: .notConnectedToInternet)
+    await #expect(throws: RESTError.offline) {
+      _ = try await makeClient().sessions(connection, 1, 0, .recent)
+    }
+  }
+
+  @Test func writeTransportOfflineMapsToOffline() async throws {
+    MockURLProtocol.set(fail: true, failCode: .notConnectedToInternet)
+    await #expect(throws: RESTError.offline) {
+      try await makeClient().archive(connection, "sid", true, nil)
+    }
+  }
+
+  @Test func postJSONTransportOfflineMapsToOffline() async throws {
+    MockURLProtocol.set(fail: true, failCode: .dataNotAllowed)
+    await #expect(throws: RESTError.offline) {
+      _ = try await makeClient().transcribe(connection, "data:audio/m4a;base64,AAA", nil)
     }
   }
 

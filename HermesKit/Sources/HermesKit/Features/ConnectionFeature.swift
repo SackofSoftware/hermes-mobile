@@ -208,7 +208,9 @@ public struct ConnectionFeature {
         state.capability = nil
         switch error {
         case .decoding: state.status = .notHermes
-        case .unreachable: state.status = .unreachable
+        // `.offline` is a transport failure like `.unreachable` — same footer (the
+        // "trouble connecting to your agent?" help link is exactly what's wanted here too).
+        case .offline, .unreachable: state.status = .unreachable
         default: state.status = .failed(error.message)
         }
         return .none

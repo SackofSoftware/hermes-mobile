@@ -178,25 +178,25 @@ are opt-in.
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] add `connectionFailed: ConnectionFailedFeature.State?` + `ifLet` composition +
+- [x] add `connectionFailed: ConnectionFailedFeature.State?` + `ifLet` composition +
       `.connectionFailed(ConnectionFailedFeature.Action)` case
-- [ ] extend `.autoConnectFailed` with the `RESTError` payload; route
+- [x] extend `.autoConnectFailed` with the `RESTError` payload; route
       `.offline`/`.unreachable` → populate `connectionFailed`; all other errors keep
       the existing onboarding fallback verbatim
-- [ ] handle delegates: `.connected` → clear slot, `makeHomeState`, replay pending
+- [x] handle delegates: `.connected` → clear slot, `makeHomeState`, replay pending
       push tap (mirror `.autoConnectSucceeded`); `.credentialsRejected` → clear slot,
       onboarding prefilled (same shape as today's fallback); `.logoutTapped` → full
       logout (delete keychain session, `clearServerURL`, `clearIdentityScopedPrefs`,
       `saveGroupingMode(.default)`, `chatSnapshot.wipeAll()`, badge reset,
       `unregisterPushOnLogout`) → fresh onboarding
-- [ ] forward `.scenePhaseChanged(.active)` → `.connectionFailed(.sceneBecameActive)`
+- [x] forward `.scenePhaseChanged(.active)` → `.connectionFailed(.sceneBecameActive)`
       when the slot exists
-- [ ] write TestStore tests: unreachable → new screen, offline → new screen,
+- [x] write TestStore tests: unreachable → new screen, offline → new screen,
       unauthorized → onboarding fallback unchanged, `.connected` builds home and
       replays a stashed push tap, `.credentialsRejected` → onboarding prefilled,
       logout clears keychain/prefs/snapshots and lands on fresh onboarding,
       foreground forwards retry
-- [ ] run `swift test --package-path HermesKit` — must pass before task 4
+- [x] run `swift test --package-path HermesKit` — must pass before task 4
 
 ### Task 4: `ConnectionFailedView` + root wiring
 

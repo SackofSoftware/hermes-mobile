@@ -66,6 +66,9 @@ struct AppFeatureTests {
       $0.autoConnecting = false
       $0.onboarding = ConnectionFeature.State(serverURL: "http://mac.tailnet:9119", token: "bad")
     }
+    // #62 guard: an AUTH rejection must never raise the retry screen — retrying can't fix
+    // dead credentials, so this path stays byte-identical to pre-#62 behavior.
+    #expect(store.state.connectionFailed == nil)
   }
 
   /// A dead **cookie** session falls back to onboarding with only the URL prefilled (the
@@ -2624,5 +2627,195 @@ struct AppFeatureTests {
     #expect(store.state.pendingApprovalSessionIDs.isEmpty)
     await store.finish()
     #expect(push.badgeCount == 0)
+  }
+
+  // MARK: Launch connection-failed screen (#62)
+
+  /// A launch probe that never reached the server (`.unreachable`) must raise the retry
+  /// screen with the stored session INTACT — onboarding is left untouched, so a password-mode
+  /// user is never asked to re-type a password that never expired.
+  @Test func autoConnectUnreachableRaisesRetryScreen() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadSession = { @Sendable _ in .token("tok") }
+      $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+    }
+
+    await store.send(.task) { $0.autoConnecting = true }
+    await store.receive(\.autoConnectFailed) {
+      $0.autoConnecting = false
+      $0.connectionFailed = ConnectionFailedFeature.State(
+        connection: self.connection, reason: .unreachable
+      )
+    }
+    #expect(store.state.onboarding == ConnectionFeature.State())
+  }
+
+  /// Same routing for `.offline` — the reason rides along so the screen can say "you're
+  /// offline" instead of sending the user hunting for a dead server.
+  @Test func autoConnectOfflineRaisesRetryScreenWithOfflineReason() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadSession = { @Sendable _ in .token("tok") }
+      $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.offline }
+    }
+
+    await store.send(.task) { $0.autoConnecting = true }
+    await store.receive(\.autoConnectFailed) {
+      $0.autoConnecting = false
+      $0.connectionFailed = ConnectionFailedFeature.State(
+        connection: self.connection, reason: .offline
+      )
+    }
+  }
+
+  /// A non-transport, non-auth failure (5xx, malformed body …) keeps the pre-#62 onboarding
+  /// fallback — the retry screen is deliberately scoped to transport failures only.
+  @Test func autoConnectServerErrorStillFallsBackToOnboarding() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.loadSession = { @Sendable _ in .token("tok") }
+      $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.decoding }
+    }
+
+    await store.send(.task) { $0.autoConnecting = true }
+    await store.receive(\.autoConnectFailed) {
+      $0.autoConnecting = false
+      $0.onboarding = ConnectionFeature.State(serverURL: "http://mac.tailnet:9119", token: "tok")
+    }
+    #expect(store.state.connectionFailed == nil)
+  }
+
+  /// A successful retry lands exactly where a successful launch auto-connect lands: the slot
+  /// is cleared, the list is built, and a stashed cold-launch push tap (#46) still replays.
+  @Test func retrySuccessBuildsHomeAndReplaysStashedTap() async {
+    var initial = AppFeature.State(
+      connectionFailed: ConnectionFailedFeature.State(connection: connection, reason: .unreachable)
+    )
+    initial.pendingPushTap = PushTap(sessionID: "s-cold")
+    let store = TestStore(initialState: initial) { AppFeature() }
+    store.exhaustivity = .off
+
+    await store.send(.connectionFailed(.delegate(.connected(connection)))) {
+      $0.connectionFailed = nil
+      $0.home = SessionListFeature.State(connection: self.connection)
+      $0.pendingPushTap = nil
+    }
+    await store.receive(\.pushTapped)
+    await store.receive(\.home.delegate.openSession)
+    #expect(store.state.liveChat?.storedSessionID == "s-cold")
+    #expect(store.state.path.last?.sessionKey == "s-cold")
+  }
+
+  /// The retry reached the server and it rejected us — fall back to the SAME prefilled
+  /// onboarding a launch auth failure produces.
+  @Test func retryCredentialsRejectedFallsBackToPrefilledOnboarding() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: connection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.connectionFailed(.delegate(.credentialsRejected(connection)))) {
+      $0.connectionFailed = nil
+      $0.onboarding = ConnectionFeature.State(
+        serverURL: "http://mac.tailnet:9119", token: "tok"
+      )
+    }
+  }
+
+  /// "Log Out" from the retry screen runs the FULL logout recipe — keychain session, server
+  /// URL, identity-scoped prefs, grouping mode, snapshot cache, badge, push registration —
+  /// and lands on a FRESH (nothing prefilled) onboarding.
+  @Test func logoutFromRetryScreenClearsEverythingAndShowsFreshOnboarding() async {
+    let sessionDeleted = LockIsolated(false)
+    let snapshotsWiped = LockIsolated(false)
+    let unregistered = LockIsolated<String?>(nil)
+    let preferences = PreferencesClient.inMemory()
+    preferences.saveServerURL("http://mac.tailnet:9119")
+    preferences.savePinnedIDs(["s-pinned"])
+    preferences.saveSeenCounts(["s-pinned": 3])
+    preferences.saveSelectedProfileID("work")
+    preferences.saveGroupingMode(.chronological)
+    preferences.savePushDeviceToken("cafef00d")
+    let push = PushClient.inMemory()
+
+    var initial = AppFeature.State(
+      connectionFailed: ConnectionFailedFeature.State(connection: connection, reason: .offline)
+    )
+    initial.pendingPushTap = PushTap(sessionID: "s-stale")
+    initial.pendingApprovalSessionIDs = ["s-stale"]
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.push = push.client
+      $0.keychain.deleteSession = { @Sendable in sessionDeleted.setValue(true) }
+      $0.chatSnapshot.wipeAll = { @Sendable in snapshotsWiped.setValue(true) }
+      $0.hermesREST.unregisterPush = { @Sendable _, token in unregistered.setValue(token) }
+    }
+    store.exhaustivity = .off
+    await push.client.setBadgeCount(1)
+
+    await store.send(.connectionFailed(.delegate(.logoutTapped))) {
+      $0.connectionFailed = nil
+      $0.onboarding = .init() // fresh — there is no session left to repair
+      $0.pendingPushTap = nil
+      $0.pendingApprovalSessionIDs = []
+    }
+    await store.finish()
+    #expect(sessionDeleted.value)
+    #expect(snapshotsWiped.value)
+    #expect(preferences.loadServerURL() == nil)
+    #expect(preferences.loadPinnedIDs().isEmpty)
+    #expect(preferences.loadSeenCounts().isEmpty)
+    #expect(preferences.loadSelectedProfileID() == nil)
+    #expect(preferences.loadGroupingMode() == .default)
+    #expect(preferences.loadPushDeviceToken() == nil)
+    #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
+    #expect(push.badgeCount == 0)
+  }
+
+  /// Foregrounding while stuck on the retry screen auto-probes — the user very likely just
+  /// turned the VPN back on, and a probe that succeeds walks straight into the list.
+  @Test func foregroundAutoRetriesOnTheConnectionFailedScreen() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: connection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.scenePhaseChanged(.active))
+    await store.receive(\.connectionFailed.sceneBecameActive) { $0.connectionFailed?.isRetrying = true }
+    await store.receive(\.connectionFailed.retryResult)
+    await store.receive(\.connectionFailed.delegate.connected) {
+      $0.connectionFailed = nil
+      $0.home = SessionListFeature.State(connection: self.connection)
+    }
+    await store.send(.home(.onDisappear))
+  }
+
+  /// Existing-behavior guard: with no retry screen up, `.active` must not emit a stray
+  /// `.connectionFailed` action into a nil child.
+  @Test func foregroundWithoutRetryScreenEmitsNoRetry() async {
+    let store = TestStore(initialState: AppFeature.State()) { AppFeature() }
+    await store.send(.scenePhaseChanged(.active))
   }
 }

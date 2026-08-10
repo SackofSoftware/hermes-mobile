@@ -257,15 +257,16 @@ ever transit the gateway; real message content is fetched in-app over the privat
 `/unregister`. **The app never signs pushes**, so registration returns nothing the app must
 persist (no secret). A `404` from the register route means the plugin isn't installed → the app
 sets `pushAvailable = false` and hides the toggle (same capability-gating as attach/profiles).
-The plugin POSTs `{device_token, apns_env, type, session_id, title, body, thread_id, hmac}` to
-the gateway's `POST /push`; the gateway mints an ES256 JWT from the `.p8`, picks the APNs host
-from `apns_env` (`api.push.apple.com` vs `api.sandbox.push.apple.com`), and forwards. The
-optional `hmac` is HMAC-SHA256 over a **canonical signed string** (fixed key order, compact
-separators, `thread_id` omitted when absent) keyed by a **single shared secret**
-(`HERMES_PUSH_HMAC_SECRET`) the publisher provisions to *both* the plugin and the gateway —
-the stateless gateway has no per-device store, so a per-device secret could never match. If the
-shared secret is unset the plugin sends **unsigned** (the gateway allows unsigned). The plugin
-(`sender.py`) and gateway (`validate.ts`) compute the canonical string byte-identically. The
+The plugin POSTs `{device_token, apns_env, type, session_id, title, body, thread_id, capability}`
+to the gateway's `POST /push`; the gateway mints an ES256 JWT from the `.p8`, picks the APNs host
+from `apns_env` (`api.push.apple.com` vs `api.sandbox.push.apple.com`), and forwards.
+**Authorization is a gateway-issued, device-scoped `capability`, not a shared secret** (the old
+`hmac`-over-a-canonical-string / `HERMES_PUSH_HMAC_SECRET` scheme is gone — a single hosted
+gateway serves all App Store users, so a plugin-held shared secret would be world-readable).
+The plugin `POST`s `{device_token}` to the gateway's `/register` once per device, caches the
+returned opaque `capability` in its token store, and presents it on every push; a `403
+invalid_capability` drops the cached value, re-registers once, and retries the push once. The
+plugin never computes the capability, and a leaked one can only push to its own device. The
 app's compile-time `apns_env` (`#if DEBUG` → `sandbox`, else `production`) must match the
 `aps-environment` entitlement, which is driven per-build-configuration (`$(APS_ENVIRONMENT)`:
 `development` for Debug, `production` for Release) so distribution builds ship the right value.
@@ -280,6 +281,32 @@ CLI and gateway sessions:
 - **error** — `on_session_end`, genuine failures only (not successful or user-interrupted turns)
 - **clarify** — `pre_tool_call` filtered to the `clarify` tool, fired before the user is
   prompted; not duration-gated (an input-needed pause, like approval)
+- **internal agent forks never push** (#64, **plugin-side only** — no iOS or gateway change) —
+  a `delegate_task` child is a full `AIAgent` with
+  `platform == "subagent"` and its own `session_id`, so it fires this same hook set mid-parent-
+  turn; the curator fork does the same with `"curator"`. The plugin maps a fork's
+  `post_llm_call` / `on_session_end` to no push and keeps its id out of the approval
+  turn-tracker — a lock-guarded fork-session registry covers the `platform`-less
+  `pre_tool_call` and any terminal event that omits `platform`, FIFO-capped because a fork's
+  `on_session_end` is not guaranteed to fire (abandoned/timed-out children leak an entry).
+  Every drop is logged at DEBUG with the session id. **Approvals are never filtered**
+  (they block and need the user), but they do **not** carry the parent chat's id: a child runs
+  on its own worker thread and the tracker is per-thread, so a child-raised approval falls back
+  to `session_key`, never the parent's id. Today's agent gives each child a fresh one-worker
+  executor, so that tracker is simply empty; the documented guarantee is deliberately weaker
+  ("empty, or another fork's id — never the parent's") because the plugin does not control the
+  agent's threading — a recycled worker carrying a stale *sibling*'s id is characterised by a
+  test, not a shape upstream produces. That same threading fact makes the tracker guard and the teardown skip
+  defence-in-depth (a child cannot reach the parent's tracker), not the live mechanism.
+  Only the exact `"subagent"`/`"curator"` values are filtered — a missing or
+  other `platform` fails open (old agents unchanged). **Still unfiltered:**
+  `agent/background_review.py` forks an agent that inherits the parent's `platform` *and*
+  `session_id`, so it looks like a real turn at the hook boundary and keeps producing a
+  spurious extra "Turn complete"; that needs a hermes-agent-side change — a `fork=True` hook
+  kwarg or its own `session_id`, **not** just a distinct `platform`. Widening the deny-list is
+  only safe for a fork with its OWN `session_id`: the registry is fed by the platform-carrying
+  hooks and suppresses every event bearing a registered id, so deny-listing a fork that shares
+  the parent's id would silence the user's own pushes.
 
 All payloads stay generic/content-free. (When a clarify push fires during a turn, the
 trailing "turn complete" for that same turn is suppressed as redundant.)

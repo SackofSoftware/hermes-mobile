@@ -11,20 +11,59 @@
   `complete` / `error` pushes — with the *child's* session id. The policy's
   client-present gate can't suppress it (no client is bound to the child session) and
   the >10s duration gate passes because subagent tasks are long.
-- Fix: filter subagent-originated events in the **plugin** (`hermes-mobile-push-plugin`
+- Fix: filter internal-fork events in the **plugin** (`hermes-mobile-push-plugin`
   repo). `pre_llm_call`, `post_llm_call`, and `on_session_end` all forward
-  `platform=getattr(agent, "platform", ...)`, so the plugin can skip
-  `platform == "subagent"`. Older agents that don't pass `platform` see `""` →
+  `platform=getattr(agent, "platform", ...)`, so the plugin can skip a platform in
+  `INTERNAL_PLATFORMS` (`"subagent"`, plus `"curator"` — see Solution Overview).
+  Older agents that don't pass `platform` see `""` →
   today's behavior (fail-open, backward compatible).
 - Bonus fix: `pre_tool_call` (which carries **no** `platform`) feeds the plugin's
   turn-session tracker used to correlate **approval** pushes. A subagent's tool calls
   can overwrite the tracker with the child session id, mis-routing an approval push to
-  a chat with no approval card. A subagent-session registry lets the plugin skip that
-  recording, so approval pushes always correlate to the parent/UI session.
+  a chat with no approval card. An internal-session registry lets the plugin skip that
+  recording, so the *parent's* tracker can never hold a fork's id (a hypothetical reused
+  pool worker's own thread-local still could — see the ➕ refinement below) — but note this does NOT buy a
+  parent-id guarantee for approvals raised *inside* a child; see the ⚠️ correction
+  below for what it actually delivers.
 - Deliberately kept: **approval** pushes for subagent commands (they block and need
-  the user; with the tracker fix they carry the parent chat's id, where the card
-  actually appears). Deliberately suppressed: subagent **complete** AND **error**
+  the user). Deliberately suppressed: subagent **complete** AND **error**
   (a child failure is handled by the parent, whose own turn is still running).
+- ⚠️ [correction, review] The approval half of the bonus fix does **not** deliver a
+  parent-id guarantee, and the docs no longer claim one. hermes-agent runs every
+  delegated child's `run_conversation` on a `DaemonThreadPoolExecutor` worker —
+  `_run_single_child` builds a FRESH one-worker executor per child (for the child
+  timeout) and submits exactly one `run_conversation` into it, including from the
+  batch path, whose reusable outer pool only ever runs `_run_single_child` itself
+  and never a hook — and the plugin's turn tracker is a ContextVar +
+  `threading.local`. So a child physically cannot corrupt the parent's tracker —
+  the tracker guard and the `_on_session_end` teardown skip are defence-in-depth
+  for an inline host — and an approval raised *inside* a child reads an EMPTY
+  tracker, falling back to `session_key` (in practice such an approval fires with
+  `surface="cli"` from the worker's non-interactive callback and is skipped
+  entirely). ➕ [review 2, corrected by review 5] the *documented* guarantee is
+  deliberately weaker than what the current agent produces: were two children ever
+  to share one worker, the teardown skip would leave the first child's thread-local
+  set and the second would read a stale **sibling** child's id rather than an empty
+  tracker. Never the parent's — both are forks the app has no row for, so the
+  user-visible outcome is unchanged. That reuse does NOT happen upstream today
+  (fresh executor per child, above); it is a defensive characterization the plugin
+  keeps because it does not control the agent's threading, modelled — explicitly as
+  a shape the current agent does not produce — by
+  `test_reused_pool_worker_may_hold_a_stale_sibling_id_never_the_parent`.
+  The registry, being process-global, DOES work across that boundary,
+  which is what makes the `platform`-less `pre_tool_call` filterable at all.
+- ⚠️ [known gap, review] `agent/background_review.py` forks a review agent that
+  **inherits the parent's `platform` and pins its `session_id` to the parent's**,
+  then runs a full `run_conversation` on a daemon thread every few turns. It is
+  indistinguishable from a real turn at the hook boundary, so this filter cannot
+  suppress it: it still fires a spurious extra "Turn complete" for the user's own
+  session ~30s-2min after the real one and resets/clears the parent's duration
+  anchor. Documented in the plugin README / `triggers.py` / this repo's
+  `CLAUDE.md` + `docs/architecture.md` as a second root cause needing a
+  hermes-agent change — verify on the live agent before closing #64. ⚠️ that change
+  must NOT be "just a distinct `platform`": because the fork shares the parent's
+  `session_id`, deny-listing that platform would register the PARENT and suppress
+  the user's own pushes (see the widening precondition under Development Approach).
 - Out of scope (agreed): iOS fine-grained notification settings — once the subagent
   noise is gone, the complaint is fixed; per-trigger toggles are YAGNI. No iOS,
   gateway, or hermes-agent changes.
@@ -61,8 +100,28 @@
   plugin repo) — no exceptions
 - **CRITICAL: update this plan file when scope changes during implementation**
 - Backward compatibility is a hard requirement: events with no `platform` kwarg (old
-  agents) and every non-`"subagent"` platform value must behave byte-identically to
-  today. Only exact `platform == "subagent"` is filtered.
+  agents) and every platform value outside the deny-list must behave byte-identically
+  to today. Only an EXACT match against `INTERNAL_PLATFORMS` is filtered —
+  `{"subagent", "curator"}` as shipped (the plan originally scoped this to
+  `"subagent"` alone; `"curator"` was added during review, see Solution Overview for
+  why it is safe). Missing / empty / non-`str` / any other `platform` fails open.
+  Adding a value to that set is the ONLY sanctioned way to widen the filter, and
+  only for a platform no user-facing client can ever carry — **and only for a fork
+  that carries its OWN `session_id`, never the parent's.** ⚠️ [precondition, review]
+  `_on_pre_llm_call` files an internal-platform event's session id in the fork
+  registry and all three pushing mappers suppress any event bearing a registered
+  id, so deny-listing a fork that shares the parent's id (which is exactly what
+  `agent/background_review.py` does — it pins `review_agent.session_id =
+  agent.session_id`) would register the PARENT and silence the user's OWN
+  complete/error pushes for the whole fork run — and until FIFO eviction if that
+  fork's `on_session_end` never fires. One spurious extra push would become no
+  pushes at all. The precondition lives on `INTERNAL_PLATFORMS` /
+  `record_internal_session` in `triggers.py`, in the plugin README, and is
+  characterized by `test_a_fork_sharing_the_parent_session_id_would_suppress_the_parent`
+  (which monkeypatches the widening in, so it stays green if the platform is really
+  added); the assertion that actually FAILS on a widening is
+  `test_internal_platforms_is_the_single_deny_list`, whose message points back at the
+  precondition.
 - Commits in the plugin repo follow the same convention: capitalized verb, no
   conventional-commit prefixes, concise.
 
@@ -82,15 +141,38 @@
 ## Solution Overview
 
 - **Platform filter at the mapping layer**: `map_complete` and `map_session_end`
-  return `None` when `kwargs["platform"] == "subagent"`. The mappers are the single
-  choke point both dispatcher and tests exercise; the policy/sender never see the
-  payload.
-- **Subagent-session registry** (module-level in `triggers.py`, mirroring the turn
-  tracker's style): a lock-guarded set of session ids known to belong to subagents.
-  Populated from any hook that carries `platform == "subagent"` + a session id
-  (`pre_llm_call` fires before a child's first tool call, so the registry is warm in
-  time); entries discarded at that child's `on_session_end` (after the mapping
-  decision), keeping the set bounded by concurrently-running children.
+  return `None` when `kwargs["platform"]` is an internal-fork platform. The mappers
+  are the single choke point both dispatcher and tests exercise; the policy/sender
+  never see the payload. ➕ [review] the deny-list is `INTERNAL_PLATFORMS =
+  {"subagent", "curator"}`, not `"subagent"` alone: `agent/curator.py` forks the same
+  way with `platform="curator"` and its own `session_id`, and that push lands on a
+  session the app has no list row for (tapping it strands the user in a spurious
+  empty chat). Every user-facing platform (`gateway` / `cli` / `api_server` /
+  `telegram` / `discord` / `tui`) and every unknown value still fails open.
+- **Internal-session registry** (module-level in `triggers.py`, mirroring the turn
+  tracker's style): a lock-guarded, insertion-ordered set of session ids known to
+  belong to a fork. ⚠️ [correction, review] populated by `pre_llm_call` and
+  `post_llm_call` only — the two platform-carrying hooks that fire BEFORE a fork's
+  session ends (`pre_llm_call` precedes the fork's first tool call, so the registry
+  is warm in time); `on_session_end` **only ever prunes, never records** (its
+  record call was dead and was deleted). Entries are discarded at that fork's
+  `on_session_end` (in a `finally`, after the mapping decision). ⚠️ [correction, review] the prune path
+  does **not** bound it — `on_session_end` is not guaranteed to fire (early returns
+  that never reach `finalize_turn`; `delegate_task` abandons a timed-out child's
+  worker thread) — so the registry is **hard-capped with FIFO eviction**
+  (`_INTERNAL_SESSIONS_MAX`). Eviction is safe: session ids are `timestamp_uuid` and
+  never reused.
+- ➕ [review] All three *pushing* mappers (`map_complete` / `map_session_end` /
+  `map_clarify`) consult the registry; the first two read `platform` as well (they
+  are the only mappers whose hooks carry one), while `map_clarify` has **no
+  `platform` to read** — `pre_tool_call` carries none, so the registry is its ONLY
+  signal. `map_approval` is the deliberate exception and never filters. Verdict on the "is the registry arm
+  reachable?" question: against today's hermes-agent it is **not** (all three
+  platform-carrying hooks read the same `getattr(agent, "platform", None) or ""`),
+  but it is kept — it costs one dict lookup, `pre_tool_call` proves hook-kwarg drift
+  is a real shape, and it is what keeps the mappers' verdict in lockstep with
+  `__init__._on_session_end`'s. Removing one arm without the other is what produced
+  the task-3 bug. Recorded in `triggers.py`'s module docstring, where the code is.
 - **Tracker guard**: `TriggerDispatcher.on_pre_tool_call` skips
   `record_turn_session` — and `map_clarify` skips mapping — when the incoming
   session id is in the registry (`pre_tool_call` has no `platform` of its own).
@@ -101,32 +183,50 @@
 
 ## Technical Details
 
-- New in `triggers.py`:
-  - `PLATFORM_SUBAGENT = "subagent"` constant; helper
-    `_is_subagent_platform(kwargs) -> bool` (exact match on
-    `str(kwargs.get("platform") or "")`).
-  - Registry API: `record_subagent_session(session_id)`,
-    `is_subagent_session(session_id) -> bool`, `discard_subagent_session(session_id)`
-    — module functions over a `threading.Lock()`-guarded `set[str]`, no-ops on empty
-    ids (matches `record_turn_session` conventions).
-  - `map_complete` / `map_session_end`: platform check first (cheapest), then the
-    existing logic. `map_session_end` additionally calls
-    `record_subagent_session`/`discard` bookkeeping from the dispatcher, not inside
-    the pure mapper (mappers stay pure).
-  - `TriggerDispatcher.on_post_llm_call` / `on_session_end`: record the session id
-    into the registry when the event is subagent-platform (so even if `pre_llm_call`
-    was missed, later events self-identify); `on_session_end` discards the id after
-    dispatch.
+- New in `triggers.py` (names as shipped after the review pass):
+  - `PLATFORM_SUBAGENT` / `PLATFORM_CURATOR` constants + the `INTERNAL_PLATFORMS`
+    frozenset; ONE predicate body `_is_internal_platform(kwargs) -> bool` (exact
+    match against `INTERNAL_PLATFORMS` on a `str` only — no `str()` coercion, so
+    a non-`str` fails open, `triggers.py:287-304`), with the public
+    `is_internal_platform(**kwargs)` delegating to it (no duplicated body).
+  - Registry API: `record_internal_session(session_id)`,
+    `is_internal_session(session_id) -> bool`, `discard_internal_session(session_id)`
+    — module functions over a `threading.Lock()`-guarded `OrderedDict[str, None]`
+    (FIFO-capped), no-ops on empty ids (matches `record_turn_session` conventions).
+  - `map_complete`: platform check first (cheapest), then the existing logic, then
+    the registry check. `map_session_end` gates the same two signals but AFTER the
+    completed/interrupted skip — otherwise every fork end logs a bogus "suppressed
+    error" line for an event that was never going to push anyway; both orders
+    return `None` for exactly the same events (`triggers.py:614-621`).
+    `map_clarify` has no `platform` kwarg
+    to check at all (`pre_tool_call` carries none) — it filters on the registry
+    alone, after the `tool_name` filter. ⚠️ [deviation]
+    the mappers are **no longer pure** — `map_clarify` already read the registry, and
+    hoisting the check to the dispatcher would let a direct mapper call (which the
+    wiring tests make) bypass it.
+  - `TriggerDispatcher.on_post_llm_call`: records the session id into the registry
+    when the event is internal-platform (so even a fork whose `pre_llm_call` was
+    missed still self-identifies in time to keep the turn-tracker clean).
+    `TriggerDispatcher.on_session_end` does **not** record — ⚠️ [correction, review]
+    that call was dead (the id is discarded in the same invocation) and was deleted;
+    it only discards the id, in a `finally` around the dispatch, on EITHER signal
+    (platform kwarg or registry).
   - `TriggerDispatcher.on_pre_tool_call`: guard `record_turn_session` and the clarify
-    mapping behind `not is_subagent_session(session_id)`.
-- `__init__.py` `_on_pre_llm_call`: when subagent-platform → `record_subagent_session`
+    mapping behind `not is_internal_session(session_id)`, resolving the id with the
+    same `_hook_session_id` helper `map_clarify` uses so guard and mapper cannot
+    disagree about which session an event belongs to.
+- `__init__.py` `_on_pre_llm_call`: when internal-platform → `record_internal_session`
   and return early (no `record_turn_session`, no `note_turn_start`).
 - Docstrings: update the module docstring's "How the events surface" section and
   `__init__.py`'s hook comments to document the subagent story (they are the
   plugin's living spec).
+- `__init__.py` `_on_session_end`: an internal fork's end still dispatches (no push,
+  registry pruned) but SKIPS the parent's anchor/tracker teardown. Defence-in-depth
+  given the thread boundary; also what keeps this verdict in lockstep with
+  `map_session_end`'s.
 - Payloads, gateway contract, iOS app: unchanged. Version bump `0.1.0` → `0.2.0` in
-  `pyproject.toml` (behavioral change worth a marker; check `plugin.yaml` for a
-  version field too).
+  `pyproject.toml`, `plugin.yaml` **and `dashboard/manifest.json`** (all three carry
+  a version field), plus a README *Update* section with the one-line changelog.
 
 ## What Goes Where
 
@@ -142,6 +242,14 @@
 **Files (plugin repo `../hermes-mobile-push-plugin`):**
 - Modify: `triggers.py`
 - Modify: `tests/test_triggers.py`
+
+> ℹ️ The checkboxes in Tasks 1–2 name the PRE-RENAME API (`is_subagent_platform` /
+> `record_subagent_session` / …) and the pre-review gate order (they say
+> `map_session_end` filters *before* the completed/interrupted logic; it now
+> filters after it). Review renamed the whole family to `is_internal_platform` /
+> `record_internal_session` / … when the deny-list grew past `"subagent"`, and
+> inverted that one gate order. Left verbatim as the historical record;
+> **Technical Details above carries the shipped names and gate order.**
 
 - [x] add `PLATFORM_SUBAGENT`, `_is_subagent_platform`, and the lock-guarded
       subagent-session registry (`record_subagent_session` / `is_subagent_session` /
@@ -284,9 +392,37 @@
 - Start a turn that spawns a subagent (e.g. a delegated research task) with the app
   backgrounded: no push when the subagent finishes; exactly one "Turn complete" push
   when the parent turn actually ends (if >10s).
-- Trigger an approval inside a subagent-spawning turn: push arrives and tapping it
-  opens the parent chat showing the approval card.
-- Then close issue #64.
+- Do it **twice — once with a single delegated task and once with a batch of ≥2**
+  (only the batch path fans out across worker threads; the in-thread suite models
+  the inline shape).
+- Trigger an approval inside a subagent-spawning turn: the PARENT's own approval push
+  arrives and tapping it opens the parent chat with the card. An approval raised
+  *inside* the child is expected to either not push at all (`surface="cli"` from the
+  worker's non-interactive callback) or to carry the child's `session_key` — NOT the
+  parent's id. That is the documented limit, not a regression.
+- **Watch for a second, later "Turn complete" ~30s-2min after the real one** — that is
+  the unfixed `background_review` fork (see Overview). If it appears, #64 is only
+  partly resolved and the remaining half needs a hermes-agent change.
+- ⚠️ **Do NOT close #64 on this change alone.** The delegate-subagent half is fixed and
+  test-pinned; the `background_review` half is reachable by DEFAULT (nudge intervals
+  default to 10 turns and are gated only on the `skill_manage` / `memory` toolsets
+  being present, and the policy's 5s dedup window cannot absorb a fork that lands
+  ~30s-2min later). A second-order effect: the review fork's `on_session_end` clears
+  the PARENT's turn-start anchor, so a genuinely new parent turn can lose its anchor
+  and fail the >10s duration gate **open** — an extra push, not a lost one.
+  Keep #64 open until the live check above passes, and file an upstream
+  hermes-agent ask — there is no plugin-side fix. ⚠️ [correction, review] the ask is
+  a fork signal the internal-session registry never consumes: a `fork=True` /
+  `is_fork` hook kwarg, or its OWN `session_id` for the review fork. **Do not ask
+  for a distinct `platform` alone**: the fork pins `review_agent.session_id =
+  agent.session_id`, so adding that platform to `INTERNAL_PLATFORMS` would file the
+  PARENT's id in the registry and silence the user's own complete/error pushes for
+  the whole review run (worse than the extra push it fixes). See the widening
+  precondition under Development Approach; characterized by
+  `test_a_fork_sharing_the_parent_session_id_would_suppress_the_parent`, with the
+  actual widening tripwire in `test_internal_platforms_is_the_single_deny_list`.
+- Close #64 only if the live check shows no second push; otherwise re-scope it to
+  the `background_review` half and file the upstream ask.
 
 **External systems:**
 - Gateway and iOS app unchanged — no deploys there.

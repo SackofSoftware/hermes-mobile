@@ -410,4 +410,26 @@ struct ConnectionFeatureTests {
       $0.status = .failed(RESTError.serviceUnavailable.message)
     }
   }
+
+  /// "Back to the connection screen" is pure routing: it only asks the parent to put the
+  /// stashed retry screen back — nothing typed here is validated, persisted or cleared
+  /// locally, and no probe fires.
+  @Test func returnToConnectionFailedIsPureRouting() async {
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://typo:9119",
+        password: "half-typed",
+        method: .password,
+        status: .unreachable,
+        canReturnToConnectionFailed: true
+      )
+    ) {
+      ConnectionFeature()
+    }
+
+    await store.send(.returnToConnectionFailedTapped)
+    await store.receive(\.delegate.returnToConnectionFailedRequested)
+    #expect(store.state.serverURL == "http://typo:9119")
+    #expect(store.state.status == .unreachable)
+  }
 }

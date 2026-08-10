@@ -693,10 +693,11 @@ public struct SessionListFeature {
           do {
             try await rest.registerPush(connection, token, env, version)
             await send(.pushRegistered)
-          } catch let error as RESTError {
-            await send(.pushRegisterFailed(error))
           } catch {
-            await send(.pushRegisterFailed(.unreachable))
+            // `asRESTError` keeps a typed `RESTError` verbatim and classifies a raw transport
+            // failure through the same funnel, so a no-network register reports `.offline`
+            // instead of a hardcoded `.unreachable`.
+            await send(.pushRegisterFailed(asRESTError(error)))
           }
         }
 
@@ -1236,10 +1237,14 @@ public struct SessionListFeature {
       do {
         try await rpc(rest, connection, id, profile)
         await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: nil))
-      } catch let error as RESTError {
-        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: error))
       } catch {
-        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: .unreachable))
+        // Same `asRESTError` funnel as every other failure path: a typed `RESTError` survives
+        // verbatim, a raw transport error is classified (offline vs unreachable).
+        await send(
+          .cronJobActionFinished(
+            id: id, refetchSessions: refetchSessions, error: asRESTError(error)
+          )
+        )
       }
     }
   }

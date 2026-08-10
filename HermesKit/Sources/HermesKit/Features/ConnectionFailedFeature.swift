@@ -15,18 +15,29 @@ import Foundation
 /// Three ways out, only one of them destructive: **Retry** (plus a foreground auto-retry),
 /// **Change server** — the non-destructive escape hatch for an agent that moved host/port,
 /// which lands on the same prefilled onboarding an auth failure does *without* touching the
-/// keychain — and **Log Out**, behind a confirmation, which abandons the session. The view
+/// keychain, and which `AppFeature` makes **reversible** (it stashes this screen and offers a
+/// "Back to the connection screen" row on onboarding, so an exploratory tap can't strand a
+/// password-mode user in front of an empty password field) — and **Log Out**, behind a
+/// confirmation, which abandons the session. The view
 /// additionally links the `AgentSetupGuideView` sheet directly (view-local `@State`, as on the
 /// login screen), so connection help doesn't cost a detour through Change server.
 ///
 /// The reducer is pure routing + the retry probe: clearing the keychain/prefs on
-/// `.logoutTapped` lives in `AppFeature`, next to the other full-logout recipe.
+/// `.logoutConfirmed` lives in `AppFeature`, next to the other full-logout recipe.
+///
+/// **Where the pure statics live** — one rule, so a reader never has to guess which type to
+/// look on: the **routing** rule (which failures earn this screen at all) sits on the
+/// *reducer*, because it is shared with `AppFeature`'s launch routing; everything that only
+/// decides **what the screen says** sits on *`State`*, next to `reasonText`.
 @Reducer
 public struct ConnectionFailedFeature {
   /// The HTTP statuses that ARE a verdict on the stored credentials: `401` (which `validate`
   /// already surfaces as `.unauthorized`, but a raw `.server(401)` from any other path means
   /// the same thing) and `403`. Only these send the user back to a credentials form.
-  public static let credentialsRejectionStatuses: Set<Int> = [401, 403]
+  ///
+  /// Deliberately not API: `isRetryable` is the ONE rule callers ask, and exposing the set
+  /// would invite a second, drifting copy of that decision.
+  private static let credentialsRejectionStatuses: Set<Int> = [401, 403]
 
   /// The ONE rule deciding "worth a Retry" vs "back to onboarding", shared by `AppFeature`'s
   /// launch routing and this reducer's retry-failure branch so the two can't drift.
@@ -85,7 +96,7 @@ public struct ConnectionFailedFeature {
     public var reasonText: String {
       switch reason {
       case .offline:
-        "You appear to be offline. Check Wi‑Fi or cellular data and try again."
+        "You appear to be offline. Check Wi-Fi or cellular data and try again."
       case .unreachable:
         "The server didn’t respond. If it’s on a private network (VPN/Tailscale), make sure that connection is on."
       case .serviceUnavailable:
@@ -97,7 +108,7 @@ public struct ConnectionFailedFeature {
       case .rateLimited:
         "The server is turning requests away right now (HTTP 429). Try again in a moment."
       case .decoding:
-        "The reply didn’t look like a Hermes agent. You may be behind a Wi‑Fi sign-in page, or this address may now point somewhere else."
+        "The reply didn’t look like a Hermes agent. You may be behind a Wi-Fi sign-in page, or this address may now point somewhere else."
       case .unauthorized, .transcriptionFailed:
         // Unreachable by construction (`.unauthorized` is the one thing `isRetryable` keeps
         // off this screen; `.transcriptionFailed` can't come from the sessions probe). Render
@@ -221,10 +232,13 @@ public struct ConnectionFailedFeature {
       /// fix that, so fall back to onboarding for re-entry.
       case credentialsRejected(ServerConnection)
       /// The user wants to edit the server URL — same prefilled-onboarding landing as
-      /// `.credentialsRejected`, but nothing is cleared: the stored session stays intact.
+      /// `.credentialsRejected`, but nothing is cleared: the stored session stays intact, and
+      /// `AppFeature` stashes this screen so onboarding can hand it back.
       case changeServerRequested(ServerConnection)
-      /// Abandon the stored session — `AppFeature` runs the full-logout recipe.
-      case logoutTapped
+      /// The user confirmed the Log Out dialog — abandon the stored session, and `AppFeature`
+      /// runs the full-logout recipe. Named for the *outcome*, like its siblings: the bare
+      /// button tap is `Action.logoutButtonTapped` and only raises the confirmation.
+      case logoutConfirmed
     }
   }
 
@@ -289,7 +303,7 @@ public struct ConnectionFailedFeature {
         return .none
 
       case .confirmationDialog(.presented(.confirmLogout)):
-        return .send(.delegate(.logoutTapped))
+        return .send(.delegate(.logoutConfirmed))
 
       case .confirmationDialog:
         return .none

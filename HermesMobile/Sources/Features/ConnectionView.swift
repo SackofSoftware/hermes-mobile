@@ -13,6 +13,25 @@ struct ConnectionView: View {
 
   var body: some View {
     Form {
+      // Only when a retry screen is set aside behind this one (arrived here via *Change
+      // server*, which deletes nothing). It sits ABOVE everything else — it's the way out of a
+      // screen the user may have opened by accident, and the saved sign-in it returns to is
+      // exactly what this form would otherwise make them re-type. A `Form` row rather than a
+      // toolbar item so it renders wherever this view is hosted (the snapshot host has no
+      // `NavigationStack`), and it is absent — not disabled — when there is nothing to go back
+      // to, which is every other way of reaching onboarding.
+      if store.canReturnToConnectionFailed {
+        Section {
+          Button {
+            store.send(.returnToConnectionFailedTapped)
+          } label: {
+            Label("Back to the connection screen", systemImage: "chevron.backward")
+          }
+        } footer: {
+          Text("Your saved sign-in is still here — going back doesn’t ask for it again.")
+        }
+      }
+
       // Entry point (a): unmissable top row for first-timers — this screen's beta job is
       // half "log in", half "teach setup".
       Section {

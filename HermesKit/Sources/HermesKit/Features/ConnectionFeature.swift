@@ -35,6 +35,18 @@ public struct ConnectionFeature {
     /// the reachability check completes. Drives segment enable/preselect.
     public var capability: ServerAuthCapability?
     public var status: Status
+    /// A launch **retry screen is set aside behind this one**: the user reached onboarding via
+    /// `ConnectionFailedView`'s *Change server*, which deletes nothing — the keychain session
+    /// and the stored URL both survive. Shows the way back (`returnToConnectionFailedTapped`),
+    /// so an exploratory tap isn't a one-way door: without it a password-mode user lands on a
+    /// prefilled URL with an empty password field, the retry screen is gone, and the
+    /// once-per-process launch probe won't run again — re-creating issue #62's exact symptom
+    /// (re-type a password that never expired) from one tap, force-quit the only escape.
+    ///
+    /// Set by `AppFeature` alongside the stash it restores; false everywhere else (a plain
+    /// logout, a credentials rejection, first launch), so the affordance appears **only** when
+    /// there is genuinely something to go back to.
+    public var canReturnToConnectionFailed: Bool
 
     public init(
       serverURL: String = "",
@@ -43,7 +55,8 @@ public struct ConnectionFeature {
       password: String = "",
       method: AuthMethod = .token,
       capability: ServerAuthCapability? = nil,
-      status: Status = .idle
+      status: Status = .idle,
+      canReturnToConnectionFailed: Bool = false
     ) {
       self.serverURL = serverURL
       self.token = token
@@ -52,6 +65,7 @@ public struct ConnectionFeature {
       self.method = method
       self.capability = capability
       self.status = status
+      self.canReturnToConnectionFailed = canReturnToConnectionFailed
     }
 
     public enum Status: Equatable, Sendable {
@@ -112,6 +126,10 @@ public struct ConnectionFeature {
     /// The URL field was submitted or lost focus — check immediately.
     case serverFieldCommitted
     case connectTapped
+    /// "Back to the connection screen" — only offered while `canReturnToConnectionFailed` is
+    /// set. Pure routing: nothing typed here is validated or persisted, the parent just puts
+    /// the stashed retry screen back.
+    case returnToConnectionFailedTapped
     /// `/api/status` result plus the (optional) `/api/auth/providers` probe, folded so the
     /// capability is computed in one place.
     case serverStatusResponse(Result<ServerStatus, RESTError>, providers: [AuthProvider]?)
@@ -123,6 +141,9 @@ public struct ConnectionFeature {
     @CasePathable
     public enum Delegate {
       case connected(ServerConnection)
+      /// Put the launch retry screen back (the user took *Change server* and changed their
+      /// mind). `AppFeature` owns the stash — this only asks.
+      case returnToConnectionFailedRequested
     }
   }
 
@@ -214,6 +235,11 @@ public struct ConnectionFeature {
         default: state.status = .failed(error.message)
         }
         return .none
+
+      case .returnToConnectionFailedTapped:
+        // Nothing to undo locally — this screen persists only on a successful connect, so a
+        // half-typed URL/password simply goes away with the state the parent rebuilds.
+        return .send(.delegate(.returnToConnectionFailedRequested))
 
       case .connectTapped:
         guard let url = parseServerURL(state.serverURL) else {

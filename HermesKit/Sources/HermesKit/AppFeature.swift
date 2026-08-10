@@ -30,6 +30,17 @@ public struct AppFeature {
     /// be made to re-type a password that never expired just because Tailscale was off or the
     /// agent threw a 500.
     public var connectionFailed: ConnectionFailedFeature.State?
+    /// The retry screen set aside by **Change server**, so onboarding can hand it back.
+    ///
+    /// Change server deliberately clears nothing (keychain session + stored URL survive) and
+    /// the launch probe is once-per-process, so without a way back an exploratory tap stranded
+    /// a password-mode user on a prefilled URL with an empty password field — issue #62's own
+    /// symptom, force-quit the only escape. Filled the instant `connectionFailed` is nil'd for
+    /// *that* reason and consumed by `.returnToConnectionFailedRequested`, so the invariant is
+    /// "at most one of the two is non-nil". A credentials rejection does NOT stash (the retry
+    /// screen can't help a 401), and a successful login or a full logout drops it — a stash
+    /// whose connection points at an abandoned server must never be restorable.
+    var connectionFailedStash: ConnectionFailedFeature.State?
     /// The re-auth modal, presented when a live (gated) session dies mid-use. While shown,
     /// the dead chat's reconnect stays paused (it pauses itself via `awaitingReauth`).
     @Presents public var reauth: ReauthFeature.State?
@@ -106,6 +117,27 @@ public struct AppFeature {
       guard !path.isEmpty else { return nil }
       return liveChat?.sessionKey
     }
+
+    /// Which root branch the app shell renders. The precedence is **logic, not layout**, so it
+    /// lives here rather than in `AppView`: the connection-failed screen (#62) is reachable
+    /// purely by sitting between the `autoConnecting` spinner and the onboarding fallback, and
+    /// reordering it would silently disable the whole feature with every other test still
+    /// green. Keeping it in the package makes that ordering assertable by `swift test`
+    /// instead of a simulator run.
+    public var rootScreen: RootScreen {
+      if home != nil { return .home }
+      if autoConnecting { return .connecting }
+      if connectionFailed != nil { return .connectionFailed }
+      return .onboarding
+    }
+  }
+
+  /// The root branches of the app shell, in the order `State.rootScreen` resolves them.
+  public enum RootScreen: Equatable, Sendable {
+    case home
+    case connecting
+    case connectionFailed
+    case onboarding
   }
 
   /// App lifecycle phase, mirrored from SwiftUI's `ScenePhase` by the thin app shell so
@@ -268,17 +300,36 @@ public struct AppFeature {
         state.home = makeHomeState(connection: connection)
         return replayPendingPushTap(&state)
 
-      case let .connectionFailed(.delegate(.credentialsRejected(connection))),
-           let .connectionFailed(.delegate(.changeServerRequested(connection))):
-        // Either the retry reached the server and it turned us away (retrying can't fix that),
-        // or the user asked to edit the URL because the agent moved host/port. Both land
-        // exactly where a launch auth failure lands — prefilled onboarding, nothing cleared,
-        // which is also where the connection-help sheet's entry points live.
+      case let .connectionFailed(.delegate(.credentialsRejected(connection))):
+        // The retry reached the server and it turned us away — retrying can't fix that, so
+        // land exactly where a launch auth failure lands: prefilled onboarding, nothing
+        // cleared, which is also where the connection-help sheet's entry points live. No
+        // stash: going "back" to a screen whose only action is a Retry the server already
+        // answered with a 401 would be a loop, not an escape.
         state.connectionFailed = nil
+        state.connectionFailedStash = nil
         fallBackToOnboarding(&state, connection: connection)
         return .none
 
-      case .connectionFailed(.delegate(.logoutTapped)):
+      case let .connectionFailed(.delegate(.changeServerRequested(connection))):
+        // The user asked to edit the URL because the agent moved host/port — same prefilled
+        // onboarding, and still nothing cleared. But this one is REVERSIBLE: stash the retry
+        // screen and tell onboarding to offer the way back, so an exploratory tap doesn't
+        // strand a password-mode user in front of an empty password field with no route to the
+        // still-valid stored session (#62's symptom, one tap away). The stash is normalized —
+        // its probe was cancelled by the `ifLet` nil-out and any confirmation dialog is
+        // dismissed — so a restore comes back idle rather than with a latched spinner.
+        // The delegate can only arrive from a live `ifLet` child, so the slot IS populated —
+        // `guard` states that rather than optional-chaining around a case that can't happen.
+        guard var stash = state.connectionFailed else { return .none }
+        stash.isRetrying = false
+        stash.confirmationDialog = nil
+        state.connectionFailedStash = stash
+        state.connectionFailed = nil
+        fallBackToOnboarding(&state, connection: connection, canReturnToConnectionFailed: true)
+        return .none
+
+      case .connectionFailed(.delegate(.logoutConfirmed)):
         // "Log Out" from the retry screen (confirmed): the user is abandoning the stored
         // session, so run the FULL logout recipe and land on a *fresh* onboarding (nothing
         // prefilled — there is no session left to repair).
@@ -412,10 +463,29 @@ public struct AppFeature {
         // never coexist. `AppView` would render `home` while the `ifLet` child stayed alive,
         // re-probing on every foreground for the process lifetime.
         state.connectionFailed = nil
+        // The user signed in (possibly to a DIFFERENT server) — the set-aside retry screen is
+        // about a connection that no longer describes this session, so drop it rather than
+        // leave a restorable screen pointing at the old host.
+        state.connectionFailedStash = nil
+        state.onboarding.canReturnToConnectionFailed = false
         state.home = makeHomeState(connection: connection)
         // Auto-connect failure falls back to onboarding, so a manual login must also replay
         // a stashed cold-launch tap (#46).
         return replayPendingPushTap(&state)
+
+      case .onboarding(.delegate(.returnToConnectionFailedRequested)):
+        // "Back to the connection screen": hand the stashed retry screen back. Deliberately
+        // does NOT re-probe — the user chose to stop editing, and Retry (plus the foreground
+        // auto-retry) is right there. A missing stash can only mean the flag outlived it, so
+        // clear the flag rather than acting on nothing.
+        guard let stash = state.connectionFailedStash else {
+          state.onboarding.canReturnToConnectionFailed = false
+          return .none
+        }
+        state.connectionFailedStash = nil
+        state.onboarding.canReturnToConnectionFailed = false
+        state.connectionFailed = stash
+        return .none
 
       case let .home(.delegate(.openSession(session))):
         guard let home = state.home else { return .none }
@@ -779,6 +849,10 @@ public struct AppFeature {
     preferences.saveGroupingMode(.default)
     chatSnapshot.wipeAll()
     state.connectionFailed = nil
+    // The stash outlives `connectionFailed` by design (Change server sets one as it clears the
+    // other), so logout has to name it explicitly — the session it would restore is gone.
+    // `state.onboarding = .init()` below resets its companion flag.
+    state.connectionFailedStash = nil
     state.path = .init()
     state.liveChat = nil
     state.home = nil
@@ -793,11 +867,20 @@ public struct AppFeature {
   /// retrying: token mode prefills both fields so the user can fix them; cookie mode prefills
   /// only the URL (the password is never persisted), so they re-enter it. Shared by the launch
   /// auth-failure fallback and the retry screen's `.credentialsRejected` /
-  /// `.changeServerRequested` delegates so those three stay byte-identical.
-  private func fallBackToOnboarding(_ state: inout State, connection: ServerConnection) {
+  /// `.changeServerRequested` delegates so onboarding is constructed in exactly one place.
+  ///
+  /// `canReturnToConnectionFailed` is the one thing the three callers disagree on — only
+  /// **Change server** stashes the retry screen and can hand it back — so it is a parameter
+  /// rather than a field patched back on afterwards.
+  private func fallBackToOnboarding(
+    _ state: inout State,
+    connection: ServerConnection,
+    canReturnToConnectionFailed: Bool = false
+  ) {
     state.onboarding = ConnectionFeature.State(
       serverURL: connection.baseURL.absoluteString,
-      token: connection.auth.token ?? ""
+      token: connection.auth.token ?? "",
+      canReturnToConnectionFailed: canReturnToConnectionFailed
     )
   }
 

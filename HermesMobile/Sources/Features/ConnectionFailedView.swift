@@ -20,6 +20,16 @@ struct ConnectionFailedView: View {
 
   @State private var showsSetupGuide = false
 
+  /// The hero glyph, sized well above any text style: this is a full-screen failure state, and
+  /// the icon is what identifies it before a word is read. Deliberately larger than
+  /// `.largeTitle`, which is why it is a point size rather than a semantic `Font`.
+  private static let iconPointSize: CGFloat = 56
+
+  /// Floor for the two primary button labels, so swapping "Retry" for a `ProgressView` (which
+  /// measures shorter than a line of text) doesn't shrink the button and jolt everything above
+  /// it — and so "Change server" below it keeps the same height either way.
+  private static let buttonLabelMinHeight: CGFloat = 22
+
   var body: some View {
     // Scrolls so the buttons stay reachable at accessibility Dynamic Type sizes; the
     // `minHeight` keeps the default-size layout (title centred, buttons at the bottom)
@@ -39,12 +49,17 @@ struct ConnectionFailedView: View {
     }
   }
 
+  /// Hand-rolled rather than `ContentUnavailableView` (which every other empty/failure state in
+  /// the app uses): that view stacks label → description → `actions` as one centred block, and
+  /// this screen needs the message centred with its three escape routes pinned to the BOTTOM —
+  /// a split it has no API for. Its `actions:` slot would also put "Log Out" mid-screen, next
+  /// to Retry, which is the opposite of the weighting a destructive action wants.
   private var content: some View {
     VStack(spacing: 24) {
       Spacer(minLength: 0)
 
       Image(systemName: "wifi.exclamationmark")
-        .font(.system(size: 56, weight: .light))
+        .font(.system(size: Self.iconPointSize, weight: .light))
         .foregroundStyle(.orange)
         .accessibilityHidden(true)
 
@@ -89,7 +104,7 @@ struct ConnectionFailedView: View {
               Text("Retry")
             }
           }
-          .frame(maxWidth: .infinity, minHeight: 22)
+          .frame(maxWidth: .infinity, minHeight: Self.buttonLabelMinHeight)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
@@ -107,7 +122,7 @@ struct ConnectionFailedView: View {
           store.send(.changeServerTapped)
         } label: {
           Text("Change server")
-            .frame(maxWidth: .infinity, minHeight: 22)
+            .frame(maxWidth: .infinity, minHeight: Self.buttonLabelMinHeight)
         }
         .buttonStyle(.bordered)
         .controlSize(.large)
@@ -122,12 +137,17 @@ struct ConnectionFailedView: View {
         .buttonStyle(.borderless)
         .font(.footnote)
 
-        Button("Log Out") {
+        // `role: .destructive` like every other destructive control in the app (and like this
+        // feature's own confirm button) — the role carries the semantics and the accessibility
+        // trait, and the style has to be one that HONOURS it: `.plain` draws its label with no
+        // role decoration at all, so pairing the two would have claimed the semantics while
+        // rendering an ordinary-looking control. De-emphasis comes from the smaller font, not
+        // from dropping the role.
+        Button("Log Out", role: .destructive) {
           store.send(.logoutButtonTapped)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.borderless)
         .font(.callout)
-        .foregroundStyle(.secondary)
       }
     }
     .padding(.horizontal, 32)

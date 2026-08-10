@@ -42,7 +42,7 @@ struct ConnectionFailedFeatureTests {
     #expect(offline.serverURLText == "http://mac.tailnet:9119")
     #expect(
       offline.reasonText
-        == "You appear to be offline. Check Wi‑Fi or cellular data and try again."
+        == "You appear to be offline. Check Wi-Fi or cellular data and try again."
     )
 
     let unreachable = state(reason: .unreachable)
@@ -61,7 +61,7 @@ struct ConnectionFailedFeatureTests {
     #expect(state(reason: .serviceUnavailable).reasonText.contains("isn’t answering"))
     #expect(state(reason: .notFound).reasonText.contains("HTTP 404"))
     #expect(state(reason: .rateLimited).reasonText.contains("HTTP 429"))
-    #expect(state(reason: .decoding).reasonText.contains("Wi‑Fi sign-in page"))
+    #expect(state(reason: .decoding).reasonText.contains("Wi-Fi sign-in page"))
     // Copy must never inherit the VPN advice by accident.
     for reason: RESTError in [.server(status: 500), .notFound, .rateLimited, .decoding] {
       #expect(!state(reason: reason).reasonText.contains("VPN"))
@@ -398,7 +398,7 @@ struct ConnectionFailedFeatureTests {
   /// never arrives — `URLSession`'s default request timeout is 60s — can never brick the
   /// screen with a latched `isRetrying`.
   @Test func foregroundSupersedesAStalledProbe() async {
-    let stall = AsyncStream<Void>.makeStream()
+    let (stall, releaseStall) = AsyncStream<Void>.makeStream()
     let probes = LockIsolated(0)
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
@@ -409,7 +409,7 @@ struct ConnectionFailedFeatureTests {
           return value
         }
         // The first probe never resolves; the foreground's probe answers immediately.
-        if attempt == 1 { for await _ in stall.stream { break } }
+        if attempt == 1 { for await _ in stall { break } }
         return []
       }
     }
@@ -421,7 +421,7 @@ struct ConnectionFailedFeatureTests {
     #expect(probes.value == 2)
     // The stalled probe was cancelled, so nothing further ever lands (TestStore fails on an
     // unasserted trailing action).
-    stall.continuation.finish()
+    releaseStall.finish()
   }
 
   // MARK: - Change server
@@ -442,26 +442,11 @@ struct ConnectionFailedFeatureTests {
   @Test func logoutConfirmsBeforeDelegatingUp() async {
     let store = TestStore(initialState: state()) { ConnectionFailedFeature() }
 
-    await store.send(.logoutButtonTapped) {
-      $0.confirmationDialog = ConfirmationDialogState {
-        TextState("Log out?")
-      } actions: {
-        ButtonState(role: .destructive, action: .confirmLogout) {
-          TextState("Log Out")
-        }
-        ButtonState(role: .cancel) {
-          TextState("Cancel")
-        }
-      } message: {
-        TextState(
-          "This deletes the saved sign-in for this server along with pins, unread state and cached chats. To just point the app somewhere else, use Change server."
-        )
-      }
-    }
+    await store.send(.logoutButtonTapped) { $0.confirmationDialog = anyLogoutDialog }
     await store.send(.confirmationDialog(.presented(.confirmLogout))) {
       $0.confirmationDialog = nil
     }
-    await store.receive(\.delegate, .logoutTapped)
+    await store.receive(\.delegate, .logoutConfirmed)
   }
 
   /// Dismissing the dialog abandons nothing.
@@ -490,13 +475,15 @@ struct ConnectionFailedFeatureTests {
     await store.send(.confirmationDialog(.presented(.confirmLogout))) {
       $0.confirmationDialog = nil
     }
-    await store.receive(\.delegate, .logoutTapped)
+    await store.receive(\.delegate, .logoutConfirmed)
     release.yield()
     release.finish()
     await store.receive(\.retrySucceeded) { $0.isRetrying = false }
     await store.receive(\.delegate, .connected(connection))
   }
 
+  /// The dialog the reducer raises, spelled out ONCE for every test that asserts it — a copy
+  /// edit is a one-line change here, not three.
   private var anyLogoutDialog: ConfirmationDialogState<ConnectionFailedFeature.Action.Dialog> {
     ConfirmationDialogState {
       TextState("Log out?")

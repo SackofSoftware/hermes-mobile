@@ -80,7 +80,7 @@
   same `rest.sessions` probe. Success → delegate `.connected`; another retryable
   failure → update the reason in place; a credentials verdict → delegate
   `.credentialsRejected`. "Change server" → delegate `.changeServerRequested`. Logout →
-  confirmation dialog → delegate `.logoutTapped`. Foreground auto-retry re-enters the
+  confirmation dialog → delegate `.logoutConfirmed`. Foreground auto-retry re-enters the
   same probe, **superseding** any in-flight one (`cancelInFlight`).
 - **`AppFeature` routing**: `.autoConnectFailed` gains the `RESTError` payload.
   `ConnectionFailedFeature.isRetryable` — the single shared rule — populates the new
@@ -88,7 +88,7 @@
   (401/403) keeps today's onboarding fallback. Delegates: `.connected` mirrors `.autoConnectSucceeded`
   (build home, replay pending push tap); `.credentialsRejected` /
   `.changeServerRequested` fall back to onboarding prefilled (nothing cleared);
-  `.logoutTapped` runs the full-logout recipe (keychain + all prefs + snapshot wipe +
+  `.logoutConfirmed` runs the full-logout recipe (keychain + all prefs + snapshot wipe +
   badge reset + push unregister) and lands on a **fresh** onboarding.
 - Key decisions: prefs/keychain clearing lives in `AppFeature.fullLogout` — one helper
   shared with the reauth "Quit to start" path (they had already drifted over
@@ -113,7 +113,7 @@
   non-401/403 launch failure means the network or the server changed. The cost is one
   extra tap (**Change server**) in the genuine wrong-URL case; the saving is never
   demanding credentials for a network condition. `ConnectionFailedFeature.reasonText`
-  gained honest copy for 404 / 429 / `.decoding`, and `credentialsRejectionStatuses`
+  gained honest copy for 404 / 429 / `.decoding`, and `credentialsRejectionStatuses` (now private)
   ({401, 403}) replaced `retryableServerStatuses`.
 - **[decision, review phase 1] A third, non-destructive affordance: "Change server".**
   `.unreachable` covers "the agent moved host/port", for which Retry can never succeed
@@ -122,7 +122,10 @@
   `AgentSetupGuideView` help sheet, whose only entry points live there (so no second
   connection-help surface is introduced). *(Amended in iteration 3: the retry screen
   links the SAME guide sheet directly, as a tertiary link — still one help surface, one
-  fewer screen transition to reach it.)*
+  fewer screen transition to reach it. Amended in iteration 5: the transition is
+  REVERSIBLE — `AppFeature` stashes the retry screen and onboarding offers a "Back to the
+  connection screen" row while the stash exists, so the non-destructive escape hatch isn't
+  a one-way door into re-typing a password that never expired; see Task 9.)*
 
 ## Technical Details
 
@@ -147,7 +150,7 @@
   convention for destructive actions), `.retrySucceeded` / `.retryFailed(RESTError)`
   (two plain cases, not one `.retryResult(Result<…>)`), `.delegate(Delegate)` with
   **four** cases: `connected(ServerConnection)`, `credentialsRejected(ServerConnection)`,
-  `changeServerRequested(ServerConnection)`, `logoutTapped`.
+  `changeServerRequested(ServerConnection)`, `logoutConfirmed`.
 - Retry effect: `rest.sessions(connection, 1, 0, .recent)`, error normalised through
   `asRESTError` (typed `RESTError` first, then `RESTError(transport:)`), `.cancellable`
   on a `CancelID.probe` with `cancelInFlight: true`. **`.retryTapped` guards on
@@ -214,7 +217,7 @@ are opt-in.
       guards on `isRetrying` — `.sceneBecameActive` supersedes via `cancelInFlight`
       (iteration-1 latch fix)*
 - [x] `.logoutButtonTapped` → confirmation dialog → `.confirmationDialog(.presented(
-      .confirmLogout))` → `.delegate(.logoutTapped)` (clears live in AppFeature);
+      .confirmLogout))` → `.delegate(.logoutConfirmed)` (clears live in AppFeature);
       `.changeServerTapped` → `.delegate(.changeServerRequested)`
 - [x] public inits for State (app/snapshot targets need them)
 - [x] write TestStore tests: retry success, retry transport failure updates reason,
@@ -241,7 +244,7 @@ are opt-in.
       push tap (mirror `.autoConnectSucceeded`); `.credentialsRejected` → clear slot,
       onboarding prefilled (same shape as today's fallback) — as does the fourth,
       later-added `.changeServerRequested`, which prefills identically but clears
-      nothing; `.logoutTapped` → full
+      nothing; `.logoutConfirmed` → full
       logout (delete keychain session, `clearServerURL`, `clearIdentityScopedPrefs`,
       `saveGroupingMode(.default)`, `chatSnapshot.wipeAll()`, badge reset,
       `unregisterPushOnLogout`) → fresh onboarding
@@ -310,11 +313,13 @@ isolation with `-only-testing:HermesMobileTests/ConnectionFailedSnapshotTests`.
       the transport classification that feeds the reason:
       `HermesRESTClientTests.offlineURLErrorCodesMapToOffline` + siblings; Retry/Log Out
       affordances + spinner state: the three `ConnectionFailedSnapshotTests` baselines.
-      (`AppView`'s branch ordering is pinned by `HermesMobileTests/AppViewRootScreenTests`
-      over the pure `AppView.RootScreen.resolve` — `testOnboardingIsTheFallback`,
-      `testConnectionFailedBeatsOnboarding`, `testConnectingBeatsConnectionFailed`,
-      `testHomeBeatsEverything` — added in Task 7; there is no *image* snapshot of `AppView`
-      itself, which is why the ordering is asserted as a pure function instead.)
+      (`AppView`'s branch ordering is pinned by `HermesKitTests/AppRootScreenTests`
+      over the computed `AppFeature.State.rootScreen` — `onboardingIsTheFallback`,
+      `connectionFailedBeatsOnboarding`, `connectingBeatsConnectionFailed`,
+      `homeBeatsEverything` — added in Task 7; there is no *image* snapshot of `AppView`
+      itself, which is why the ordering is asserted as a pure function instead. It started
+      out as `AppView.RootScreen.resolve` in the app target and moved into the package
+      during review — pure logic belongs in HermesKit, and it cost a simulator run.)
 - [x] 401 at launch still lands on onboarding exactly as before —
       `AppFeatureTests.autoLoginWithInvalidTokenFallsBackToPrefilledOnboarding` (asserts
       `connectionFailed == nil` alongside the unchanged prefilled onboarding) and
@@ -407,9 +412,10 @@ isolation with `-only-testing:HermesMobileTests/ConnectionFailedSnapshotTests`.
       the `.task` guard, `autoConnectSucceeded` clearing the slot, the exhaustive logout assertion
 - [x] docs: README "Connect once." bullet, `docs/architecture.md` feature tree + a
       "Launch-probe failures split by kind" prose section, the CLAUDE.md bullet rewritten
-- [x] `AppView`'s root branch decision extracted to a pure `AppView.RootScreen.resolve`, pinned
-      by the new `HermesMobileTests/AppViewRootScreenTests` — the screen is reachable *only* by
-      sitting between `autoConnecting` and onboarding, and nothing guarded that ordering
+- [x] `AppView`'s root branch decision extracted to the computed `AppFeature.State.rootScreen`
+      (HermesKit), pinned by the new `HermesKitTests/AppRootScreenTests` — the screen is
+      reachable *only* by sitting between `autoConnecting` and onboarding, and nothing guarded
+      that ordering; the view is a bare `switch` over it
 - [x] re-recorded ONLY the three `ConnectionFailedSnapshotTests` baselines (targeted
       `-only-testing` record-then-assert; `make snapshot-record` not used)
 
@@ -463,7 +469,7 @@ on **iPhone 17 Pro / iOS 26.5**.
       the URL they were editing (`fallBackToOnboarding` rebuilds `onboarding` from scratch).
       Test: `AppFeatureTests.taskAfterChangeServerDoesNotRelaunchTheProbe`
 - [x] docs of record corrected: this plan's Tasks 5/6 (inverted rule, real test names, the
-      foreground-supersedes semantics, `AppViewRootScreenTests` coverage, test count),
+      foreground-supersedes semantics, `AppRootScreenTests` coverage, test count),
       `docs/architecture.md` (the manual-login `.offline` parenthetical is true of the
       **server-URL auto-probe footer only** — the token/password arms map `.offline` through
       `default:` to `.failed("No internet connection.")`, which carries no help link), and the
@@ -480,3 +486,34 @@ on **iPhone 17 Pro / iOS 26.5**.
 
 **External systems:**
 - None — no server/plugin changes involved.
+
+### Task 9: Review phase 1, iteration 5 follow-ups
+
+- [x] **Change server is no longer a one-way door within a process.** It clears nothing (by
+      design) and the launch probe is once-per-process, so a password-mode user who tapped it
+      exploratorily landed on prefilled onboarding with an EMPTY password field, no retry
+      screen, and no way back short of force-quitting — re-creating #62's symptom from one tap.
+      `AppFeature` now stashes the screen (`State.connectionFailedStash`, filled exactly as
+      `connectionFailed` is nil'd) and sets `ConnectionFeature.State.canReturnToConnectionFailed`,
+      which renders a "Back to the connection screen" row above everything else on
+      `ConnectionView`; `.returnToConnectionFailedTapped` → `.delegate(...Requested)` → the
+      parent restores it, normalized (`isRetrying = false`, dialog dismissed) and WITHOUT an
+      auto re-probe. A **credentials rejection deliberately does not stash** (going back to a
+      Retry the server already answered with a 401 is a loop, not an escape), and a successful
+      manual login or a `fullLogout` drops the stash so it can never point at an abandoned
+      server. `didRunLaunchProbe` is untouched — it is correct as written; this adds the
+      missing route rather than re-arming the probe. Tests:
+      `AppFeatureTests.returningFromOnboardingRestoresTheStashedRetryScreen`,
+      `.returningWithoutAStashOnlyClearsTheFlag`, `.manualLoginDropsTheStashedRetryScreen`,
+      `.fullLogoutDropsTheStashedRetryScreen`, the stash assertions added to
+      `.changeServerLandsOnPrefilledOnboardingWithoutClearingAnything` /
+      `.retryCredentialsRejectedFallsBackToPrefilledOnboarding`,
+      `ConnectionFeatureTests.returnToConnectionFailedIsPureRouting`, and the new
+      `ConnectionSnapshotTests.testConnectionView_returnToConnectionFailed` baseline (the row is
+      flag-gated, so the other six baselines in that suite are byte-identical)
+- [x] the last two `asRESTError` stragglers routed through the funnel:
+      `SessionListFeature`'s push-register catch and the shared cron-action catch, which both
+      hardcoded `.unreachable` for a non-`RESTError`. Only the cron one is observable (its
+      `loadError` banner now reads "No internet connection." offline — test
+      `SessionListCronTests.offlineActionFailureUsesTheOfflineCopy`); `pushRegisterFailed` only
+      ever compares against `.notFound`, so that half is consistency, not behaviour

@@ -2993,6 +2993,10 @@ struct AppFeatureTests {
         serverURL: "http://mac.tailnet:9119", token: "tok"
       )
     }
+    // NOT reversible, unlike Change server: the screen it would restore offers a Retry the
+    // server has already answered with a 401, so there is nothing to go back to.
+    #expect(store.state.connectionFailedStash == nil)
+    #expect(store.state.onboarding.canReturnToConnectionFailed == false)
   }
 
   /// "Change server" is the NON-destructive escape hatch for an agent that moved host/port:
@@ -3017,14 +3021,118 @@ struct AppFeatureTests {
     }
 
     await store.send(.connectionFailed(.delegate(.changeServerRequested(connection)))) {
+      $0.connectionFailedStash = ConnectionFailedFeature.State(
+        connection: self.connection, reason: .unreachable
+      )
       $0.connectionFailed = nil
       $0.onboarding = ConnectionFeature.State(
-        serverURL: "http://mac.tailnet:9119", token: "tok"
+        serverURL: "http://mac.tailnet:9119",
+        token: "tok",
+        canReturnToConnectionFailed: true
       )
     }
     #expect(!sessionDeleted.value)
     #expect(preferences.loadServerURL() == "http://mac.tailnet:9119")
     #expect(preferences.loadPinnedIDs() == ["s-pinned"])
+  }
+
+  /// Change server is REVERSIBLE: the retry screen is stashed and handed straight back, so an
+  /// exploratory tap can't strand a password-mode user in front of an empty password field
+  /// with the launch probe already spent (#62's own symptom, one tap away). The restore is
+  /// normalized — a probe that was in flight when the user left comes back idle, never as a
+  /// latched spinner — and it does NOT re-probe on its own (Retry is right there).
+  @Test func returningFromOnboardingRestoresTheStashedRetryScreen() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: connection, reason: .server(status: 500, detail: nil), isRetrying: true
+        )
+      )
+    ) {
+      AppFeature()
+    }
+
+    await store.send(.connectionFailed(.delegate(.changeServerRequested(connection)))) {
+      $0.connectionFailedStash = ConnectionFailedFeature.State(
+        connection: self.connection, reason: .server(status: 500, detail: nil)
+      )
+      $0.connectionFailed = nil
+      $0.onboarding = ConnectionFeature.State(
+        serverURL: "http://mac.tailnet:9119",
+        token: "tok",
+        canReturnToConnectionFailed: true
+      )
+    }
+
+    // The user changed their mind and took the way back.
+    await store.send(.onboarding(.delegate(.returnToConnectionFailedRequested))) {
+      $0.connectionFailedStash = nil
+      $0.onboarding.canReturnToConnectionFailed = false
+      $0.connectionFailed = ConnectionFailedFeature.State(
+        connection: self.connection, reason: .server(status: 500, detail: nil)
+      )
+    }
+    // No re-probe fired on the way back (an unexpected effect would fail the send/finish).
+    await store.finish()
+  }
+
+  /// Defensive: the flag can only outlive the stash through a bug, and acting on nothing must
+  /// not blank the screen — it just clears the flag.
+  @Test func returningWithoutAStashOnlyClearsTheFlag() async {
+    var initial = AppFeature.State()
+    initial.onboarding.canReturnToConnectionFailed = true
+    let store = TestStore(initialState: initial) { AppFeature() }
+
+    await store.send(.onboarding(.delegate(.returnToConnectionFailedRequested))) {
+      $0.onboarding.canReturnToConnectionFailed = false
+    }
+    #expect(store.state.connectionFailed == nil)
+  }
+
+  /// A manual login drops the stash: it describes a connection the user just replaced (very
+  /// possibly a different server), so leaving it restorable would be a route back to a screen
+  /// about an abandoned session.
+  @Test func manualLoginDropsTheStashedRetryScreen() async {
+    var initial = AppFeature.State()
+    initial.connectionFailedStash = ConnectionFailedFeature.State(
+      connection: connection, reason: .unreachable
+    )
+    initial.onboarding.canReturnToConnectionFailed = true
+    let other = ServerConnection(baseURL: URL(string: "http://other:9119")!, token: "tok2")
+    let store = TestStore(initialState: initial) { AppFeature() }
+
+    await store.send(.onboarding(.delegate(.connected(other)))) {
+      $0.connectionFailedStash = nil
+      $0.onboarding.canReturnToConnectionFailed = false
+      $0.home = SessionListFeature.State(connection: other)
+    }
+  }
+
+  /// A full logout drops it too — the stash outlives `connectionFailed` by design, so the
+  /// logout recipe has to name it explicitly or a route back to the abandoned session's retry
+  /// screen would survive the wipe.
+  @Test func fullLogoutDropsTheStashedRetryScreen() async {
+    var initial = AppFeature.State(home: SessionListFeature.State(connection: connection))
+    initial.connectionFailedStash = ConnectionFailedFeature.State(
+      connection: connection, reason: .unreachable
+    )
+    initial.onboarding.canReturnToConnectionFailed = true
+    initial.reauth = ReauthFeature.State(serverURL: connection.baseURL, method: .password)
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = PreferencesClient.inMemory()
+      $0.keychain = KeychainClient.inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.reauth(.presented(.delegate(.quit))))
+    await store.finish()
+    #expect(store.state.connectionFailedStash == nil)
+    #expect(store.state.onboarding.canReturnToConnectionFailed == false)
+    #expect(store.state.onboarding == ConnectionFeature.State())
   }
 
   /// "Change server" clears NOTHING — keychain session and stored URL both survive, and it
@@ -3063,7 +3171,9 @@ struct AppFeatureTests {
     #expect(store.state.connectionFailed == nil)
     #expect(
       store.state.onboarding
-        == ConnectionFeature.State(serverURL: "http://mac.tailnet:9119", token: "tok")
+        == ConnectionFeature.State(
+          serverURL: "http://mac.tailnet:9119", token: "tok", canReturnToConnectionFailed: true
+        )
     )
   }
 
@@ -3102,7 +3212,7 @@ struct AppFeatureTests {
 
     // Deliberately EXHAUSTIVE: `.off` would also suppress the in-flight-effect check and any
     // stray state mutation the logout recipe grew.
-    await store.send(.connectionFailed(.delegate(.logoutTapped))) {
+    await store.send(.connectionFailed(.delegate(.logoutConfirmed))) {
       $0.connectionFailed = nil
       $0.onboarding = .init() // fresh — there is no session left to repair
       $0.pendingPushTap = nil

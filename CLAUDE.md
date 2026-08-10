@@ -254,7 +254,7 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   that surfaces a bare `URLError`) from `.unreachable` (timeout, DNS, refused, non-HTTP response).
   **`ConnectionFailedFeature.isRetryable` is the ONE routing rule**, shared by `.autoConnectFailed`
   and the child's own retry-failure branch, and it is **inverted from the obvious one: ONLY a
-  credentials verdict — 401 (`.unauthorized`) or 403 (`credentialsRejectionStatuses`) — goes to
+  credentials verdict — 401 (`.unauthorized`) or 403 — goes to
   onboarding; EVERYTHING else populates `AppFeature.State.connectionFailed`**
   (`ConnectionFailedFeature`, an `ifLet` child). A stored connection was, by construction, a
   working Hermes agent when onboarding persisted it, so a launch failure that isn't a 401/403 —
@@ -280,7 +280,18 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   failing with a 401/403 delegates `.credentialsRejected` and drops to onboarding.
   **`.changeServerRequested` lands on that SAME prefilled onboarding without touching the
   keychain** — deliberately, because an agent that moved host/port is a first-class `.unreachable`
-  cause. (The `AgentSetupGuideView` help sheet is reachable from the retry screen **directly**,
+  cause — **and it is REVERSIBLE**: `AppFeature` moves the screen into
+  `connectionFailedStash` and sets `onboarding.canReturnToConnectionFailed`, which renders a
+  "Back to the connection screen" row above everything else on `ConnectionView`
+  (`.returnToConnectionFailedTapped` → delegate → restore, normalized to `isRetrying = false`
+  with the dialog dismissed, and **no** auto re-probe). Without it the escape hatch was a
+  one-way door *within a process*: nothing is cleared, so a password-mode user who tapped it
+  exploratorily got a prefilled URL with an empty password field, no retry screen, and a spent
+  once-per-process launch probe — #62's own symptom, force-quit the only cure. The stash holds
+  **at most one** (it is filled exactly as `connectionFailed` is nil'd and consumed on restore),
+  a **credentials rejection deliberately does NOT stash** (going back to a Retry the server
+  already answered with a 401 is a loop, not an escape), and a successful manual login or a
+  `fullLogout` drops it — a stash pointing at an abandoned server must never stay restorable. (The `AgentSetupGuideView` help sheet is reachable from the retry screen **directly**,
   as a tertiary link with its own view-local `@State` — help must not cost a detour through
   onboarding hoping its re-probe renders the footer link, which only `.unreachable`/`.notHermes`
   do.) **`reasonText` splits a `.server` status THREE ways and surfaces the server's `detail`
@@ -306,6 +317,12 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   from the slots would bounce the user back onto the retry screen mid-URL-edit.
   **Scope is the launch auto-connect path only** — a manual login failure still shows the
   onboarding inline footer, and a post-login socket drop still shows the chat reconnect banner.
+  **Which root branch `AppView` renders is decided in the package**, by the computed
+  `AppFeature.State.rootScreen` (`home` → `connecting` → `connectionFailed` → `onboarding`) —
+  the precedence IS the feature (the retry screen is reachable only by sitting between the
+  spinner and the onboarding fallback), so it is pinned by `swift test`
+  (`AppRootScreenTests`), not a simulator run, and the view is a bare `switch` over it that
+  never re-derives the same optionals.
   The child reducer is pure routing + probe (`rest.sessions(connection, 1, 0, .recent)`);
   **the logout clearing lives in `AppFeature.fullLogout`** — the ONE recipe, shared with the
   reauth "Quit to start" path so the two can't drift (keychain session, server URL,

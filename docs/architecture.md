@@ -39,7 +39,7 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 │                          //   stored session; manual Retry + foreground auto-retry (the
 │                          //   foreground supersedes an in-flight probe rather than being
 │                          //   swallowed); delegates connected / credentialsRejected /
-│                          //   changeServerRequested / logoutTapped (all clearing lives in AppFeature)
+│                          //   changeServerRequested / logoutConfirmed (all clearing lives in AppFeature)
 ├─ ReauthFeature           // re-auth modal: fixed URL, prefilled identity, password/token field;
 │                          //   same-user resume vs different-user switch vs Quit→onboarding
 ├─ SessionListFeature      // flat list, grouped by workspace OR chronological (persisted) /
@@ -174,7 +174,13 @@ own `500`, a vanished route's `404`, a `429`, a captive portal's HTML (`.decodin
 network or the server changed, not the saved sign-in. Retrying can't repair dead credentials,
 but it can repair every one of those, and the screen states the real failure where prefilled
 onboarding states nothing. The screen's own way *out* without a logout is
-**Change server**, which lands on that same prefilled onboarding. The `AgentSetupGuideView`
+**Change server**, which lands on that same prefilled onboarding — and it is reversible:
+`AppFeature` stashes the screen (`connectionFailedStash`) and onboarding shows a "Back to the
+connection screen" row (`ConnectionFeature.State.canReturnToConnectionFailed`) that hands it
+back, so an exploratory tap can't strand a password-mode user in front of an empty password
+field with the once-per-process launch probe already spent. A credentials rejection doesn't
+stash (there is nothing useful to go back to), and a login or a logout drops the stash. The
+`AgentSetupGuideView`
 connection-help sheet is reached from the screen **directly** (a tertiary link, view-local
 `@State` as on the login screen), since these failures are the ones the guide explains. The
 reason line splits a `.server` status **three ways**: a 5xx (matched explicitly as `500..<600`)

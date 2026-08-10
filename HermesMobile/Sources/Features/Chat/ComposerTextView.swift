@@ -247,7 +247,9 @@ class ComposerInputTextView: UITextView {
 /// *is* the focusable view — so a `@FocusState` here would never latch and reading it would
 /// only ever resign the keyboard (it did: the composer lost the keyboard after one
 /// keystroke). The transcript dismisses the keyboard directly at the UIKit level, via
-/// `CollectionTranscriptView`'s `keyboardDismissMode = .interactive`.
+/// `CollectionTranscriptView`'s `keyboardDismissMode = .interactive`; a blocking card dismisses
+/// it through ``blockingCardToken`` (below), for the same reason — UIKit is the only layer that
+/// can.
 struct ComposerTextView: UIViewRepresentable {
   @Binding var text: String
   var placeholder: String = "Message"
@@ -257,6 +259,23 @@ struct ComposerTextView: UIViewRepresentable {
   /// field stops offering **Paste** for an image-only clipboard instead of accepting a
   /// gesture that could only be dropped. Text paste is unaffected.
   var attachmentsSupported: Bool = true
+  /// Identity of the blocking card standing over the chat (`ChatFeature.State`'s
+  /// `pendingInteractionToken` while `pendingInteraction != nil`), or `nil` when none is.
+  ///
+  /// Raising one drops the keyboard: the card is the focal point, `canSend` is false while it
+  /// stands, and the keyboard costs it roughly half the screen — the card lives in the
+  /// non-scrolling region between the transcript and this field, which is exactly what the
+  /// keyboard shrinks. That is #65's own root cause: leaving and re-entering the chat "fixed"
+  /// the truncated command because the keyboard was down on the way back in.
+  ///
+  /// **Resign, not disable.** The field stays live and editable, so a user who deliberately
+  /// taps it can still draft their next message while they think about the card (the card's
+  /// bounded region absorbs the keyboard coming back — that is what it is built for). It fires
+  /// once per *raised card*, keyed on the token rather than on `nil`-ness, so a replacement
+  /// card drops the keyboard too and a re-focus is never fought over: `ChatView` re-renders on
+  /// every streamed token, and an unkeyed "resign while blocked" would resign again on each one,
+  /// making the field untappable in all but name.
+  var blockingCardToken: Int?
   /// Return key — matches `TextField(axis: .vertical).onSubmit`.
   var onSubmit: () -> Void = {}
   /// Fired **synchronously** the moment a paste is claimed, before its providers have loaded.
@@ -293,12 +312,25 @@ struct ComposerTextView: UIViewRepresentable {
       coordinator.loadPastedImages(providers)
     }
     apply(to: view)
+    dropFocusIfACardWasJustRaised(on: view, context.coordinator)
     return view
   }
 
   func updateUIView(_ view: ComposerInputTextView, context: Context) {
     context.coordinator.parent = self
     apply(to: view)
+    dropFocusIfACardWasJustRaised(on: view, context.coordinator)
+  }
+
+  /// See ``blockingCardToken``. The edge decision lives in the coordinator (it is the only
+  /// thing that survives a re-render); the responder call stays here.
+  private func dropFocusIfACardWasJustRaised(
+    on view: ComposerInputTextView, _ coordinator: Coordinator
+  ) {
+    guard coordinator.shouldDropFocus(for: blockingCardToken), view.isFirstResponder else {
+      return
+    }
+    view.resignFirstResponder()
   }
 
   func sizeThatFits(
@@ -345,8 +377,23 @@ struct ComposerTextView: UIViewRepresentable {
     /// Identifies the newest chained load, so a finishing task only clears `pendingLoad` when
     /// nothing has queued behind it.
     private var loadGeneration = 0
+    /// The blocking card this composer has already yielded the keyboard to — see
+    /// ``ComposerTextView/blockingCardToken``.
+    private var lastBlockingCardToken: Int?
 
     init(_ parent: ComposerTextView) { self.parent = parent }
+
+    /// Should the field give up the keyboard right now? True exactly once per raised card:
+    /// on the card that is standing when the view is made, and on every *later* card whose
+    /// token differs — including a replacement that never passes through `nil` (a queued
+    /// approval, a second secret prompt). False for every re-render in between, so a user who
+    /// taps the field back into focus while a card stands keeps it. Consuming (it records the
+    /// token it was asked about), so it must be called once per update pass.
+    func shouldDropFocus(for token: Int?) -> Bool {
+      defer { lastBlockingCardToken = token }
+      guard let token else { return false }
+      return token != lastBlockingCardToken
+    }
 
     func textViewDidChange(_ textView: UITextView) {
       parent.text = textView.text

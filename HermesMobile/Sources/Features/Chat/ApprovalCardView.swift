@@ -85,16 +85,22 @@ struct ApprovalCardView: View {
   ///
   /// **Derived from what the user must be able to read, not chosen by taste**: on the shortest
   /// screen with the keyboard up the region lands exactly here, and there the *command* has to
-  /// show three full `.callout` lines outside the bottom ramp —
+  /// show three full `.callout` lines **at `.large`** outside the bottom ramp —
   /// ``commandPadding`` (8) + 3 × 20.9 + ``bottomFadeHeight`` (24) ≈ 95, rounded to 96. That
   /// arithmetic only works because the command is the FIRST thing in the scroll: with the
   /// title and the detail above it, the same region showed about half a line of command
   /// (measured — no command pixels above the ramp at all with a long detail).
   ///
-  /// Deliberately *not* scaled: a squeeze is a squeeze, and at accessibility sizes reserving
-  /// three enlarged lines here is what would push the buttons out. It is small enough that
-  /// even the shortest screen's keyboard-up region fits the whole card
-  /// (`ApprovalCardLayoutTests` measures exactly that, buttons included).
+  /// Deliberately *not* scaled, so **the three-line contract is a `.large` one and degrades
+  /// with Dynamic Type**: the readable band is a constant 64pt (96 − a 24pt ramp − 8pt of block
+  /// padding), which is ~3.1 `.callout` lines at `.large`, ~1.3 at AX3 and under one at AX5
+  /// (`ApprovalCardLayoutTests.testTheFloorsReadableBandDegradesWithDynamicType` pins those
+  /// numbers off the real font metrics). Scaling it is not an option and not merely a taste
+  /// call: three AX5 lines are ~210pt, and reserving that on a 320×352 keyboard-up region is
+  /// measurably what pushes Deny/Approve — the safety-critical half — off the screen. A floor
+  /// small enough to keep the answer reachable everywhere is the trade, and one the *cap* (not
+  /// the floor) undoes as soon as there is any room: this binds only in the tightest
+  /// configuration there is.
   static let contentMinHeight: CGFloat = 96
 
   /// Tallest the bottom ramp that signals "there is more below" is allowed to be.
@@ -104,18 +110,24 @@ struct ApprovalCardView: View {
   /// "how many command lines are legible" assertions have to discount it.
   static let commandPadding: CGFloat = 8
 
-  /// Fraction of the fixed region the content region will claim at most, so the transcript —
-  /// the context for the approve/deny decision — is not starved to nothing.
+  /// Points of the fixed region the content region hands back, so the transcript — the context
+  /// for the approve/deny decision — is not starved to nothing.
   ///
   /// `ChatView` gives the card `.layoutPriority(1)` (without it the region collapses onto its
   /// floor with the keyboard up), and a priority-1 child is offered *everything* the other
   /// children do not strictly need: the greedy transcript's minimum is zero, so the card took
-  /// the whole region and the transcript was measured at **0pt** on every phone. Yielding a
-  /// quarter of what is offered puts a few rows of conversation back on screen while leaving
-  /// the command the lion's share (measured on a 393×516 keyboard-up window: region 227 → 151pt,
-  /// i.e. ~5 command lines instead of ~9, transcript 0 → ~50pt). Under a genuine squeeze the
-  /// floor wins over the fraction, so the shortest screen still gives the card what it needs.
-  static let contentClaim: CGFloat = 0.75
+  /// the whole region and the transcript was measured at **0pt** on every phone.
+  ///
+  /// **Absolute, not a fraction.** A proportional reserve (this was `0.75` of the offer) cuts
+  /// the region even when the content had room to fit: at an offer of 320 with 320pt of content
+  /// it handed back 80pt — about four command lines — that nothing else had asked for, on the
+  /// one surface whose rule is "the user must be able to read what they are approving". An
+  /// absolute reserve can only ever spend room the card does not want: the content hugs itself
+  /// whenever it fits under `offer − reserve`, and past that it gives back this much and no
+  /// more. One 44pt tap target's worth, the HIG minimum — enough that the conversation behind
+  /// the card is a row rather than a sliver, small enough to be invisible when the card is
+  /// short. The floor still outranks it, so the shortest screen gives the card what it needs.
+  static let transcriptReserve: CGFloat = 44
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -176,7 +188,7 @@ struct ApprovalCardView: View {
   ///   also what makes the height assertable (`ApprovalCardLayoutTests`).
   private var scrollableContent: some View {
     BoundedHeightLayout(
-      cap: contentMaxHeight, minHeight: Self.contentMinHeight, claim: Self.contentClaim
+      cap: contentMaxHeight, minHeight: Self.contentMinHeight, reserve: Self.transcriptReserve
     ) {
       ScrollView(.vertical) {
         VStack(alignment: .leading, spacing: 10) {
@@ -298,8 +310,9 @@ struct ApprovalCardView: View {
   }
 }
 
-/// Sizes its subview to `min(its natural height, cap)` when there is room, and yields to a
-/// shorter proposal down to `minHeight`.
+/// Sizes its subview to `min(its natural height, cap)` when there is room — minus `reserve`,
+/// which is held back for a greedy sibling — and yields to a shorter proposal down to
+/// `minHeight`.
 ///
 /// Two things a plain `.frame` cannot do together, both load-bearing for #65:
 ///
@@ -326,10 +339,15 @@ struct BoundedHeightLayout: Layout {
   let cap: CGFloat
   /// Shortest it will compress to — never taller than the content itself.
   let minHeight: CGFloat
-  /// Fraction of a *concrete* offer the region will take at most, so a greedy sibling that
-  /// was served after it (the transcript) is not left with nothing. Applied above the floor
-  /// only: under a real squeeze the floor still wins. `1` opts out.
-  var claim: CGFloat = 1
+  /// Points of a *concrete* offer held back for a greedy sibling that is served after this one
+  /// (the transcript), so it is not left with nothing.
+  ///
+  /// **Absolute on purpose**: it may only ever spend room the content did not want. Content
+  /// that fits under `offer − reserve` still hugs itself exactly, and content that does not is
+  /// cut by this much and no more — a *proportional* reserve instead scales with the offer, so
+  /// it kept cutting a region that had room to fit (see `ApprovalCardView.transcriptReserve`).
+  /// Applied above the floor only: under a real squeeze the floor still wins. `0` opts out.
+  var reserve: CGFloat = 0
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
     guard let content = subviews.first else { return .zero }
@@ -343,16 +361,16 @@ struct BoundedHeightLayout: Layout {
   }
 
   /// The height rule, pure so it is assertable without rendering: the content's own height
-  /// while it fits the cap, the cap past it, at most `claim` of the offered height when the
-  /// container is shorter than that — and never below `minHeight`, nor above the content when
-  /// the content is shorter than `minHeight` (a one-line card is not padded out to a floor).
+  /// while it fits both the cap and `offered − reserve`, that bound past it — and never below
+  /// `minHeight`, nor above the content when the content is shorter than `minHeight` (a
+  /// one-line card is not padded out to a floor).
   func height(natural: CGFloat, offered: CGFloat?) -> CGFloat {
     let bounded = min(natural, cap)
     guard let offered else { return bounded }
-    // The floor outranks the claim: yielding a share of the region is for the *comfortable*
+    // The floor outranks the reserve: handing points back to a sibling is for the *comfortable*
     // case, and must never be the thing that squeezes the card below what it needs.
-    let claimed = max(minHeight, offered * claim)
-    return max(min(minHeight, bounded), min(bounded, claimed))
+    let claimable = max(minHeight, offered - reserve)
+    return max(min(minHeight, bounded), min(bounded, claimable))
   }
 
   func placeSubviews(

@@ -24,8 +24,8 @@ struct ChatView: View {
       // of what is left and its scrollable region collapses onto its floor with the keyboard
       // up: measured at the floor on every iPhone, i.e. the two-line window #65 was filed
       // about. With the priority the card is offered the whole remainder first; it hands a
-      // quarter of that back (`BoundedHeightLayout.claim`) so the transcript — the context
-      // for the decision — is not starved to 0pt. Applied here rather than inside
+      // tap target's worth back (`BoundedHeightLayout.reserve`) so the transcript — the
+      // context for the decision — is not starved to 0pt. Applied here rather than inside
       // `pendingCard`'s `switch`: a trait written inside a `@ViewBuilder` branch does not
       // reach the enclosing stack (measured — the region stayed on its floor).
       //
@@ -53,6 +53,11 @@ struct ChatView: View {
         recordingSeconds: store.recordingSeconds,
         attachmentsSupported: !store.attachmentsUnsupported,
         attachments: store.attachments,
+        // Raising a blocking card hands the keyboard back (`ComposerTextView.blockingCardToken`):
+        // the card can't be answered from the composer — `canSend` is false while one stands —
+        // and the keyboard shrinks the very fixed region the card lives in, which is #65's own
+        // root cause. Not a disable: the field stays live for a draft.
+        blockingCardToken: store.pendingInteraction != nil ? store.pendingInteractionToken : nil,
         onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) },

@@ -45,12 +45,19 @@ public struct ChatFeature {
     /// The app-level slot policy reads this: a RUNNING chat keeps its slot (socket and
     /// streaming effects) across a nav pop; an idle one is torn down.
     public var isRunning: Bool { isSending }
-    /// A blocking request from the agent (approval/clarify/secret). While set, the
-    /// composer is disabled and a card is the focal point. **Raise it through
-    /// ``present(_:)``**, never by assigning here: the assignment alone leaves
-    /// ``pendingInteractionToken`` behind, and a replacement card would then inherit the
-    /// previous one's `@State`. Assigning `nil` to dismiss is fine.
-    public var pendingInteraction: PendingInteraction?
+    /// A blocking request from the agent (approval/clarify/secret). While set, `canSend` is
+    /// false and a card is the focal point — and `ChatView` hands the keyboard back so the
+    /// card gets the fixed region (the composer's *field* stays live for a draft; only
+    /// sending is blocked).
+    ///
+    /// **Raise it through ``present(_:)``**, never by assigning here: the assignment alone
+    /// leaves ``pendingInteractionToken`` behind, and a replacement card would then inherit
+    /// the previous one's `@State` — its scroll offset, its "Approve all" toggle, or, worst,
+    /// a typed sudo password. `internal(set)` so that is structural rather than a convention
+    /// for everything outside HermesKit (the app target, where the view identity lives, now
+    /// *cannot* assign one without the token). Assigning `nil` to dismiss is fine — a card
+    /// that is gone has no identity to keep.
+    public internal(set) var pendingInteraction: PendingInteraction?
     /// Is the standing card an *approval*? The only card `ChatView` gives layout priority
     /// over the transcript — it is the one built to absorb the squeeze (a bounded, scrollable
     /// region), so priority buys it readable command lines; the clarify/secret card is rigid

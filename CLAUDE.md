@@ -346,10 +346,24 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   `TranscriptLayout.shortestLayoutHeight * 0.6`; the floor (96pt) is deliberately unscaled and is
   **derived from what must be readable**: `commandPadding` + three `.callout` lines + the fade ramp,
   i.e. on the shortest screen with the keyboard up (where the region lands exactly on it) three full
-  lines *of the command* are legible above the ramp. A **landscape** phone with the keyboard up
-  leaves ~100pt of fixed region and cannot hold the card (~250pt compressed) *and* the composer —
-  true before this change too; there the region sits on its floor, Deny/Approve stay inside the
-  window and the composer (disabled while a card is up) is what goes under the keyboard. **`ChatView`
+  lines *of the command* are legible above the ramp **at `.large`**. That three-line contract is a
+  `.large` one and **degrades with Dynamic Type** — the band is a constant 64pt, ~1.3 AX3 lines and
+  under one at AX5 (pinned by `testTheFloorsReadableBandDegradesWithDynamicType`); scaling the floor
+  is not available, since three AX5 lines are ~210pt of floor and reserving that on the shortest
+  keyboard-up screen is measurably what pushes Deny/Approve out. **Raising a card hands the keyboard
+  back** — `ChatView` passes `pendingInteractionToken` to `ComposerTextView.blockingCardToken`, which
+  resigns first responder once per *raised* card (keyed on the token, because `ChatView` re-renders
+  on every streamed token and an unkeyed resign makes the field untappable). It is a **resign, not a
+  disable**: `canSend` is already false while a card stands, but the field stays live so a draft is
+  still possible — do not write "the composer is disabled", it never was. That is the cheapest room
+  the fix buys, since the keyboard is what shrinks the region the card lives in (#65's own root
+  cause: leaving and re-entering the chat "fixed" the truncation because the keyboard was down). A
+  **landscape** phone whose composer is deliberately re-focused has ~100pt of fixed region and cannot
+  hold the card (~250pt compressed) *and* the composer — true before this change too; there the
+  Deny/Approve row stays inside the window (asserted on the buttons' own **accessibility frames**,
+  the only place UIKit publishes where a SwiftUI control landed — the hosted scroll view reports a
+  height its content is not painted at once the card over-subscribes) and the composer is what goes
+  under the keyboard. **`ChatView`
   gives the card `.layoutPriority(1)`** (at the `VStack` call site — a trait written inside
   `pendingCard`'s `@ViewBuilder` branch does not reach the stack): without it the stack offers each
   child `remaining / remainingCount` in flexibility order, the card is less flexible than the
@@ -357,9 +371,12 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   an iPhone 15). It is **scoped to `.approval`** (`State.isApprovalPending`) — `ClarifyCardView` is
   rigid stacked content that cannot use the extra room, so priority there only blanks the transcript
   (measured 160pt → 13pt). And because a priority-1 child is offered everything the others do not
-  strictly need — the greedy transcript's minimum is 0 — the region **hands a quarter of its offer
-  back** (`BoundedHeightLayout.claim`, floor-outranked): without it the transcript measured **0pt**
-  on every phone, i.e. the decision was made with no visible context. The bottom fade is driven by **live scroll
+  strictly need — the greedy transcript's minimum is 0 — the region **hands a fixed 44pt of its offer
+  back** (`BoundedHeightLayout.reserve`, floor-outranked): without it the transcript measured **0pt**
+  on every phone, i.e. the decision was made with no visible context. The reserve is **absolute, not
+  a fraction** — a proportional one scales with the container and so kept cutting a region that had
+  room to fit (at a 320pt offer with 320pt of content it gave back 80pt, about four command lines,
+  that nothing had asked for). The bottom fade is driven by **live scroll
   geometry** (`hasBottomOverflow`, mirroring #59's table fade), never by the measured content
   height (a measurement-keyed fade never clears, leaving the last line permanently ramped to
   transparent), and its ramp is a **quarter of the viewport capped at 24pt** — a constant ramp is
@@ -372,7 +389,8 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   into the next one, and two back-to-back requests can be *equal* (an agent retrying the same
   command), which a value-derived id cannot tell apart. The token is `public internal(set)` and
   bumped only by `State.present(_:)` — **raise a card through `present`, never by assigning
-  `pendingInteraction`**.
+  `pendingInteraction`**, which is `public internal(set)` for the same reason (outside HermesKit
+  there is no way to raise one without its token; dismissal stays a plain `= nil`).
   The recovered card (`command == nil`) renders no command; its region hugs the recovery copy.
   The measured derivations — why the layout probes its subview with the height **unspecified** (a
   `ScrollView` handed a concrete proposal swallows it whole; unspecified, it reports its content's

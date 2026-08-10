@@ -38,8 +38,8 @@ enum TranscriptLayout {
   /// **Display Zoom** mode as ``narrowestLayoutWidth``, where an SE 2/3 renders at 320×568.
   ///
   /// Anything competing for the chat screen's *vertical* budget sizes against this the way
-  /// row content sizes against ``narrowestRowWidth`` — `ApprovalCardView`'s command-block
-  /// ceiling is half of it.
+  /// row content sizes against ``narrowestRowWidth`` — `ApprovalCardView`'s scrollable-content
+  /// ceiling is three fifths of it.
   static let shortestLayoutHeight: CGFloat = 568
 }
 

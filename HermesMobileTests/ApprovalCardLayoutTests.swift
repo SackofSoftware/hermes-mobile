@@ -70,8 +70,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// This is the assertion the previous take on the fix could not satisfy: the card's region
   /// is *less* flexible than the greedy transcript, so a plain `VStack` offers it roughly half
   /// of what is left and it lands on its floor. Measured at 88pt here without `ChatView`'s
-  /// `.layoutPriority` and 149pt with it (227 before the region started handing a quarter of
-  /// the offer back to the transcript) — from about one line of command to about six.
+  /// `.layoutPriority` and 155pt with it (227 before the region started handing a tap target's
+  /// worth of the offer back to the transcript) — from about one line of command to about six.
   ///
   /// The assertion is on the **command's own painted geometry**, not on the viewport's height:
   /// the viewport also holds the detail and the session toggle, so a line-count floor on the
@@ -117,6 +117,41 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
     XCTAssertGreaterThan(chat.region.contentSize.height, chat.region.bounds.height, "…and scroll")
     assertNothingIsPushedOffScreen(chat)
+  }
+
+  /// The floor's "three legible command lines" is a **`.large`** contract, and this is the
+  /// number it degrades to — stated, rather than left implied by an unqualified doc comment.
+  ///
+  /// ``ApprovalCardView/contentMinHeight`` is deliberately unscaled, so the band above the ramp
+  /// is a constant 64pt at every text size while a `.callout` line is not. Scaling the floor is
+  /// not an available fix: three AX5 lines are ~210pt of floor, and reserving that on the
+  /// shortest keyboard-up screen is measurably what pushes Deny/Approve out — the safety half
+  /// outranks the reading comfort. The cap, not the floor, is what undoes this as soon as the
+  /// region has any room at all, which is every configuration except the tightest.
+  func testTheFloorsReadableBandDegradesWithDynamicType() {
+    let band =
+      ApprovalCardView.contentMinHeight
+      - ApprovalCardView.fadeRampHeight(viewportHeight: ApprovalCardView.contentMinHeight)
+      - ApprovalCardView.commandPadding
+    XCTAssertEqual(band, 64, accuracy: 0.5, "the floor's readable band, by construction")
+
+    func lines(_ category: UIContentSizeCategory) -> CGFloat {
+      band
+        / UIFont.preferredFont(
+          forTextStyle: .callout,
+          compatibleWith: UITraitCollection(preferredContentSizeCategory: category)
+        ).lineHeight
+    }
+    XCTAssertGreaterThanOrEqual(
+      lines(.large), 3, "three command lines at `.large` — the contract, \(lines(.large)) measured")
+    // Characterisation, not an aspiration: if either of these goes red because the degradation
+    // improved, update the number here AND the contract stated on `contentMinHeight`.
+    XCTAssertEqual(
+      lines(.accessibilityExtraLarge), 1.3, accuracy: 0.35,
+      "AX3 degrades to about one and a third lines (\(lines(.accessibilityExtraLarge)) measured)")
+    XCTAssertEqual(
+      lines(.accessibilityExtraExtraExtraLarge), 0.9, accuracy: 0.35,
+      "…and AX5 to under one (\(lines(.accessibilityExtraExtraExtraLarge)) measured)")
   }
 
   /// The safety half, at accessibility text sizes. The card's session toggle and detail grow
@@ -181,10 +216,90 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
   }
 
+  /// **The keyboard itself.** A blocking card cannot be answered from the composer (`canSend`
+  /// is false while one stands), and the keyboard costs the card roughly half the screen — the
+  /// card lives in the non-scrolling region between the transcript and the composer, which is
+  /// exactly what the keyboard shrinks. That is #65's own root cause: leaving and re-entering
+  /// the chat "fixed" the truncated command because the keyboard was down on the way back in.
+  /// So raising a card hands the keyboard back, which is by far the cheapest room this whole
+  /// branch buys.
+  ///
+  /// End to end through the real `ChatView`, because the value is plumbed through three views
+  /// (`ChatView` → `ComposerView` → `ComposerTextView`) and any hop could be dropped with every
+  /// other test still green.
+  @MainActor
+  func testRaisingACardHandsTheKeyboardBack() throws {
+    let chat = try hostedChat(width: 393, height: 800, raiseACard: false)
+    chat.window.makeKeyAndVisible()
+    XCTAssertTrue(chat.composer.becomeFirstResponder(), "sanity: the composer starts focusable")
+
+    chat.store.send(
+      .gatewayEvent(.approvalRequest(ApprovalRequest(command: "rm -rf /", detail: "Danger"))))
+    chat.relayout()
+    XCTAssertFalse(
+      chat.composer.isFirstResponder,
+      "A raised card must hand the keyboard back — the region it needs is the one the keyboard takes"
+    )
+    XCTAssertTrue(
+      chat.composer.isEditable,
+      "…by resigning focus, not by disabling the field: a draft while the card stands is fine"
+    )
+
+    // A deliberate re-focus is the user's call and must stick. `ChatView` re-renders on every
+    // streamed token, so a resign that is not keyed on the card's identity would fire again on
+    // each one and leave the field untappable in all but name.
+    XCTAssertTrue(chat.composer.becomeFirstResponder())
+    chat.store.send(.binding(.set(\.composerText, "drafting while I think")))
+    chat.relayout()
+    XCTAssertTrue(
+      chat.composer.isFirstResponder, "Re-renders under a standing card must not re-resign")
+
+    // …but a *replacement* card — the case that never passes through `nil` — drops it again.
+    chat.store.send(.gatewayEvent(.sudoRequest(SecretPrompt(requestID: "r1", prompt: "Password"))))
+    chat.relayout()
+    XCTAssertFalse(
+      chat.composer.isFirstResponder, "A card replacing another must hand the keyboard back too")
+  }
+
+  /// **Landscape with the keyboard up** — the branch's own worst case, and the one configuration
+  /// it used to document without testing.
+  ///
+  /// A landscape phone leaves roughly 100pt of fixed region, which cannot hold a card *and* a
+  /// composer, so something has to go off screen; the composer does (measured: 44pt out, and
+  /// 26pt out on `main` before this branch existed). What must hold whatever else gives is the
+  /// safety half — the **Deny/Approve row stays inside the window** — and that is asserted here
+  /// directly, on the buttons' own published frames rather than on a proxy.
+  ///
+  /// It is also the assertion the floor is really constrained by: the floor drives the card's
+  /// claim on a tiny region, and it was raised 88 → 96 in the commit that recorded 88 as the
+  /// largest measured-safe value. **Red-checked**: at `contentMinHeight = 200` the row is
+  /// pushed to y 255…290 in a 200pt window and both sizes fail.
+  @MainActor
+  func testLandscapeWithTheKeyboardUpKeepsTheAnswerInsideTheWindow() throws {
+    for size in [DynamicTypeSize.large, .accessibility3] {
+      let chat = try hostedChat(width: 568, height: 200, dynamicType: size)
+      let answer = try answerRow(in: chat)
+
+      XCTAssertGreaterThanOrEqual(
+        answer.minY, 0, "\(chat.label): the Deny/Approve row must not be clipped off the top")
+      XCTAssertLessThanOrEqual(
+        answer.maxY, chat.windowHeight,
+        """
+        \(chat.label): in the one configuration where the card cannot fit at all, the row the \
+        user has to tap is what stays inside the window. The composer is what yields.
+        """
+      )
+      XCTAssertLessThan(
+        chat.region.bounds.height, ApprovalCardView.contentMaxHeightBase,
+        "\(chat.label): sanity — the region is genuinely squeezed here, which is what makes it the test"
+      )
+    }
+  }
+
   /// The transcript is the *context* for an approve/deny decision, and `.layoutPriority(1)`
   /// hands the card everything the other children do not strictly need — the greedy
   /// transcript's minimum is zero, so it was measured at **0pt** on every phone. The region
-  /// gives a quarter of its offer back (`BoundedHeightLayout.claim`).
+  /// hands a fixed 44pt of its offer back (`BoundedHeightLayout.reserve`).
   @MainActor
   func testTheTranscriptKeepsAUsableHeightBehindTheCard() throws {
     let chat = try hostedChat(width: 393, height: 516)
@@ -332,10 +447,14 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// It is the number that decides whether a short container can hold the card *and* the
   /// composer. A portrait phone with the keyboard up can (measured on the shortest, 320×352:
   /// the whole card plus the composer fit). A **landscape** phone with the keyboard up leaves
-  /// roughly 100pt of fixed region and cannot — on this branch or before it. What happens
-  /// there is at least the right order of precedence: the region lands on its floor, the
-  /// Deny/Approve row stays inside the window, and the composer — which is *disabled* while a
-  /// card is up — is what goes under the keyboard.
+  /// roughly 100pt of fixed region and cannot — on this branch or before it. Raising a card
+  /// now hands the keyboard back (``testRaisingACardHandsTheKeyboardBack``), so reaching that
+  /// state at all takes a deliberate re-focus of the composer while the card stands; when it
+  /// is reached, the order of precedence is the right one — the region lands on its floor, the
+  /// Deny/Approve row stays inside the window
+  /// (``testLandscapeWithTheKeyboardUpKeepsTheButtonRowInsideTheWindow``), and the composer is
+  /// what goes under the keyboard. Note the composer is *live*, not disabled: only Send is
+  /// blocked while a card stands, so what is off screen there is the user's own focused field.
   func testTheCardsCompressedFittingSizeIsPinned() throws {
     let host = hostedCard(
       ApprovalRequest(command: Self.longCommand, detail: Self.longDetail),
@@ -587,22 +706,58 @@ final class ApprovalCardLayoutTests: XCTestCase {
     XCTAssertEqual(layout.height(natural: 20, offered: 0), 20, "…and never taller than the content")
   }
 
-  /// The share the region hands back so the transcript is not starved to 0pt by the card's
-  /// layout priority — and the two things that outrank it: the cap above, the floor below.
-  func testBoundedHeightLayoutYieldsAShareOfTheOfferedHeight() {
-    let layout = BoundedHeightLayout(cap: 320, minHeight: 88, claim: 0.75)
-    XCTAssertEqual(
-      layout.height(natural: 1258, offered: 200), 150, "a quarter of the offer goes back")
+  /// The points the region hands back so the transcript is not starved to 0pt by the card's
+  /// layout priority — and, just as load-bearing, the room it must **not** hand back.
+  ///
+  /// The reserve is absolute for that second half. It used to be a *fraction* (0.75 of the
+  /// offer), which scales with the container and therefore kept cutting a region that had room
+  /// to fit: at an offer of 320 with 320pt of content it gave 80pt — about four `.callout`
+  /// command lines, or the whole detail plus the session toggle — back to a transcript that had
+  /// not asked for it. The band where that happens (`offer − reserve < natural ≤ offer`) was
+  /// touched by no test at all: the roomy cases sit far under it and every squeezed case lands
+  /// on the floor, which outranks both forms.
+  func testBoundedHeightLayoutHoldsBackAFixedReserveForTheTranscript() {
+    let reserve: CGFloat = 44
+    let layout = BoundedHeightLayout(cap: 320, minHeight: 88, reserve: reserve)
+
+    // Squeezed, and the two things that outrank the reserve: the cap above, the floor below.
+    XCTAssertEqual(layout.height(natural: 1258, offered: 200), 156, "the reserve comes off the top")
     XCTAssertEqual(
       layout.height(natural: 1258, offered: 900), 320, "…but the cap still decides when roomy")
     XCTAssertEqual(
       layout.height(natural: 1258, offered: 100), 88,
-      "…and the floor outranks the share: yielding must never squeeze the card past its floor")
+      "…and the floor outranks the reserve: yielding must never squeeze the card past its floor")
     XCTAssertEqual(
-      layout.height(natural: 60, offered: 200), 60, "…nor pad short content out to the share")
+      layout.height(natural: 60, offered: 200), 60, "…nor pad short content out to the offer")
+
+    // The band no test used to constrain: content that FITS what is offered. A proportional
+    // reserve cut every one of these; an absolute one may not touch them.
+    XCTAssertEqual(
+      layout.height(natural: 240, offered: 300), 240,
+      "content that fits under offer − reserve must hug itself, not be cut to a fraction")
+    XCTAssertEqual(layout.height(natural: 256, offered: 300), 256, "…right up to the boundary")
+    XCTAssertEqual(
+      layout.height(natural: 300, offered: 300), 256, "…and past it gives back exactly the reserve")
+    XCTAssertEqual(layout.height(natural: 320, offered: 320), 276)
+
+    // Stated over the whole band rather than at sampled points, so the reserve cannot be
+    // re-tuned — or turned back into a fraction — without going red.
+    for offered in stride(from: CGFloat(140), through: 600, by: 5) {
+      for natural in stride(from: CGFloat(100), through: 600, by: 5) {
+        let wanted = min(natural, 320)
+        let height = layout.height(natural: natural, offered: offered)
+        XCTAssertGreaterThanOrEqual(
+          height, min(wanted, offered - reserve) - 0.001,
+          "offer \(offered)/content \(natural): never give back more of the offer than the reserve"
+        )
+        XCTAssertLessThanOrEqual(
+          height, wanted + 0.001, "offer \(offered)/content \(natural): never pad past the content")
+      }
+    }
+
     XCTAssertEqual(
       BoundedHeightLayout(cap: 320, minHeight: 88).height(natural: 1258, offered: 200), 200,
-      "Sanity: `claim` defaults to taking the whole offer, so it is opt-in")
+      "Sanity: `reserve` defaults to 0, so it is opt-in")
   }
 
   // MARK: - Fixtures
@@ -710,13 +865,18 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// composer, all live views, plus the window they were laid out in.
   private struct HostedChat {
     /// The card's bounded content region — `nil` when the standing card is a clarify/secret
-    /// one, which is plain stacked content and hosts no scroll view of its own.
+    /// one (plain stacked content, no scroll view of its own) or when none is standing.
     var regionIfAny: UIScrollView?
     var transcript: UIScrollView
-    var composer: UIScrollView
+    var composer: ComposerInputTextView
     var window: UIWindow
     var windowHeight: CGFloat
     var label: String
+    /// The live store, so a test can raise a card *after* the first layout pass.
+    var store: StoreOf<ChatFeature>
+    /// Forces another SwiftUI update + layout pass — what a state change needs before its
+    /// effect on the UIKit views can be read.
+    var relayout: () -> Void
 
     /// The approval card's region. Force-unwrapped on purpose: every caller has an approval
     /// standing, and `hostedChat` already fails the test with a message when it is missing.
@@ -733,6 +893,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     dynamicType: DynamicTypeSize = .large,
     detail: String = "Delete the build directory and all untracked files",
     interaction: ChatFeature.State.PendingInteraction? = nil,
+    raiseACard: Bool = true,
     file: StaticString = #filePath,
     line: UInt = #line
   ) throws -> HostedChat {
@@ -751,18 +912,18 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
     // Through `present(_:)`, like the reducer: a bare assignment leaves the token behind, and
     // the token is the card's view identity.
-    state.present(interaction ?? .approval(ApprovalRequest(command: Self.longCommand, detail: detail)))
+    if raiseACard {
+      state.present(
+        interaction ?? .approval(ApprovalRequest(command: Self.longCommand, detail: detail)))
+    }
+    let store = Store(initialState: state) { ChatFeature() } withDependencies: {
+      // Don't open a real socket during layout.
+      $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
+      $0.continuousClock = ImmediateClock()
+    }
     let root = AnyView(
-      NavigationStack {
-        ChatView(
-          store: Store(initialState: state) { ChatFeature() } withDependencies: {
-            // Don't open a real socket during layout.
-            $0.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
-            $0.continuousClock = ImmediateClock()
-          }
-        )
-      }
-      .dynamicTypeSize(dynamicType)
+      NavigationStack { ChatView(store: store) }
+        .dynamicTypeSize(dynamicType)
     )
     let hosted = host(root, width: width, height: height)
     // The transcript is a `UIViewRepresentable`; let its first collection-view layout settle
@@ -792,14 +953,20 @@ final class ApprovalCardLayoutTests: XCTestCase {
     return HostedChat(
       regionIfAny: region, transcript: transcript, composer: composer,
       window: try XCTUnwrap(windows.last, file: file, line: line), windowHeight: height,
-      label: "\(Int(width))×\(Int(height)) @\(dynamicType)"
+      label: "\(Int(width))×\(Int(height)) @\(dynamicType)",
+      store: store,
+      relayout: { [weak hosted] in
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        hosted?.view.setNeedsLayout()
+        hosted?.view.layoutIfNeeded()
+      }
     )
   }
 
-  /// The card's answer must stay reachable. The Deny/Approve row is laid out *between* the
-  /// content region and the composer, so a composer that is still fully inside the window is
-  /// proof that neither it nor the buttons were pushed out — and it needs no assumption about
-  /// how tall a button row is at a given Dynamic Type size.
+  /// The card's answer must stay reachable, and on a portrait phone the composer must stay with
+  /// it. The Deny/Approve row is asserted **on its own frame** (see ``answerRow(in:file:line:)``)
+  /// rather than inferred from the composer's: they diverge in exactly the configurations that
+  /// matter, and the row is the safety-critical half.
   private func assertNothingIsPushedOffScreen(
     _ chat: HostedChat, file: StaticString = #filePath, line: UInt = #line
   ) {
@@ -815,6 +982,63 @@ final class ApprovalCardLayoutTests: XCTestCase {
       "\(chat.label): the button row must still fit between the region and the composer",
       file: file, line: line
     )
+    if let answer = try? answerRow(in: chat, file: file, line: line) {
+      XCTAssertLessThanOrEqual(
+        answer.maxY, chat.windowHeight,
+        "\(chat.label): the Deny/Approve row itself must be inside the window", file: file,
+        line: line
+      )
+      XCTAssertGreaterThanOrEqual(
+        answer.minY, 0, "\(chat.label): …and not clipped off the top", file: file, line: line)
+    }
+  }
+
+  /// The Deny/Approve row's frame, read off the **accessibility tree**.
+  ///
+  /// The buttons are drawn by SwiftUI — there is no `UIView` to interrogate — and the card's
+  /// backing scroll view is not a usable proxy in the configurations that matter: when the card
+  /// over-subscribes its container the hosted region reports one height and the content is
+  /// painted at another. The accessibility tree is the one place UIKit publishes where a
+  /// SwiftUI control actually ended up, and it is what a user's tap would hit. Frames come out
+  /// in *screen* coordinates; every window in this suite is at the origin, so they are window
+  /// coordinates too.
+  ///
+  /// Matched on the exact button titles (`ApprovalCardView.approveTitle(all:)`), so the
+  /// "Approve all in this session" **toggle** — which is inside the scroll and may legitimately
+  /// be below the fold — cannot be mistaken for the primary button.
+  private func answerRow(
+    in chat: HostedChat, file: StaticString = #filePath, line: UInt = #line
+  ) throws -> CGRect {
+    let titles = ["Deny", ApprovalCardView.approveTitle(all: false), .init(true)]
+    let buttons = Self.accessibilityElements(in: chat.window)
+      .filter { titles.contains($0.label) }
+      .map(\.frame)
+    XCTAssertGreaterThanOrEqual(
+      buttons.count, 2, "\(chat.label): both Deny and Approve must be in the accessibility tree",
+      file: file, line: line
+    )
+    return try XCTUnwrap(
+      buttons.dropFirst().reduce(buttons.first) { $0?.union($1) },
+      "\(chat.label): the answer row must be laid out", file: file, line: line
+    )
+  }
+
+  /// Every labelled element in the accessibility tree, flattened. Containers publish their
+  /// children through `accessibilityElement(at:)`; plain views are walked by `subviews`.
+  private static func accessibilityElements(in object: NSObject) -> [(label: String, frame: CGRect)]
+  {
+    var found: [(String, CGRect)] = []
+    let count = object.accessibilityElementCount()
+    if count != NSNotFound, count > 0 {
+      for index in 0..<count {
+        guard let child = object.accessibilityElement(at: index) as? NSObject else { continue }
+        if let label = child.accessibilityLabel { found.append((label, child.accessibilityFrame)) }
+        found += accessibilityElements(in: child)
+      }
+    } else if let view = object as? UIView {
+      for sub in view.subviews { found += accessibilityElements(in: sub) }
+    }
+    return found
   }
 
   // MARK: - Measuring the COMMAND (not the viewport it happens to sit in)

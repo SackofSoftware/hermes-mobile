@@ -526,6 +526,56 @@ final class ComposerTextViewTests: XCTestCase {
     XCTAssertEqual(box.values.first?.map(\.filename), ["pasted-image.png"])
   }
 
+  // MARK: - Blocking cards and the keyboard
+
+  /// The edge rule behind ``ComposerTextView/blockingCardToken`` (#65): the field gives up the
+  /// keyboard once per *raised card*, never on the re-renders in between.
+  ///
+  /// Both halves matter. Resigning on the raise is the point — the card lives in the fixed
+  /// region the keyboard shrinks, and it cannot be answered from the composer anyway. Not
+  /// resigning in between is what keeps the field usable: `ChatView` re-renders on every
+  /// streamed token, so an unkeyed "resign while a card stands" fires on each one and a user
+  /// who taps the field is bounced out of it before they can type.
+  func testTheKeyboardIsHandedBackOncePerRaisedCard() {
+    let coordinator = ComposerTextView(text: .constant("")).makeCoordinator()
+
+    XCTAssertFalse(coordinator.shouldDropFocus(for: nil), "no card, no reason to touch focus")
+    XCTAssertTrue(coordinator.shouldDropFocus(for: 1), "a raised card hands the keyboard back")
+    XCTAssertFalse(
+      coordinator.shouldDropFocus(for: 1), "…and the re-renders under it leave focus alone")
+    XCTAssertFalse(coordinator.shouldDropFocus(for: 1))
+    XCTAssertTrue(
+      coordinator.shouldDropFocus(for: 2),
+      "a replacement card — which never passes through nil — hands it back again")
+    XCTAssertFalse(coordinator.shouldDropFocus(for: nil), "answering the card is not a reason to")
+    XCTAssertTrue(coordinator.shouldDropFocus(for: 3), "…and the next card is")
+  }
+
+  /// The same rule through the representable: a card standing at `makeUIView` time is consumed
+  /// there, so a field the user focuses afterwards keeps focus.
+  func testACardStandingWhenTheFieldIsMadeDoesNotFightALaterFocus() {
+    let host = UIHostingController(
+      rootView: ComposerTextView(text: .constant(""), blockingCardToken: 7))
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+    window.rootViewController = host
+    window.makeKeyAndVisible()
+    window.layoutIfNeeded()
+    defer {
+      window.isHidden = true
+      window.rootViewController = nil
+    }
+
+    guard let field = Self.firstTextView(in: host.view) else {
+      return XCTFail("the representable produced no ComposerInputTextView")
+    }
+    XCTAssertTrue(field.becomeFirstResponder(), "the field must stay focusable while a card stands")
+    XCTAssertTrue(field.isEditable, "…and editable: the card blocks Send, not drafting")
+    // The standing card's identity was consumed when the view was made, so nothing re-resigns.
+    host.view.setNeedsLayout()
+    host.view.layoutIfNeeded()
+    XCTAssertTrue(field.isFirstResponder)
+  }
+
   private static func firstTextView(in view: UIView) -> ComposerInputTextView? {
     if let hit = view as? ComposerInputTextView { return hit }
     for subview in view.subviews {

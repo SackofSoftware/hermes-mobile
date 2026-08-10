@@ -389,8 +389,10 @@ their own.
       measured at 568×200 the composer was already 26pt off screen *before* this branch (44pt
       after, the card being ~250pt compressed against ~100pt of fixed region). It cannot be fixed
       by tuning: a card plus a composer does not fit. Documented as a limitation with the right
-      precedence (Deny/Approve stay inside the window; the composer, disabled while a card is up,
-      is what yields) and pinned by a compressed-fitting-size test so it cannot drift further.
+      precedence (Deny/Approve stay inside the window; the composer is what yields) and pinned by a
+      compressed-fitting-size test so it cannot drift further. ⚠️ **The precedence claim's stated
+      justification — "the composer is disabled while a card is up" — was itself false, and the
+      landscape claim had no test. Both fixed in Task 3e.**
 - [x] tests: 22 measured cases (was 16). New: the command's painted band on the shortest screen
       and against an unbounded detail, the command band at AX sizes, the transcript's height, the
       clarify card's transcript share, the Approve-title mirror, the claim arithmetic, the
@@ -402,6 +404,87 @@ their own.
       harness renders the region's content blank while reporting a viewport taller than the card is
       painted. The command-band assertions therefore run at 393×516 for AX sizes; the composer /
       button-row assertions still cover the short window.
+
+### Task 3e: Fourth-round code-review fixes (claims the branch had not earned)
+
+Two reviewers confirmed the mechanism is sound (the layout arithmetic, the nil-height probe, token
+integrity across all five presentation paths, command-first ordering proven non-vacuously). What was
+left was mostly **things documented as verified that were not**, plus one real regression in the
+reserve.
+
+- [x] **the composer was never disabled while a card is up** — three doc sites (the compressed-
+      fitting-size test, CLAUDE.md, Task 3d above) justified the landscape trade-off with "the
+      composer, disabled while a card is up, is what yields". `ComposerView` applies `.disabled`
+      only to `sendButton`; the field stays editable and first responder, which is *why* the
+      keyboard is up. So the 44pt going off screen there was the user's own focused input.
+      Fixed at the root rather than in prose: **raising a card now hands the keyboard back**
+      (`ChatView` → `ComposerView` → `ComposerTextView.blockingCardToken` → `resignFirstResponder`).
+      A **resign, not a disable** — `canSend` is already false, but the field stays live so a draft
+      is still possible — and keyed on `pendingInteractionToken`, not on `pendingInteraction != nil`:
+      `ChatView` re-renders on every streamed token, and an unkeyed resign fires on each one, which
+      bounces a user out of the field before they can type (a replacement card, which never passes
+      through `nil`, still drops it). This is the cheapest room the whole branch buys — the keyboard
+      is what shrinks the region the card lives in, i.e. #65's own root cause. Verified it does not
+      touch the clarify/secret card's own field (a separate `TextField`/`SecureField` inside
+      `ClarifyCardView`) and does not disable the interrupt button.
+- [x] **`BoundedHeightLayout.claim` was a proportional reserve where a fixed one was wanted.** It
+      applied unconditionally, so for `offer − 25% < natural ≤ offer` it cut a region that had room
+      to fit: `height(natural: 320, offered: 320)` → 240, i.e. 80pt (about four `.callout` command
+      lines) handed to a transcript that had not asked for it, on the surface whose rule is "the
+      user must be able to read what they are approving". Replaced by an **absolute**
+      `reserve` = `ApprovalCardView.transcriptReserve` (44pt, one HIG tap target). The band was
+      constrained by no test in either direction — the roomy cases sit far under it and the squeezed
+      ones land on the floor, which outranks both forms — so the arithmetic case now states the
+      invariant over the whole band (`height ≥ min(wanted, offer − reserve)` and `≤ wanted`) rather
+      than at sampled points. **Red-checked**: restoring the proportional form fails it (explicit
+      cases plus ~hundreds of band points).
+      Measured effect at 393×516 keyboard-up: region 155pt (was 149), transcript 44pt (was ~50).
+- [x] **the landscape safety claim had no test**, and the floor had moved 88 → 96 *past* the
+      previously-measured safe maximum. Added `testLandscapeWithTheKeyboardUpKeepsTheAnswerInsideTheWindow`
+      at 568×200, `.large` + AX3. It asserts the **Deny/Approve row's own frame**, read off the
+      **accessibility tree** — SwiftUI draws the buttons into a shared layer (no `UIView`), and the
+      hosted scroll view is not a usable proxy here: once the card over-subscribes its container the
+      backing `HostingScrollView` reports 141.7pt while the layout places 96 (the same harness
+      artifact Task 3d filed for 320×352 at AX3+). The a11y frame is where a tap would actually
+      land. Measured: row at y 151.7…186.0 in a 200pt window at `.large` — inside, with the
+      composer 44pt out, exactly the documented precedence. **Red-checked**: at
+      `contentMinHeight = 200` the row lands at 238/229.7 and both sizes fail. The same assertion
+      was folded into `assertNothingIsPushedOffScreen`, so every composition test now checks the
+      buttons directly instead of inferring them from the composer.
+- [x] **the "three legible command lines" contract is `.large`-only** — the floor is deliberately
+      unscaled, so the readable band is a constant 64pt while a `.callout` line is not (~20.9pt at
+      `.large`, ~48 at AX3, ~69 at AX5). Qualified in the source doc, CLAUDE.md and here, and pinned
+      by `testTheFloorsReadableBandDegradesWithDynamicType`, which measures the real font metric per
+      content-size category: ≥3 lines at `.large`, ~1.3 at AX3, ~0.9 at AX5. **Not** fixed by
+      scaling the floor: three AX5 lines are ~210pt, and reserving that on the shortest keyboard-up
+      screen is measurably what pushes Deny/Approve off it (Task 3c measured that failure). The cap,
+      not the floor, is what undoes the degradation as soon as the region has any room.
+- [x] **stale doc comments**: `TranscriptLayout.shortestLayoutHeight` said the card's ceiling was
+      "half of it" (it is `* 0.6`), and `BoundedHeightLayout`'s summary said "sizes to
+      `min(natural, cap)` when there is room" without mentioning the reserve that overrides it.
+- [x] **`pendingInteraction` is now `public internal(set)`**, so the "raise a card only through
+      `present(_:)`" invariant is structural for everything outside HermesKit — the app target,
+      which is where the carried-over-`@State` bug manifests, can no longer assign one without its
+      token. [decision] **not** `private(set)`: ~20 `TestStore` expectation and initial-state sites
+      across three HermesKit test files assign it directly, and rewriting them to `present(_:)`
+      shifts every token expectation — churn with a real chance of masking a regression rather than
+      catching one. No public dismissal mutator was added (nothing outside the module dismisses;
+      dead API).
+- [x] tests: 25 measured cases (was 22) + 2 in `ComposerTextViewTests`. New: the keyboard hand-back
+      end to end through the real `ChatView` (raise → resign, re-focus → sticks across a re-render,
+      replacement card → resign again), the landscape answer-row containment, the floor's Dynamic
+      Type degradation, the reserve's band invariant; plus the coordinator's edge rule and a
+      "a card standing at `makeUIView` does not fight a later focus" case in the composer suite.
+- [x] validation: HermesKit 1017/1017 unchanged, `ApprovalCardLayoutTests` 25/25,
+      `ComposerTextViewTests` 32/32. **One baseline re-recorded**: the absolute reserve gives the
+      region ~298pt instead of ~257 inside `testApprovalCard_longCommandScrolls`'s pinned 460pt
+      frame — about two more command lines, which is the point — so that PNG was re-recorded via
+      the run-twice recipe (delete the one file, `make snapshot` records + fails by design,
+      `make snapshot` again asserts clean). `testApprovalCard` / `_recovered` are unchanged.
+      Proven to be the only render difference by running the **whole** `HermesMobileTests` suite
+      at `HEAD` and on the branch and diffing the pass/fail set per test: identical apart from the
+      new/renamed cases, all passing. `make snapshot` stays red only with the documented
+      environment-wide drift (89 of it, unchanged in both runs).
 
 ### Task 4: [Final] Update documentation
 

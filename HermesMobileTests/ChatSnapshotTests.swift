@@ -419,6 +419,12 @@ final class ChatSnapshotTests: SnapshotTestCase {
 
   // MARK: Approval card
 
+  /// The height is pinned for the same reason the width is on a horizontally-scrollable view
+  /// (CLAUDE.md's blank-sliver gotcha, vertical edition): the card's content region is
+  /// **compressible**, and `componentImage()` renders at `.sizeThatFits`, i.e. UIKit's
+  /// *compressed* fitting size — which for a compressible view is its FLOOR, not its natural
+  /// height. Unpinned this recorded the card 39pt short, with the region already scrolling.
+  /// The frame is generous enough that the card lays out naturally inside it.
   func testApprovalCard() {
     let view = ApprovalCardView(
       request: ApprovalRequest(
@@ -428,7 +434,8 @@ final class ChatSnapshotTests: SnapshotTestCase {
       onApprove: { _ in },
       onDeny: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 260)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 
@@ -442,7 +449,9 @@ final class ChatSnapshotTests: SnapshotTestCase {
   func testApprovalCard_longCommandScrolls() {
     let view = ApprovalCardView(
       request: ApprovalRequest(
-        command: Self.longCommand,
+        // One fixture, shared with the measured suite that asserts this shape's geometry —
+        // two copies would drift and the two suites would stop describing the same card.
+        command: ApprovalCardLayoutTests.longCommand,
         detail: "Rebuild every target and re-run the full suite"
       ),
       onApprove: { _ in },
@@ -453,11 +462,6 @@ final class ChatSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
-  /// ~20 lines — comfortably past the 220pt cap at the default content size.
-  private static let longCommand = (1...20)
-    .map { "step \($0): xcodebuild -workspace HermesMobile.xcworkspace -scheme Target\($0) test" }
-    .joined(separator: "\n")
-
   /// Push-tap approval recovery (hermes-agent #30 workaround): the synthetic request has
   /// no command — only the recovery-copy detail — so the card must lay out command-less.
   func testApprovalCard_recovered() {
@@ -466,7 +470,11 @@ final class ChatSnapshotTests: SnapshotTestCase {
       onApprove: { _ in },
       onDeny: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    // Height pinned for the reason on `testApprovalCard` — this card's content happens to sit
+    // under the floor today, so `.sizeThatFits` is currently faithful, but a longer recovery
+    // copy would silently start recording the floor instead.
+    .frame(width: device.size?.width ?? 390, height: 220)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 

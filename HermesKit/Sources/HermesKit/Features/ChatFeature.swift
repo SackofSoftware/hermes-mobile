@@ -46,8 +46,36 @@ public struct ChatFeature {
     /// streaming effects) across a nav pop; an idle one is torn down.
     public var isRunning: Bool { isSending }
     /// A blocking request from the agent (approval/clarify/secret). While set, the
-    /// composer is disabled and a card is the focal point.
+    /// composer is disabled and a card is the focal point. **Raise it through
+    /// ``present(_:)``**, never by assigning here: the assignment alone leaves
+    /// ``pendingInteractionToken`` behind, and a replacement card would then inherit the
+    /// previous one's `@State`. Assigning `nil` to dismiss is fine.
     public var pendingInteraction: PendingInteraction?
+    /// Is the standing card an *approval*? The only card `ChatView` gives layout priority
+    /// over the transcript — it is the one built to absorb the squeeze (a bounded, scrollable
+    /// region), so priority buys it readable command lines; the clarify/secret card is rigid
+    /// stacked content and priority would only take room from the transcript.
+    public var isApprovalPending: Bool {
+      if case .approval = pendingInteraction { return true }
+      return false
+    }
+    /// Monotonic count of blocking requests *presented* — bumped by ``present(_:)`` every
+    /// time a card is raised, never reset. The view uses it as the card's identity so a
+    /// replacement always gets fresh `@State` (its "Approve all" toggle off, its command
+    /// scrolled to the top, a secret prompt's typed value gone). Identity cannot come from
+    /// the request itself: a queued replacement can be *equal* to the card it replaces — an
+    /// agent retrying the same command — and a value-derived id would be unchanged for
+    /// exactly that pair, which is the one case where the replacement does not pass through
+    /// `nil` first. `internal(set)` so the invariant "every presentation bumps the token" is
+    /// enforceable: outside HermesKit the only way to raise a card is ``present(_:)``.
+    public internal(set) var pendingInteractionToken: Int
+    /// Raise a blocking card, bumping ``pendingInteractionToken`` so the view rebuilds.
+    /// Every presentation goes through here; dismissal is a plain `pendingInteraction = nil`
+    /// (a card that is gone has no identity to keep).
+    public mutating func present(_ interaction: PendingInteraction) {
+      pendingInteraction = interaction
+      pendingInteractionToken &+= 1
+    }
     /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
     /// #30: an `approval.request` that fired while the socket was down is gone — the
     /// server does not re-surface pending approvals on `session.resume`). Set by
@@ -350,6 +378,7 @@ public struct ChatFeature {
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
       self.pendingInteraction = nil
+      self.pendingInteractionToken = 0
       self.expectsPendingApproval = false
       self.presentedTool = nil
       self.model = nil
@@ -2136,20 +2165,20 @@ public struct ChatFeature {
       // focus rather than pausing — simpler reducer, and wall-clock still reflects the turn.
       // The real event overwrites any push-tap-synthesized card unconditionally and clears
       // the recovery hint so a later hydrate can't re-synthesize (#30 workaround).
-      state.pendingInteraction = .approval(request)
+      state.present(.approval(request))
       state.expectsPendingApproval = false
       return .none
 
     case let .clarifyRequest(request):
-      state.pendingInteraction = .clarify(request)
+      state.present(.clarify(request))
       return .none
 
     case let .sudoRequest(prompt):
-      state.pendingInteraction = .secret(.sudo, prompt)
+      state.present(.secret(.sudo, prompt))
       return .none
 
     case let .secretRequest(prompt):
-      state.pendingInteraction = .secret(.secret, prompt)
+      state.present(.secret(.secret, prompt))
       return .none
 
     case let .sessionInfo(info):
@@ -2547,7 +2576,7 @@ public struct ChatFeature {
     if state.expectsPendingApproval {
       state.expectsPendingApproval = false
       if running, state.pendingInteraction == nil {
-        state.pendingInteraction = .approval(Self.recoveredApprovalRequest)
+        state.present(.approval(Self.recoveredApprovalRequest))
       }
     }
     // The inverse staleness rule: the authoritative "not running" means no approval can

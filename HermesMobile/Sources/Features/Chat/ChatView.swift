@@ -18,7 +18,27 @@ struct ChatView: View {
           CopiedToastView(token: store.copiedIDToastToken)
         }
       footer
+      // A standing *approval* outranks the greedy transcript for the fixed region's height.
+      // Without it a `VStack` offers each child `remaining / remainingCount` in flexibility
+      // order, so the card — less flexible than the transcript — is offered roughly *half*
+      // of what is left and its scrollable region collapses onto its floor with the keyboard
+      // up: measured at the floor on every iPhone, i.e. the two-line window #65 was filed
+      // about. With the priority the card is offered the whole remainder first; it hands a
+      // quarter of that back (`BoundedHeightLayout.claim`) so the transcript — the context
+      // for the decision — is not starved to 0pt. Applied here rather than inside
+      // `pendingCard`'s `switch`: a trait written inside a `@ViewBuilder` branch does not
+      // reach the enclosing stack (measured — the region stayed on its floor).
+      //
+      // Scoped to `.approval` because only that card is compressible: `ClarifyCardView` is
+      // plain stacked content with rigid choice buttons, so priority would only take room
+      // from the transcript (measured: 160pt → 13pt with a long question) without giving the
+      // card anything it can use. Every card gets a fresh identity per presentation — a
+      // replacement that does not pass through `nil` (a queued approval, a second secret
+      // prompt) must not inherit the previous one's `@State`: its scroll offset, its
+      // "Approve all" toggle, or — worst — a typed sudo password.
       pendingCard
+        .id(store.pendingInteractionToken)
+        .layoutPriority(store.isApprovalPending ? 1 : 0)
       suggestionPanel
       Divider()
       ComposerView(
@@ -258,6 +278,9 @@ struct ChatView: View {
   private var pendingCard: some View {
     switch store.pendingInteraction {
     case let .approval(request):
+      // The per-presentation identity that keeps this card's `@State` (scroll offset,
+      // "Approve all") from leaking into the next one is applied to `pendingCard` at the
+      // `VStack` call site, so it covers the clarify/secret branches too — see there.
       ApprovalCardView(
         request: request,
         onApprove: { all in store.send(.respondToApproval(approve: true, all: all)) },

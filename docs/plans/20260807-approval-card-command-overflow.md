@@ -248,6 +248,161 @@
       regressions — exactly the one this task just caught. A deliberate global re-record on
       the current runtime is the follow-up, and it must be its own commit.
 
+### Task 3b: Code-review fixes (four reviewers, all four agreed on the same defects)
+
+- [x] **the fade never cleared** — it was keyed on the measured content height, so past the cap
+      it was on for the block's whole lifetime and the command's LAST line sat permanently
+      inside the ramp (unreadable at exactly the place `&& rm -rf /` would be). Replaced by the
+      live-geometry `hasBottomOverflow(visibleRect:contentHeight:)` fed from
+      `onScrollGeometryChange`, i.e. the half of the #59 precedent Task 1 had not copied.
+- [x] **the rigid `.frame(height:)` made the card taller than its region** — incompressible at
+      ~458pt against the ~290pt `ChatView`'s fixed region has with the keyboard up on an SE, so
+      the card over-subscribed its container and pushed Deny/Approve (and the composer) under
+      the keyboard: `.fixedSize`'s failure by another route. Replaced by `BoundedHeightLayout`,
+      which reports `min(content, cap)` and **yields to a shorter proposal** down to a 44pt
+      floor — shrinking a scroll *viewport* loses nothing.
+- [x] **the `@ScaledMetric` cap had no ceiling** (~730pt at AX5, taller than any iPhone's fixed
+      region). Clamped to `TranscriptLayout.shortestLayoutHeight / 2` — derived, not typed, the
+      `MarkdownTableView.columnMaxWidthCeiling` convention; `shortestLayoutHeight` added
+      alongside `narrowestLayoutWidth` (same Display-Zoom SE metric, 320×568).
+- [x] **`@State` and scroll offset survived one approval replacing another** — `.id(request)` on
+      the card in `ChatView.pendingCard` (`ApprovalRequest` gained `Hashable`); previously
+      command B could open scrolled into its middle with A's "Approve all" still on.
+- ➕ **the `commandSizer` twin turned out to be unnecessary and was deleted.** The real fact is
+      narrower than Task 3 recorded: a `ScrollView` does not have *no* ideal height, it
+      swallows whatever concrete proposal it is handed. Probed with the height **unspecified**
+      — which a custom `Layout` can do and a `ZStack` cannot — the scroll view reports its own
+      content's ideal. So the twin, its `maxHeight` clamp, and the double TextKit layout it
+      cost all go away. Red-checked: making the probe concrete again fails 4 assertions.
+- [x] tests: 11 measured cases (was 8). New — the tight-region repro (red-checked: with the
+      layout made incompressible it fails at 458 > 290), the unwindowed-`sizeThatFits` case
+      (the shape that caught the collapsed-ideal regression, now in the suite instead of only
+      in a snapshot), the AX5 ceiling case (Dynamic Type was a dead parameter before), the
+      cap boundary from **both** sides with non-zero geometry asserted (the old
+      `testCommandAtTheCapDoesNotScroll` passed on a collapsed block and its fixture was 37pt
+      shy of the cap), a pure `BoundedHeightLayout` arithmetic case, and a positive control
+      making the "no scroll view" absence assertion non-vacuous. Dropped
+      `testUncappedCommandBlockWouldBlowTheBudget` (it exercised no production code) and the
+      test-only `commandBlockAccessibilityID` + a11y-tree walker (one plain `subviews` walk now
+      serves both presence and absence, the `MarkdownTableLayoutTests` convention). The 20-line
+      fixture is shared with `ChatSnapshotTests` instead of duplicated.
+- [x] docs: the CLAUDE.md bullet halved and re-pointed at the code for its derivations, the
+      "byte-identical snapshot" claim corrected to a **size** guard, the scrollable-snapshot
+      rule generalised to either axis, the `ScrollView`-proposal trap filed as a Gotcha, and the
+      environment-wide baseline drift given a standing note (it was only in this plan).
+- [x] validation: HermesKit 1016/1016, `ApprovalCardLayoutTests` 11/11,
+      `testApprovalCard_longCommandScrolls` still matches its baseline **unchanged** (so the
+      render, fade included, is identical), `testApprovalCard` / `_recovered` differ from their
+      baselines by 60 / 67 px at max channel delta **1** at the **same** render size — the
+      documented drift floor, not a sizing change.
+
+### Task 3c: Second-round code-review fixes (two reviewers, same defect)
+
+- [x] **the block collapsed to its floor in exactly #65's condition, and the suite said fine.**
+      Both reviewers derived it independently; **measured** it here by hosting the real `ChatView`
+      with an approval standing, in windows the size of the screen area left when the keyboard is
+      up: the content region landed on **44pt on every iPhone** (SE 320×352, 15 393×516, 6.7"
+      430×590 — all identical), because a `VStack` offers each child `remaining / remainingCount`
+      in flexibility order and the card is less flexible than the greedy transcript. Fixed by
+      `.layoutPriority` on `pendingCard` **at the `VStack` call site** — a trait written inside the
+      `@ViewBuilder` `switch` does **not** reach the enclosing stack (measured: identical numbers).
+      Region with the fix, at the same window sizes: **227pt** (iPhone 15), **301pt** (6.7"),
+      **320pt** (cap, keyboard down), **88pt** on the shortest screen where the region genuinely
+      cannot hold more.
+- [x] **the card's rigid chrome pushed Deny/Approve off screen anyway** — only the *command* was
+      bounded; the header, the unbounded `detail` (the server's `description`) and the session
+      toggle were rigid, and their sum alone outgrew the fixed region at AX3/AX5 and on any phone
+      with a long detail (measured: composer bottom 176pt past the window at AX5 on the shortest
+      screen; 85pt past it with a 1000-char detail at `.large`). **Restructured: header + detail +
+      command + toggle now share ONE bounded `ScrollView`; only the Deny/Approve row is rigid.**
+      One scroll, no nesting, and the detail is bounded for free. Accepted cost, logged as a
+      decision: with a long command the "Approve all in this session" toggle sits below the fold
+      (one scroll away, behind the fade) — keeping it rigid is precisely what put the buttons off
+      screen at AX sizes, and the buttons are the safety-critical half.
+- [x] **the 24pt fade was 55% of the 44pt floor** — the hint had eaten the content it was hinting
+      about. `fadeRampHeight(viewportHeight:)` now returns `min(24, viewport / 4)`, so three
+      quarters of any viewport stay fully opaque at any size; the constant/fraction relationship is
+      pinned by its own test rather than left to drift.
+- [x] **`.id(request)` could not tell two *equal* back-to-back approvals apart** — the one case
+      where a replacement does not pass through `nil`. Replaced by the reducer's monotonic
+      `ChatFeature.State.pendingInteractionToken`, bumped by a single `present(_:)` mutator on
+      every presentation (approval / clarify / sudo / secret / the #30-recovered synthesis).
+- [x] **the floor is 88pt, chosen by measurement, not by taste.** 44 → 63pt region on the shortest
+      screen; 130 → 221pt there but the button row is clipped on a landscape SE (the floor drives
+      the card's *claim*, so a bigger one over-subscribes a genuinely tiny region). 88 is the
+      largest value that kept the button row inside the window in **every** configuration measured
+      — portrait and landscape, `.large` through AX5.
+- [x] tests: 16 measured cases (was 11). Four host the **real `ChatView`** — the composition is
+      where the defect lived and the card-alone harness could not see it — asserting a *line-count
+      floor* on the readable (un-ramped) viewport and that the composer, which sits below the
+      button row, is still fully inside the window. Red-checked all three fixes: removing
+      `.layoutPriority` → 6 failures (readable height 66 < 167); restoring the rigid chrome → 11
+      failures (composer 176pt off screen at AX5); a constant fade ramp → the ramp test fails at
+      every squeezed viewport. The old tight-region test, which passed on the degenerate 44pt
+      outcome, now asserts ≥ 3 `.callout` lines outside the ramp.
+- [x] snapshots: the card's content region is now compressible **vertically**, and
+      `componentImage()` renders at `.sizeThatFits`, i.e. UIKit's *compressed* fitting size — which
+      for a compressible view is its FLOOR. `testApprovalCard` recorded 39pt short (1170×493 vs
+      1170×611) with the region already scrolling: the blank-sliver gotcha, vertical edition. Both
+      component approval snapshots now pin an explicit height (the long-command one already did),
+      all three baselines re-recorded via the run-twice recipe, and all three are green.
+      `make snapshot` is 89 red, all of it the documented environment-wide drift (was 92 — the
+      three approval baselines are now the only ones recorded on the current runtime).
+
+### Task 3d: Third-round code-review fixes (the merged scroll traded one bug for another)
+
+Two reviewers found that Task 3c's "everything in one scroll" restructure created new problems.
+All of it **measured** in the hosted harness (windows the size of the screen area a keyboard
+leaves), by rendering the region and reading the *command block's own painted band* — the
+suite's old line-count floors were on the **viewport**, which the header and detail satisfy on
+their own.
+
+- [x] **the viewport opened on chrome, not on the command.** At 320×352 with the keyboard up the
+      region sat on its floor and the title + a two-line detail filled it: measured **12pt of the
+      command block above the ramp, i.e. ~0 lines of text**. With a 1000-char `detail` at 393×516,
+      **zero command pixels** were painted at all. Fixed by ordering the scroll **command →
+      detail → toggle** and lifting the title out of the scroll as one rigid, Dynamic-Type-clamped
+      line. Now: 3.1 command lines at the floor, ~5.6 at 393×516, and **identical with a 26- and a
+      1020-character detail**.
+- [x] **the floor is now derived, not tuned**: `commandPadding` (8) + 3 × 20.9 + the 24pt ramp
+      ≈ 95 → **96** (was 88, which yields 2.8 lines).
+- [x] **the transcript was starved to 0pt on every phone** by the card's `.layoutPriority(1)` (a
+      priority-1 child is offered everything the others do not strictly *need*, and the greedy
+      transcript's minimum is zero). `BoundedHeightLayout.claim` hands a quarter of the offer
+      back, floor-outranked: 393×516 keyboard-up goes region 227 → 149pt, transcript 0 → 50pt.
+- [x] **`.layoutPriority(1)` was applied to the clarify/secret card too.** Measured: it does *not*
+      push the composer off screen (the overflow one reviewer predicted is pre-existing and caused
+      by a long *choice list*, identical with and without priority) but it does take the
+      transcript's room (160pt → 13pt) while a rigid card can use none of it. Scoped to
+      `.approval` via `ChatFeature.State.isApprovalPending`.
+- [x] **the toggle could be flipped, scrolled away from and committed unseen.** The Approve
+      button's title now mirrors it ("Approve all"), so the state is legible on the rigid row where
+      the decision is made. Keeping the toggle itself rigid is what put the buttons off screen at
+      AX sizes, so it stays in the scroll.
+- [x] **`.id(pendingInteractionToken)` only covered the approval branch**, so a secret prompt
+      replacing another carried the typed password over. Moved to `pendingCard` at the call site.
+      `pendingInteractionToken` is now `public internal(set)` with a public `present(_:)`.
+- [x] **`ApprovalRequest: Hashable`** was vestigial with a comment describing the deleted design →
+      back to `Equatable`.
+- [x] **landscape with the keyboard up**: the plan's claim that the 88pt floor kept the buttons
+      inside the window "in every configuration measured, portrait and landscape" is **false** —
+      measured at 568×200 the composer was already 26pt off screen *before* this branch (44pt
+      after, the card being ~250pt compressed against ~100pt of fixed region). It cannot be fixed
+      by tuning: a card plus a composer does not fit. Documented as a limitation with the right
+      precedence (Deny/Approve stay inside the window; the composer, disabled while a card is up,
+      is what yields) and pinned by a compressed-fitting-size test so it cannot drift further.
+- [x] tests: 22 measured cases (was 16). New: the command's painted band on the shortest screen
+      and against an unbounded detail, the command band at AX sizes, the transcript's height, the
+      clarify card's transcript share, the Approve-title mirror, the claim arithmetic, the
+      compressed fitting size. **Red-checked**: pre-fix content order → **7 failures, every one
+      "0.0 lines of command"**; `claim = 1` → transcript 0.0 < 40; unscoped priority → clarify
+      transcript 12.7 < 100. Green after, 22/22.
+- [x] **known harness limitation** (measured identically before this branch, so not a regression):
+      on the 320×352 window at AX3+ the card over-subscribes its container and the offscreen
+      harness renders the region's content blank while reporting a viewport taller than the card is
+      painted. The command-band assertions therefore run at 393×516 for AX sizes; the composer /
+      button-row assertions still cover the short window.
+
 ### Task 4: [Final] Update documentation
 
 - [x] add a CLAUDE.md line to the approval-card conventions: the command block is a

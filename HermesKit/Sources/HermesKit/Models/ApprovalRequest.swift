@@ -11,6 +11,10 @@ import Foundation
 /// `session_id` + `choice` + `all`. Every field is therefore optional and decoded
 /// leniently: a malformed/partial payload still yields an approval prompt rather than
 /// silently degrading to `.unknown` and hanging the turn.
+/// Deliberately only `Equatable`: the card's view identity comes from the reducer's monotonic
+/// `pendingInteractionToken`, never from the request's value — two back-to-back approvals can
+/// be *equal* (an agent retrying the same command), which is exactly the pair a value-derived
+/// id cannot tell apart.
 public struct ApprovalRequest: Equatable, Sendable, Decodable {
   /// The command awaiting approval (shown verbatim in the card).
   public var command: String?

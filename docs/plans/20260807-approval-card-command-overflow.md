@@ -133,54 +133,135 @@
 - Modify: `HermesMobile/Sources/Features/Chat/ApprovalCardView.swift`
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift`
 
-- [ ] extract the command block into a private builder: `ScrollView` +
+- [x] extract the command block into a private builder: `ScrollView` +
       `fixedSize`d `Text` + `onGeometryChange` height measurement +
       `.frame(height: min(measured, cap))` (maxHeight fallback pre-measurement) +
       `.scrollBounceBehavior(.basedOnSize)`
-- [ ] add the `@ScaledMetric` cap and the overflow-only bottom fade mask
-- [ ] document on the type why the explicit measured frame exists (the `VStack`
+- [x] add the `@ScaledMetric` cap and the overflow-only bottom fade mask
+- [x] document on the type why the explicit measured frame exists (the `VStack`
       compression story) — the constraint the code can't show
-- [ ] update/extend snapshots: existing short-command card stays byte-identical;
+- [x] update/extend snapshots: existing short-command card stays byte-identical;
       add a long-command card at a pinned explicit frame (fade + first screenful);
       record new baselines via `make snapshot` run twice
-- [ ] run `make snapshot` — must pass before task 2
+- [x] run `make snapshot` — must pass before task 2
+- ⚠️ `make snapshot` has **pre-existing** unrelated failures in this environment
+      (`AddProfileSnapshotTests` ×3, `AuthSnapshotTests` ×5–9 — `drawHierarchyInKeyWindow`
+      renders drifting against baselines recorded on an older iOS 26 runtime). Verified
+      pre-existing by re-running both suites with this task's changes stashed: identical
+      failures. Every `ChatSnapshotTests` case passes, including both existing approval
+      baselines (byte-identical) and the new `testApprovalCard_longCommandScrolls`.
 
 ### Task 2: Measured layout tests for the command block
 
 **Files:**
 - Create: `HermesMobileTests/ApprovalCardLayoutTests.swift`
 
-- [ ] host the card in a `UIWindow` (follow `MarkdownTableLayoutTests` harness:
+- [x] host the card in a `UIWindow` (follow `MarkdownTableLayoutTests` harness:
       hosting controller, forced layout, `.dynamicTypeSize(.large)` pinned)
-- [ ] long command in a height-constrained host: the block's `UIScrollView` has
+- [x] long command in a height-constrained host: the block's `UIScrollView` has
       `contentSize.height > bounds.height` (full content present, scrollable) AND
       the card's `sizeThatFits` height stays ≤ the constraint (buttons never pushed
       out)
-- [ ] short command: block height equals content height (±1pt) — no dead space, no
+- [x] short command: block height equals content height (±1pt) — no dead space, no
       scroll (`contentSize.height <= bounds.height`)
-- [ ] recovered card (`command == nil`): no scroll view in the hierarchy; card
+- [x] recovered card (`command == nil`): no scroll view in the hierarchy; card
       height unchanged by this work
-- [ ] control test proving the harness can go red (e.g. assert a deliberately
+- [x] control test proving the harness can go red (e.g. assert a deliberately
       uncapped variant would exceed the constraint — mirror the prose control in
       `MarkdownTableLayoutTests`)
-- [ ] run the `HermesMobileTests` suite — must pass before task 3
+- [x] run the `HermesMobileTests` suite — must pass before task 3
+- ➕ the block is found by `ApprovalCardView.commandBlockAccessibilityID` through the
+      **accessibility** children, not `subviews`: SwiftUI only stamps the identifier onto
+      the backing `UIScrollView` once the accessibility tree is materialised (measured —
+      a plain `subviews` walk reads it back as `nil`). The absence assertion for the
+      command-less card uses a plain `subviews` walk, which is the only way to prove
+      *no* scroll view exists.
+- ➕ red-check beyond the in-suite control: with the cap removed from the production view
+      (`.frame(height: commandContentHeight)`) the suite goes red on exactly the
+      cap-dependent assertions — 5 failures across
+      `testLongCommandScrollsInsteadOfBeingTruncated` (block 1258pt, not 220pt) and
+      `testCardHeightIsBoundedByTheCapNotTheCommandLength` (card 1497pt vs 12837pt for a
+      10× command, both past the 480pt budget). Production file restored afterwards.
+- ⚠️ the **pre-existing** snapshot drift noted under Task 1 has widened on this machine:
+      `make snapshot` now reports 92/161 failures across *every* snapshot suite
+      (`ChatSnapshotTests` included, which passed during Task 1). Verified unrelated to
+      this task: `ChatSnapshotTests` alone fails 22/27 identically **with this task's new
+      file deleted and the project regenerated**, and no tracked file differs from the
+      Task-1 commit. Ruled out: simulator contention with a concurrent run (re-ran with
+      the simulator idle — same 92) and a dark-appearance simulator (reset to light —
+      same 92). The two measured suites are green: `ApprovalCardLayoutTests` 8/8 and
+      `MarkdownTableLayoutTests` 19/19. Out of scope here; Task 3's `make snapshot` gate
+      needs the baselines re-recorded on the current runtime first.
 
 ### Task 3: Verify acceptance criteria
 
-- [ ] long command + tight vertical space: command fully readable by scrolling,
-      Approve/Deny on screen, fade shown
-- [ ] short command: rendering pixel-identical to before (snapshots unchanged)
-- [ ] recovered/no-command card untouched
-- [ ] full suites green: `script -q /dev/null swift test --package-path HermesKit`
-      (unchanged, sanity), `make snapshot`, and the layout tests
+- [x] long command + tight vertical space: command fully readable by scrolling,
+      Approve/Deny on screen, fade shown — `ApprovalCardLayoutTests` 8/8 green
+      (`contentSize.height` 1258pt > `bounds.height` 220pt, card height ≤ budget) and the
+      `testApprovalCard_longCommandScrolls` baseline shows the capped first screenful, the
+      bottom fade, and the toggle + Deny/Approve row on the card
+- [x] short command: rendering pixel-identical to before (snapshots unchanged) — **this
+      criterion initially FAILED and found a real bug in Task 1's view; fixed here** (see ➕
+      below). No baseline file was re-recorded; `testApprovalCard` now renders at the
+      baseline's exact 1170×611 with a 47px / 0.007% / **1-of-255** residual, i.e. the same
+      environment noise floor as every untouched suite
+- [x] recovered/no-command card untouched — `testRecoveredCardRendersNoCommandBlock` green
+      (no scroll view in the hierarchy); `testApprovalCard_recovered` differs from its
+      baseline by 56px / 0.010% / 1-of-255, drift only
+- [x] full suites green: `script -q /dev/null swift test --package-path HermesKit`
+      (1016 tests / 57 suites, 0 failures — unchanged, no HermesKit file touched),
+      the layout suites (`ApprovalCardLayoutTests` 8/8, `MarkdownTableLayoutTests` 19/19,
+      `ComposerTextViewTests` 30/30, `MarkdownTableSnapshotTests` 6/6), and `make snapshot`
+      **with the caveat below**
+- ➕ **Real regression found and fixed: the block reported a collapsed ideal height.** A
+      `ScrollView` is fully flexible along its scroll axis, so its *own* ideal height is
+      **zero** — `.frame(maxHeight:)` can cap an ideal but cannot supply one. Task 1's block
+      therefore sized to its 16pt padding alone on any pass that ran **before**
+      `onGeometryChange` had fired, and the whole card under-reported its height by exactly
+      one command. Measured: `testApprovalCard` rendered 1170×**553** against a 1170×611
+      baseline — the card clipped 9.7pt off *each* end, cutting its own rounded border. This
+      is a one-frame squeeze of precisely the content #65 is about, and it was invisible to
+      the Task-2 layout tests because their harness forces a window layout pass (so the
+      measurement has already landed) before asserting. Proved it was ours, not drift, by
+      swapping the production `commandBlock` back to main's bare `Text`: the same test then
+      rendered 1170×611, byte-for-byte the baseline's size. Fix: a hidden, layout-only
+      `commandSizer(_:)` twin of the command text inside the block's `ZStack`, supplying the
+      ideal the `ScrollView` cannot. The twin carries **its own** `maxHeight` clamp — without
+      it the `.fixedSize` text answers every proposal with its full natural height, the
+      `ZStack` reports ~1258pt, the sibling `ScrollView` is handed all of it and the outer
+      frame merely clips: the cap defeated and nothing scrolling (measured that failure mode
+      too, en route). Both the twin and the real text come from one `commandText(_:)` builder
+      so they cannot drift apart.
+- ⚠️ `make snapshot` is **92/161 red, and 0 of those failures belong to this branch.** The
+      drift is environment-wide against baselines recorded on an older iOS 26 runtime. Ruled
+      out as ours three independent ways: (1) `git diff main...HEAD` touches only
+      `ApprovalCardView.swift`, `ApprovalCardLayoutTests.swift`, an additive
+      `ChatSnapshotTests` case, one new PNG and this plan — so `AuthSnapshotTests` (9/9 red)
+      and `SettingsSnapshotTests` (7/7 red) are byte-identical to main, inputs and baselines
+      alike, and fail on main by construction; (2) pixel-diffing every produced-vs-baseline
+      pair shows the failures are sub-perceptual (`AddProfileSnapshotTests`: 662 of 2.96M px,
+      max channel delta **3**) through to genuinely visible but unrelated
+      (`SessionSnapshotTests`: up to 4.2% of px, delta 255 — list chrome); (3) the one
+      baseline recorded on the *current* runtime, `testApprovalCard_longCommandScrolls`,
+      **passes**. Not re-recorded: CLAUDE.md reserves `make snapshot-record` for a deliberate
+      global re-render, and re-recording drifted baselines wholesale would bury real
+      regressions — exactly the one this task just caught. A deliberate global re-record on
+      the current runtime is the follow-up, and it must be its own commit.
 
 ### Task 4: [Final] Update documentation
 
-- [ ] add a CLAUDE.md line to the approval-card conventions: the command block is a
+- [x] add a CLAUDE.md line to the approval-card conventions: the command block is a
       measured, capped, scrollable region (never bare `Text` in the fixed `VStack`
-      region) with the fade + `@ScaledMetric` rationale
-- [ ] comment on issue #65 with the root cause + fix; close after device check
-- [ ] move this plan to `docs/plans/completed/`
+      region) with the fade + `@ScaledMetric` rationale — added directly after the
+      push-tap approval-recovery bullet, covering the `VStack`-compression root cause,
+      the explicit-measured-frame-over-`ViewThatFits` decision, the `@ScaledMetric` cap
+      and unconditional overflow-only fade, and the hidden `commandSizer` twin (why a
+      `ScrollView` has no ideal height of its own, and why the twin needs its own clamp)
+- [x] comment on issue #65 with the root cause + fix; close after device check —
+      posted (`#65 issuecomment-5239424122`); left **open** deliberately, the plan
+      closes it only after the device repro
+- [x] move this plan to `docs/plans/completed/` (deferred to the orchestrator's
+      end-of-run move)
 
 ## Post-Completion
 

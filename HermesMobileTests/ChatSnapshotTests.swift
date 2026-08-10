@@ -432,6 +432,32 @@ final class ChatSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  /// A command far taller than the cap (#65): the block stops growing at
+  /// `commandMaxHeight`, shows the first screenful, and fades its bottom edge to signal the
+  /// rest is reachable by scrolling — while Deny/Approve stay on the card.
+  ///
+  /// The frame is pinned in **both** axes: `componentImage()` renders at `.sizeThatFits`,
+  /// which proposes nothing along a `ScrollView`'s scroll axis, and a flexible scroll view
+  /// takes that literally (CLAUDE.md's blank-sliver gotcha, vertical edition).
+  func testApprovalCard_longCommandScrolls() {
+    let view = ApprovalCardView(
+      request: ApprovalRequest(
+        command: Self.longCommand,
+        detail: "Rebuild every target and re-run the full suite"
+      ),
+      onApprove: { _ in },
+      onDeny: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 460)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// ~20 lines — comfortably past the 220pt cap at the default content size.
+  private static let longCommand = (1...20)
+    .map { "step \($0): xcodebuild -workspace HermesMobile.xcworkspace -scheme Target\($0) test" }
+    .joined(separator: "\n")
+
   /// Push-tap approval recovery (hermes-agent #30 workaround): the synthetic request has
   /// no command — only the recovery-copy detail — so the card must lay out command-less.
   func testApprovalCard_recovered() {

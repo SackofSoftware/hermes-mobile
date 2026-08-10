@@ -322,6 +322,42 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   push-payload change** — the generic-body privacy rule stands; composes with #30 (a
   re-surfaced real event just replaces the generic card). Clarify recovery is out of scope
   (needs the real event's `request_id`).
+- **The approval card's command is a MEASURED, CAPPED, SCROLLABLE block — never a bare `Text`**
+  (#65): `ApprovalCardView` sits in `ChatView`'s outer `VStack`, the **non-scrolling** region
+  between the greedy transcript and the composer, so when that region runs short (long command,
+  keyboard up, suggestion panel showing) the `VStack` compresses the card and a plain `Text`
+  answers by **truncating with no way to reach the rest** — users had to leave and re-enter the
+  chat (keyboard down = more room) to read what they were approving. `.fixedSize` alone inverts
+  the bug and pushes Deny/Approve off screen. `commandBlock(_:)` is a vertical `ScrollView` over
+  a `.fixedSize`d `Text` (every byte in the hierarchy, reachable by scrolling) pinned to
+  `.frame(height: min(measured, cap))`, the natural height read via `onGeometryChange` into
+  `@State`: **an explicit height is not compressible**, so the card's region is deterministic,
+  the buttons always stay laid out, and a short command hugs its content exactly as before (no
+  dead space, no scroll — guarded byte-identical by the existing snapshots). Deliberately **NOT
+  `ViewThatFits(in: .vertical)`** — that picks per the *incoming proposal*, which here is
+  precisely the squeezed size that caused #65, reintroducing the ambiguity instead of removing
+  it; the measured frame is also the only version that's assertable
+  (`HermesMobileTests/ApprovalCardLayoutTests.swift`, `UIWindow`-hosted geometry, block located
+  through the **accessibility** tree — SwiftUI stamps `commandBlockAccessibilityID` on the
+  backing `UIScrollView` only once that tree materialises, a plain `subviews` walk reads `nil`).
+  The cap is `@ScaledMetric(relativeTo: .callout)` (base 220pt ≈ ten lines) so larger Dynamic
+  Type keeps a similar **line count** visible rather than ever fewer lines, and the bottom fade
+  (`bottomFadeMask(isFaded:)`, gated by the pure `overflows(contentHeight:cap:)`) is applied
+  **unconditionally** — an `if` would rebuild the `ScrollView` and discard the scroll offset —
+  fully opaque when nothing overflows. Same rationale as #59's table fade: iOS only flashes the
+  scroll indicator mid-drag, so an un-hinted scrollable command looks exactly like the clipped
+  one the issue reported. **The hidden `commandSizer(_:)` twin is load-bearing**: a `ScrollView`
+  is fully flexible along its scroll axis so its own **ideal height is zero**, and
+  `.frame(maxHeight:)` caps an ideal but cannot supply one — without the twin every layout pass
+  that runs *before* `onGeometryChange` fires (a `sizeThatFits` snapshot is exactly one such
+  pass) sizes the block to its padding alone and the card renders clipped at both ends. The twin
+  needs **its own** `maxHeight` clamp, not a duplicate of the block's: its text is `.fixedSize`
+  and answers any proposal with its full natural height, so unclamped the `ZStack` reports the
+  whole command, the sibling `ScrollView` is handed all of it and the outer frame merely clips —
+  cap defeated, nothing scrolling. Both come from one `commandText(_:)` builder so they cannot
+  drift. The recovered card (`command == nil`) renders no block at all. Selection-vs-scroll
+  gesture precedence inside the block is a **manual-check item**, not a tested contract (same
+  caveat family as #59's table cells).
 - **Session-list working glow is event-driven** via `ChatFeature.Delegate.runningChanged`
   (emitted on `message.start`/`complete`/`error` and the `session.resume` `running` flag),
   routed by `AppFeature` to `SessionListFeature` for an instant row-glow patch; the poll is only

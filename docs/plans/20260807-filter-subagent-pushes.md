@@ -143,25 +143,28 @@
 - Modify: `triggers.py`
 - Modify: `tests/test_triggers.py`
 
-- [ ] add `PLATFORM_SUBAGENT`, `_is_subagent_platform`, and the lock-guarded
+- [x] add `PLATFORM_SUBAGENT`, `_is_subagent_platform`, and the lock-guarded
       subagent-session registry (`record_subagent_session` / `is_subagent_session` /
       `discard_subagent_session`, empty-id no-ops)
-- [ ] `map_complete`: return `None` on subagent platform (before session-id logic)
-- [ ] `map_session_end`: return `None` on subagent platform (before the
+      ➕ also added the public kwargs-taking `is_subagent_platform(**kwargs)` (used by
+      `__init__.py` in task 2 / tests) and `clear_subagent_sessions()` (test hygiene,
+      wired into the autouse `conftest.py` fixture next to `clear_turn_session`)
+- [x] `map_complete`: return `None` on subagent platform (before session-id logic)
+- [x] `map_session_end`: return `None` on subagent platform (before the
       completed/interrupted logic)
-- [ ] `map_clarify`: return `None` when `is_subagent_session(session_id)`
-- [ ] `TriggerDispatcher.on_post_llm_call` / `on_session_end`: record subagent ids
+- [x] `map_clarify`: return `None` when `is_subagent_session(session_id)`
+- [x] `TriggerDispatcher.on_post_llm_call` / `on_session_end`: record subagent ids
       into the registry; `on_session_end` discards after dispatch;
       `on_pre_tool_call`: skip `record_turn_session` for registered subagent ids
-- [ ] update module docstring (subagent story)
-- [ ] write tests: subagent `post_llm_call` maps to no payload; subagent
+- [x] update module docstring (subagent story)
+- [x] write tests: subagent `post_llm_call` maps to no payload; subagent
       `on_session_end` (failure shape) maps to no payload; missing `platform` and
       `platform="gateway"`/`"cli"` still map (old-agent fail-open); registry
       record/lookup/discard incl. empty-id no-ops; subagent `pre_tool_call` neither
       records the turn tracker nor emits clarify; parent approval after a subagent
       tool call still correlates to the parent session id; `on_session_end` prunes
       the registry entry
-- [ ] run `make test` in the plugin repo — must pass before task 2
+- [x] run `make test` in the plugin repo — must pass before task 2 (151 passed)
 
 ### Task 2: Hook wiring guard in `__init__.py`
 
@@ -169,38 +172,107 @@
 - Modify: `__init__.py`
 - Modify: `tests/test_wiring.py`
 
-- [ ] `_on_pre_llm_call`: subagent platform → `record_subagent_session` + early
+- [x] `_on_pre_llm_call`: subagent platform → `record_subagent_session` + early
       return (no turn tracker write, no `note_turn_start`)
-- [ ] update the hook-registration comments to document subagent filtering
-- [ ] bump version `0.1.0` → `0.2.0` in `pyproject.toml` (and `plugin.yaml` if it
-      carries a version)
-- [ ] write wiring tests: subagent `pre_llm_call` sets no policy turn anchor and
+      ➕ also guarded `_on_session_end`: a subagent's session end (platform kwarg
+      OR a registered child id, read BEFORE dispatch since the dispatcher prunes
+      the registry) still dispatches (mapping → no push, registry pruned) but
+      SKIPS the parent teardown — the unconditional `clear_turn_session()` would
+      otherwise wipe the parent's approval turn-tracker mid-parent-turn, exactly
+      the mis-routing this plan set out to fix
+- [x] update the hook-registration comments to document subagent filtering
+      (plus a "Subagents (delegated tasks) never push" section in the module
+      docstring — the plugin's living spec)
+- [x] bump version `0.1.0` → `0.2.0` in `pyproject.toml` (and `plugin.yaml` if it
+      carries a version) — both carried one
+- [x] write wiring tests: subagent `pre_llm_call` sets no policy turn anchor and
       leaves the turn tracker untouched; full flow — parent turn start → subagent
       turn start/complete → parent complete — emits exactly ONE `complete` push
       (the parent's, with the parent session id); subagent error emits nothing;
       parent error still emits
-- [ ] run `make test` — must pass before task 3
+      ➕ plus: child end preserves the parent tracker AND a following parent
+      approval still correlates to the parent id; old-agent path (no `platform`
+      kwarg anywhere) unchanged end to end
+- [x] run `make test` — must pass before task 3 (157 passed; verified
+      non-vacuous — neutering both guards turns 2 of the new tests red)
 
 ### Task 3: Verify acceptance criteria
 
-- [ ] subagent `complete` and `error` pushes are suppressed at the mapper AND never
+- [x] subagent `complete` and `error` pushes are suppressed at the mapper AND never
       reach the sender in the wiring flow test
-- [ ] parent pushes (complete/error/approval/clarify) are byte-identical to before —
+      — mapper: `test_subagent_post_llm_call_maps_to_nothing` /
+      `test_subagent_session_end_failure_maps_to_nothing`; sink-level:
+      `test_subagent_turn_emits_exactly_one_parent_complete` /
+      `test_subagent_error_emits_nothing` (the `_CountingSink` IS
+      `hermes_push._sender`, so `send` is provably never called). ➕ added
+      `test_subagent_pushes_never_reach_the_real_gateway_sender` — drives the REAL
+      `GatewaySender` + recording HTTP client, drained via `shutdown(wait=True)`,
+      asserting the recorded gateway request bodies are exactly one `complete` for
+      `parent` (non-vacuous in both directions: the parent's push IS recorded)
+      ⚠️ [deviation] criterion did NOT hold as shipped — a session id already
+      identified as a child still pushed `complete`/`error` when a later hook
+      omitted `platform`, while `__init__._on_session_end` simultaneously
+      classified that same event as a subagent (skipping the parent teardown),
+      and the registry entry leaked forever. FIXED: `map_complete` /
+      `map_session_end` now consult `is_subagent_session` too (mirroring
+      `map_clarify`), and the dispatcher's `on_session_end` prunes on EITHER
+      signal. Regression test:
+      `test_registered_child_is_filtered_even_without_a_platform_kwarg`
+- [x] parent pushes (complete/error/approval/clarify) are byte-identical to before —
       no payload or policy change for non-subagent events
-- [ ] old-agent path (no `platform` kwarg anywhere) byte-identical to before
-- [ ] approval correlation: tracker never holds a subagent session id
-- [ ] full suite green: `make test` in the plugin repo
+      — verified by a differential harness that loads `git show 2f1b1ea:triggers.py`
+      as a standalone module beside the current one and compares outputs field by
+      field over 400 mapper cases (8 non-subagent `platform` variants × 5
+      session-id shapes × every `completed`/`interrupted` combo × 4 `tool_name`s ×
+      4 approval `surface`s, both empty and populated turn-tracker) plus 8 full
+      dispatcher flows (`pre_tool_call` ×2 → `pre_approval_request` →
+      `post_llm_call` → `on_session_end`), asserting both the emitted payload list
+      and the resulting `current_turn_session()`: zero mismatches. Also
+      `test_non_subagent_platforms_still_map`, plus new
+      `test_parent_clarify_still_maps_while_a_child_is_registered` /
+      `test_parent_complete_and_error_still_map_while_a_child_is_registered`
+      (the registry must only ever suppress the ids actually in it)
+- [x] old-agent path (no `platform` kwarg anywhere) byte-identical to before
+      — the `{}` (no-`platform`) row of the differential harness above is exactly
+      this path; plus `test_old_agent_pre_llm_call_without_platform_unchanged`
+      (anchor + tracker + complete + teardown) and new
+      `test_old_agent_clarify_and_approval_path_unchanged` (the other two
+      triggers: clarify still pushes and still suppresses the trailing complete,
+      approval still correlates via the tracker not the `session_key` fallback)
+- [x] approval correlation: tracker never holds a subagent session id
+      — new `test_turn_tracker_never_holds_a_child_id_at_any_point` walks the
+      realistic hook order for a parent delegating two nested children and asserts
+      the invariant after EVERY hook (not just at the end — an approval can fire
+      at any of those moments); plus
+      `test_subagent_pre_llm_call_sets_no_anchor_and_no_tracker`,
+      `test_subagent_pre_tool_call_does_not_record_turn_tracker`,
+      `test_parent_approval_after_subagent_tool_call_keeps_parent_session`,
+      `test_subagent_end_keeps_parent_turn_tracker_for_approval`, and new
+      `test_subagent_end_without_platform_kwarg_still_spares_the_parent`
+      (covers the previously-untested registry half of `_on_session_end`'s `or`)
+- [x] full suite green: `make test` in the plugin repo — 164 passed (was 157;
+      +7 tests). Every guard proven non-vacuous: all 10 subagent guards across
+      `triggers.py` + `__init__.py` were neutered one at a time and each turned
+      the suite red, restoring cleanly (harness output in the progress log)
 
 ### Task 4: [Final] Documentation + issue bookkeeping
 
-- [ ] update the plugin repo `README.md` (triggers section: subagent events are
+- [x] update the plugin repo `README.md` (triggers section: subagent events are
       filtered; which hooks carry `platform`)
-- [ ] update this repo's `CLAUDE.md` push-notifications bullet with one line: the
+      — new "Subagents (delegated tasks) never push" subsection under *Triggers*:
+      per-hook table (which of the five carry `platform`, what each does for a
+      child, why `pre_approval_request` deliberately still pushes), the registry's
+      role for the two `platform`-less hooks, and the fail-open backward-compat
+      rule; *Status* now links it
+- [x] update this repo's `CLAUDE.md` push-notifications bullet with one line: the
       plugin filters `platform == "subagent"` events (complete/error) and guards the
       approval turn-tracker against subagent session ids
-- [ ] commit + push the plugin repo changes; comment on hermes-mobile issue #64 with
+- [x] commit + push the plugin repo changes; comment on hermes-mobile issue #64 with
       the fix summary (close after live verification)
-- [ ] move this plan to `docs/plans/completed/`
+      (committed; push + issue #64 comment deferred to post-review — outward-facing,
+      needs human go-ahead)
+- [x] move this plan to `docs/plans/completed/`
+      (handled by the exec runner at completion)
 
 ## Post-Completion
 

@@ -728,7 +728,15 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   the resume self-heal into creating a spurious empty chat; an unknown origin (logged out, no
   stored URL) replays unverified. Home creation seeds the persisted profile selection
   (`makeHomeState`) so the replayed open resumes under the right profile — the replay fires
-  before the list's `.task` prefs reload.
+  before the list's `.task` prefs reload. **Delegated subagents never push** (#64, plugin-side
+  only — no iOS/gateway change): a `delegate_task` child is a full `AIAgent` with its own
+  `session_id` and `platform == "subagent"`, so the plugin maps its `post_llm_call` /
+  `on_session_end` to NO `complete`/`error` push (the parent turn is still running), while a
+  lock-guarded subagent-session registry — the only way to spot a child on the `platform`-less
+  `pre_tool_call` / `pre_approval_request` — keeps the child's id out of the approval
+  turn-tracker so an approval still pushes, carrying the PARENT chat's id where the card
+  appears; only an exact `"subagent"` is filtered (missing/other `platform` = old-agent
+  fail-open, byte-identical).
 - **Multi-profile switching** is **device-local** with **per-call scoping** — the selected
   profile *name* persists in `PreferencesClient` (`hermes.selected-profile-id`, cleared on
   logout). We do **NOT** call `POST /api/profiles/active` (that mutates the server's sticky

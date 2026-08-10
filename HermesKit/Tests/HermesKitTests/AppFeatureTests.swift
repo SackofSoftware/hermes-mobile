@@ -2812,6 +2812,37 @@ struct AppFeatureTests {
     await store.send(.home(.onDisappear))
   }
 
+  /// …but a foreground landing while a probe is ALREADY in flight must not fan out a second
+  /// one. `AppFeature` forwards `.active` unconditionally whenever the slot exists, so the
+  /// child's `isRetrying` guard is the only thing standing between a VPN-flipping user and a
+  /// pile of parallel probes — assert it holds through the composed path, not just in
+  /// isolation (`ConnectionFailedFeatureTests.retryIsGuardedWhileOneIsInFlight`).
+  @Test func foregroundWhileRetryingDoesNotDoubleProbe() async {
+    let probes = LockIsolated(0)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: connection, reason: .unreachable, isRetrying: true
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        probes.withValue { $0 += 1 }
+        return []
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.scenePhaseChanged(.active))
+    // Forwarded, but swallowed by the guard: no state change, no probe, no `.retryResult`.
+    await store.receive(\.connectionFailed.sceneBecameActive)
+    await store.finish()
+    #expect(store.state.connectionFailed?.isRetrying == true)
+    #expect(probes.value == 0)
+  }
+
   /// Existing-behavior guard: with no retry screen up, `.active` must not emit a stray
   /// `.connectionFailed` action into a nil child.
   @Test func foregroundWithoutRetryScreenEmitsNoRetry() async {

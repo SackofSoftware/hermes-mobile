@@ -241,13 +241,48 @@ isolation with `-only-testing:HermesMobileTests/ConnectionFailedSnapshotTests`.
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] transport failure at launch shows the screen with URL + reason + Retry + Log Out
-- [ ] 401 at launch still lands on onboarding exactly as before
-- [ ] retry success lands in the session list; a stashed push tap still replays
-- [ ] foregrounding the app auto-retries; no double-probe while one is in flight
-- [ ] logout from the screen leaves no keychain session, prefs, or snapshot cache
-- [ ] run full suite: `script -q /dev/null swift test --package-path HermesKit` and
-      `make snapshot`
+- [x] transport failure at launch shows the screen with URL + reason + Retry + Log Out —
+      routing: `AppFeatureTests.autoConnectUnreachableRaisesRetryScreen` /
+      `.autoConnectOfflineRaisesRetryScreenWithOfflineReason` (slot populated with the
+      stored `ServerConnection`, `onboarding` left untouched, so no password re-entry);
+      URL + reason copy: `ConnectionFailedFeatureTests.displayStringsNameTheServerAndTheReason`;
+      the transport classification that feeds the reason:
+      `HermesRESTClientTests.offlineURLErrorCodesMapToOffline` + siblings; Retry/Log Out
+      affordances + spinner state: the three `ConnectionFailedSnapshotTests` baselines.
+      (`AppView`'s branch ordering is code-verified — `AppView` has no snapshot coverage
+      for any of its branches in this project.)
+- [x] 401 at launch still lands on onboarding exactly as before —
+      `AppFeatureTests.autoLoginWithInvalidTokenFallsBackToPrefilledOnboarding` (asserts
+      `connectionFailed == nil` alongside the unchanged prefilled onboarding) and
+      `.autoLoginWithDeadCookieSessionFallsBackToOnboarding`;
+      `.autoConnectServerErrorStillFallsBackToOnboarding` pins the same for non-transport,
+      non-auth errors
+- [x] retry success lands in the session list; a stashed push tap still replays —
+      `AppFeatureTests.retrySuccessBuildsHomeAndReplaysStashedTap`
+      (home built + `.pushTapped` replayed + slot/path land on the pushed session)
+- [x] foregrounding the app auto-retries; no double-probe while one is in flight —
+      `AppFeatureTests.foregroundAutoRetriesOnTheConnectionFailedScreen` (probe → connected)
+      and `.foregroundWithoutRetryScreenEmitsNoRetry`; the in-flight guard by
+      `ConnectionFailedFeatureTests.retryIsGuardedWhileOneIsInFlight` plus the **new**
+      `AppFeatureTests.foregroundWhileRetryingDoesNotDoubleProbe`, added here because
+      nothing covered the guard through the composed `.scenePhaseChanged(.active)` path
+- [x] logout from the screen leaves no keychain session, prefs, or snapshot cache —
+      `AppFeatureTests.logoutFromRetryScreenClearsEverythingAndShowsFreshOnboarding`
+      (keychain delete, server URL, pins, seen counts, profile, grouping reset, snapshot
+      wipe, badge 0, push unregister with the stored token, fresh onboarding)
+- [x] run full suite: `script -q /dev/null swift test --package-path HermesKit` — **1042
+      tests in 58 suites passed**; `make snapshot` → `ConnectionFailedSnapshotTests` green
+      **3/3** (verified in isolation with
+      `-only-testing:HermesMobileTests/ConnectionFailedSnapshotTests` → `** TEST SUCCEEDED **`).
+      The full `HermesMobileTests` run still reports the Task-4 pre-existing failures (see
+      the ⚠️ note above) — now spread across `ComposerSnapshotTests`,
+      `ConnectionSnapshotTests`, `ContextUsageSnapshotTests`, `HydrationSnapshotTests`,
+      `SessionSnapshotTests`, `SettingsSnapshotTests`, `ThinkingIndicatorSnapshotTests`,
+      none of which this branch touches. The single **non**-snapshot casualty
+      (`ComposerTextViewTests.testAPasteThatLoadsNothingStillReportsAnEmptyBatch`) passes
+      in isolation (29/29 for that class), confirming full-run environment contention
+      rather than a regression. Re-recording the whole suite stays out of scope
+      (CLAUDE.md forbids `make snapshot-record` for a targeted change).
 
 ### Task 6: [Final] Update documentation
 

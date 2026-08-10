@@ -432,4 +432,110 @@ struct ConnectionFeatureTests {
     #expect(store.state.serverURL == "http://typo:9119")
     #expect(store.state.status == .unreachable)
   }
+
+  /// The screen went away mid-login (the parent restored the stashed retry screen, or logged
+  /// out). This reducer is permanently scoped — nothing cancels its effects implicitly — so
+  /// the cancel has to reach the connect round-trip: no delegate, and above all NOTHING
+  /// persisted. A late success would otherwise write credentials the user abandoned and
+  /// navigate home over the screen they went back to.
+  @Test func cancelInFlightRequestsStopsAConnectBeforeItPersistsAnything() async {
+    let clock = TestClock()
+    let keychain = KeychainClient.inMemory()
+    let preferences = PreferencesClient.inMemory()
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac.tailnet:9119",
+        token: "secret",
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        try await clock.sleep(for: .seconds(1))
+        return []
+      }
+      $0.keychain = keychain
+      $0.preferences = preferences
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.send(.cancelInFlightRequests) { $0.status = .idle }
+    // The round-trip resolves after the user left: no action lands (an unexpected one fails
+    // the test) and nothing reaches the keychain or the prefs.
+    await clock.advance(by: .seconds(1))
+    await store.finish()
+    #expect(keychain.loadToken() == nil)
+    #expect(preferences.loadServerURL() == nil)
+  }
+
+  /// Same for the password path, where the stakes are higher: activation FLUSHES the shared
+  /// cookie jar, so an abandoned login must not touch it — the connection the user went back
+  /// to authenticates out of that jar.
+  @Test func cancelInFlightRequestsStopsAPasswordLoginBeforeItTouchesTheCookieJar() async {
+    let clock = TestClock()
+    let activated = LockIsolated(0)
+    let saved = LockIsolated(0)
+    let cookieSession = CookieSession(
+      cookies: [SerializedCookie(name: "hermes_session_at", value: "new", domain: "mac", path: "/")],
+      username: "alice", provider: "basic"
+    )
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac:9119",
+        username: "alice",
+        password: "pw",
+        method: .password,
+        capability: .passwordAvailable(provider: "basic", displayName: "Password"),
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in
+        try await clock.sleep(for: .seconds(1))
+        return cookieSession
+      }
+      $0.keychain.activateCookieSession = { @Sendable _ in activated.withValue { $0 += 1 } }
+      $0.keychain.saveSession = { @Sendable _ in saved.withValue { $0 += 1 } }
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.send(.cancelInFlightRequests) { $0.status = .idle }
+    await clock.advance(by: .seconds(1))
+    await store.finish()
+    #expect(activated.value == 0)
+    #expect(saved.value == 0)
+  }
+
+  /// A second Connect tap supersedes the first rather than fanning out into two logins (the
+  /// same `cancelInFlight` that makes the parent's cancel possible).
+  @Test func secondConnectTapSupersedesTheFirst() async {
+    let clock = TestClock()
+    let calls = LockIsolated(0)
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac.tailnet:9119",
+        token: "secret",
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        calls.withValue { $0 += 1 }
+        try await clock.sleep(for: .seconds(1))
+        return []
+      }
+      $0.keychain = KeychainClient.inMemory()
+      $0.preferences = PreferencesClient.inMemory()
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.send(.connectTapped)
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.tokenValidationResponse.success)
+    await store.receive(\.delegate.connected)
+    #expect(calls.value == 2) // both started, but only the survivor reported
+  }
 }

@@ -82,6 +82,12 @@ a `testValue`/`.inMemory()` variant):
   `.token`, or a `.cookie(CookieSession)` carrying the rotating session cookies + username +
   provider. `saveSession`/`loadSession` round-trip the whole session (cookies rehydrate into
   `HTTPCookieStorage` on launch); the legacy `…Token` helpers remain for token-mode.
+  `deleteSession` also flushes `HTTPCookieStorage.shared`, and `flushSharedCookies` exposes that
+  flush on its own so `AppFeature.fullLogout` can repeat it once the in-flight REST effects have
+  been cancelled — `URLSession` writes a reply's `Set-Cookie` into the shared jar itself, so a
+  response landing after the first flush would otherwise repopulate live credentials post-logout.
+  `captureSharedCookies` is a raw snapshot of that jar (not "the session's cookies" — consumers
+  re-apply scoping; see `cookieHeader(_:for:)`).
 - **`ChatSnapshotClient`** — a **non-authoritative** instant-paint cache + turn-start anchor,
   backed by GRDB (the store uses a private `DatabaseQueue` directly,
   not a shared `defaultDatabase`) and kept entirely behind the client boundary (read
@@ -179,7 +185,21 @@ onboarding states nothing. The screen's own way *out* without a logout is
 connection screen" row (`ConnectionFeature.State.canReturnToConnectionFailed`) that hands it
 back, so an exploratory tap can't strand a password-mode user in front of an empty password
 field with the once-per-process launch probe already spent. A credentials rejection doesn't
-stash (there is nothing useful to go back to), and a login or a logout drops the stash. The
+stash (there is nothing useful to go back to), and a login or a logout drops the stash.
+Restoring it also **cancels onboarding** (`ConnectionFeature` is a permanently scoped `Scope`,
+so its connect effect is `.cancellable` and both the restore and `fullLogout` send
+`.cancelInFlightRequests` — a late login must not persist abandoned credentials or navigate
+home over the restored screen) and, in cookie mode, **re-activates the stashed session's own
+cookies**, since a password attempt on the way past flushed the shared jar the transports read.
+The re-activation is `.concatenate`d after that cancellation rather than done in the reducer body,
+so the abandoned login (which checks `Task.isCancelled` right before its own jar write) cannot
+overwrite it.
+Those cookies are a snapshot of the **live** jar taken at stash time
+(`KeychainClient.captureSharedCookies`), not the Keychain's login vintage — the server rotates
+cookies transparently and nothing persists them, so restoring the stored copy would downgrade a
+refreshed session; an empty snapshot keeps the stored cookies (the refresh only ever makes a
+session fresher).
+The
 `AgentSetupGuideView`
 connection-help sheet is reached from the screen **directly** (a tertiary link, view-local
 `@State` as on the login screen), since these failures are the ones the guide explains. The
@@ -270,7 +290,17 @@ ever transit the gateway; real message content is fetched in-app over the privat
 
 **Protocol.** The app registers via `POST /api/plugins/hermes-push/register`
 `{device_token, apns_env, app_version}` (auth as for any `/api/` route) and tears down via
-`/unregister`. **The app never signs pushes**, so registration returns nothing the app must
+`/unregister` — which, uniquely, authenticates from the **connection's own cookies** (an
+explicit `Cookie` header, `httpShouldHandleCookies = false`) because every caller is a logout
+and logout has already flushed the shared jar before the effect runs; without it the teardown
+POST is unauthenticated, 401s, and the device keeps receiving the previous user's pushes. That
+header is built by `cookieHeader(_:for:)`, which re-applies the domain/path/`Secure`/expiry
+rules the explicit header switches off — the snapshot it is built from is the whole shared jar,
+so serialising it verbatim would leak an out-of-scope cookie to this endpoint. The call is
+best-effort and its failure is **reported** on the post-logout onboarding screen
+(`AppFeature.pushNotUnregisteredMessage`), never swallowed: nothing on the device can stop an
+agent it could not reach from pushing to it.
+**The app never signs pushes**, so registration returns nothing the app must
 persist (no secret). A `404` from the register route means the plugin isn't installed → the app
 sets `pushAvailable = false` and hides the toggle (same capability-gating as attach/profiles).
 The plugin POSTs `{device_token, apns_env, type, session_id, title, body, thread_id, hmac}` to

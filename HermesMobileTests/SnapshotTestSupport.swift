@@ -41,8 +41,13 @@ class SnapshotTestCase: XCTestCase {
   /// `precision` (the fraction of pixels that must clear that perceptual bar) defaults to a
   /// strict `1`. Lower it ONLY for a view containing a genuinely non-deterministic region —
   /// an indeterminate `ProgressView` spinner is captured at whatever rotation the render
-  /// server happens to be at — and keep the allowance just big enough for that region, so the
-  /// rest of the screen is still asserted pixel-for-pixel.
+  /// server happens to be at. Measure the drift before picking a number, and record the
+  /// measurement at the call site: with `perceptualPrecision < 1` the check is a float area
+  /// average over millions of pixels, whose noise floor sits well above a small real drift, so
+  /// the value you end up needing says more about the estimator than about the view (see
+  /// `ConnectionFailedSnapshotTests.testConnectionFailedView_retrying`). A budget is fungible
+  /// — it can absorb a small regression ANYWHERE on the screen, not only in the region it was
+  /// sized for — so pair it with a structural assertion of whatever it could hide.
   func deviceImage<V: SwiftUI.View>(precision: Float = 1) -> Snapshotting<V, UIImage> {
     .image(
       drawHierarchyInKeyWindow: true,

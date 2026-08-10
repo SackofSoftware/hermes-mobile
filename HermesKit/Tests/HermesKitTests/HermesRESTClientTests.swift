@@ -600,6 +600,124 @@ struct HermesRESTClientTests {
     #expect(json == ["device_token": "abc123"])
   }
 
+  /// Unregister is the ONE call that runs **after** logout has flushed the shared cookie jar
+  /// (`deleteSession` clears it, then the effect fires), so in cookie mode it cannot rely on the
+  /// jar: without an explicit `Cookie` header the POST goes out unauthenticated, the server
+  /// 401s, and the device stays registered — still receiving the previous user's pushes.
+  @Test func unregisterPushSendsGatedCookiesExplicitly() async throws {
+    MockURLProtocol.set(status: 200)
+    let gated = ServerConnection(
+      baseURL: baseURL,
+      auth: .cookie(CookieSession(
+        cookies: [
+          SerializedCookie(name: "hermes_session_at", value: "ACCESS", domain: "test.local", path: "/"),
+          SerializedCookie(name: "hermes_session_rt", value: "REFRESH", domain: "test.local", path: "/"),
+        ],
+        username: "alice",
+        provider: "basic"
+      ))
+    )
+    try await makeClient().unregisterPush(gated, "abc123")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.value(forHTTPHeaderField: "Cookie") == "hermes_session_at=ACCESS; hermes_session_rt=REFRESH")
+    // The jar must not be allowed to overwrite the header we just set (nor to swallow the
+    // reply's `Set-Cookie` back into a session that is being torn down).
+    #expect(req.httpShouldHandleCookies == false)
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == nil)
+  }
+
+  /// …but the snapshot the logout hands over is the WHOLE shared jar, and an explicit `Cookie`
+  /// header turns off every check `URLSession` would have made on the way out. Only the cookies
+  /// actually scoped to the unregister URL may be serialized: a cookie for another host in the
+  /// jar (a WebView, an earlier server, anything) would otherwise be disclosed to this endpoint.
+  @Test func unregisterPushNeverSendsAForeignDomainCookie() async throws {
+    MockURLProtocol.set(status: 200)
+    let gated = ServerConnection(
+      baseURL: baseURL, // test.local
+      auth: .cookie(CookieSession(
+        cookies: [
+          SerializedCookie(name: "hermes_session_at", value: "ACCESS", domain: "test.local", path: "/"),
+          SerializedCookie(name: "sso", value: "SECRET", domain: "accounts.example.com", path: "/"),
+          // A near-miss suffix must not match either — `.local` scoping is not string-suffix.
+          SerializedCookie(name: "nearmiss", value: "NOPE", domain: "eviltest.local", path: "/"),
+        ],
+        username: "alice",
+        provider: "basic"
+      ))
+    )
+    try await makeClient().unregisterPush(gated, "abc123")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.value(forHTTPHeaderField: "Cookie") == "hermes_session_at=ACCESS")
+  }
+
+  /// The other three checks the explicit header switches off, all applied at the same place:
+  /// a cookie scoped to a different path, one that has already expired, and a `Secure` one on a
+  /// plain-http request are each left out. (`/api/plugins/hermes-push/unregister` over http.)
+  @Test func unregisterPushHonoursPathSecureAndExpiryScoping() async throws {
+    MockURLProtocol.set(status: 200)
+    let past = Date().timeIntervalSince1970 - 60
+    let gated = ServerConnection(
+      baseURL: baseURL,
+      auth: .cookie(CookieSession(
+        cookies: [
+          SerializedCookie(name: "root", value: "KEEP", domain: "test.local", path: "/"),
+          SerializedCookie(name: "scoped", value: "KEEP2", domain: "test.local", path: "/api"),
+          SerializedCookie(name: "elsewhere", value: "DROP", domain: "test.local", path: "/admin"),
+          SerializedCookie(name: "expired", value: "DROP", domain: "test.local", path: "/", expiresAt: past),
+          SerializedCookie(name: "tls", value: "DROP", domain: "test.local", path: "/", isSecure: true),
+        ],
+        username: "alice",
+        provider: "basic"
+      ))
+    )
+    try await makeClient().unregisterPush(gated, "abc123")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.value(forHTTPHeaderField: "Cookie") == "root=KEEP; scoped=KEEP2")
+  }
+
+  /// And when nothing in the snapshot is in scope there is no header at all — an empty `Cookie`
+  /// header would be a different request from the one the jar would have made.
+  @Test func unregisterPushSendsNoHeaderWhenNoCookieIsInScope() async throws {
+    MockURLProtocol.set(status: 200)
+    let gated = ServerConnection(
+      baseURL: baseURL,
+      auth: .cookie(CookieSession(
+        cookies: [SerializedCookie(name: "sso", value: "SECRET", domain: "example.com", path: "/")],
+        username: "alice",
+        provider: "basic"
+      ))
+    )
+    try await makeClient().unregisterPush(gated, "abc123")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.value(forHTTPHeaderField: "Cookie") == nil)
+  }
+
+  /// A cookie stored with an explicit `Domain` (Foundation keeps the leading dot) still reaches
+  /// its subdomains — the narrowing must mirror `URLSession`, not simply be stricter than it.
+  @Test func cookieHeaderKeepsDomainCookiesForSubdomains() {
+    let cookies = [
+      SerializedCookie(name: "wide", value: "OK", domain: ".test.local", path: "/"),
+    ]
+    let url = URL(string: "http://agent.test.local:9119/api/plugins/hermes-push/unregister")!
+    #expect(cookieHeader(cookies, for: url) == "wide=OK")
+    // …but never to a lookalike that merely ends with the same letters.
+    #expect(cookieHeader(cookies, for: URL(string: "http://nottest.local/x")!) == nil)
+  }
+
+  /// Token mode is untouched: no cookies, so no header and the default jar handling.
+  @Test func unregisterPushSendsNoCookieHeaderInTokenMode() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().unregisterPush(connection, "abc123")
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.value(forHTTPHeaderField: "Cookie") == nil)
+    #expect(req.httpShouldHandleCookies == true)
+  }
+
   @Test func unregisterPushNotFoundSurfacesCapabilityGate() async throws {
     MockURLProtocol.set(status: 404)
     await #expect(throws: RESTError.notFound) {

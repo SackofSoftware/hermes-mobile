@@ -245,6 +245,30 @@ public struct ConnectionFailedFeature {
   /// The retry probe. Cancellable so a foreground can supersede a stalled one — `URLSession`'s
   /// default request timeout is 60s, and without this a probe that never resolves would leave
   /// `isRetrying` latched and both the spinner and the guard stuck forever.
+  ///
+  /// **Cancelling it cannot cost a cookie-mode user their session**, even though a probe *is*
+  /// the kind of gated request that can trigger the agent's transparent server-side refresh
+  /// (expired `hermes_session_at` + live `hermes_session_rt` → the gate rotates and replays the
+  /// new pair in `Set-Cookie`). Two measured facts, both needed:
+  ///
+  /// 1. A cancelled `data(for:)` really does drop that `Set-Cookie` — measured against a local
+  ///    server that emits the headers immediately and stalls the body: the jar is still empty
+  ///    1.4s after the header bytes are on the wire, so a buffered data task stores cookies at
+  ///    *completion*, not at header receipt, and cancelling loses the rotation outright.
+  ///    (`bytes(for:)` differs — it stores at header receipt — but no transport here uses it.)
+  /// 2. That loss is harmless, because the rotation it discards is not destructive. A mobile
+  ///    cookie session can only be minted by `POST /auth/password-login`, which 404s any
+  ///    provider without `supports_password` — and the agent's ONE such provider is
+  ///    `BasicAuthProvider`, whose sessions are stateless HMAC-signed blobs: `refresh_session`
+  ///    just checks the signature/`exp` and mints a fresh pair, `revoke_session` is a documented
+  ///    no-op, and there is no server-side rotation record to consume. Verified against the real
+  ///    provider: the ORIGINAL refresh token still refreshes after repeated rotations and after
+  ///    a revoke, for its full 30-day `exp`. So a discarded rotation just means the next request
+  ///    refreshes again.
+  ///
+  /// The rotating, single-use, reuse-detected refresh token — where dropping the successor
+  /// really would revoke the family — belongs to the Nous Portal (`nous`) provider, which is
+  /// OAuth-only (`supports_password = False`) and therefore unreachable from this app.
   private enum CancelID { case probe }
 
   @Dependency(\.hermesREST) var rest

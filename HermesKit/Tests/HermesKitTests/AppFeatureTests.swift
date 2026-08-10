@@ -1,5 +1,6 @@
 import ComposableArchitecture
 import Foundation
+import Security
 import Testing
 
 @testable import HermesKit
@@ -1157,14 +1158,17 @@ struct AppFeatureTests {
 
   @Test func disconnectUnregistersPushAndClearsPushState() async {
     let unregistered = LockIsolated<String?>(nil)
-    let tokenCleared = LockIsolated(false)
+    let preferences = PreferencesClient.inMemory()
+    preferences.savePushDeviceToken("cafef00d")
     let store = TestStore(
       initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
     ) {
       AppFeature()
     } withDependencies: {
-      $0.preferences.loadPushDeviceToken = { "cafef00d" }
-      $0.preferences.clearPushDeviceToken = { @Sendable in tokenCleared.setValue(true) }
+      $0.preferences = preferences
+      $0.chatSnapshot = .inMemory()
+      $0.keychain = KeychainClient.inMemory()
+      $0.push = PushClient.inMemory().client
       $0.hermesREST.unregisterPush = { @Sendable _, token in unregistered.setValue(token) }
     }
     store.exhaustivity = .off
@@ -1174,7 +1178,309 @@ struct AppFeatureTests {
     }
     await store.finish()
     #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
-    #expect(tokenCleared.value) // device-token pref wiped
+    #expect(preferences.loadPushDeviceToken() == nil) // device-token pref wiped
+  }
+
+  /// Settings' "Clear token" runs the SAME recipe as the retry screen's Log out — it just
+  /// delegates now, instead of keeping a partial copy of the recipe that skipped the Keychain
+  /// compensation and flushed the cookie jar too early.
+  @Test func disconnectRunsTheFullLogoutRecipe() async {
+    let sessionDeleted = LockIsolated(false)
+    let snapshotsWiped = LockIsolated(false)
+    let preferences = PreferencesClient.inMemory()
+    preferences.saveServerURL("http://mac.tailnet:9119")
+    preferences.savePinnedIDs(["s1"])
+    preferences.saveSeenCounts(["s1": 4])
+    preferences.saveSelectedProfileID("staging")
+    preferences.saveGroupingMode(.chronological)
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.deleteSession = { @Sendable in sessionDeleted.setValue(true) }
+      $0.chatSnapshot.wipeAll = { @Sendable in snapshotsWiped.setValue(true) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.finish()
+    #expect(sessionDeleted.value)
+    #expect(snapshotsWiped.value)
+    #expect(preferences.loadServerURL() == nil)
+    #expect(preferences.loadPinnedIDs().isEmpty)
+    #expect(preferences.loadSeenCounts().isEmpty)
+    #expect(preferences.loadSelectedProfileID() == nil)
+    #expect(preferences.loadGroupingMode() == .default)
+    #expect(store.state.rootScreen == .onboarding)
+  }
+
+  /// The ordering finding: Settings used to delete the Keychain session itself, which FLUSHES
+  /// the shared cookie jar, so by the time the parent ran there was nothing live to snapshot and
+  /// the push unregister went out with login-vintage cookies. Against a server that had
+  /// transparently rotated them that is a 401 — the device stays registered and keeps buzzing
+  /// for the previous user. The recipe now runs entirely here, jar still live.
+  @Test func disconnectUnregistersPushWithTheCookiesThatWereLive() async {
+    let rotated = [
+      SerializedCookie(name: "hermes_session_at", value: "ROTATED", domain: "mac.tailnet", path: "/"),
+    ]
+    let released = LockIsolated<[ServerConnection]>([])
+    let preferences = PreferencesClient.inMemory()
+    preferences.savePushDeviceToken("cafef00d")
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: cookieConnection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.captureSharedCookies = { @Sendable in rotated }
+      $0.hermesREST.unregisterPush = { @Sendable conn, _ in
+        released.withValue { $0.append(conn) }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.finish()
+    #expect(released.value.map(\.auth.cookies) == [rotated])
+  }
+
+  /// The ordering finding: `fullLogout` flushes the shared cookie jar (inside `deleteSession`)
+  /// synchronously in the reducer, while REST work is STILL IN FLIGHT — the in-flight effects are
+  /// only cancelled afterwards, and `URLSession`, not our effect, is what writes a reply's
+  /// `Set-Cookie` into that jar. A response landing in that window repopulates live credentials
+  /// behind a user who has just logged out. The recipe therefore re-flushes the jar in an effect
+  /// ordered strictly AFTER the cancellation — which is what this pins: the flush is the last
+  /// thing that happens, after the in-flight request has been torn down.
+  @Test func logoutFlushesTheCookieJarAgainAfterCancellingInFlightWork() async {
+    let events = LockIsolated<[String]>([])
+    let started = AsyncStream<Void>.makeStream()
+    var initial = AppFeature.State(home: SessionListFeature.State(connection: cookieConnection))
+    initial.onboarding = ConnectionFeature.State(serverURL: "http://mac.tailnet:9119", token: "tok")
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.deleteSession = { @Sendable in events.withValue { $0.append("delete") } }
+      $0.keychain.flushSharedCookies = { @Sendable in events.withValue { $0.append("flush") } }
+      // A request that is still on the wire when the user logs out — the shape whose reply
+      // would land a `Set-Cookie` in the jar the logout had already flushed.
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        started.continuation.yield()
+        started.continuation.finish()
+        await withTaskCancellationHandler {
+          try? await Task.sleep(for: .seconds(60))
+        } onCancel: {
+          events.withValue { $0.append("in-flight request cancelled") }
+        }
+        throw CancellationError()
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.onboarding(.connectTapped))
+    for await _ in started.stream { break } // the request is genuinely in flight
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.finish()
+    #expect(events.value == ["delete", "in-flight request cancelled", "flush"])
+  }
+
+  /// The same ordering, on the RETRY-SCREEN logout — the other reachable path into
+  /// `fullLogout`, and the one whose in-flight request belongs to an `ifLet` child rather than
+  /// to the permanently-scoped onboarding. `.connectionFailed = nil` is what tears the probe
+  /// down, and the guarantee is not merge order: `Effect.cancel(id:)` cancels eagerly at effect
+  /// CONSTRUCTION, so `ifLet` cancels the child's effects synchronously inside the reduce —
+  /// strictly before the trailing `.run` flush, which is a `@MainActor` task that cannot start
+  /// until the store's synchronous send loop returns.
+  @Test func retryScreenLogoutCancelsTheProbeBeforeFlushingTheJar() async {
+    let events = LockIsolated<[String]>([])
+    let (started, startedContinuation) = AsyncStream<Void>.makeStream()
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: cookieConnection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.deleteSession = { @Sendable in events.withValue { $0.append("delete") } }
+      $0.keychain.flushSharedCookies = { @Sendable in events.withValue { $0.append("flush") } }
+      // The retry probe, still on the wire when the user logs out instead.
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        startedContinuation.yield()
+        startedContinuation.finish()
+        await withTaskCancellationHandler {
+          try? await Task.sleep(for: .seconds(60))
+        } onCancel: {
+          events.withValue { $0.append("probe cancelled") }
+        }
+        throw CancellationError()
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.connectionFailed(.retryTapped))
+    for await _ in started { break } // the probe is genuinely in flight
+
+    await store.send(.connectionFailed(.delegate(.logoutConfirmed)))
+    await store.finish()
+    #expect(events.value == ["delete", "probe cancelled", "flush"])
+    #expect(store.state.rootScreen == .onboarding)
+  }
+
+  /// …and on the session list's own fetch, the third `Set-Cookie` source a logout has to get
+  /// ahead of (`state.home = nil` is what cancels it, again through `ifLet`).
+  @Test func logoutCancelsTheSessionListFetchBeforeFlushingTheJar() async {
+    let events = LockIsolated<[String]>([])
+    let (started, startedContinuation) = AsyncStream<Void>.makeStream()
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: cookieConnection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.deleteSession = { @Sendable in events.withValue { $0.append("delete") } }
+      $0.keychain.flushSharedCookies = { @Sendable in events.withValue { $0.append("flush") } }
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        startedContinuation.yield()
+        startedContinuation.finish()
+        await withTaskCancellationHandler {
+          try? await Task.sleep(for: .seconds(60))
+        } onCancel: {
+          events.withValue { $0.append("list fetch cancelled") }
+        }
+        throw CancellationError()
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.home(.pulledToRefresh))
+    for await _ in started { break } // the fetch is genuinely in flight
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.finish()
+    #expect(events.value == ["delete", "list fetch cancelled", "flush"])
+  }
+
+  /// The honesty finding: Settings swallowed a Keychain delete failure with `try?` and still
+  /// landed the user on a spotless onboarding screen while their credentials were still on the
+  /// device. Routed through `fullLogout`, the survivor is overwritten — and when even that
+  /// fails, the screen says so.
+  @Test func disconnectWarnsWhenTheCredentialsCouldNotBeCleared() async {
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = PreferencesClient.inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.deleteSession = { @Sendable in throw KeychainError.unhandled(errSecInteractionNotAllowed) }
+      $0.keychain.saveSession = { @Sendable _ in throw KeychainError.unhandled(errSecInteractionNotAllowed) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.finish()
+    #expect(store.state.rootScreen == .onboarding)
+    #expect(store.state.onboarding.status == .failed(AppFeature.credentialsNotClearedMessage))
+  }
+
+  /// The push unregister is best-effort by necessity — logout is very often the one moment the
+  /// agent is unreachable — but it must not be SILENTLY lossy: nothing on the device can stop
+  /// the agent pushing to it afterwards, so the failure is named on the screen the user lands on.
+  @Test func disconnectReportsAPushUnregisterThatCouldNotBeDelivered() async {
+    let preferences = PreferencesClient.inMemory()
+    preferences.savePushDeviceToken("cafef00d")
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.hermesREST.unregisterPush = { @Sendable _, _ in throw RESTError.unreachable }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.receive(\.pushUnregisterFailed)
+    await store.finish()
+    #expect(
+      store.state.onboarding.status
+        == .failed(AppFeature.pushNotUnregisteredMessage(host: "mac.tailnet"))
+    )
+  }
+
+  /// …but a 404 means the agent has no push plugin at all, so nothing was ever registered and
+  /// there is nothing to warn about. Nor may the notice ever displace the LOUDER credentials
+  /// warning — a session we could not delete beats notifications we could not stop.
+  @Test func disconnectStaysSilentWhenThereWasNothingRegisteredToRemove() async {
+    let preferences = PreferencesClient.inMemory()
+    preferences.savePushDeviceToken("cafef00d")
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.hermesREST.unregisterPush = { @Sendable _, _ in throw RESTError.notFound }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.finish()
+    #expect(store.state.onboarding.status == .idle)
+  }
+
+  @Test func pushUnregisterNoticeNeverDisplacesTheCredentialsWarning() async {
+    let preferences = PreferencesClient.inMemory()
+    preferences.savePushDeviceToken("cafef00d")
+    let store = TestStore(
+      initialState: AppFeature.State(home: SessionListFeature.State(connection: connection))
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.deleteSession = { @Sendable in throw KeychainError.unhandled(errSecInteractionNotAllowed) }
+      $0.keychain.saveSession = { @Sendable _ in throw KeychainError.unhandled(errSecInteractionNotAllowed) }
+      $0.hermesREST.unregisterPush = { @Sendable _, _ in throw RESTError.unreachable }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.home(.delegate(.disconnect)))
+    await store.receive(\.pushUnregisterFailed)
+    await store.finish()
+    #expect(store.state.onboarding.status == .failed(AppFeature.credentialsNotClearedMessage))
   }
 
   @Test func tokenSessionExpiredSeedsTokenReauthModal() async {
@@ -3072,8 +3378,236 @@ struct AppFeatureTests {
         connection: self.connection, reason: .server(status: 500, detail: nil)
       )
     }
+    // Onboarding is told to drop whatever it had in flight (see the dedicated test below).
+    await store.receive(\.onboarding.cancelInFlightRequests)
     // No re-probe fired on the way back (an unexpected effect would fail the send/finish).
     await store.finish()
+  }
+
+  /// Going back must also STOP onboarding. `ConnectionFeature` is a permanently scoped
+  /// `Scope`, not an `ifLet` child, so nothing cancels its effects when the screen goes away:
+  /// a login still in flight would persist the credentials it was validating and delegate
+  /// `.connected`, replacing the restored retry screen with a session list the user never
+  /// asked for — after they had explicitly gone back.
+  @Test func returningFromOnboardingCancelsAnInFlightLogin() async {
+    let clock = TestClock()
+    let saved = LockIsolated<[AuthSession]>([])
+    let preferences = PreferencesClient.inMemory()
+    var initial = AppFeature.State()
+    initial.connectionFailedStash = ConnectionFailedFeature.State(
+      connection: connection, reason: .unreachable
+    )
+    initial.onboarding = ConnectionFeature.State(
+      serverURL: "http://elsewhere:9119",
+      token: "typed-by-hand",
+      status: .reachable(version: "0.16.0"),
+      canReturnToConnectionFailed: true
+    )
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.keychain.saveSession = { @Sendable session in saved.withValue { $0.append(session) } }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        try await clock.sleep(for: .seconds(1))
+        return []
+      }
+    }
+
+    await store.send(.onboarding(.connectTapped)) { $0.onboarding.status = .validating }
+    await store.send(.onboarding(.delegate(.returnToConnectionFailedRequested))) {
+      $0.connectionFailedStash = nil
+      $0.onboarding.canReturnToConnectionFailed = false
+      $0.connectionFailed = ConnectionFailedFeature.State(
+        connection: self.connection, reason: .unreachable
+      )
+    }
+    await store.receive(\.onboarding.cancelInFlightRequests) { $0.onboarding.status = .idle }
+
+    // The abandoned login resolves: no `.connected`, nothing persisted, still on the screen
+    // the user came back to.
+    await clock.advance(by: .seconds(1))
+    await store.finish()
+    #expect(saved.value.isEmpty)
+    #expect(preferences.loadServerURL() == nil)
+    #expect(store.state.home == nil)
+    #expect(store.state.rootScreen == .connectionFailed)
+  }
+
+  /// A COOKIE-mode stash has to come back with its cookies live. Onboarding's password path
+  /// flushes the shared jar and installs the new login's cookies the moment `passwordLogin`
+  /// succeeds — before the validating call that may 401, and before the user can abandon the
+  /// attempt — so the stashed session's own cookies are gone from the jar the transports read.
+  /// Without reinstating them, Retry authenticates as nobody, reads the 401 as
+  /// `.credentialsRejected`, and dumps a perfectly valid session back onto onboarding.
+  @Test func returningRestoresTheStashedCookieSessionIntoTheSharedJar() async {
+    let activated = LockIsolated<[CookieSession]>([])
+    var initial = AppFeature.State()
+    initial.connectionFailedStash = ConnectionFailedFeature.State(
+      connection: cookieConnection, reason: .unreachable
+    )
+    initial.onboarding.canReturnToConnectionFailed = true
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.activateCookieSession = { @Sendable session in
+        activated.withValue { $0.append(session) }
+      }
+    }
+
+    await store.send(.onboarding(.delegate(.returnToConnectionFailedRequested))) {
+      $0.connectionFailedStash = nil
+      $0.onboarding.canReturnToConnectionFailed = false
+      $0.connectionFailed = ConnectionFailedFeature.State(
+        connection: self.cookieConnection, reason: .unreachable
+      )
+    }
+    await store.receive(\.onboarding.cancelInFlightRequests)
+    await store.finish()
+
+    guard case let .cookie(stashed) = cookieConnection.auth else {
+      Issue.record("fixture is not a cookie session")
+      return
+    }
+    #expect(activated.value == [stashed])
+  }
+
+  /// The ordering finding, on the *change server → back* round trip. Reinstating the stashed
+  /// cookies in the reducer body put the jar write BEFORE the cancellation of onboarding's
+  /// login: `passwordLogin` runs on a background executor and its `Task.isCancelled` guard sits
+  /// immediately before its own `activateCookieSession`, so a login resolving in that window
+  /// flushed the session we had just restored and installed the abandoned attempt's cookies
+  /// instead. Retry would then authenticate as the wrong user, read the 401 as
+  /// `.credentialsRejected`, and bounce a still-valid session back to onboarding — #62's exact
+  /// symptom, manufactured by the escape hatch built to avoid it. The reinstatement is now the
+  /// last step of an explicitly sequenced chain, so it lands after the login is torn down.
+  @Test func returningReinstatesTheStashedCookiesOnlyAfterCancellingTheLogin() async {
+    let rotated = [
+      SerializedCookie(name: "hermes_session_at", value: "ROTATED", domain: "mac.tailnet", path: "/"),
+    ]
+    let events = LockIsolated<[String]>([])
+    let (started, startedContinuation) = AsyncStream<Void>.makeStream()
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: cookieConnection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.captureSharedCookies = { @Sendable in rotated }
+      $0.keychain.activateCookieSession = { @Sendable session in
+        events.withValue { $0.append("activate \(session.cookies.map(\.value).joined())") }
+      }
+      // The abandoned login: still on the wire when the user takes the way back, and one
+      // `Task.isCancelled` check away from flushing the jar for its own cookies.
+      $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in
+        startedContinuation.yield()
+        startedContinuation.finish()
+        await withTaskCancellationHandler {
+          try? await Task.sleep(for: .seconds(60))
+        } onCancel: {
+          events.withValue { $0.append("login cancelled") }
+        }
+        throw CancellationError()
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    // Change server → the stash is taken with the cookies that are live right now, and
+    // onboarding comes up prefilled. The user types a password login for the new host…
+    await store.send(.connectionFailed(.delegate(.changeServerRequested(cookieConnection))))
+    #expect(store.state.connectionFailedStash?.connection.auth.cookies == rotated)
+    await store.send(.onboarding(.binding(.set(\.method, .password))))
+    await store.send(.onboarding(.binding(.set(\.username, "bob"))))
+    await store.send(.onboarding(.binding(.set(\.password, "hunter2"))))
+    await store.send(.onboarding(.connectTapped))
+    for await _ in started { break } // the login is genuinely in flight
+
+    await store.send(.onboarding(.delegate(.returnToConnectionFailedRequested)))
+    await store.finish()
+    #expect(events.value == ["login cancelled", "activate ROTATED"])
+    #expect(store.state.rootScreen == .connectionFailed)
+  }
+
+  /// The stash must carry the cookies that are LIVE when it is taken, not the login-time
+  /// vintage the connection was built from. The gated server rotates cookies transparently on
+  /// any response and nothing writes them back to the Keychain, so restoring the stored copy
+  /// would flush a refreshed session out of the jar and install an older one — the next Retry
+  /// could then 401 a session that was perfectly valid, which is exactly the bounce the
+  /// reversible escape hatch exists to prevent.
+  @Test func changeServerStashesTheLiveCookiesAndRestoreReinstatesThose() async {
+    let rotated = [
+      SerializedCookie(name: "hermes_session_at", value: "ROTATED", domain: "mac.tailnet", path: "/"),
+    ]
+    let activated = LockIsolated<[CookieSession]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: cookieConnection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.captureSharedCookies = { @Sendable in rotated }
+      $0.keychain.activateCookieSession = { @Sendable session in
+        activated.withValue { $0.append(session) }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.connectionFailed(.delegate(.changeServerRequested(cookieConnection))))
+    #expect(store.state.connectionFailedStash?.connection.auth.cookies == rotated)
+
+    await store.send(.onboarding(.delegate(.returnToConnectionFailedRequested)))
+    await store.finish()
+    #expect(activated.value.map(\.cookies) == [rotated])
+    // Identity is preserved — only the cookies are refreshed.
+    #expect(activated.value.first?.username == "alice")
+  }
+
+  /// …but the refresh may only ever make the stashed session FRESHER. An empty jar (nothing
+  /// live to snapshot) keeps the stored cookies rather than stashing a session with none,
+  /// which would restore to an unauthenticated connection.
+  @Test func changeServerKeepsStoredCookiesWhenTheJarIsEmpty() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: cookieConnection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.captureSharedCookies = { @Sendable in [] }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.connectionFailed(.delegate(.changeServerRequested(cookieConnection))))
+    #expect(store.state.connectionFailedStash?.connection.auth == cookieConnection.auth)
+  }
+
+  /// …and a TOKEN-mode stash must NOT touch the jar: `activateCookieSession` flushes it first,
+  /// so calling it with nothing to install would clear cookies for no reason.
+  @Test func returningWithATokenStashLeavesTheCookieJarAlone() async {
+    let activated = LockIsolated(0)
+    var initial = AppFeature.State()
+    initial.connectionFailedStash = ConnectionFailedFeature.State(
+      connection: connection, reason: .unreachable
+    )
+    initial.onboarding.canReturnToConnectionFailed = true
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.activateCookieSession = { @Sendable _ in activated.withValue { $0 += 1 } }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.onboarding(.delegate(.returnToConnectionFailedRequested)))
+    await store.finish()
+    #expect(activated.value == 0)
   }
 
   /// Defensive: the flag can only outlive the stash through a bug, and acting on nothing must
@@ -3133,6 +3667,173 @@ struct AppFeatureTests {
     #expect(store.state.connectionFailedStash == nil)
     #expect(store.state.onboarding.canReturnToConnectionFailed == false)
     #expect(store.state.onboarding == ConnectionFeature.State())
+  }
+
+  /// Log Out has to stop onboarding too. Nothing cancels a permanently-scoped `Scope`'s
+  /// effects, so a login still in flight would persist the very session this recipe just wiped
+  /// — and delegate `.connected` on top of the fresh onboarding the user was left on.
+  @Test func fullLogoutCancelsAnInFlightOnboardingLogin() async {
+    let clock = TestClock()
+    let keychain = KeychainClient.inMemory()
+    let preferences = PreferencesClient.inMemory()
+    var initial = AppFeature.State(
+      connectionFailed: ConnectionFailedFeature.State(connection: connection, reason: .unreachable)
+    )
+    initial.onboarding = ConnectionFeature.State(
+      serverURL: "http://mac.tailnet:9119",
+      token: "tok",
+      status: .reachable(version: "0.16.0")
+    )
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain = keychain
+      $0.preferences = preferences
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        try await clock.sleep(for: .seconds(1))
+        return []
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.onboarding(.connectTapped))
+    await store.send(.connectionFailed(.delegate(.logoutConfirmed)))
+    await clock.advance(by: .seconds(1))
+    await store.finish()
+    // The abandoned login neither resurrected the session nor navigated home.
+    #expect(keychain.loadSession(HTTPCookieStorage()) == nil)
+    #expect(preferences.loadServerURL() == nil)
+    #expect(store.state.home == nil)
+    #expect(store.state.rootScreen == .onboarding)
+  }
+
+  /// A Keychain delete can fail, and logout used to `try?` that away — leaving the saved
+  /// session behind while presenting a fresh onboarding as if it were gone. There's no honest
+  /// UI for a half-logout on a screen that has already left, so compensate instead: overwrite
+  /// the survivor with an empty-token session, which the launch probe reads as "no
+  /// credentials".
+  @Test func fullLogoutNeutralizesASessionItCouldNotDelete() async {
+    let saved = LockIsolated<[AuthSession]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: cookieConnection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.deleteSession = { @Sendable in
+        throw KeychainError.unhandled(errSecInteractionNotAllowed)
+      }
+      $0.keychain.saveSession = { @Sendable session in saved.withValue { $0.append(session) } }
+      $0.preferences = PreferencesClient.inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.connectionFailed(.delegate(.logoutConfirmed)))
+    await store.finish()
+    #expect(saved.value == [.token("")])
+    #expect(store.state.rootScreen == .onboarding)
+    // The overwrite landed, so the logout IS complete — nothing to warn about.
+    #expect(store.state.onboarding.status == .idle)
+  }
+
+  /// …and when the overwrite fails TOO, the logout cannot claim success. There is no honest
+  /// silent outcome here: the credential is still on the device, so onboarding says so instead
+  /// of presenting a clean slate. (The old shape `try?`-ed the overwrite away — and the live
+  /// `saveSession` would answer `errSecDuplicateItem` in exactly this situation, so the silent
+  /// path was the LIKELY one, not the exotic one.)
+  @Test func fullLogoutSurfacesACredentialItCouldNeitherDeleteNorOverwrite() async {
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: cookieConnection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.deleteSession = { @Sendable in
+        throw KeychainError.unhandled(errSecInteractionNotAllowed)
+      }
+      $0.keychain.saveSession = { @Sendable _ in
+        throw KeychainError.unhandled(errSecInteractionNotAllowed)
+      }
+      $0.preferences = PreferencesClient.inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.connectionFailed(.delegate(.logoutConfirmed)))
+    await store.finish()
+    #expect(store.state.rootScreen == .onboarding)
+    #expect(store.state.onboarding.status == .failed(AppFeature.credentialsNotClearedMessage))
+  }
+
+  /// The push unregister has to authenticate, and in cookie mode it authenticates from the
+  /// connection it is handed — the logout has already flushed the shared jar by the time the
+  /// effect runs. So the recipe snapshots the LIVE cookies before deleting: hand over the
+  /// Keychain vintage and a rotated session's unregister 401s, leaving the device registered
+  /// and buzzing for the previous user's sessions.
+  @Test func fullLogoutUnregistersPushWithTheCookiesThatWereLive() async {
+    let rotated = [
+      SerializedCookie(name: "hermes_session_at", value: "ROTATED", domain: "mac.tailnet", path: "/"),
+    ]
+    let released = LockIsolated<[ServerConnection]>([])
+    let preferences = PreferencesClient.inMemory()
+    preferences.savePushDeviceToken("cafef00d")
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(
+          connection: cookieConnection, reason: .unreachable
+        )
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+      $0.keychain = KeychainClient.inMemory()
+      $0.keychain.captureSharedCookies = { @Sendable in rotated }
+      $0.hermesREST.unregisterPush = { @Sendable conn, _ in
+        released.withValue { $0.append(conn) }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.connectionFailed(.delegate(.logoutConfirmed)))
+    await store.finish()
+    #expect(released.value.map(\.auth.cookies) == [rotated])
+  }
+
+  /// The happy path stays untouched: a delete that works writes nothing back.
+  @Test func fullLogoutWritesNothingBackWhenTheDeleteSucceeds() async {
+    let saved = LockIsolated<[AuthSession]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        connectionFailed: ConnectionFailedFeature.State(connection: connection, reason: .unreachable)
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.keychain.deleteSession = { @Sendable in }
+      $0.keychain.saveSession = { @Sendable session in saved.withValue { $0.append(session) } }
+      $0.preferences = PreferencesClient.inMemory()
+      $0.chatSnapshot = .inMemory()
+      $0.push = PushClient.inMemory().client
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.connectionFailed(.delegate(.logoutConfirmed)))
+    await store.finish()
+    #expect(saved.value.isEmpty)
   }
 
   /// "Change server" clears NOTHING — keychain session and stored URL both survive, and it
@@ -3219,6 +3920,9 @@ struct AppFeatureTests {
       $0.pendingPushTapServerURL = nil
       $0.pendingApprovalSessionIDs = []
     }
+    // Onboarding is told to abandon anything it had in flight (nothing here, but the recipe
+    // always says so — see `fullLogoutCancelsAnInFlightOnboardingLogin`).
+    await store.receive(\.onboarding.cancelInFlightRequests)
     await store.finish()
     #expect(sessionDeleted.value)
     #expect(snapshotsWiped.value)

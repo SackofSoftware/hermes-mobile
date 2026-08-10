@@ -517,3 +517,212 @@ on **iPhone 17 Pro / iOS 26.5**.
       `loadError` banner now reads "No internet connection." offline — test
       `SessionListCronTests.offlineActionFailureUsesTheOfflineCopy`); `pushRegisterFailed` only
       ever compares against `.notFound`, so that half is consistency, not behaviour
+
+### Task 10: Review phase 1, iteration 7 follow-ups
+
+- [x] **Restoring the stashed retry screen now cancels onboarding's in-flight login.**
+      `ConnectionFeature` is a permanently-scoped `Scope`, not an `ifLet` child, so nothing
+      cancelled its effects when the screen went away: a connect/login that resolved after
+      `.returnToConnectionFailedRequested` persisted the typed credentials + server URL and
+      delegated `.connected`, replacing the just-restored retry screen with a session list —
+      and the same hole let it resurrect a session the user had confirmed **Log Out** on. The
+      connect effects are now `.cancellable(CancelID.connect, cancelInFlight: true)` (which
+      also makes a double Connect tap supersede rather than fan out), they re-check
+      `Task.isCancelled` before touching the keychain/prefs/cookie jar, and `AppFeature` sends
+      the new `ConnectionFeature.Action.cancelInFlightRequests` on both the restore and
+      `fullLogout`. Tests: `AppFeatureTests.returningFromOnboardingCancelsAnInFlightLogin`,
+      `.fullLogoutCancelsAnInFlightOnboardingLogin`,
+      `ConnectionFeatureTests.cancelInFlightRequestsStopsAConnectBeforeItPersistsAnything`,
+      `.cancelInFlightRequestsStopsAPasswordLoginBeforeItTouchesTheCookieJar`,
+      `.secondConnectTapSupersedesTheFirst`
+- [x] **A cookie-mode restore re-activates the stashed session's cookies.**
+      `activateCookieSession` FLUSHES `HTTPCookieStorage.shared` (the jar the live transports
+      read) the moment `passwordLogin` succeeds — before the validating call that may 401, and
+      before the user can abandon the attempt — so coming back left the stashed connection
+      authenticating as nobody: its Retry would 401, the reducer would read that as
+      `.credentialsRejected`, and a perfectly valid session would be dumped back on onboarding.
+      The restore now re-activates it (token stashes deliberately don't touch the jar — the
+      flush would clear cookies for nothing). Tests:
+      `AppFeatureTests.returningRestoresTheStashedCookieSessionIntoTheSharedJar`,
+      `.returningWithATokenStashLeavesTheCookieJarAlone`
+- [x] **`fullLogout` no longer swallows a `deleteSession` failure.** The live delete threw
+      *before* flushing the shared cookie jar, so an `OSStatus` failure left both the stored
+      session AND live gated cookies behind while the app presented a fresh onboarding. The
+      flush is now unconditional (`deleteStoredSession`, split out so the guarantee is testable
+      without a failing Keychain), and `fullLogout` compensates the failure it can see by
+      overwriting the survivor with `.token("")` — the shape the launch probe reads as "no
+      credentials". Tests: `KeychainClientTests.deleteFlushesSharedCookiesEvenWhenTheKeychainRemovalFails`,
+      `.deleteTreatsItemNotFoundAsSuccess`, `AppFeatureTests.fullLogoutNeutralizesASessionItCouldNotDelete`,
+      `.fullLogoutWritesNothingBackWhenTheDeleteSucceeds`
+- [x] **The retrying snapshot's pixel budget is now measured and no longer load-bearing.**
+      Measured against a failing render: 1,682 pixels differ (0.06% of 1170×2532), all inside a
+      93×93px box around the spinner. The budget cannot be tightened to match — SnapshotTesting's
+      `precision` under `perceptualPrecision < 1` is a float area-average whose noise floor is
+      above that signal (0.995 fails, 0.993 passes) — so `0.99` stays, with the doc comment
+      corrected to say what it actually is and the "everything else is strict" claim dropped.
+      What a fungible budget could hide (a control vanishing) is instead pinned structurally by
+      the new `ConnectionFailedControlsTests`, which hosts the view in a `UIWindow` and asserts
+      the three controls and their enabled/disabled traits through the accessibility tree
+      (verified non-vacuous by mutation: disabling "Change server" while retrying turns it red).
+- [x] **The restore reinstates the cookies that were LIVE, not the Keychain's login vintage.**
+      The gated server rotates cookies transparently and nothing writes them back to the
+      Keychain, so re-activating `stash.connection.auth` flushed a refreshed jar and installed
+      an older session — the next Retry could 401 a valid session, which is the bounce the
+      escape hatch exists to prevent. **[decision]** Of the three options (don't flush on
+      restore / snapshot the live jar at stash time / keep + document), only the snapshot cannot
+      make a valid session look invalid: not flushing leaves onboarding's foreign cookies live
+      (the bug the previous round fixed), and keeping the stale install is the finding itself.
+      `KeychainClient.captureSharedCookies` reads the live jar; `changeServerRequested` folds it
+      into the stash (an EMPTY snapshot keeps the stored cookies — the refresh may only ever make
+      a session fresher). Tests:
+      `AppFeatureTests.changeServerStashesTheLiveCookiesAndRestoreReinstatesThose`,
+      `.changeServerKeepsStoredCookiesWhenTheJarIsEmpty`,
+      `KeychainClientTests.captureSharedCookiesSnapshotsTheLiveJar`
+- [x] **The delete-failure compensation is now verifiable, and an unverifiable logout says so.**
+      The live `saveSession` was itself a delete-then-add: when the original delete failed the
+      item was still there, `SecItemAdd` answered `errSecDuplicateItem`, and the call site's
+      `try?` swallowed it — so the "overwrite the credential I could not delete" compensation
+      silently left the real credentials intact, and that was the LIKELY path, not an exotic one.
+      `writeStoredSession` makes the save a real upsert (delete → add → `SecItemUpdate` on
+      duplicate) and propagates a failure; `fullLogout` catches it and surfaces
+      `AppFeature.credentialsNotClearedMessage` on the onboarding it lands on rather than
+      presenting a clean slate. Tests: `KeychainClientTests.saveOverwritesAnItemItCouldNotDelete`,
+      `.saveThrowsWhenTheOverwriteAlsoFails`, `.saveAddsWithoutUpdatingOnTheHappyPath`,
+      `AppFeatureTests.fullLogoutSurfacesACredentialItCouldNeitherDeleteNorOverwrite` (plus the
+      `.idle` assertion added to `.fullLogoutNeutralizesASessionItCouldNotDelete`)
+- [x] **The push unregister authenticates after the jar is flushed.** Every logout path deletes
+      the Keychain session first — which flushes `HTTPCookieStorage.shared` — and only then fires
+      `unregisterPushOnLogout`, so in cookie mode the POST went out unauthenticated, the server
+      401'd, and the device stayed registered receiving the previous user's pushes. Affected all
+      three paths (retry-screen Log Out, reauth "Quit to start", Settings' clear-token), so the
+      fix is in the client, not the ordering: `unregisterPush` sends its connection's cookies as
+      an explicit `Cookie` header with `httpShouldHandleCookies = false`, and `fullLogout`
+      snapshots the live jar into that connection before deleting (the Settings path has already
+      flushed by the time it delegates, so it sends the persisted vintage). Token mode is
+      byte-identical. Tests: `HermesRESTClientTests.unregisterPushSendsGatedCookiesExplicitly`,
+      `.unregisterPushSendsNoCookieHeaderInTokenMode`,
+      `AppFeatureTests.fullLogoutUnregistersPushWithTheCookiesThatWereLive`
+- [x] **The structural controls test covers the help link too.** It asserted Retry / Change
+      server / Log Out but not "Need help setting up your agent?", so a footnote-sized link
+      could vanish in the retrying state inside the snapshot's pixel budget with every
+      assertion still green. Both states now assert every control (verified non-vacuous by
+      deleting the button: both tests go red).
+
+### Task 11: Review phase 1, iteration 8 follow-ups
+
+- [x] **The explicit `Cookie` header is scoped to the request URL.** Iteration 2's fix (send the
+      connection's cookies explicitly, so the post-logout unregister is authenticated) serialised
+      the WHOLE snapshot as `name=value` pairs — and the snapshot is `sharedCookieSnapshot()`,
+      i.e. every cookie in `HTTPCookieStorage.shared`. Setting the header by hand switches off
+      the domain/path/`Secure`/expiry enforcement `URLSession` would have applied, so a foreign
+      or out-of-scope cookie was disclosed to the unregister endpoint: a security regression
+      introduced by the fix. `cookieHeader(_:for:now:)` now filters through
+      `SerializedCookie.applies(to:now:)` (RFC 6265 rules, matching how Foundation normalises
+      what it stores — host-only without a leading dot, subdomain-matching with one) and formats
+      the survivors with `HTTPCookie.requestHeaderFields(with:)` rather than by hand. Tests:
+      `HermesRESTClientTests.unregisterPushNeverSendsAForeignDomainCookie`,
+      `.unregisterPushHonoursPathSecureAndExpiryScoping`,
+      `.unregisterPushSendsNoHeaderWhenNoCookieIsInScope`,
+      `.cookieHeaderKeepsDomainCookiesForSubdomains`
+- [x] **Settings' logout runs the ONE recipe instead of a partial copy.** `SettingsFeature`
+      deleted the Keychain session itself — which flushes the shared jar — and only then
+      delegated, so `AppFeature` had nothing live to snapshot and the push unregister went out
+      with login-vintage cookies (a 401 against any server that had rotated them, leaving the
+      device registered). The same copy also `try?`-swallowed a Keychain delete failure and
+      landed on a spotless onboarding screen, skipping the compensation + warning `fullLogout`
+      has. **[decision]** Rather than duplicate the snapshot-and-compensate dance in the child,
+      `.clearTokenTapped` now only delegates `.disconnect` and `AppFeature` answers it with
+      `fullLogout` — the same call "Quit to start" makes. Net −20 lines, one recipe, no drift.
+      Tests: `SettingsFeatureTests.clearTokenOnlyEmitsDisconnectAndLeavesTheRecipeToTheParent`,
+      `AppFeatureTests.disconnectRunsTheFullLogoutRecipe`,
+      `.disconnectUnregistersPushWithTheCookiesThatWereLive`,
+      `.disconnectWarnsWhenTheCredentialsCouldNotBeCleared`
+- [x] **A push unregister that cannot be delivered is reported, not swallowed.** **[decision]**
+      Reordering was weighed and rejected: logging out from the retry screen means the server is
+      unreachable *by definition*, so no ordering makes the call land. Clearing the device token
+      only on success would preserve a value nothing retries with (the registration is
+      server-side; the local token is re-obtained from APNs next launch) while contradicting
+      "logout clears everything"; a durable retry queue would have to persist a live credential
+      past logout. So the call stays best-effort and the residue is stated instead of dropped:
+      the failure sends `.pushUnregisterFailed` → `AppFeature.pushNotUnregisteredMessage` on the
+      onboarding screen the user lands on, never over the louder credentials warning, and a
+      `404` (no plugin, nothing registered) is exempt. Tests:
+      `AppFeatureTests.disconnectReportsAPushUnregisterThatCouldNotBeDelivered`,
+      `.disconnectStaysSilentWhenThereWasNothingRegisteredToRemove`,
+      `.pushUnregisterNoticeNeverDisplacesTheCredentialsWarning`
+- [x] **`writeStoredSession` is update-first.** The claimed upsert deleted before adding, so an
+      add that failed for anything other than `errSecDuplicateItem` (locked Keychain, full disk)
+      destroyed the previous credential and stored nothing. `SecItemUpdate` runs first and
+      `SecItemAdd` only on `errSecItemNotFound`; nothing else falls through. Tests:
+      `KeychainClientTests.saveNeverDestroysTheOldItemWhenTheWriteFails`,
+      `.saveOverwritesAnExistingItemInPlace`,
+      `.saveThrowsWhenTheOverwriteFailsAndDoesNotFallThroughToAdd`,
+      `.saveAddsWhenThereIsNoExistingItem`
+
+### Task 12: Review phase 1, iteration 9 follow-ups
+
+- [x] **The logout jar flush is repeated after the in-flight work is cancelled.** `fullLogout`
+      flushes `HTTPCookieStorage.shared` synchronously (inside `deleteSession`) while the retry
+      probe / list fetch / onboarding connect are still on the wire, and their `ifLet` /
+      `.cancelInFlightRequests` cancellations only run afterwards. `URLSession` — not our effect
+      — is what writes a reply's `Set-Cookie` into that jar, so a response landing in the window
+      repopulated LIVE credentials behind a user who had just logged out. **[decision]** Cancel-
+      before-delete isn't expressible in one reduction (the child cancellations are effects, and
+      the push unregister needs the jar snapshot taken before the delete), so the fix is the
+      ordered second flush the finding also names: a new `KeychainClient.flushSharedCookies`
+      endpoint, run in a `.run` `.concatenate`d after `.onboarding(.cancelInFlightRequests)` —
+      which also lands after the `ifLet` auto-cancels merged into the same return. Deliberately
+      NOT ordered after the push unregister: that call can take seconds and a flush that late
+      could wipe the jar of a session the user had already signed back into. Residue stated in
+      the code: a response landing after the second flush still stores its cookies, but every
+      effect that could produce one has been cancelled by then. Test:
+      `AppFeatureTests.logoutFlushesTheCookieJarAgainAfterCancellingInFlightWork` (drives a real
+      in-flight request with a cancellation handler and asserts
+      `delete → cancelled → flush`; red without the fix).
+- [x] **`saveNeverDestroysTheOldItemWhenTheWriteFails` actually exercises a failed write.** The
+      version added in iteration 8 let its `update` closure SUCCEED, so the failing `add` was
+      unreachable and the test merely restated the happy path — vacuous proof for the update-first
+      fix. It now models a Keychain holding a credential it will not let anyone write
+      (`errSecInteractionNotAllowed`) with an `add` wired to clobber the store, and asserts the
+      throw, the surviving `OLD` value and zero add attempts (verified red — 3 issues — against a
+      destructive fallthrough).
+- [x] **Doc corrections.** `fullLogout`'s comment still claimed Settings clears separately (it
+      delegates since iteration 8) and described the obsolete delete/add/`errSecDuplicateItem`
+      upsert; `sharedCookieSnapshot` still claimed every shared cookie belongs to the active
+      session, which the scoped-`Cookie`-header fix exists to disprove.
+- [x] **The credentials-not-cleared message names a remedy that works.** It advised deleting the
+      app, but the session is a generic-password item (`kSecAttrAccessibleAfterFirstUnlock`, no
+      access group, not synchronizable) and iOS keeps those across an uninstall/reinstall. What
+      actually failed is a locked/unavailable Keychain write, so the copy now says to unlock the
+      device and sign in and out again, and warns that reinstalling may not clear them.
+
+### Task 13: Review phase 1, iteration 10 follow-ups (cancel-before-mutate ordering)
+
+- [x] **The stash restore reinstates the cookies AFTER cancelling onboarding, not before.**
+      `.returnToConnectionFailedRequested` called `keychain.activateCookieSession(stash)` in the
+      reducer body and only then sent `.cancelInFlightRequests`. The password login runs on a
+      background executor and its `Task.isCancelled` guard sits immediately before its own
+      `activateCookieSession`, so a login resolving in that window flushed the session just
+      restored and installed the abandoned attempt's cookies — Retry then authenticates as the
+      wrong user, reads the 401 as `.credentialsRejected`, and bounces a valid session back to
+      onboarding (#62's symptom, from the escape hatch built to avoid it). The reinstatement is
+      now the tail of `.concatenate(.send(.onboarding(.cancelInFlightRequests)), .run { … })`.
+      Test: `AppFeatureTests.returningReinstatesTheStashedCookiesOnlyAfterCancellingTheLogin`
+      (full *change server → login in flight → back* round trip; asserts
+      `login cancelled → activate ROTATED`, and goes red with the exact inverted order).
+- [x] **The `fullLogout` ordering claim is FALSE POSITIVE — but now proven, not assumed.**
+      **[decision]** The finding said `ifLet`'s auto-cancels are "merged concurrently" with the
+      parent effect, so the trailing flush could beat them. TCA's source says otherwise:
+      `Effect.publisher(_:)` invokes its **non-escaping** factory immediately, so
+      `Effect.cancel(id:)` (and `_IfLetReducer`'s `._cancel`) performs its cancellation eagerly at
+      effect **construction** — synchronously inside the reduce, before the returned effect is
+      subscribed at all. Merge order is irrelevant. `.send` likewise resolves inside the same
+      synchronous store `send` (a `Just`, delivered by `UIScheduler` on the main queue, drained
+      from `bufferedActions` before that call returns), while a `.run` body is a `@MainActor`
+      `Task` that cannot start until it does. The relying comment (which claimed the auto-cancels
+      "subscribe before this `.run` can start") was corrected to the real mechanism, and the two
+      reachable paths the finding said were untested are now pinned:
+      `AppFeatureTests.retryScreenLogoutCancelsTheProbeBeforeFlushingTheJar` and
+      `.logoutCancelsTheSessionListFetchBeforeFlushingTheJar` (both drive a real in-flight request
+      through an `ifLet` child, assert `delete → cancelled → flush`, and go red without the
+      trailing flush).

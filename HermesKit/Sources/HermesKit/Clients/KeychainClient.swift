@@ -30,6 +30,22 @@ public struct KeychainClient: Sendable {
   /// REST calls 401 until the next launch (when `loadSession` rehydrates). Flushes any prior
   /// shared cookies first so a user-switch / re-auth can't mix old and new jars.
   public var activateCookieSession: @Sendable (_ session: CookieSession) -> Void = { _ in }
+  /// Snapshot the cookies **currently live** in `HTTPCookieStorage.shared` — the jar the REST/WS
+  /// transports actually authenticate with. The persisted `CookieSession` is only the
+  /// *login-time* vintage: the gated server rotates cookies transparently on any response and
+  /// nothing writes those back to the Keychain, so the jar can hold newer cookies than the
+  /// stored session does. Callers that need to re-install (`activateCookieSession`) or re-send
+  /// (`unregisterPush` after logout has flushed the jar) a cookie session must read it from
+  /// here first, or they downgrade a refreshed session to its stale copy.
+  public var captureSharedCookies: @Sendable () -> [SerializedCookie] = { [] }
+  /// Flush every cookie out of `HTTPCookieStorage.shared` — the same jar-clearing half
+  /// `deleteSession` performs, exposed on its own so logout can run it a SECOND time once the
+  /// in-flight work it is racing has been cancelled. `deleteSession` clears the jar while REST
+  /// effects may still be in flight, and `URLSession` writes a reply's `Set-Cookie` into the
+  /// shared jar itself — so a response landing after that first flush would repopulate live
+  /// credentials behind a user who has just logged out. Idempotent, and cheap: an already-empty
+  /// jar is a no-op.
+  public var flushSharedCookies: @Sendable () -> Void = {}
 
   // Token-mode shims — retained as dependency endpoints for byte-identical token behaviour.
   public var loadToken: @Sendable () -> String? = { nil }
@@ -72,12 +88,18 @@ public extension KeychainClient {
         kSecAttrService as String: service,
         kSecAttrAccount as String: account,
       ]
-      SecItemDelete(identity as CFDictionary) // upsert: clear any existing item first
       var add = identity
       add[kSecValueData as String] = data
       add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-      let status = SecItemAdd(add as CFDictionary, nil)
-      guard status == errSecSuccess else { throw KeychainError.unhandled(status) }
+      try writeStoredSession(
+        update: {
+          SecItemUpdate(
+            identity as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+          )
+        },
+        add: { SecItemAdd(add as CFDictionary, nil) }
+      )
     }
     @Sendable func delete() throws {
       let identity: [String: Any] = [
@@ -85,19 +107,15 @@ public extension KeychainClient {
         kSecAttrService as String: service,
         kSecAttrAccount as String: account,
       ]
-      let status = SecItemDelete(identity as CFDictionary)
-      guard status == errSecSuccess || status == errSecItemNotFound else {
-        throw KeychainError.unhandled(status)
-      }
-      // Flush gated-session cookies rehydrated into the shared jar (where the REST/WS live
-      // transports read them) so logout leaves nothing behind for the next user.
-      clearSharedCookies()
+      try deleteStoredSession { SecItemDelete(identity as CFDictionary) }
     }
     return KeychainClient(
       loadSession: { load($0) },
       saveSession: { try save($0) },
       deleteSession: { try delete() },
       activateCookieSession: { activateSharedCookieSession($0) },
+      captureSharedCookies: { sharedCookieSnapshot() },
+      flushSharedCookies: { clearSharedCookies() },
       loadToken: { load(.shared)?.token },
       saveToken: { try save(.token($0)) },
       deleteToken: { try delete() }
@@ -120,11 +138,77 @@ public extension KeychainClient {
       // mutating the process-global jar here would race across parallel suites. Tests that
       // need to assert activation override this endpoint with a spy.
       activateCookieSession: { _ in },
+      // Likewise a no-op: the in-memory variant never drives the process-global jar, so it has
+      // nothing live to snapshot. An empty snapshot is the "nothing fresher than the stored
+      // session" answer every caller already handles. Spy on it to assert a capture.
+      captureSharedCookies: { [] },
+      // Same reasoning: the in-memory variant owns no process-global jar to flush. Spy on it to
+      // assert logout's post-cancellation re-flush.
+      flushSharedCookies: {},
       loadToken: { box.get()?.token },
       saveToken: { box.set(.token($0)) },
       deleteToken: { box.set(nil) }
     )
   }
+}
+
+/// The live `deleteSession`: remove the Keychain item, then flush the gated-session cookies
+/// rehydrated into `HTTPCookieStorage.shared` (where the live REST/WS transports read them) so
+/// logout leaves nothing behind for the next user.
+///
+/// The flush is **unconditional, and that is the whole point of this function existing**: the
+/// Keychain removal can fail (`errSecInteractionNotAllowed`, any other `OSStatus`), and
+/// throwing before the flush left a user who had just "logged out" with live authentication
+/// cookies in the jar every subsequent request is signed with. The item removal is injected so
+/// that guarantee is testable without a Keychain that can be made to fail.
+func deleteStoredSession(_ removeKeychainItem: () -> OSStatus) throws {
+  let status = removeKeychainItem()
+  clearSharedCookies()
+  guard status == errSecSuccess || status == errSecItemNotFound else {
+    throw KeychainError.unhandled(status)
+  }
+}
+
+/// The live `saveSession`: a real **upsert** — update first, add only when there is nothing to
+/// update. Never "delete then add and hope".
+///
+/// Order matters, and it is the opposite of the obvious one. Deleting first makes the write
+/// *destructive before it is constructive*: if the following `SecItemAdd` fails for any reason
+/// that is not `errSecDuplicateItem` (`errSecNotAvailable`, `errSecInteractionNotAllowed`, a
+/// full-disk `errSecIO`…), the previous credential is already gone and the new one never landed
+/// — the device is left with no session at all. `SecItemUpdate` first is atomic in the case that
+/// matters: it either overwrites in place or answers `errSecItemNotFound`, which is the only
+/// status that means "nothing there yet" and the only one that falls through to `SecItemAdd`.
+///
+/// That in-place overwrite is also what makes `fullLogout`'s "overwrite the credential I could
+/// not delete" compensation real, and a failure of either step propagates rather than being
+/// swallowed, so the caller can say out loud that the credential is still on the device.
+/// Injected ops so every branch is testable without a Keychain that can be made to fail.
+func writeStoredSession(
+  update: () -> OSStatus,
+  add: () -> OSStatus
+) throws {
+  let updateStatus = update()
+  if updateStatus == errSecSuccess { return }
+  // Anything other than "no such item" is a real failure — do NOT fall through to an add that
+  // would race the item we could not write.
+  guard updateStatus == errSecItemNotFound else { throw KeychainError.unhandled(updateStatus) }
+  let addStatus = add()
+  guard addStatus == errSecSuccess else { throw KeychainError.unhandled(addStatus) }
+}
+
+/// Snapshot every cookie currently in `HTTPCookieStorage.shared` (see
+/// `KeychainClient.captureSharedCookies`) — deliberately unfiltered: domain-matching guesswork
+/// here would be the thing that silently drops the rotated cookie a refresh depends on.
+///
+/// **"Every cookie" is NOT the same as "the live session's cookies".** The jar is process-global
+/// and persisted, so it can also hold a previous server's cookies (nothing flushes it until the
+/// next logout / cookie-session activation) or anything else a response set. Consumers must
+/// therefore treat this as a raw jar snapshot and re-apply scoping themselves — which is exactly
+/// what `cookieHeader(_:for:)` does before serialising any of it into an explicit `Cookie`
+/// header, since setting that header switches off every rule `URLSession` would have enforced.
+func sharedCookieSnapshot() -> [SerializedCookie] {
+  (HTTPCookieStorage.shared.cookies ?? []).map(SerializedCookie.init)
 }
 
 /// Rehydrate a freshly-captured `.cookie` session into `HTTPCookieStorage.shared` (flushing
@@ -137,8 +221,9 @@ func activateSharedCookieSession(_ session: CookieSession) {
 
 /// Remove every cookie from `HTTPCookieStorage.shared` — the jar the live REST/WS transports
 /// read (and into which a `.cookie` session is rehydrated). Called on session deletion so a
-/// gated logout leaves no cookie behind. (We own the shared jar in this app — no third-party
-/// cookies share it — so clearing all of them is safe and avoids domain-matching guesswork.)
+/// gated logout leaves no cookie behind. (Clearing the WHOLE jar is the conservative direction:
+/// the app talks to one agent at a time and stores nothing else in it, so an over-broad flush
+/// costs nothing, while domain-matching guesswork could leave a session cookie behind.)
 func clearSharedCookies() {
   let storage = HTTPCookieStorage.shared
   for cookie in storage.cookies ?? [] { storage.deleteCookie(cookie) }

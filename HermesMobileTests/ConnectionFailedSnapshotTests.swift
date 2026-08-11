@@ -44,9 +44,9 @@ final class ConnectionFailedSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// Retry in flight: the button swaps to a spinner and is disabled — while "Change server"
-  /// and "Log Out", the two ways OFF this screen, stay enabled (a probe can run to
-  /// URLSession's 60s default, and the foreground auto-retry arms it unasked).
+  /// Retry in flight: the button swaps to a spinner and is disabled — while "Log Out", the
+  /// way OFF this screen, stays enabled (a probe can run to URLSession's 60s default, and the
+  /// foreground auto-retry arms it unasked).
   ///
   /// The indeterminate spinner is captured at whatever rotation the render server is at, so
   /// this one baseline needs a pixel budget — and the budget does **not** mean what its number
@@ -76,12 +76,10 @@ final class ConnectionFailedSnapshotTests: SnapshotTestCase {
 /// same size vanished". So the controls are pinned here instead — hosted in a real `UIWindow`
 /// and read back through the accessibility tree, which has no tolerance to spend.
 final class ConnectionFailedControlsTests: XCTestCase {
-  /// Every control that is not the retry button itself — the two ways OFF the screen plus the
-  /// connection-help link. All of them must survive a retry, so they are asserted in both
-  /// states rather than only at rest.
-  private static let secondaryControls = [
-    "Change server", "Need help setting up your agent?", "Log Out",
-  ]
+  /// Every control that is not the retry button itself — the way OFF the screen plus the
+  /// connection-help link. Both must survive a retry, so they are asserted in both states
+  /// rather than only at rest.
+  private static let secondaryControls = ["Need help setting up your agent?", "Log Out"]
 
   /// While a probe is in flight the primary control must be the disabled "Retrying" one, and
   /// everything else must stay tappable: a probe can run to `URLSession`'s 60s default and the

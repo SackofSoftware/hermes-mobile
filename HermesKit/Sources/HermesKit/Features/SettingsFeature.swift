@@ -102,6 +102,7 @@ public struct SettingsFeature {
 
   @Dependency(\.keychain) var keychain
   @Dependency(\.preferences) var preferences
+  @Dependency(\.chatSnapshot) var chatSnapshot
   @Dependency(\.debugLog) var debugLog
   @Dependency(\.hermesREST) var rest
   @Dependency(\.push) var push
@@ -226,19 +227,15 @@ public struct SettingsFeature {
         return .send(.delegate(.tokenSaved(token)))
 
       case .clearTokenTapped:
-        // Report the intent; do NOT run the logout recipe here. `AppFeature.fullLogout` owns it
-        // (the same one "Quit to start" uses) for two reasons this screen got wrong when it had
-        // its own copy:
-        //
-        //  * ORDER — deleting the session flushes the shared cookie jar, and the push
-        //    unregister is the one REST call that has to authenticate AFTER logout. Doing the
-        //    delete here left the parent nothing live to snapshot, so the unregister went out
-        //    with login-vintage cookies; against a server that had transparently rotated them
-        //    it 401s and the device stays registered, still receiving the previous user's
-        //    pushes.
-        //  * HONESTY — a Keychain delete can fail. `try?` swallowed that and still landed the
-        //    user on a clean onboarding screen with live credentials on the device.
-        //    `fullLogout` compensates (overwrite in place) and, when even that fails, says so.
+        // Clear the full session (token + any gated cookies in the shared jar), not just the
+        // token — a gated logout must leave no cookie behind.
+        try? keychain.deleteSession()
+        preferences.clearServerURL()
+        preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
+        preferences.saveSeenCounts([:]) // unread state is per-server; drop it too
+        preferences.saveGroupingMode(.default) // reset the list grouping pref on logout
+        preferences.clearSelectedProfileID() // selected profile is per-server — clear on logout
+        chatSnapshot.wipeAll() // snapshots + turn anchors are per-server — wipe on logout
         return .merge(
           .send(.delegate(.disconnect)),
           .run { [dismiss] _ in await dismiss() }

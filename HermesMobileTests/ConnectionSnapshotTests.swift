@@ -27,25 +27,6 @@ final class ConnectionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// Arrived here from the launch retry screen's *Change server*, which stashes that screen
-  /// rather than discarding it: a "Back to the connection screen" row sits above everything
-  /// else. It is gated on `canReturnToConnectionFailed`, so every other baseline in this suite
-  /// (and every other route to onboarding) renders without it.
-  func testConnectionView_returnToConnectionFailed() {
-    let view = ConnectionView(
-      store: Store(
-        initialState: ConnectionFeature.State(
-          serverURL: "http://mac.tailnet:9119",
-          method: .password,
-          capability: .passwordAvailable(provider: "basic", displayName: "Password"),
-          status: .unreachable,
-          canReturnToConnectionFailed: true
-        )
-      ) { ConnectionFeature() }
-    )
-    assertSnapshot(of: view, as: deviceImage())
-  }
-
   /// Unreachable server: red failure footer plus the contextual "Need help setting up
   /// your agent?" link (shown only for `.unreachable` / `.notHermes` — the stuck moment).
   func testConnectionView_unreachable() {

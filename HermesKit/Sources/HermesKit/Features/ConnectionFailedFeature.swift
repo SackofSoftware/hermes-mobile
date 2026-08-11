@@ -12,15 +12,10 @@ import Foundation
 /// before, and if a *retry* from this screen comes back with a credentials verdict the
 /// reducer bubbles `.credentialsRejected` so the user ends up in the same place.
 ///
-/// Three ways out, only one of them destructive: **Retry** (plus a foreground auto-retry),
-/// **Change server** — the non-destructive escape hatch for an agent that moved host/port,
-/// which lands on the same prefilled onboarding an auth failure does *without* touching the
-/// keychain, and which `AppFeature` makes **reversible** (it stashes this screen and offers a
-/// "Back to the connection screen" row on onboarding, so an exploratory tap can't strand a
-/// password-mode user in front of an empty password field) — and **Log Out**, behind a
-/// confirmation, which abandons the session. The view
-/// additionally links the `AgentSetupGuideView` sheet directly (view-local `@State`, as on the
-/// login screen), so connection help doesn't cost a detour through Change server.
+/// Two ways out, only one of them destructive: **Retry** (plus a foreground auto-retry) and
+/// **Log Out**, behind a confirmation, which abandons the session. The view additionally links
+/// the `AgentSetupGuideView` sheet directly (view-local `@State`, as on the login screen), so
+/// connection help is one tap away.
 ///
 /// The reducer is pure routing + the retry probe: clearing the keychain/prefs on
 /// `.logoutConfirmed` lives in `AppFeature`, next to the other full-logout recipe.
@@ -49,9 +44,7 @@ public struct ConnectionFailedFeature {
   /// changed on the *network or server* side, not that the saved sign-in went bad. Making
   /// such a user re-type a password is issue #62's exact symptom, and it buys nothing: the
   /// retry screen states the real failure (`HTTP 500`, `HTTP 404`, a captive-portal reply)
-  /// where prefilled onboarding shows a blank field and no explanation, and its **Change
-  /// server** button reaches that same prefilled onboarding in one tap when the URL really is
-  /// the problem.
+  /// where prefilled onboarding shows a blank field and no explanation.
   public static func isRetryable(_ error: RESTError) -> Bool {
     switch error {
     case .unauthorized:
@@ -104,7 +97,7 @@ public struct ConnectionFailedFeature {
       case let .server(status, detail):
         Self.serverReasonText(status: status, detail: detail)
       case .notFound:
-        "The server answered, but there’s no Hermes agent at this address (HTTP 404). If it moved, use Change server."
+        "The server answered, but there’s no Hermes agent at this address (HTTP 404)."
       case .rateLimited:
         "The server is turning requests away right now (HTTP 429). Try again in a moment."
       case .decoding:
@@ -129,8 +122,8 @@ public struct ConnectionFailedFeature {
     static let transientRefusalStatuses: Set<Int> = [408, 425, 429]
 
     /// Longest server-supplied `detail` the reason line will quote. The reason `Text` sits
-    /// ABOVE this screen's three escape routes inside a `ScrollView`, so an unbounded body
-    /// pushes Retry / Change server / Log Out below the fold.
+    /// ABOVE this screen's two escape routes inside a `ScrollView`, so an unbounded body
+    /// pushes Retry / Log Out below the fold.
     static let maxServerDetailLength = 200
 
     /// Make a server-supplied `detail` safe to quote on the reason line: drop an HTML/XML
@@ -190,11 +183,11 @@ public struct ConnectionFailedFeature {
       }
       guard (400..<500).contains(status) else {
         return
-          "The server answered unexpectedly (HTTP \(status)). Try again, or use Change server if the address changed."
+          "The server answered unexpectedly (HTTP \(status)). Try again in a moment."
       }
       guard let explanation = sanitizedServerDetail(detail) else {
         return
-          "The server refused the request (HTTP \(status)) — retrying won’t change that. Check the agent’s setup, or use Change server."
+          "The server refused the request (HTTP \(status)) — retrying won’t change that. Check the agent’s setup."
       }
       return
         "The server refused the request (HTTP \(status)) — retrying won’t change that. It said: “\(explanation)”"
@@ -206,9 +199,6 @@ public struct ConnectionFailedFeature {
     /// The app came back to the foreground — re-probe (the user very likely just turned the
     /// VPN back on, which is exactly the moment a manual tap is most annoying).
     case sceneBecameActive
-    /// "Change server" — the agent moved host/port and the URL needs editing. Non-destructive:
-    /// nothing is deleted, the parent just lands on prefilled onboarding.
-    case changeServerTapped
     /// Log Out button — raises the confirmation; only `.confirmLogout` actually logs out.
     case logoutButtonTapped
     case confirmationDialog(PresentationAction<Dialog>)
@@ -231,10 +221,6 @@ public struct ConnectionFailedFeature {
       /// The retry reached the server and it rejected us (401 and friends) — retrying can't
       /// fix that, so fall back to onboarding for re-entry.
       case credentialsRejected(ServerConnection)
-      /// The user wants to edit the server URL — same prefilled-onboarding landing as
-      /// `.credentialsRejected`, but nothing is cleared: the stored session stays intact, and
-      /// `AppFeature` stashes this screen so onboarding can hand it back.
-      case changeServerRequested(ServerConnection)
       /// The user confirmed the Log Out dialog — abandon the stored session, and `AppFeature`
       /// runs the full-logout recipe. Named for the *outcome*, like its siblings: the bare
       /// button tap is `Action.logoutButtonTapped` and only raises the confirmation.
@@ -306,9 +292,6 @@ public struct ConnectionFailedFeature {
         state.reason = error
         return .none
 
-      case .changeServerTapped:
-        return .send(.delegate(.changeServerRequested(state.connection)))
-
       case .logoutButtonTapped:
         state.confirmationDialog = ConfirmationDialogState {
           TextState("Log out?")
@@ -321,7 +304,7 @@ public struct ConnectionFailedFeature {
           }
         } message: {
           TextState(
-            "This deletes the saved sign-in for this server along with pins, unread state and cached chats. To just point the app somewhere else, use Change server."
+            "This deletes the saved sign-in for this server along with pins, unread state and cached chats."
           )
         }
         return .none

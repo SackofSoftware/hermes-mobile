@@ -30,17 +30,6 @@ public struct AppFeature {
     /// be made to re-type a password that never expired just because Tailscale was off or the
     /// agent threw a 500.
     public var connectionFailed: ConnectionFailedFeature.State?
-    /// The retry screen set aside by **Change server**, so onboarding can hand it back.
-    ///
-    /// Change server deliberately clears nothing (keychain session + stored URL survive) and
-    /// the launch probe is once-per-process, so without a way back an exploratory tap stranded
-    /// a password-mode user on a prefilled URL with an empty password field — issue #62's own
-    /// symptom, force-quit the only escape. Filled the instant `connectionFailed` is nil'd for
-    /// *that* reason and consumed by `.returnToConnectionFailedRequested`, so the invariant is
-    /// "at most one of the two is non-nil". A credentials rejection does NOT stash (the retry
-    /// screen can't help a 401), and a successful login or a full logout drops it — a stash
-    /// whose connection points at an abandoned server must never be restorable.
-    var connectionFailedStash: ConnectionFailedFeature.State?
     /// The re-auth modal, presented when a live (gated) session dies mid-use. While shown,
     /// the dead chat's reconnect stays paused (it pauses itself via `awaitingReauth`).
     @Presents public var reauth: ReauthFeature.State?
@@ -53,18 +42,9 @@ public struct AppFeature {
     /// `.active`). Guards `.backgroundGraceExpired`: an expiry whose send escaped just as
     /// the user returned must not tear down the socket `.active` freshly redialed.
     var isSceneBackgrounded = false
-    /// The launch auto-connect probe has been started once this process — it never runs
-    /// again, whatever the rest of the state looks like.
-    ///
-    /// `.task` can be re-sent (a re-created `AppView`), and every *other* condition in its
-    /// guard is satisfiable again after the user has already been through the launch flow:
-    /// `changeServerRequested` deliberately clears nothing — the keychain session and the
-    /// stored URL both survive, and `connectionFailed` is nil'd — so without this flag a
-    /// re-sent `.task` would restart the launch probe, flip the root back to "Connecting…",
-    /// and on the same failure dump the user straight back onto the retry screen they were
-    /// escaping, discarding whatever URL they had typed (`fallBackToOnboarding` rebuilds
-    /// `onboarding` from scratch). "Already ran" must be its own bit, not an inference from
-    /// slots that are deliberately cleared.
+    /// The launch auto-connect probe has been started once this process — a re-sent `.task`
+    /// (a re-created `AppView`) must never restart it, which would flip the root back to the
+    /// "Connecting…" spinner over the retry screen the user is standing on.
     var didRunLaunchProbe = false
     /// A push tap that arrived before the session list existed (cold launch — #46): the
     /// routing in `.pushTapped` can't open anything without `home`, so the tap is stashed
@@ -199,10 +179,6 @@ public struct AppFeature {
     /// (`.teardownSocketOnly`), keeping the chat state in memory for the #26-preserving
     /// foreground re-hydrate.
     case backgroundGraceExpired
-    /// Internal: logout's best-effort push unregister did NOT land (the agent was unreachable,
-    /// or rejected the call). Carries the host so onboarding can name it. See
-    /// `unregisterPushOnLogout` for why this is reported rather than retried.
-    case pushUnregisterFailed(host: String)
     case reauth(PresentationAction<ReauthFeature.Action>)
   }
 
@@ -219,7 +195,6 @@ public struct AppFeature {
   @Dependency(\.hermesREST) var rest
   @Dependency(\.push) var push
   @Dependency(\.backgroundTask) var backgroundTask
-  @Dependency(\.chatSnapshot) var chatSnapshot
 
   public init() {}
 
@@ -243,12 +218,9 @@ public struct AppFeature {
         // a home. `loadSession` rehydrates a `.cookie` session's cookies into `.shared` so
         // the REST/WS transports authenticate on this fresh launch.
         // `!didRunLaunchProbe` is the real once-per-process gate (see the property): a
-        // re-sent `.task` (a re-created `AppView`) must never start a SECOND launch probe —
-        // not while the retry screen is up (it would flip the UI back to the "Connecting…"
-        // spinner and, on success, build `home` beside a still-populated slot), and not after
-        // the user took **Change server**, which deliberately clears nothing and would
-        // otherwise satisfy every other condition here and bounce them back. The
-        // `home`/`connectionFailed`/`autoConnecting` checks stay as cheap belt-and-braces.
+        // re-sent `.task` must never start a SECOND probe while the retry screen is up (it
+        // would flip the UI back to the "Connecting…" spinner and, on success, build `home`
+        // beside a still-populated slot). The other checks are cheap belt-and-braces.
         guard !state.didRunLaunchProbe, state.home == nil, state.connectionFailed == nil,
               !state.autoConnecting,
               let session = keychain.loadSession(.shared),
@@ -307,46 +279,30 @@ public struct AppFeature {
       case let .connectionFailed(.delegate(.credentialsRejected(connection))):
         // The retry reached the server and it turned us away — retrying can't fix that, so
         // land exactly where a launch auth failure lands: prefilled onboarding, nothing
-        // cleared, which is also where the connection-help sheet's entry points live. No
-        // stash: going "back" to a screen whose only action is a Retry the server already
-        // answered with a 401 would be a loop, not an escape.
+        // cleared, which is also where the connection-help sheet's entry points live.
         state.connectionFailed = nil
-        state.connectionFailedStash = nil
         fallBackToOnboarding(&state, connection: connection)
-        return .none
-
-      case let .connectionFailed(.delegate(.changeServerRequested(connection))):
-        // The user asked to edit the URL because the agent moved host/port — same prefilled
-        // onboarding, and still nothing cleared. But this one is REVERSIBLE: stash the retry
-        // screen and tell onboarding to offer the way back, so an exploratory tap doesn't
-        // strand a password-mode user in front of an empty password field with no route to the
-        // still-valid stored session (#62's symptom, one tap away). The stash is normalized —
-        // its probe was cancelled by the `ifLet` nil-out and any confirmation dialog is
-        // dismissed — so a restore comes back idle rather than with a latched spinner.
-        // The delegate can only arrive from a live `ifLet` child, so the slot IS populated —
-        // `guard` states that rather than optional-chaining around a case that can't happen.
-        guard var stash = state.connectionFailed else { return .none }
-        stash.isRetrying = false
-        stash.confirmationDialog = nil
-        // Stash the LIVE cookies with it, not the login-vintage ones it was built from: the
-        // restore re-installs this session into the shared jar, and the gated server rotates
-        // cookies transparently on any response (including the launch probe / a retry that
-        // then failed) without anything writing them back to the Keychain. Snapshotting here —
-        // while this session is still the one in the jar, and before onboarding's password
-        // path can flush it — makes the restore reinstate exactly what was live at stash time,
-        // so the escape hatch can never hand back a session older than the one it took away.
-        stash.connection.auth = refreshedFromLiveJar(stash.connection.auth)
-        state.connectionFailedStash = stash
-        state.connectionFailed = nil
-        fallBackToOnboarding(&state, connection: connection, canReturnToConnectionFailed: true)
         return .none
 
       case .connectionFailed(.delegate(.logoutConfirmed)):
         // "Log Out" from the retry screen (confirmed): the user is abandoning the stored
-        // session, so run the FULL logout recipe and land on a *fresh* onboarding (nothing
-        // prefilled — there is no session left to repair).
+        // session, so run the same logout as "Quit to start" (Keychain session + every pref)
+        // and land on a *fresh* onboarding — nothing prefilled, there is no session left to
+        // repair. The tap stash and the approval badge set die with the identity too.
         let connection = state.connectionFailed?.connection
-        return fullLogout(&state, connection: connection)
+        try? keychain.deleteSession()
+        preferences.clearServerURL()
+        preferences.clearIdentityScopedPrefs()
+        preferences.saveGroupingMode(.default)
+        state.connectionFailed = nil
+        state.path = .init()
+        state.liveChat = nil
+        state.home = nil
+        state.onboarding = .init()
+        state.pendingPushTap = nil
+        state.pendingPushTapServerURL = nil
+        state.pendingApprovalSessionIDs = []
+        return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
 
       case let .scenePhaseChanged(phase):
         // Fan lifecycle out to the live chat slot (if any) and the session list — no
@@ -475,61 +431,10 @@ public struct AppFeature {
         // never coexist. `AppView` would render `home` while the `ifLet` child stayed alive,
         // re-probing on every foreground for the process lifetime.
         state.connectionFailed = nil
-        // The user signed in (possibly to a DIFFERENT server) — the set-aside retry screen is
-        // about a connection that no longer describes this session, so drop it rather than
-        // leave a restorable screen pointing at the old host.
-        state.connectionFailedStash = nil
-        state.onboarding.canReturnToConnectionFailed = false
         state.home = makeHomeState(connection: connection)
         // Auto-connect failure falls back to onboarding, so a manual login must also replay
         // a stashed cold-launch tap (#46).
         return replayPendingPushTap(&state)
-
-      case .onboarding(.delegate(.returnToConnectionFailedRequested)):
-        // "Back to the connection screen": hand the stashed retry screen back. Deliberately
-        // does NOT re-probe — the user chose to stop editing, and Retry (plus the foreground
-        // auto-retry) is right there. A missing stash can only mean the flag outlived it, so
-        // clear the flag rather than acting on nothing (and nothing is cancelled either: that
-        // path leaves the user ON onboarding, where an in-flight login is still theirs).
-        guard let stash = state.connectionFailedStash else {
-          state.onboarding.canReturnToConnectionFailed = false
-          return .none
-        }
-        state.connectionFailedStash = nil
-        state.onboarding.canReturnToConnectionFailed = false
-        state.connectionFailed = stash
-        // Stop whatever onboarding still has in flight. Its effects are NOT auto-cancelled
-        // (permanently scoped, not an `ifLet` child), so a login resolving after this would
-        // persist the abandoned credentials and navigate home over the restored screen.
-        let cancelOnboarding = Effect<Action>.send(.onboarding(.cancelInFlightRequests))
-        // Cookie mode: onboarding's password path REPLACES the shared cookie jar the live
-        // transports read (`activateCookieSession` flushes it, then installs the new login's
-        // cookies) the moment `passwordLogin` succeeds — before the validating call that may
-        // then 401, and before the user can abandon the attempt. Coming back therefore means
-        // coming back to a connection whose cookies are no longer in the jar: its Retry would
-        // authenticate as the wrong user (or as nobody), read a 401 as `.credentialsRejected`,
-        // and bounce a still-valid session straight back to onboarding — #62's symptom
-        // manufactured by the escape hatch meant to avoid it. Reinstate them with the stash —
-        // which carries the cookies that were LIVE when it was taken (see the snapshot in
-        // `.changeServerRequested`), not the Keychain's login-time vintage, so a session the
-        // server had since refreshed comes back refreshed rather than downgraded.
-        //
-        // ORDERING (load-bearing, same rule as `fullLogout`'s trailing flush): the reinstatement
-        // is the LAST write to the jar, sequenced strictly AFTER the cancellation — never done
-        // here in the reducer body. `passwordLogin` runs on a background executor and checks
-        // `Task.isCancelled` immediately before its own `activateCookieSession`, so a login that
-        // resolves in the window between the reducer and the cancellation would flush the jar we
-        // had just restored and leave Retry authenticating as the abandoned attempt. `.concatenate`
-        // + a `.run` gives the reverse order for real: `.send` is `Just`, delivered synchronously
-        // by `UIScheduler` on the main queue and reduced inside the SAME synchronous store
-        // `send` loop (buffered actions are drained before it returns), and `.cancel(id:)`
-        // performs its cancellation eagerly when the effect is *constructed* — while a `.run`
-        // body is a `@MainActor` `Task` that cannot start until that loop returns.
-        guard case let .cookie(session) = stash.connection.auth else { return cancelOnboarding }
-        return .concatenate(
-          cancelOnboarding,
-          .run { [keychain] _ in keychain.activateCookieSession(session) }
-        )
 
       case let .home(.delegate(.openSession(session))):
         guard let home = state.home else { return .none }
@@ -643,14 +548,21 @@ public struct AppFeature {
         return teardownSlot()
 
       case .home(.delegate(.disconnect)):
-        // "Clear token" in Settings → the SAME full logout as "Quit to start", run here rather
-        // than in `SettingsFeature`. The child deliberately deletes nothing (see its
-        // `.clearTokenTapped`): the credential delete flushes the shared cookie jar, so doing it
-        // there would leave `fullLogout` nothing live to snapshot and the push unregister would
-        // authenticate with login-vintage cookies a rotation has already invalidated. Running
-        // the one recipe here also gets the Keychain-failure compensation (and its honest
-        // warning) that the child's `try?` used to swallow.
-        return fullLogout(&state, connection: state.home?.connection)
+        // Token cleared in Settings → tear down and return to onboarding. Nil-ing the slot
+        // auto-cancels its effects (socket included). The tap stash is structurally nil
+        // here (home existed, so any stash was consumed at creation) — cleared
+        // defensively: the stash dies with the identity. The pending-approval badge set
+        // dies with it too (entries reference sessions on the server just left — they'd
+        // leak a stale icon badge into the next login), so reset the badge to zero.
+        let connection = state.home?.connection
+        state.path = .init()
+        state.liveChat = nil
+        state.home = nil
+        state.onboarding = .init()
+        state.pendingPushTap = nil
+        state.pendingPushTapServerURL = nil
+        state.pendingApprovalSessionIDs = []
+        return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
 
       case .liveChat(.delegate(.sessionExpired)):
         // The live (gated) session died — attached or detached, the slot is the one chat.
@@ -681,12 +593,23 @@ public struct AppFeature {
         return setBadge(state)
 
       case .reauth(.presented(.delegate(.quit))):
-        // "Quit to start" → full logout (Keychain session + every pref + the snapshot cache)
-        // → onboarding. The tap stash and the approval badge set die with the identity (same
-        // clears as `.disconnect`, through the other logout path); badge reset to zero.
+        // "Quit to start" → full logout (Keychain session + every pref) → onboarding.
+        // The tap stash and the approval badge set die with the identity (same clears
+        // as `.disconnect`, through the other logout path); badge reset to zero.
         let connection = state.home?.connection ?? state.liveChat?.connection
+        try? keychain.deleteSession()
+        preferences.clearServerURL()
+        preferences.clearIdentityScopedPrefs()
+        preferences.saveGroupingMode(.default)
         state.reauth = nil
-        return fullLogout(&state, connection: connection)
+        state.path = .init()
+        state.liveChat = nil
+        state.home = nil
+        state.onboarding = .init()
+        state.pendingPushTap = nil
+        state.pendingPushTapServerURL = nil
+        state.pendingApprovalSessionIDs = []
+        return .merge(setBadge(state), unregisterPushOnLogout(connection: connection))
 
       case let .liveChat(.delegate(.branchCreated(creation))):
         // A branch `session.create` resolved (#34). The new session lives ONLY in server
@@ -732,16 +655,6 @@ public struct AppFeature {
         // nothing left to keep alive: flush the snapshot, then tear the slot down.
         guard !running, state.path.isEmpty, state.liveChat != nil else { return glow }
         return .concatenate(glow, teardownSlot())
-
-      case let .pushUnregisterFailed(host):
-        // Logout could not tell the agent to stop pushing to this device (see
-        // `unregisterPushOnLogout` for why this is reported, not retried). Tell the user on the
-        // screen they just landed on — but only while they are still standing on the
-        // freshly-reset onboarding, and never over the LOUDER credentials warning (a session we
-        // could not delete beats notifications we could not stop).
-        guard state.home == nil, state.onboarding.status == .idle else { return .none }
-        state.onboarding.status = .failed(Self.pushNotUnregisteredMessage(host: host))
-        return .none
 
       case .onboarding, .connectionFailed, .home, .path, .reauth, .liveChat:
         return .none
@@ -876,203 +789,32 @@ public struct AppFeature {
     state.path.append(ChatScreen.State(sessionKey: chat.sessionKey))
   }
 
-  /// The ONE full-logout recipe in `AppFeature` — "Log Out" from the launch retry screen and
-  /// "Quit to start" from the re-auth modal both run it, so the two can't drift (they already
-  /// had: only one of the copies wiped the snapshot cache). Everything identity-scoped goes:
-  /// the Keychain session, the server URL, identity-scoped prefs, the grouping pref, the
-  /// non-authoritative chat cache, the nav/live-chat/list state, the cold-launch tap stash and
-  /// the pending-approval badge set — landing on a *fresh* (nothing prefilled) onboarding,
-  /// with the icon badge zeroed and the device's push registration released.
-  ///
-  /// `connection` is the server to release the push registration against (best-effort; `nil`
-  /// still clears the local push state). Read it from state BEFORE calling — this clears it.
-  ///
-  /// Settings' "Clear token" runs this same recipe: `SettingsFeature` deliberately clears
-  /// NOTHING itself (it owns only the sheet dismissal) and delegates `.disconnect` here, so
-  /// there is exactly one logout in the app.
-  private func fullLogout(_ state: inout State, connection: ServerConnection?) -> Effect<Action> {
-    // Snapshot the live cookies BEFORE the delete flushes the jar: the push unregister below
-    // is the one REST call that has to authenticate after logout, and it authenticates from
-    // the connection it is handed (see `HermesRESTClient.unregisterPush`). Reading the jar
-    // afterwards would hand it nothing.
-    let releaseConnection = connection.map {
-      var refreshed = $0
-      refreshed.auth = refreshedFromLiveJar($0.auth)
-      return refreshed
-    }
-    var credentialsWarning: String?
-    do {
-      try keychain.deleteSession()
-    } catch {
-      // A Keychain delete CAN fail (an `OSStatus` we can't act on). Compensate rather than
-      // swallow it: overwrite the item that survived with an empty-token session, which the
-      // launch probe treats as "no credentials" (see `.task`), so the residue can't silently
-      // sign the next launch back in. The overwrite is a real upsert — `saveSession` is
-      // `SecItemUpdate`-first (`writeStoredSession`), so it overwrites the surviving item IN
-      // PLACE rather than deleting it and hoping an add lands — so a clean return here genuinely
-      // means the credential is neutralized, and a throw genuinely means it isn't. That last
-      // case is NOT swallowed: a logout that cannot guarantee the credential is gone must not
-      // claim success, so it says so on the onboarding screen the user lands on. (The cookie
-      // half is already safe: `deleteSession` flushes the shared jar even when the item delete
-      // fails, and the cleared server URL blocks the launch probe regardless.)
-      do {
-        try keychain.saveSession(.token(""))
-      } catch {
-        credentialsWarning = Self.credentialsNotClearedMessage
-      }
-    }
-    preferences.clearServerURL()
-    preferences.clearIdentityScopedPrefs()
-    preferences.saveGroupingMode(.default)
-    chatSnapshot.wipeAll()
-    state.connectionFailed = nil
-    // The stash outlives `connectionFailed` by design (Change server sets one as it clears the
-    // other), so logout has to name it explicitly — the session it would restore is gone.
-    // `state.onboarding = .init()` below resets its companion flag.
-    state.connectionFailedStash = nil
-    state.path = .init()
-    state.liveChat = nil
-    state.home = nil
-    state.onboarding = .init()
-    if let credentialsWarning {
-      state.onboarding.status = .failed(credentialsWarning)
-    }
-    state.pendingPushTap = nil
-    state.pendingPushTapServerURL = nil
-    state.pendingApprovalSessionIDs = []
-    return .merge(
-      setBadge(state),
-      unregisterPushOnLogout(connection: releaseConnection),
-      .concatenate(
-        // Belt-and-braces: onboarding's effects are not auto-cancelled (permanently scoped), so
-        // a connect that was in flight when the user logged out would persist the very session
-        // this recipe just wiped — and delegate `.connected` on top of the fresh onboarding.
-        .send(.onboarding(.cancelInFlightRequests)),
-        // …and then flush the shared cookie jar a SECOND time, ordered strictly after that
-        // cancellation AND after the `ifLet` nil-outs above. Both orderings are real, and
-        // neither rests on merge order (the auto-cancels are merged LAST, after this return):
-        //   * `Effect.cancel(id:)` runs its cancellation eagerly, when the effect is
-        //     CONSTRUCTED — `Effect.publisher` invokes its non-escaping factory immediately —
-        //     so `_IfLetReducer` cancels every effect of a child it just nil'd out
-        //     synchronously, inside the reduce, before anything here is even subscribed.
-        //   * `.send` is `Just`, delivered synchronously by `UIScheduler` while we are on the
-        //     main queue, and the store drains its buffered actions inside the SAME synchronous
-        //     `send` call — so `.onboarding(.cancelInFlightRequests)` is fully reduced (and its
-        //     `.cancel(id:)`s constructed) before that call returns.
-        //   * a `.run` body is a `@MainActor` `Task`, which cannot start until it does.
-        //
-        // The first flush is the one `deleteSession` performs, and it happens while REST work is
-        // still in flight: `URLSession` — not our effect — writes a reply's `Set-Cookie` into
-        // `HTTPCookieStorage.shared`, so a list fetch / retry probe / status check whose response
-        // landed in the window between that flush and the cancellations would repopulate LIVE
-        // credentials behind a user who has just logged out, and they would then persist in the
-        // jar (and in any later `captureSharedCookies`). Re-flushing here closes that window.
-        //
-        // Honest residue: a response that lands after this second flush would still store its
-        // cookies. It cannot be eliminated from the reducer (cancelling a task does not un-park a
-        // response `URLSession` has already received), and it is narrow — every effect that could
-        // produce one has been cancelled by this point, so no NEW request goes out. Deliberately
-        // NOT ordered after the push unregister: that is a real network call which can take
-        // seconds, and a flush that late could wipe the jar of a session the user had already
-        // signed back into. (It cannot dirty the jar either — it sends an explicit `Cookie`
-        // header with `httpShouldHandleCookies = false`.)
-        .run { [keychain] _ in keychain.flushSharedCookies() }
-      )
-    )
-  }
-
-  /// What onboarding says when a logout could neither delete the stored session nor overwrite
-  /// it: the only case where "you are signed out" would be a lie. Names the one thing the user
-  /// can actually do about it — and it is deliberately NOT "delete the app": the session lives
-  /// in a generic-password item (`kSecAttrAccessibleAfterFirstUnlock`, no access group, not
-  /// synchronizable), and iOS keeps such items across an uninstall/reinstall, so advertising a
-  /// reinstall as the remedy would be reassuring and wrong. What actually fails here is the
-  /// Keychain write itself (`errSecInteractionNotAllowed` / `errSecNotAvailable` — a device
-  /// still locked since boot, or a Keychain momentarily unavailable), and that clears up once
-  /// the device is unlocked: repeating the sign-in/sign-out then overwrites the item for real.
-  static let credentialsNotClearedMessage =
-    "Signed out, but iOS wouldn’t let us remove the saved credentials from the Keychain. "
-      + "Unlock this device, then sign in and out again — reinstalling the app may not clear them."
-
-  /// Refresh a stored `.cookie` session from a snapshot of the LIVE shared jar — the jar the
-  /// transports actually authenticate with, and the only place a transparently-rotated cookie
-  /// exists (nothing writes rotations back to the Keychain). `.token` sessions and an empty
-  /// snapshot are returned unchanged: this may only ever make a session fresher, never replace
-  /// a working session with nothing.
-  private func refreshedFromLiveJar(_ auth: AuthSession) -> AuthSession {
-    guard case .cookie = auth else { return auth }
-    let live = keychain.captureSharedCookies()
-    guard !live.isEmpty else { return auth }
-    return auth.replacingCookies(live)
-  }
-
   /// The prefilled-onboarding landing for a connection that needs *editing* rather than
   /// retrying: token mode prefills both fields so the user can fix them; cookie mode prefills
   /// only the URL (the password is never persisted), so they re-enter it. Shared by the launch
-  /// auth-failure fallback and the retry screen's `.credentialsRejected` /
-  /// `.changeServerRequested` delegates so onboarding is constructed in exactly one place.
-  ///
-  /// `canReturnToConnectionFailed` is the one thing the three callers disagree on — only
-  /// **Change server** stashes the retry screen and can hand it back — so it is a parameter
-  /// rather than a field patched back on afterwards.
-  private func fallBackToOnboarding(
-    _ state: inout State,
-    connection: ServerConnection,
-    canReturnToConnectionFailed: Bool = false
-  ) {
+  /// auth-failure fallback and the retry screen's `.credentialsRejected` delegate, so
+  /// onboarding is constructed in exactly one place.
+  private func fallBackToOnboarding(_ state: inout State, connection: ServerConnection) {
     state.onboarding = ConnectionFeature.State(
       serverURL: connection.baseURL.absoluteString,
-      token: connection.auth.token ?? "",
-      canReturnToConnectionFailed: canReturnToConnectionFailed
+      token: connection.auth.token ?? ""
     )
   }
 
   /// Best-effort push cleanup on logout: unregister the last-known device token with the
-  /// agent's push plugin, then clear the persisted device token (prefs). Part of
+  /// agent's push plugin (failures ignored — the server prunes dead tokens on a 410 anyway),
+  /// then clear the persisted device token (prefs). Part of
   /// "logout clears everything". Uses the persisted token so it works even when the live
   /// `register()` stream isn't producing; a `nil` connection (nothing to talk to) still clears
   /// local push state.
-  ///
-  /// **The unregister stays best-effort, and its failure is REPORTED rather than retried.**
-  /// Logout is very often the one moment the agent is unreachable — the retry screen's Log out
-  /// button exists precisely for a server that will not answer — so no ordering trick makes the
-  /// call succeed. The two obvious alternatives were weighed and rejected:
-  ///
-  ///  * *Clear the local token only on success.* The device token is not what keeps the
-  ///    registration alive — the plugin's record is keyed by the APNs token server-side, and the
-  ///    local copy is re-obtained from APNs on the next launch. Keeping it would preserve a
-  ///    value nothing ever retries with, while contradicting "logout clears everything".
-  ///  * *Queue a durable retry.* It would have to outlive the credentials it needs (a gated
-  ///    unregister authenticates from cookies we have just deleted), i.e. persist a live
-  ///    credential past logout. Not worth it for a generic-body notification.
-  ///
-  /// So the residue is real and bounded: until that agent can be reached again, it may keep
-  /// pushing to this device. Saying that out loud on the onboarding screen the user lands on is
-  /// the honest half — a swallowed `try?` was not. A 404 is exempt: no push plugin means nothing
-  /// was ever registered.
   private func unregisterPushOnLogout(connection: ServerConnection?) -> Effect<AppFeature.Action> {
     let token = preferences.loadPushDeviceToken()
     preferences.clearPushDeviceToken()
     preferences.clearPushPromptSnooze() // device-local push prompt state — reset on logout
     guard let connection, let token else { return .none }
-    let host = connection.baseURL.host ?? connection.baseURL.absoluteString
-    return .run { [rest] send in
-      do {
-        try await rest.unregisterPush(connection, token)
-      } catch RESTError.notFound {
-        // Plugin not installed on that agent — there was never a registration to remove.
-      } catch {
-        await send(.pushUnregisterFailed(host: host))
-      }
+    return .run { [rest] _ in
+      try? await rest.unregisterPush(connection, token)
     }
-  }
-
-  /// What onboarding says when logout could not tell the agent to stop pushing to this device.
-  /// Names the server and the one thing that actually ends it (reaching that agent again) —
-  /// signing in elsewhere does not.
-  static func pushNotUnregisteredMessage(host: String) -> String {
-    "Signed out, but \(host) couldn’t be reached to turn off notifications for this device. "
-      + "It may keep sending them until this device connects to it again."
   }
 
   /// Push the app-icon badge to the current pending-approval count (the only side effect; the

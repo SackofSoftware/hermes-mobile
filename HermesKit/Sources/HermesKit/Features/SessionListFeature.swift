@@ -519,11 +519,10 @@ public struct SessionListFeature {
             do {
               let result = try await profiles.list(connection)
               await send(.profilesResponse(.success(result)))
+            } catch let error as RESTError {
+              await send(.profilesResponse(.failure(error)))
             } catch {
-              // `asRESTError` keeps a typed `RESTError` verbatim and classifies a raw
-              // transport failure through the shared funnel, so an offline device gets the
-              // "No internet connection." banner instead of a blanket "couldn't reach".
-              await send(.profilesResponse(.failure(asRESTError(error))))
+              await send(.profilesResponse(.failure(.unreachable)))
             }
           }
           .cancellable(id: CancelID.fetch, cancelInFlight: true),
@@ -693,11 +692,10 @@ public struct SessionListFeature {
           do {
             try await rest.registerPush(connection, token, env, version)
             await send(.pushRegistered)
+          } catch let error as RESTError {
+            await send(.pushRegisterFailed(error))
           } catch {
-            // `asRESTError` keeps a typed `RESTError` verbatim and classifies a raw transport
-            // failure through the same funnel, so a no-network register reports `.offline`
-            // instead of a hardcoded `.unreachable`.
-            await send(.pushRegisterFailed(asRESTError(error)))
+            await send(.pushRegisterFailed(.unreachable))
           }
         }
 
@@ -1237,14 +1235,10 @@ public struct SessionListFeature {
       do {
         try await rpc(rest, connection, id, profile)
         await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: nil))
+      } catch let error as RESTError {
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: error))
       } catch {
-        // Same `asRESTError` funnel as every other failure path: a typed `RESTError` survives
-        // verbatim, a raw transport error is classified (offline vs unreachable).
-        await send(
-          .cronJobActionFinished(
-            id: id, refetchSessions: refetchSessions, error: asRESTError(error)
-          )
-        )
+        await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: .unreachable))
       }
     }
   }
@@ -1274,8 +1268,10 @@ private func fetchCronJobs(
 ) async -> SessionListFeature.Action {
   do {
     return .cronJobsResponse(.success(try await rest.cronJobs(connection, profile)))
+  } catch let error as RESTError {
+    return .cronJobsResponse(.failure(error))
   } catch {
-    return .cronJobsResponse(.failure(asRESTError(error)))
+    return .cronJobsResponse(.failure(.unreachable))
   }
 }
 
@@ -1301,7 +1297,9 @@ private func fetchSessions(
       sessions = try await rest.sessions(connection, 50, 0, .recent)
     }
     return .sessionsResponse(.success(sessions))
+  } catch let error as RESTError {
+    return .sessionsResponse(.failure(error))
   } catch {
-    return .sessionsResponse(.failure(asRESTError(error)))
+    return .sessionsResponse(.failure(.unreachable))
   }
 }

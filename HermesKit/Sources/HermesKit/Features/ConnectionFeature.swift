@@ -35,18 +35,6 @@ public struct ConnectionFeature {
     /// the reachability check completes. Drives segment enable/preselect.
     public var capability: ServerAuthCapability?
     public var status: Status
-    /// A launch **retry screen is set aside behind this one**: the user reached onboarding via
-    /// `ConnectionFailedView`'s *Change server*, which deletes nothing — the keychain session
-    /// and the stored URL both survive. Shows the way back (`returnToConnectionFailedTapped`),
-    /// so an exploratory tap isn't a one-way door: without it a password-mode user lands on a
-    /// prefilled URL with an empty password field, the retry screen is gone, and the
-    /// once-per-process launch probe won't run again — re-creating issue #62's exact symptom
-    /// (re-type a password that never expired) from one tap, force-quit the only escape.
-    ///
-    /// Set by `AppFeature` alongside the stash it restores; false everywhere else (a plain
-    /// logout, a credentials rejection, first launch), so the affordance appears **only** when
-    /// there is genuinely something to go back to.
-    public var canReturnToConnectionFailed: Bool
 
     public init(
       serverURL: String = "",
@@ -55,8 +43,7 @@ public struct ConnectionFeature {
       password: String = "",
       method: AuthMethod = .token,
       capability: ServerAuthCapability? = nil,
-      status: Status = .idle,
-      canReturnToConnectionFailed: Bool = false
+      status: Status = .idle
     ) {
       self.serverURL = serverURL
       self.token = token
@@ -65,7 +52,6 @@ public struct ConnectionFeature {
       self.method = method
       self.capability = capability
       self.status = status
-      self.canReturnToConnectionFailed = canReturnToConnectionFailed
     }
 
     public enum Status: Equatable, Sendable {
@@ -126,22 +112,6 @@ public struct ConnectionFeature {
     /// The URL field was submitted or lost focus — check immediately.
     case serverFieldCommitted
     case connectTapped
-    /// "Back to the connection screen" — only offered while `canReturnToConnectionFailed` is
-    /// set. Pure routing: nothing typed here is validated or persisted, the parent just puts
-    /// the stashed retry screen back.
-    case returnToConnectionFailedTapped
-    /// Abandon everything this screen has in flight — the URL debounce, the reachability
-    /// probe, and (the one that matters) the connect/login round-trip — and drop back to
-    /// `.idle`.
-    ///
-    /// Sent by `AppFeature` when onboarding leaves the screen without connecting: the stashed
-    /// retry screen is handed back, or the user logs out. `ConnectionFeature` is a permanently
-    /// scoped `Scope`, **not** an `ifLet` child, so nothing cancels its effects implicitly —
-    /// a login that resolves after the user left would persist the credentials it was
-    /// validating and delegate `.connected`, navigating home over the screen they came back to
-    /// (or resurrecting the session they just abandoned). Only the parent knows the screen is
-    /// gone, and only this screen owns the cancel ids, so it takes an action to say so.
-    case cancelInFlightRequests
     /// `/api/status` result plus the (optional) `/api/auth/providers` probe, folded so the
     /// capability is computed in one place.
     case serverStatusResponse(Result<ServerStatus, RESTError>, providers: [AuthProvider]?)
@@ -153,13 +123,10 @@ public struct ConnectionFeature {
     @CasePathable
     public enum Delegate {
       case connected(ServerConnection)
-      /// Put the launch retry screen back (the user took *Change server* and changed their
-      /// mind). `AppFeature` owns the stash — this only asks.
-      case returnToConnectionFailedRequested
     }
   }
 
-  private enum CancelID { case urlDebounce, statusCheck, connect }
+  private enum CancelID { case urlDebounce, statusCheck }
 
   @Dependency(\.hermesREST) var rest
   @Dependency(\.keychain) var keychain
@@ -241,27 +208,12 @@ public struct ConnectionFeature {
         state.capability = nil
         switch error {
         case .decoding: state.status = .notHermes
-        // `.offline` is a transport failure like `.unreachable` — same footer (the
-        // "trouble connecting to your agent?" help link is exactly what's wanted here too).
+        // `.offline` is a transport failure like `.unreachable` — same footer (its
+        // "trouble connecting to your agent?" help link is what's wanted here too).
         case .offline, .unreachable: state.status = .unreachable
         default: state.status = .failed(error.message)
         }
         return .none
-
-      case .cancelInFlightRequests:
-        // Drop the spinner too: the status this screen was left in describes a request that no
-        // longer exists, and a latched `.checking`/`.validating` would come back with it.
-        if state.status == .checking || state.status == .validating { state.status = .idle }
-        return .merge(
-          .cancel(id: CancelID.urlDebounce),
-          .cancel(id: CancelID.statusCheck),
-          .cancel(id: CancelID.connect)
-        )
-
-      case .returnToConnectionFailedTapped:
-        // Nothing to undo locally — this screen persists only on a successful connect, so a
-        // half-typed URL/password simply goes away with the state the parent rebuilds.
-        return .send(.delegate(.returnToConnectionFailedRequested))
 
       case .connectTapped:
         guard let url = parseServerURL(state.serverURL) else {
@@ -281,16 +233,10 @@ public struct ConnectionFeature {
               await send(.tokenValidationResponse(.failure(asRESTError(error))))
               return
             }
-            // The user may have left the screen while this was in flight
-            // (`.cancelInFlightRequests`). `Send` already swallows the delegate on a cancelled
-            // task, but the persistence below runs BEFORE it — writing a session and a server
-            // URL the user abandoned (possibly one they just logged out of).
-            guard !Task.isCancelled else { return }
             try? keychain.saveSession(.token(connection.token ?? ""))
             preferences.saveServerURL(connection.baseURL.absoluteString)
             await send(.tokenValidationResponse(.success(connection)))
           }
-          .cancellable(id: CancelID.connect, cancelInFlight: true)
 
         case .password:
           // Password path: log in for cookies, validate them with one authenticated call,
@@ -306,10 +252,6 @@ public struct ConnectionFeature {
               await send(.passwordLoginResponse(.failure(asRESTError(error))))
               return
             }
-            // Abandoned mid-login (`.cancelInFlightRequests`)? Then don't touch the shared
-            // cookie jar at all: activation FLUSHES it, and the session the user went back to
-            // authenticates out of that same jar.
-            guard !Task.isCancelled else { return }
             // Activate the captured cookies into the shared jar BEFORE the validating call —
             // otherwise the live REST transport reads an empty `.shared` and 401s.
             keychain.activateCookieSession(cookieSession)
@@ -320,12 +262,10 @@ public struct ConnectionFeature {
               await send(.passwordLoginResponse(.failure(asRESTError(error))))
               return
             }
-            guard !Task.isCancelled else { return } // see the token path
             try? keychain.saveSession(.cookie(cookieSession))
             preferences.saveServerURL(connection.baseURL.absoluteString)
             await send(.passwordLoginResponse(.success(connection)))
           }
-          .cancellable(id: CancelID.connect, cancelInFlight: true)
         }
 
       case let .tokenValidationResponse(.success(connection)):
@@ -358,14 +298,11 @@ public struct ConnectionFeature {
   }
 }
 
-/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel every
-/// reducer (`ConnectionFeature`, `ReauthFeature`, `ConnectionFailedFeature`, `AppFeature`)
-/// uses after a `rest.*` call: a typed `RESTError` passes through verbatim, and anything else
-/// goes through `RESTError.init(transport:)`, the SAME classifier `HermesRESTClient`'s own
-/// transport catches use. Routing raw errors through that init (rather than a blanket
-/// `.unreachable`) is what keeps the offline-vs-unreachable split intact for any client
-/// implementation that surfaces a bare `URLError` — a wrapper, a future non-`URLSession`
-/// transport, a test double — instead of it working only when the live client classified first.
+/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel the auth
+/// reducers (`ConnectionFeature`, `ReauthFeature`, `ConnectionFailedFeature`, `AppFeature`)
+/// use after every `rest.*` call: a typed `RESTError` passes through verbatim; anything else
+/// goes through `RESTError(transport:)`, the same classifier the live client's own transport
+/// catches use, so the offline/unreachable split survives a raw `URLError`.
 func asRESTError(_ error: any Error) -> RESTError {
   error as? RESTError ?? RESTError(transport: error)
 }

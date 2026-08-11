@@ -72,40 +72,6 @@ struct SessionListFeatureTests {
     await store.send(.onDisappear) // cancels the auto-poll loop
   }
 
-  /// A raw transport failure is classified through the shared `asRESTError` funnel, so an
-  /// offline device gets the "No internet connection." banner rather than the blanket
-  /// "Couldn’t reach the server." this site used to hardcode.
-  @Test func offlineLoadFailureUsesTheOfflineCopy() async {
-    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
-      SessionListFeature()
-    } withDependencies: {
-      $0.date = .constant(now)
-      $0.continuousClock = TestClock()
-      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
-      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
-      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
-        throw URLError(.notConnectedToInternet)
-      }
-    }
-
-    await store.send(.task) {
-      $0.now = now
-      $0.isLoading = true
-    }
-    await store.receive(\.setupPush)
-    await store.receive(\.pushPluginStatusLoaded)
-    await store.receive(\.profilesResponse.failure)
-    await store.receive(\.sessionsResponse.failure) {
-      $0.isLoading = false
-      $0.loadError = RESTError.offline.message
-    }
-    await store.receive(\.cronJobsResponse.failure) {
-      $0.cronJobsSupported = false
-    }
-    await store.send(.onDisappear)
-  }
-
   // MARK: Auto-poll (working glow freshness)
 
   @Test func pollRefreshesAfterIntervalAndStopsOnDisappear() async {

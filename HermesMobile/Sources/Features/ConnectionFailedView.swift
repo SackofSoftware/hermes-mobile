@@ -4,10 +4,8 @@ import SwiftUI
 
 /// Shown instead of onboarding when **launch auto-connect** fails for a reason unrelated to
 /// the stored credentials. They're still good, so the screen never asks for them again — it
-/// names the server it couldn't reach, says why, and offers a Retry. **Change server** is the
-/// non-destructive way out when the agent moved host/port (it lands on prefilled onboarding);
-/// **Log Out** — behind a confirmation — abandons the session via the full-logout recipe in
-/// `AppFeature`.
+/// names the server it couldn't reach, says why, and offers a Retry. **Log Out** — behind a
+/// confirmation — abandons the session via the logout recipe in `AppFeature`.
 ///
 /// It also carries a tertiary link to `AgentSetupGuideView`, the app's single connection-help
 /// surface: launch transport failures no longer pass through onboarding at all, and this
@@ -25,9 +23,9 @@ struct ConnectionFailedView: View {
   /// `.largeTitle`, which is why it is a point size rather than a semantic `Font`.
   private static let iconPointSize: CGFloat = 56
 
-  /// Floor for the two primary button labels, so swapping "Retry" for a `ProgressView` (which
+  /// Floor for the retry button's label, so swapping "Retry" for a `ProgressView` (which
   /// measures shorter than a line of text) doesn't shrink the button and jolt everything above
-  /// it — and so "Change server" below it keeps the same height either way.
+  /// it.
   private static let buttonLabelMinHeight: CGFloat = 22
 
   var body: some View {
@@ -51,7 +49,7 @@ struct ConnectionFailedView: View {
 
   /// Hand-rolled rather than `ContentUnavailableView` (which every other empty/failure state in
   /// the app uses): that view stacks label → description → `actions` as one centred block, and
-  /// this screen needs the message centred with its three escape routes pinned to the BOTTOM —
+  /// this screen needs the message centred with its escape routes pinned to the BOTTOM —
   /// a split it has no API for. Its `actions:` slot would also put "Log Out" mid-screen, next
   /// to Retry, which is the opposite of the weighting a destructive action wants.
   private var content: some View {
@@ -77,7 +75,7 @@ struct ConnectionFailedView: View {
           .multilineTextAlignment(.center)
 
         // Capped, unlike the URL above: this line can quote a server-supplied `detail`, and
-        // the three escape routes sit BELOW it inside the `ScrollView`. The reducer already
+        // the escape routes sit BELOW it inside the `ScrollView`. The reducer already
         // clamps the quote (`ConnectionFailedFeature.State.sanitizedServerDetail`); this is
         // the belt-and-braces half, so no reason string can ever push Retry off the screen.
         Text(store.reasonText)
@@ -111,26 +109,11 @@ struct ConnectionFailedView: View {
         .disabled(store.isRetrying)
         .accessibilityLabel(store.isRetrying ? "Retrying" : "Retry")
 
-        // The escape hatch for "the agent moved": editing the URL must not cost a logout.
-        // Deliberately NOT disabled while retrying — a probe can run up to URLSession's 60s
-        // default, and the foreground auto-retry arms it without the user asking, so the two
-        // ways off this screen must never be greyed out by it.
-        // The full-width frame goes on the LABEL, not outside `.buttonStyle` — a bordered
-        // button hugs its label, so an outer `.frame(maxWidth: .infinity)` only stretches the
-        // (untappable) layout box around a narrow pill.
-        Button {
-          store.send(.changeServerTapped)
-        } label: {
-          Text("Change server")
-            .frame(maxWidth: .infinity, minHeight: Self.buttonLabelMinHeight)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
-
         // Tertiary, above the destructive one: the failures this screen reports are the
         // ones the guide answers (host-header 400, a moved route's 404, a reply that
-        // doesn't look like Hermes), and reaching help must not require a detour through
-        // Change server hoping onboarding's re-probe renders the footer link.
+        // doesn't look like Hermes). Deliberately NOT disabled while retrying — a probe can
+        // run up to URLSession's 60s default, and the foreground auto-retry arms it without
+        // the user asking, so the ways off this screen must never be greyed out by it.
         Button("Need help setting up your agent?") {
           showsSetupGuide = true
         }

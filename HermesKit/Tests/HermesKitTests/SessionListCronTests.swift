@@ -394,32 +394,6 @@ struct SessionListCronTests {
     #expect(store.state.cronJobs == [CronJob(id: "job1", state: "scheduled")])
   }
 
-  /// A raw transport failure goes through the shared `asRESTError` funnel like every other
-  /// call site, so an offline device gets the "No internet connection." banner instead of the
-  /// blanket "Couldn’t reach the server." this path used to hardcode.
-  @Test func offlineActionFailureUsesTheOfflineCopy() async {
-    let store = TestStore(
-      initialState: SessionListFeature.State(
-        connection: connection,
-        cronJobs: [CronJob(id: "job1", state: "scheduled")]
-      )
-    ) {
-      SessionListFeature()
-    } withDependencies: {
-      $0.hermesREST.triggerCronJob = { @Sendable _, _, _ in
-        throw URLError(.notConnectedToInternet)
-      }
-    }
-
-    await store.send(.triggerCronJob(id: "job1")) {
-      $0.cronActionInFlightIDs = ["job1"]
-    }
-    await store.receive(\.cronJobActionFinished) {
-      $0.cronActionInFlightIDs = []
-      $0.loadError = RESTError.offline.message
-    }
-  }
-
   @Test func actionIsIgnoredWhileAlreadyInFlight() async {
     let store = TestStore(
       initialState: SessionListFeature.State(

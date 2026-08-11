@@ -239,172 +239,20 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
 - **The login screen's single connection-help surface is the `AgentSetupGuideView` sheet**
   (password-first setup recipe; `--insecure` + token demoted to a collapsed "Advanced"
   disclosure). Four entry points — top form row, `.unreachable`/`.notHermes` failure
-  footer, token-disclaimer link, and the launch retry screen's tertiary "Need help setting
-  up your agent?" link (`ConnectionFailedView`, whose failures — a host-header 400, a moved
-  route's 404, a `.decoding` reply — are exactly what the guide answers, and which no longer
-  pass through onboarding at all) — all toggle one local `@State` (presentation stays out
-  of the reducer). It **replaced** the token-first `SecureConnectionInfoView`; keep the
+  footer, token-disclaimer link, and the launch retry screen's tertiary link — all toggle
+  one local `@State` (presentation stays out of the reducer). It **replaced** the token-first `SecureConnectionInfoView`; keep the
   README quick-start and the sheet's commands verbatim-identical.
-- **A launch auto-connect failure that isn't a verdict on the credentials raises the retry
-  screen, never onboarding** (#62) — stored credentials that are still perfectly valid must not
-  be thrown away because Tailscale is off. `RESTError` distinguishes `.offline`
-  (`URLError.notConnectedToInternet`/`.dataNotAllowed`/`.internationalRoamingOff`, mapped in the
-  one shared `RESTError.init(transport:)` that every request helper's transport catch funnels
-  through — and that `asRESTError` defers to for a raw error, so the split survives any client
-  that surfaces a bare `URLError`) from `.unreachable` (timeout, DNS, refused, non-HTTP response).
-  **`ConnectionFailedFeature.isRetryable` is the ONE routing rule**, shared by `.autoConnectFailed`
-  and the child's own retry-failure branch, and it is **inverted from the obvious one: ONLY a
-  credentials verdict — 401 (`.unauthorized`) or 403 — goes to
-  onboarding; EVERYTHING else populates `AppFeature.State.connectionFailed`**
-  (`ConnectionFailedFeature`, an `ifLet` child). A stored connection was, by construction, a
-  working Hermes agent when onboarding persisted it, so a launch failure that isn't a 401/403 —
-  a proxy's 502/503/504, the agent's own 500, a vanished route's 404, a 429, a captive portal's
-  HTML (`.decoding`) — says the *network or server* changed, not the saved sign-in; making that
-  user retype a password is #62's exact symptom and buys nothing, since the retry screen states
-  the real failure (`HTTP 500`, `HTTP 404`, "didn't look like a Hermes agent") where prefilled
-  onboarding shows a blank field and no explanation, and **Change server** reaches that same
-  prefilled onboarding in one tap when the address really is the problem. The screen names the
-  server URL, states the reason (its `reasonText` switch is
-  **exhaustive** so a new `RESTError` case can't silently inherit VPN advice), and offers a manual
-  **Retry**, a foreground auto-retry (`.scenePhaseChanged(.active)` → `.sceneBecameActive`), a
-  non-destructive **Change server**, and a confirmed **Log Out**. **The foreground SUPERSEDES an
-  in-flight probe** (`.cancellable(cancelInFlight:)`) rather than being swallowed by `isRetrying`
-  — that guard is for rapid taps only; swallowing the foreground would let a probe whose result
-  never lands (URLSession's default request timeout is 60s) brick the screen with a latched
-  spinner. For the same reason **only Retry is disabled while probing** — the two ways *off* the
-  screen never are. (Foreground churn — Control Center, notification pull, an app-switcher peek
-  — can therefore restart the probe more often than the user asked: an accepted trade-off, since
-  gating on "was really backgrounded" would miss the main case, flipping airplane mode or Wi-Fi
-  from Control Center, which never backgrounds the app.) **A credentials verdict keeps today's
-  prefilled-onboarding fallback byte-identical**: retrying can't fix dead credentials, so a retry
-  failing with a 401/403 delegates `.credentialsRejected` and drops to onboarding.
-  **`.changeServerRequested` lands on that SAME prefilled onboarding without touching the
-  keychain** — deliberately, because an agent that moved host/port is a first-class `.unreachable`
-  cause — **and it is REVERSIBLE**: `AppFeature` moves the screen into
-  `connectionFailedStash` and sets `onboarding.canReturnToConnectionFailed`, which renders a
-  "Back to the connection screen" row above everything else on `ConnectionView`
-  (`.returnToConnectionFailedTapped` → delegate → restore, normalized to `isRetrying = false`
-  with the dialog dismissed, and **no** auto re-probe). Without it the escape hatch was a
-  one-way door *within a process*: nothing is cleared, so a password-mode user who tapped it
-  exploratorily got a prefilled URL with an empty password field, no retry screen, and a spent
-  once-per-process launch probe — #62's own symptom, force-quit the only cure. The stash holds
-  **at most one** (it is filled exactly as `connectionFailed` is nil'd and consumed on restore),
-  a **credentials rejection deliberately does NOT stash** (going back to a Retry the server
-  already answered with a 401 is a loop, not an escape), and a successful manual login or a
-  `fullLogout` drops it — a stash pointing at an abandoned server must never stay restorable.
-  **Restoring the stash also STOPS onboarding and re-activates its cookies.** `ConnectionFeature`
-  is a permanently-scoped `Scope`, **not** an `ifLet` child, so nothing cancels its effects
-  implicitly: the connect/login round-trip is `.cancellable(CancelID.connect)` and both the
-  restore and `fullLogout` send `.cancelInFlightRequests` (the effect additionally re-checks
-  `Task.isCancelled` before it persists anything) — otherwise a login resolving after the user
-  left would write the abandoned credentials and delegate `.connected` over the restored screen,
-  or over the fresh post-logout onboarding. And because the password path's
-  `activateCookieSession` **FLUSHES** the shared cookie jar the transports read (it runs the
-  moment `passwordLogin` succeeds — before the validating call that may 401, and before the user
-  can abandon the attempt), a cookie-mode restore re-activates the stashed session's own cookies;
-  without that its Retry authenticates as nobody, reads the 401 as `.credentialsRejected`, and
-  bounces a still-valid session back to onboarding — #62 manufactured by the escape hatch built
-  to avoid it. **That re-activation is `.concatenate`d AFTER `.cancelInFlightRequests`, never done
-  in the reducer body**: the login effect checks `Task.isCancelled` immediately before its own
-  `activateCookieSession`, so a jar write in the reducer is a write the abandoned login can still
-  overwrite (same ordering rule as `fullLogout`'s trailing flush — see it for the guarantee).
-  **What it re-activates is a snapshot of the LIVE jar taken at stash time**
-  (`KeychainClient.captureSharedCookies`, folded into the stash by `changeServerRequested`),
-  never the Keychain's login-time vintage: the gated server rotates cookies transparently and
-  nothing writes them back to the Keychain, so installing the stored copy would downgrade a
-  refreshed session and 401 it — the same bounce, from the other direction. An **empty** snapshot
-  keeps the stored cookies: the refresh may only ever make a session fresher, never replace a
-  working one with nothing. (The `AgentSetupGuideView` help sheet is reachable from the retry screen **directly**,
-  as a tertiary link with its own view-local `@State` — help must not cost a detour through
-  onboarding hoping its re-probe renders the footer link, which only `.unreachable`/`.notHermes`
-  do.) **`reasonText` splits a `.server` status THREE ways and surfaces the server's `detail`
-  only on a permanent 4xx**: a 5xx (matched as `500..<600`, so a 3xx can't inherit it) is the
-  server faulting on a request it accepted, so "may be down or restarting — try again in a
-  moment" is honest; a *permanent* 4xx is a refusal that will repeat identically, and the
-  motivating case is the agent's own `host_header_middleware` 400 ("Invalid Host header…"),
-  which answers **every** request once the agent restarts without `--host 0.0.0.0` — its
-  sentence is the only actionable fact in the failure, so discarding it (as the first cut did)
-  left a permanently-futile retry loop under "try again in a moment" copy. The
-  `transientRefusalStatuses` (**408 / 425 / 429**) are carved back out into the "try again"
-  branch: `validate` only maps 429/503 onto `.rateLimited`/`.serviceUnavailable` when
-  `loginSpecific` is set and the launch probe is a plain `get`, so a proxy's `limit_req` 429
-  arrives here as a bare `.server(429)` and would otherwise be told retrying can't help;
-  anything outside both bands gets neutral copy. The quoted `detail` is **sanitized**
-  (`sanitizedServerDetail`: HTML/XML bodies dropped, first line only, ~200 chars) because
-  `serverDetail(from:)` falls back to the ENTIRE response body — an intermediary's 4xx is a
-  whole HTML page, and the reason line sits ABOVE the screen's three escape routes inside the
-  `ScrollView` (`.lineLimit(6)` on the `Text` is the belt-and-braces half).
-  **The launch probe is strictly once-per-process** (`AppFeature.State.didRunLaunchProbe`, set
-  when it starts): `.task` can be re-sent, and after **Change server** — which deliberately
-  clears nothing — every other guard condition is satisfied again, so inferring "already ran"
-  from the slots would bounce the user back onto the retry screen mid-URL-edit.
-  **Scope is the launch auto-connect path only** — a manual login failure still shows the
-  onboarding inline footer, and a post-login socket drop still shows the chat reconnect banner.
-  **Which root branch `AppView` renders is decided in the package**, by the computed
-  `AppFeature.State.rootScreen` (`home` → `connecting` → `connectionFailed` → `onboarding`) —
-  the precedence IS the feature (the retry screen is reachable only by sitting between the
-  spinner and the onboarding fallback), so it is pinned by `swift test`
-  (`AppRootScreenTests`), not a simulator run, and the view is a bare `switch` over it that
-  never re-derives the same optionals.
-  The child reducer is pure routing + probe (`rest.sessions(connection, 1, 0, .recent)`);
-  **the logout clearing lives in `AppFeature.fullLogout`** — the ONE recipe, shared with the
-  reauth "Quit to start" path so the two can't drift (keychain session, server URL,
-  identity-scoped prefs, grouping reset, `chatSnapshot.wipeAll()`, nav/slot/home clears, tap
-  stash, badge reset, `unregisterPushOnLogout`), landing on a fresh onboarding. **A Keychain
-  delete that FAILS is compensated, never `try?`-swallowed**: the screen has already gone and
-  there is no honest UI for a half-logout, so the item that survived is overwritten with
-  `.token("")` — the shape the launch probe reads as "no credentials" — and the live client's
-  `deleteStoredSession` flushes `HTTPCookieStorage.shared` **unconditionally** (before the
-  `OSStatus` throw, not after), because the alternative is a "logged out" user whose gated
-  cookies still sign every request. **That flush happens with REST work still in flight, so the
-  recipe flushes the jar a SECOND time** (`keychain.flushSharedCookies`), in an effect
-  `.concatenate`d AFTER `.onboarding(.cancelInFlightRequests)` and after the `ifLet` nil-outs'
-  auto-cancels. **Neither ordering rests on merge order** (the auto-cancels are merged *last*):
-  `Effect.cancel(id:)` runs its cancellation eagerly at effect **construction** (`Effect.publisher`
-  invokes its non-escaping factory immediately), so `ifLet` tears a nil'd-out child's effects down
-  synchronously *inside the reduce*; `.send` is a `Just`, delivered synchronously by `UIScheduler`
-  on the main queue and drained from the store's buffered actions inside the SAME synchronous
-  `send` call; and a `.run` body is a `@MainActor` `Task`, which cannot start until that returns.
-  That is the ordering rule for **any** jar mutation — make it the tail of a `.concatenate`, never
-  a statement in the reducer body. `URLSession` — not our effect — writes a
-  reply's `Set-Cookie` into the shared jar, so a list fetch / retry probe / connect whose response
-  landed between the first flush and the cancellations would repopulate LIVE credentials behind a
-  user who just logged out. The re-flush is deliberately **not** ordered after the push unregister
-  — that call can take seconds and a flush that late could wipe the jar of a session the user had
-  already signed back into (it cannot dirty the jar either: explicit header,
-  `httpShouldHandleCookies = false`). **The compensation is verifiable, not another best-effort
-  write**: the live `saveSession` is a real upsert (`writeStoredSession` — `SecItemUpdate`
-  first, `SecItemAdd` only on `errSecItemNotFound`). **Update-first, never delete-then-add**: a
-  delete-first "upsert" is destructive before it is constructive, so an add that fails for
-  anything other than "duplicate" (locked Keychain, full disk) leaves the device with NO
-  credential at all. A save that still fails is **surfaced**
-  (`AppFeature.credentialsNotClearedMessage` on the onboarding it lands on) — a logout that
-  cannot guarantee the credential is gone must not present a clean slate, and the remedy it names
-  is **unlock the device and repeat the sign-in/sign-out**, never "delete the app" (a
-  generic-password item survives an uninstall/reinstall, so that advice would be reassuring and
-  wrong; what actually failed is a locked/unavailable Keychain write). **`SettingsFeature`
-  runs NONE of this**: "Clear token" only delegates `.disconnect`, which `AppFeature` answers
-  with the same `fullLogout`. Owning a second copy there broke it twice — the child's
-  `deleteSession` flushed the cookie jar before the parent could snapshot it (below), and its
-  `try?` swallowed the Keychain failure the parent compensates.
-  **The push unregister carries its own cookies**: every logout path deletes the session
-  (flushing the jar) *before* the unregister effect runs, so in cookie mode
-  `HermesRESTClient.unregisterPush` sends the connection's cookies as an explicit `Cookie`
-  header with `httpShouldHandleCookies = false` — otherwise the POST is unauthenticated, the
-  server 401s, and the device keeps receiving the previous user's pushes. `fullLogout` snapshots
-  the LIVE jar into that connection **before** deleting (a transparently-rotated cookie exists
-  nowhere else). **The explicit header is narrowed to the request URL**
-  (`cookieHeader(_:for:now:)` → `SerializedCookie.applies(to:now:)`): the snapshot is the WHOLE
-  shared jar and an explicit header switches off every check `URLSession` would have made, so
-  domain / path / `Secure` / expiry are re-applied by hand or a foreign cookie is disclosed to
-  the unregister endpoint. Token mode is byte-identical (no cookies, no header).
-  **The unregister stays best-effort — but says so.** Logout is often the one moment the agent
-  is unreachable (the retry screen's Log out exists for exactly that), and neither "clear the
-  device token only on success" nor a durable retry queue helps: the registration is server-side
-  and a gated retry would have to outlive the credentials it needs. So the failure raises
-  `.pushUnregisterFailed` → `AppFeature.pushNotUnregisteredMessage` on the onboarding screen
-  (never over the louder credentials warning; a `404` is exempt — no plugin, nothing registered),
-  rather than being dropped by a `try?`.
+- **A launch auto-connect failure that isn't a verdict on the stored credentials raises a retry
+  screen, never onboarding** (#62) — a still-valid session must not be thrown away because
+  Tailscale was off. `RESTError.offline` splits out of `.unreachable` via the one
+  `RESTError.init(transport:)` every transport catch (and `asRESTError`) funnels through, and
+  `ConnectionFailedFeature.isRetryable` is the ONE routing rule shared by `.autoConnectFailed`
+  and the child's retry-failure branch: **only a credentials verdict (401/403) falls back to
+  prefilled onboarding; everything else populates `AppFeature.State.connectionFailed`** — an
+  `ifLet` child rendered through the package-side `State.rootScreen` precedence (`home` →
+  `connecting` → `connectionFailed` → `onboarding`) offering Retry, the setup-guide link and a
+  confirmed Log Out. A foreground (`.sceneBecameActive`) re-probes, **superseding** an in-flight
+  probe rather than being swallowed by `isRetrying`. Launch path only, probe once-per-process.
 - **Session re-hydration is server-authoritative** via one unified `hydrate(sessionID)`
   (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.resume`
   (NOT `session.activate` — that is live-only and 404s any stored session opened from the list;

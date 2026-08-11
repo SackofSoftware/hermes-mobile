@@ -1,5 +1,14 @@
 # Connection-Failed Screen with Retry and Logout (#62)
 
+> **Descoped during PR review (#67).** Everything below describes the branch as it was
+> first written. Two groups of it did **not** ship: the non-destructive **Change server**
+> escape hatch (its action/delegate, `AppFeature`'s stash + reversal, `ConnectionView`'s
+> "Back to the connection screen" row) and the logout/Keychain/cookie hardening the review
+> phases added (the `fullLogout` extraction, the update-first Keychain upsert, the explicit
+> `Cookie` header on push unregister, the `asRESTError` sweep). The shipped screen is
+> Retry + setup-guide link + confirmed Log Out, with the foreground auto-retry. The
+> hardening is preserved on the `logout-hardening` branch for a PR of its own.
+
 ## Overview
 
 - When launch auto-connect fails because the server is unreachable (Tailscale/VPN off,

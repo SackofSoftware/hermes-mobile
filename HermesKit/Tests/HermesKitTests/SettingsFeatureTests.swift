@@ -8,37 +8,58 @@ import Testing
 struct SettingsFeatureTests {
   private let connection = ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "tok")
 
-  /// "Clear token" only REPORTS the intent — the logout recipe itself belongs to
-  /// `AppFeature.fullLogout` (asserted end-to-end in `AppFeatureTests`). Two review findings put
-  /// it there: deleting the session here flushed the shared cookie jar before the parent could
-  /// snapshot the live (rotated) cookies its push unregister has to authenticate with, and the
-  /// `try?` around that delete swallowed a Keychain failure while still landing the user on a
-  /// clean onboarding screen. So this screen must touch NEITHER the Keychain nor the prefs.
-  @Test func clearTokenOnlyEmitsDisconnectAndLeavesTheRecipeToTheParent() async {
+  @Test func clearTokenDeletesAndEmitsDisconnect() async {
     let deleted = LockIsolated(false)
-    let saved = LockIsolated(0)
     let preferences = PreferencesClient.inMemory()
     preferences.saveServerURL("http://mac.tailnet:9119")
     preferences.savePinnedIDs(["s1"])
-    let chatSnapshot = ChatSnapshotClient.inMemory()
-    chatSnapshot.saveSnapshot("s1", ChatSnapshot(model: "claude-opus-4-8", updatedAt: Date(timeIntervalSince1970: 1_000)))
+    preferences.saveSeenCounts(["s1": 4])
+    preferences.saveGroupingMode(.chronological)
+    preferences.saveSelectedProfileID("staging")
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      // Logout deletes the full session (token + any gated cookies), not just the token.
       $0.keychain.deleteSession = { @Sendable in deleted.setValue(true) }
-      $0.keychain.saveSession = { @Sendable _ in saved.withValue { $0 += 1 } }
       $0.preferences = preferences
+      $0.dismiss = DismissEffect {}
+    }
+
+    await store.send(.clearTokenTapped)
+    await store.receive(\.delegate.disconnect)
+    #expect(deleted.value)
+    #expect(preferences.loadServerURL() == nil) // logout forgets the server URL too
+    #expect(preferences.loadPinnedIDs() == []) // pins are per-server — cleared on logout
+    #expect(preferences.loadSeenCounts() == [:]) // unread state cleared too
+    #expect(preferences.loadGroupingMode() == .workspace) // grouping pref reset on logout
+    #expect(preferences.loadSelectedProfileID() == nil) // selected profile cleared on logout
+  }
+
+  @Test func clearTokenWipesChatSnapshotStore() async {
+    // Logout must clear the non-authoritative chat cache (snapshots + turn anchors) too —
+    // they are per-server, like the prefs cleared above.
+    let chatSnapshot = ChatSnapshotClient.inMemory()
+    let now = Date(timeIntervalSince1970: 1_000)
+    chatSnapshot.saveSnapshot("s1", ChatSnapshot(model: "claude-opus-4-8", updatedAt: now))
+    chatSnapshot.setTurnAnchor("s1", now)
+    // Seeded state is present before logout.
+    #expect(chatSnapshot.loadSnapshot("s1") != nil)
+    #expect(chatSnapshot.turnAnchor("s1") == now)
+
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.keychain.deleteToken = { @Sendable in }
+      $0.preferences = PreferencesClient.inMemory()
       $0.chatSnapshot = chatSnapshot
       $0.dismiss = DismissEffect {}
     }
 
     await store.send(.clearTokenTapped)
     await store.receive(\.delegate.disconnect)
-    #expect(!deleted.value) // the jar must still be live when the parent snapshots it
-    #expect(saved.value == 0)
-    #expect(preferences.loadServerURL() == "http://mac.tailnet:9119")
-    #expect(preferences.loadPinnedIDs() == ["s1"])
-    #expect(chatSnapshot.loadSnapshot("s1") != nil)
+    // The snapshot store is empty after logout.
+    #expect(chatSnapshot.loadSnapshot("s1") == nil)
+    #expect(chatSnapshot.turnAnchor("s1") == nil)
   }
 
   @Test func reconnectEmitsReconnectDelegate() async {

@@ -39,7 +39,7 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 │                          //   stored session; manual Retry + foreground auto-retry (the
 │                          //   foreground supersedes an in-flight probe rather than being
 │                          //   swallowed); delegates connected / credentialsRejected /
-│                          //   changeServerRequested / logoutConfirmed (all clearing lives in AppFeature)
+│                          //   logoutConfirmed (the logout clearing lives in AppFeature)
 ├─ ReauthFeature           // re-auth modal: fixed URL, prefilled identity, password/token field;
 │                          //   same-user resume vs different-user switch vs Quit→onboarding
 ├─ SessionListFeature      // flat list, grouped by workspace OR chronological (persisted) /
@@ -82,12 +82,6 @@ a `testValue`/`.inMemory()` variant):
   `.token`, or a `.cookie(CookieSession)` carrying the rotating session cookies + username +
   provider. `saveSession`/`loadSession` round-trip the whole session (cookies rehydrate into
   `HTTPCookieStorage` on launch); the legacy `…Token` helpers remain for token-mode.
-  `deleteSession` also flushes `HTTPCookieStorage.shared`, and `flushSharedCookies` exposes that
-  flush on its own so `AppFeature.fullLogout` can repeat it once the in-flight REST effects have
-  been cancelled — `URLSession` writes a reply's `Set-Cookie` into the shared jar itself, so a
-  response landing after the first flush would otherwise repopulate live credentials post-logout.
-  `captureSharedCookies` is a raw snapshot of that jar (not "the session's cookies" — consumers
-  re-apply scoping; see `cookieHeader(_:for:)`).
 - **`ChatSnapshotClient`** — a **non-authoritative** instant-paint cache + turn-start anchor,
   backed by GRDB (the store uses a private `DatabaseQueue` directly,
   not a shared `defaultDatabase`) and kept entirely behind the client boundary (read
@@ -177,49 +171,19 @@ prefilled-onboarding fallback; everything else raises `ConnectionFailedFeature` 
 `AuthSession` untouched.** A stored connection was a working Hermes agent when onboarding
 persisted it, so a launch failure that isn't 401/403 — a proxy's `502`/`503`/`504`, the agent's
 own `500`, a vanished route's `404`, a `429`, a captive portal's HTML (`.decoding`) — means the
-network or the server changed, not the saved sign-in. Retrying can't repair dead credentials,
-but it can repair every one of those, and the screen states the real failure where prefilled
-onboarding states nothing. The screen's own way *out* without a logout is
-**Change server**, which lands on that same prefilled onboarding — and it is reversible:
-`AppFeature` stashes the screen (`connectionFailedStash`) and onboarding shows a "Back to the
-connection screen" row (`ConnectionFeature.State.canReturnToConnectionFailed`) that hands it
-back, so an exploratory tap can't strand a password-mode user in front of an empty password
-field with the once-per-process launch probe already spent. A credentials rejection doesn't
-stash (there is nothing useful to go back to), and a login or a logout drops the stash.
-Restoring it also **cancels onboarding** (`ConnectionFeature` is a permanently scoped `Scope`,
-so its connect effect is `.cancellable` and both the restore and `fullLogout` send
-`.cancelInFlightRequests` — a late login must not persist abandoned credentials or navigate
-home over the restored screen) and, in cookie mode, **re-activates the stashed session's own
-cookies**, since a password attempt on the way past flushed the shared jar the transports read.
-The re-activation is `.concatenate`d after that cancellation rather than done in the reducer body,
-so the abandoned login (which checks `Task.isCancelled` right before its own jar write) cannot
-overwrite it.
-Those cookies are a snapshot of the **live** jar taken at stash time
-(`KeychainClient.captureSharedCookies`), not the Keychain's login vintage — the server rotates
-cookies transparently and nothing persists them, so restoring the stored copy would downgrade a
-refreshed session; an empty snapshot keeps the stored cookies (the refresh only ever makes a
-session fresher).
-The
-`AgentSetupGuideView`
-connection-help sheet is reached from the screen **directly** (a tertiary link, view-local
-`@State` as on the login screen), since these failures are the ones the guide explains. The
-reason line splits a `.server` status **three ways**: a 5xx (matched explicitly as `500..<600`)
-may clear on its own ("try again in a moment"), and so may the transient refusals **408 / 425 /
-429** — `validate` maps 429/503 onto their own cases only for the login-specific call, so a
-proxy's rate limiter reaches the launch probe as a bare `.server(429)`; every *other* 4xx is a
-refusal that repeats identically, so the server's `detail` is surfaced, which is what makes the
-agent's own host-header `400` ("Invalid Host header…", raised on every request when it restarts
-without `--host 0.0.0.0`) actionable instead of a futile retry loop. That quote is sanitized
-first (`sanitizedServerDetail`: markup dropped, first line, ~200 chars) because
-`serverDetail(from:)` falls back to the whole response body and an intermediary answers 4xx with
-an HTML page. The launch probe itself is **once per process**
-(`AppFeature.State.didRunLaunchProbe`), so a re-sent `.task` can't restart it behind the user —
-notably after **Change server**, which deliberately clears nothing. Scope is the launch
-path only: manual login keeps `ConnectionFeature`'s inline footer — on the **server-URL
-auto-probe** footer specifically, `.offline` shares `.unreachable`'s status so the help link
-still shows; the token/password login arms map `.offline` through `default:` to
-`.failed("No internet connection.")`, which carries no help link — and a post-login drop keeps
-the chat reconnect banner.
+network or the server changed, not the saved sign-in. The screen offers Retry, a foreground
+auto-retry (`.sceneBecameActive`, which SUPERSEDES an in-flight probe rather than being
+swallowed by `isRetrying` — a probe whose result never lands would latch the spinner), the
+`AgentSetupGuideView` help sheet (a tertiary link, view-local `@State` as on the login screen)
+and a confirmed Log Out (the clearing itself lives in `AppFeature`). Its reason line splits a
+`.server` status three ways — a 5xx (`500..<600`) and the transient refusals 408/425/429 may
+clear on their own, every *other* 4xx repeats identically and so surfaces the server's own
+`detail` (sanitized: markup dropped, first line, ~200 chars, since `serverDetail(from:)` falls
+back to the whole body), which is what makes the agent's host-header `400` actionable instead
+of a futile retry loop. The launch probe is **once per process**
+(`AppFeature.State.didRunLaunchProbe`), and scope is the launch path only: manual login keeps
+`ConnectionFeature`'s inline footer (where `.offline` shares `.unreachable`'s status so the
+help link still shows) and a post-login drop keeps the chat reconnect banner.
 
 A few protocol facts that shape the reducer (verified against the real Hermes source,
 not assumed):
@@ -290,17 +254,7 @@ ever transit the gateway; real message content is fetched in-app over the privat
 
 **Protocol.** The app registers via `POST /api/plugins/hermes-push/register`
 `{device_token, apns_env, app_version}` (auth as for any `/api/` route) and tears down via
-`/unregister` — which, uniquely, authenticates from the **connection's own cookies** (an
-explicit `Cookie` header, `httpShouldHandleCookies = false`) because every caller is a logout
-and logout has already flushed the shared jar before the effect runs; without it the teardown
-POST is unauthenticated, 401s, and the device keeps receiving the previous user's pushes. That
-header is built by `cookieHeader(_:for:)`, which re-applies the domain/path/`Secure`/expiry
-rules the explicit header switches off — the snapshot it is built from is the whole shared jar,
-so serialising it verbatim would leak an out-of-scope cookie to this endpoint. The call is
-best-effort and its failure is **reported** on the post-logout onboarding screen
-(`AppFeature.pushNotUnregisteredMessage`), never swallowed: nothing on the device can stop an
-agent it could not reach from pushing to it.
-**The app never signs pushes**, so registration returns nothing the app must
+`/unregister`. **The app never signs pushes**, so registration returns nothing the app must
 persist (no secret). A `404` from the register route means the plugin isn't installed → the app
 sets `pushAvailable = false` and hides the toggle (same capability-gating as attach/profiles).
 The plugin POSTs `{device_token, apns_env, type, session_id, title, body, thread_id, hmac}` to

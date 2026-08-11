@@ -20,24 +20,6 @@ public enum AuthSession: Equatable, Sendable, Codable {
     case .cookie: nil
     }
   }
-
-  /// The session's cookies (empty in `.token` mode). Normally the transports read the shared
-  /// jar instead — this is for the one call that must authenticate **after** the jar has been
-  /// flushed (`unregisterPush` on logout).
-  public var cookies: [SerializedCookie] {
-    switch self {
-    case .token: []
-    case let .cookie(session): session.cookies
-    }
-  }
-
-  /// The same session with its cookies replaced — used to refresh a stored (login-vintage)
-  /// cookie session from a snapshot of the live jar. `.token` sessions are returned unchanged.
-  public func replacingCookies(_ cookies: [SerializedCookie]) -> AuthSession {
-    guard case var .cookie(session) = self else { return self }
-    session.cookies = cookies
-    return .cookie(session)
-  }
 }
 
 /// A captured cookie-based session for the gated auth regime. Carries enough to rehydrate
@@ -112,46 +94,5 @@ public extension SerializedCookie {
     if isSecure { properties[.secure] = "TRUE" }
     // `HTTPOnly` has no public property key; native clients ignore it anyway.
     return HTTPCookie(properties: properties)
-  }
-
-  /// Would `URLSession` have attached this cookie to a request for `url`?
-  ///
-  /// This exists for the ONE call that authenticates from an explicit `Cookie` header instead of
-  /// the shared jar (`HermesRESTClient`'s push unregister — the jar is flushed by the logout that
-  /// triggers it). An explicit header bypasses every check `HTTPCookieStorage` would have made,
-  /// and the snapshot it is built from is the WHOLE jar, so without this predicate a foreign or
-  /// out-of-scope cookie would be disclosed to that endpoint. The rules are RFC 6265's, matching
-  /// how Foundation normalises what it stores: a cookie with an explicit `Domain` is kept with a
-  /// leading dot (and matches subdomains), one without is host-only (exact match); path is a
-  /// prefix match on a `/` boundary; `Secure` requires https; an expired cookie is never sent.
-  internal func applies(to url: URL, now: Date) -> Bool {
-    guard let host = url.host?.lowercased(), !host.isEmpty else { return false }
-    guard Self.domainMatches(domain, host: host) else { return false }
-    guard Self.pathMatches(path, requestPath: url.path.isEmpty ? "/" : url.path) else {
-      return false
-    }
-    if isSecure, url.scheme?.lowercased() != "https" { return false }
-    if let expiresAt, expiresAt <= now.timeIntervalSince1970 { return false }
-    return true
-  }
-
-  /// Host-only (no leading dot) → exact match. Domain cookie (leading dot) → the host must be
-  /// the domain itself or a subdomain of it, so `evilexample.com` never matches `.example.com`.
-  internal static func domainMatches(_ domain: String, host: String) -> Bool {
-    let domain = domain.lowercased()
-    guard domain.hasPrefix(".") else { return !domain.isEmpty && domain == host }
-    let bare = String(domain.dropFirst())
-    guard !bare.isEmpty else { return false }
-    return host == bare || host.hasSuffix(".\(bare)")
-  }
-
-  /// RFC 6265 path-match: equal, or a prefix ending at a `/` boundary. An empty cookie path is
-  /// treated as `/` (what Foundation stores when `Path` is absent).
-  internal static func pathMatches(_ cookiePath: String, requestPath: String) -> Bool {
-    let cookiePath = cookiePath.isEmpty ? "/" : cookiePath
-    if cookiePath == requestPath { return true }
-    guard requestPath.hasPrefix(cookiePath) else { return false }
-    if cookiePath.hasSuffix("/") { return true }
-    return requestPath.dropFirst(cookiePath.count).hasPrefix("/")
   }
 }

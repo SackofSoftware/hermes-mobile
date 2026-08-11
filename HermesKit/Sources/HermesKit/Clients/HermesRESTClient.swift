@@ -283,16 +283,8 @@ public extension HermesRESTClient {
       unregisterPush: { conn, deviceToken in
         let url = try makeURL(conn.baseURL, "/api/plugins/hermes-push/unregister")
         let body = try JSONSerialization.data(withJSONObject: ["device_token": deviceToken])
-        // The ONE call that authenticates from the connection's own cookies rather than the
-        // shared jar: every caller is a logout, and logout deletes the Keychain session —
-        // which flushes the jar — before this effect runs. Reading the jar here would send an
-        // unauthenticated POST, the server would 401, and the device would stay registered,
-        // pushing the previous user's sessions. Token mode passes an empty list and is
-        // unchanged. 404 → `RESTError.notFound` (plugin not installed); caller capability-gates.
-        try await send(
-          url, method: "POST", body: body, token: conn.token, session: session,
-          cookies: conn.auth.cookies
-        )
+        // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
+        try await send(url, method: "POST", body: body, token: conn.token, session: session)
       },
       sendTestPush: { conn in
         let url = try makeURL(conn.baseURL, "/api/plugins/hermes-push/test")
@@ -506,17 +498,8 @@ func postJSON<T: Decodable>(
 }
 
 /// Fire a write request (e.g. PATCH) and validate the status, discarding the body.
-///
-/// `cookies` is the escape hatch for a call that must authenticate **without** the shared jar:
-/// pass a gated session's cookies and they ride as an explicit `Cookie` header with
-/// `httpShouldHandleCookies` off, so `URLSession` neither overwrites the header from the jar
-/// nor stores the reply's `Set-Cookie` into it. Only the ones actually scoped to `url` are sent —
-/// see `cookieHeader(_:for:now:)`, which re-applies the domain/path/`Secure`/expiry rules the
-/// explicit header switches off. Empty (the default, and always so in token mode) leaves the
-/// request byte-identical to before.
 func send(
-  _ url: URL, method: String, body: Data?, token: String?, session: URLSession,
-  cookies: [SerializedCookie] = []
+  _ url: URL, method: String, body: Data?, token: String?, session: URLSession
 ) async throws {
   var request = URLRequest(url: url)
   request.httpMethod = method
@@ -525,10 +508,6 @@ func send(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
   }
   if let token { request.setValue(token, forHTTPHeaderField: "X-Hermes-Session-Token") }
-  if let header = cookieHeader(cookies, for: url) {
-    request.httpShouldHandleCookies = false
-    request.setValue(header, forHTTPHeaderField: "Cookie")
-  }
 
   let data: Data
   let response: URLResponse
@@ -539,25 +518,6 @@ func send(
   }
 
   try validate(response, data: data)
-}
-
-/// Render a request `Cookie` header value for `url` from a jar snapshot, or `nil` when nothing
-/// in the snapshot is scoped to it.
-///
-/// **The narrowing is the point.** The snapshot handed to `send` is the WHOLE shared jar
-/// (`sharedCookieSnapshot`), and setting the header explicitly turns off everything
-/// `URLSession` would have enforced on the way out — domain, path, `Secure`, expiry. Serialising
-/// the snapshot verbatim would therefore disclose a foreign or out-of-scope cookie to this
-/// endpoint. `SerializedCookie.applies(to:now:)` re-applies exactly those rules, and the survivors
-/// are formatted by `HTTPCookie.requestHeaderFields(with:)` rather than by hand, so the header is
-/// byte-for-byte what the session itself would have sent.
-func cookieHeader(_ cookies: [SerializedCookie], for url: URL, now: Date = Date()) -> String? {
-  guard !cookies.isEmpty else { return nil }
-  let scoped = cookies.filter { $0.applies(to: url, now: now) }.compactMap(\.httpCookie)
-  guard !scoped.isEmpty else { return nil }
-  let header = HTTPCookie.requestHeaderFields(with: scoped)["Cookie"]
-  guard let header, !header.isEmpty else { return nil }
-  return header
 }
 
 // MARK: - DTOs (verified against hermes_cli/web_server.py + hermes_state.py)

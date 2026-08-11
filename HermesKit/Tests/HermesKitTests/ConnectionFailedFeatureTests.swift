@@ -140,15 +140,14 @@ struct ConnectionFailedFeatureTests {
       #expect(text.contains("HTTP \(status)"))
       #expect(!text.contains("refused the request"))
       #expect(!text.contains("down or restarting"))
-      #expect(text.contains("Change server"))
+      #expect(text.contains("Try again in a moment"))
     }
   }
 
   /// `serverDetail(from:)` falls back to the ENTIRE trimmed response body when a non-2xx
   /// carries no JSON `detail`, and a 4xx from an nginx/Cloudflare/captive-portal intermediary
-  /// is a whole HTML document. The reason line sits ABOVE this screen's three escape routes
-  /// inside a `ScrollView`, so quoting that verbatim pushes Retry / Change server / Log Out
-  /// far below the fold — and dumps whatever the proxy put in its body (internal hostnames,
+  /// is a whole HTML document. The reason line sits ABOVE this screen's escape routes
+  /// inside a `ScrollView`, so quoting that verbatim pushes Retry / Log Out far below the fold — and dumps whatever the proxy put in its body (internal hostnames,
   /// stack traces) onto a screen a stuck user is likely to screenshot.
   @Test func fourXXDetailIsClampedAndMarkupIsDropped() {
     // An HTML page is never an actionable sentence — drop it and use the generic line.
@@ -424,17 +423,6 @@ struct ConnectionFailedFeatureTests {
     releaseStall.finish()
   }
 
-  // MARK: - Change server
-
-  /// The non-destructive escape hatch: nothing is cleared, the parent just lands on prefilled
-  /// onboarding so a moved agent's URL can be edited without abandoning the session.
-  @Test func changeServerDelegatesUpWithoutClearingAnything() async {
-    let store = TestStore(initialState: state()) { ConnectionFailedFeature() }
-
-    await store.send(.changeServerTapped)
-    await store.receive(\.delegate, .changeServerRequested(connection))
-  }
-
   // MARK: - Logout
 
   /// Log Out wipes the keychain session, every pref and the chat cache — it confirms first,
@@ -496,7 +484,7 @@ struct ConnectionFailedFeatureTests {
       }
     } message: {
       TextState(
-        "This deletes the saved sign-in for this server along with pins, unread state and cached chats. To just point the app somewhere else, use Change server."
+        "This deletes the saved sign-in for this server along with pins, unread state and cached chats."
       )
     }
   }

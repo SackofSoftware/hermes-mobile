@@ -33,6 +33,14 @@ enum TranscriptLayout {
   /// The width a transcript row gets on the narrowest layout: 288pt. Anything that must fit a
   /// row on *every* device sizes against this.
   static let narrowestRowWidth: CGFloat = narrowestLayoutWidth - 2 * horizontalSectionInset
+
+  /// The shortest logical screen height this app can be rendered at: 568pt — the same
+  /// **Display Zoom** mode as ``narrowestLayoutWidth``, where an SE 2/3 renders at 320×568.
+  ///
+  /// Anything competing for the chat screen's *vertical* budget sizes against this the way
+  /// row content sizes against ``narrowestRowWidth`` — `ApprovalCardView`'s scrollable-content
+  /// ceiling is three fifths of it.
+  static let shortestLayoutHeight: CGFloat = 568
 }
 
 #if canImport(UIKit)

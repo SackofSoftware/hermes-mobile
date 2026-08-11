@@ -45,9 +45,44 @@ public struct ChatFeature {
     /// The app-level slot policy reads this: a RUNNING chat keeps its slot (socket and
     /// streaming effects) across a nav pop; an idle one is torn down.
     public var isRunning: Bool { isSending }
-    /// A blocking request from the agent (approval/clarify/secret). While set, the
-    /// composer is disabled and a card is the focal point.
-    public var pendingInteraction: PendingInteraction?
+    /// A blocking request from the agent (approval/clarify/secret). While set, `canSend` is
+    /// false and a card is the focal point — and `ChatView` hands the keyboard back so the
+    /// card gets the fixed region (the composer's *field* stays live for a draft; only
+    /// sending is blocked).
+    ///
+    /// **Raise it through ``present(_:)``**, never by assigning here: the assignment alone
+    /// leaves ``pendingInteractionToken`` behind, and a replacement card would then inherit
+    /// the previous one's `@State` — its scroll offset, its "Approve all" toggle, or, worst,
+    /// a typed sudo password. `internal(set)` so that is structural rather than a convention
+    /// for everything outside HermesKit (the app target, where the view identity lives, now
+    /// *cannot* assign one without the token). Assigning `nil` to dismiss is fine — a card
+    /// that is gone has no identity to keep.
+    public internal(set) var pendingInteraction: PendingInteraction?
+    /// Is the standing card an *approval*? The only card `ChatView` gives layout priority
+    /// over the transcript — it is the one built to absorb the squeeze (a bounded, scrollable
+    /// region), so priority buys it readable command lines; the clarify/secret card is rigid
+    /// stacked content and priority would only take room from the transcript.
+    public var isApprovalPending: Bool {
+      if case .approval = pendingInteraction { return true }
+      return false
+    }
+    /// Monotonic count of blocking requests *presented* — bumped by ``present(_:)`` every
+    /// time a card is raised, never reset. The view uses it as the card's identity so a
+    /// replacement always gets fresh `@State` (its "Approve all" toggle off, its command
+    /// scrolled to the top, a secret prompt's typed value gone). Identity cannot come from
+    /// the request itself: a queued replacement can be *equal* to the card it replaces — an
+    /// agent retrying the same command — and a value-derived id would be unchanged for
+    /// exactly that pair, which is the one case where the replacement does not pass through
+    /// `nil` first. `internal(set)` so the invariant "every presentation bumps the token" is
+    /// enforceable: outside HermesKit the only way to raise a card is ``present(_:)``.
+    public internal(set) var pendingInteractionToken: Int
+    /// Raise a blocking card, bumping ``pendingInteractionToken`` so the view rebuilds.
+    /// Every presentation goes through here; dismissal is a plain `pendingInteraction = nil`
+    /// (a card that is gone has no identity to keep).
+    public mutating func present(_ interaction: PendingInteraction) {
+      pendingInteraction = interaction
+      pendingInteractionToken &+= 1
+    }
     /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
     /// #30: an `approval.request` that fired while the socket was down is gone — the
     /// server does not re-surface pending approvals on `session.resume`). Set by
@@ -350,6 +385,7 @@ public struct ChatFeature {
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
       self.pendingInteraction = nil
+      self.pendingInteractionToken = 0
       self.expectsPendingApproval = false
       self.presentedTool = nil
       self.model = nil
@@ -460,8 +496,19 @@ public struct ChatFeature {
     /// state, nothing to keep in sync. Empty when the catalog isn't loaded yet or the
     /// agent predates slash commands (`commandsUnsupported`), so the panel simply never
     /// appears on old agents.
+    ///
+    /// Also empty while a **blocking card stands** (#65): the panel is a fixed slab (up to 5.5
+    /// rows) in the same non-scrolling region as the card and the composer, so a slash draft
+    /// left in the composer when a card is raised mid-turn — or typed into it afterwards, since
+    /// the card only resigns the field, never disables it — stacked the two and pushed the
+    /// Deny/Approve row off screen on a small phone (measured: the composer's bottom at 431pt in
+    /// a 352pt window). Nothing is lost: `composerText` is untouched, so the draft and its panel
+    /// come straight back when the card is answered, and the command the panel completes could
+    /// not have been submitted meanwhile anyway — `canSend` is false while `pendingInteraction`
+    /// is non-nil. Gated here rather than in the view so the whole derivation stays one pure
+    /// rule with no stored suggestion state.
     public var slashSuggestions: [SlashSuggestion] {
-      guard !commandsUnsupported else { return [] }
+      guard !commandsUnsupported, pendingInteraction == nil else { return [] }
       return SlashSuggestionFilter.suggestions(for: composerText, catalog: commandCatalog)
     }
 
@@ -2136,20 +2183,20 @@ public struct ChatFeature {
       // focus rather than pausing — simpler reducer, and wall-clock still reflects the turn.
       // The real event overwrites any push-tap-synthesized card unconditionally and clears
       // the recovery hint so a later hydrate can't re-synthesize (#30 workaround).
-      state.pendingInteraction = .approval(request)
+      state.present(.approval(request))
       state.expectsPendingApproval = false
       return .none
 
     case let .clarifyRequest(request):
-      state.pendingInteraction = .clarify(request)
+      state.present(.clarify(request))
       return .none
 
     case let .sudoRequest(prompt):
-      state.pendingInteraction = .secret(.sudo, prompt)
+      state.present(.secret(.sudo, prompt))
       return .none
 
     case let .secretRequest(prompt):
-      state.pendingInteraction = .secret(.secret, prompt)
+      state.present(.secret(.secret, prompt))
       return .none
 
     case let .sessionInfo(info):
@@ -2547,7 +2594,7 @@ public struct ChatFeature {
     if state.expectsPendingApproval {
       state.expectsPendingApproval = false
       if running, state.pendingInteraction == nil {
-        state.pendingInteraction = .approval(Self.recoveredApprovalRequest)
+        state.present(.approval(Self.recoveredApprovalRequest))
       }
     }
     // The inverse staleness rule: the authoritative "not running" means no approval can

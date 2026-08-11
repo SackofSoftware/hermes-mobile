@@ -28,8 +28,29 @@ struct ChatInteractionTests {
 
     await store.send(.gatewayEvent(.approvalRequest(request))) {
       $0.pendingInteraction = .approval(self.request)
+      // Every presentation bumps the token — it is the card's identity in `ChatView`, so a
+      // replacement always gets fresh `@State` (toggle off, command scrolled to the top).
+      $0.pendingInteractionToken = 1
     }
     #expect(!store.state.canSend) // blocked while a request is pending
+  }
+
+  /// The identity has to survive the one case a value-derived `.id` cannot: a queued approval
+  /// that is **equal** to the one it replaces (an agent retrying the same command), which
+  /// overwrites without passing through `nil`. Only a monotonic token tells them apart.
+  @Test func repeatedIdenticalApprovalStillBumpsTheIdentityToken() async {
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+
+    await store.send(.gatewayEvent(.approvalRequest(request))) {
+      $0.pendingInteraction = .approval(self.request)
+      $0.pendingInteractionToken = 1
+    }
+    // Byte-identical request, no response in between: `pendingInteraction` does not change…
+    await store.send(.gatewayEvent(.approvalRequest(request))) {
+      $0.pendingInteractionToken = 2 // …but the card's identity must
+    }
   }
 
   @Test func approveClearsAppendsAndSends() async {

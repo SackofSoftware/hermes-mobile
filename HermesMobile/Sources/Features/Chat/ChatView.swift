@@ -18,7 +18,27 @@ struct ChatView: View {
           CopiedToastView(token: store.copiedIDToastToken)
         }
       footer
+      // A standing *approval* outranks the greedy transcript for the fixed region's height.
+      // Without it a `VStack` offers each child `remaining / remainingCount` in flexibility
+      // order, so the card — less flexible than the transcript — is offered roughly *half*
+      // of what is left and its scrollable region collapses onto its floor with the keyboard
+      // up: measured at the floor on every iPhone, i.e. the two-line window #65 was filed
+      // about. With the priority the card is offered the whole remainder first; it hands a
+      // tap target's worth back (`BoundedHeightLayout.reserve`) so the transcript — the
+      // context for the decision — is not starved to 0pt. Applied here rather than inside
+      // `pendingCard`'s `switch`: a trait written inside a `@ViewBuilder` branch does not
+      // reach the enclosing stack (measured — the region stayed on its floor).
+      //
+      // Scoped to `.approval` because only that card is compressible: `ClarifyCardView` is
+      // plain stacked content with rigid choice buttons, so priority would only take room
+      // from the transcript (measured: 160pt → 13pt with a long question) without giving the
+      // card anything it can use. Every card gets a fresh identity per presentation — a
+      // replacement that does not pass through `nil` (a queued approval, a second secret
+      // prompt) must not inherit the previous one's `@State`: its scroll offset, its
+      // "Approve all" toggle, or — worst — a typed sudo password.
       pendingCard
+        .id(store.pendingInteractionToken)
+        .layoutPriority(store.isApprovalPending ? 1 : 0)
       suggestionPanel
       Divider()
       ComposerView(
@@ -33,6 +53,11 @@ struct ChatView: View {
         recordingSeconds: store.recordingSeconds,
         attachmentsSupported: !store.attachmentsUnsupported,
         attachments: store.attachments,
+        // Raising a blocking card hands the keyboard back (`ComposerTextView.blockingCardToken`):
+        // the card can't be answered from the composer — `canSend` is false while one stands —
+        // and the keyboard shrinks the very fixed region the card lives in, which is #65's own
+        // root cause. Not a disable: the field stays live for a draft.
+        blockingCardToken: store.pendingInteraction != nil ? store.pendingInteractionToken : nil,
         onModelTap: { store.send(.modelChipTapped) },
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) },
@@ -245,6 +270,13 @@ struct ChatView: View {
   /// Rendered only while the reducer's computed `slashSuggestions` is non-empty (catalog
   /// loaded, composer text is a slash query); a tap inserts via `.slashSuggestionTapped`
   /// and leaves focus untouched, so the keyboard stays up.
+  ///
+  /// The panel and a blocking card share this non-scrolling `VStack`, and the panel is a fixed
+  /// slab of up to 5.5 rows — so a slash draft standing when a card is raised used to stack the
+  /// two and push the Deny/Approve row and the composer off a small screen (#65 rebuilt out of
+  /// different parts; measured 431pt of content in a 352pt window). `slashSuggestions` is
+  /// therefore empty while `pendingInteraction` is non-nil — a reducer rule, not a condition
+  /// added here, so the derivation stays in one place. The draft itself is untouched.
   @ViewBuilder
   private var suggestionPanel: some View {
     let suggestions = store.slashSuggestions
@@ -258,6 +290,9 @@ struct ChatView: View {
   private var pendingCard: some View {
     switch store.pendingInteraction {
     case let .approval(request):
+      // The per-presentation identity that keeps this card's `@State` (scroll offset,
+      // "Approve all") from leaking into the next one is applied to `pendingCard` at the
+      // `VStack` call site, so it covers the clarify/secret branches too — see there.
       ApprovalCardView(
         request: request,
         onApprove: { all in store.send(.respondToApproval(approve: true, all: all)) },

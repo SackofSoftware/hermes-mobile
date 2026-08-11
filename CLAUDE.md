@@ -322,6 +322,93 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   push-payload change** — the generic-body privacy rule stands; composes with #30 (a
   re-surfaced real event just replaces the generic card). Clarify recovery is out of scope
   (needs the real event's `request_id`).
+- **The approval card is a PINNED button row over ONE bounded, scrollable content region —
+  never plain stacked `Text`** (#65): `ApprovalCardView` sits in `ChatView`'s outer `VStack`, the
+  **non-scrolling** region between the greedy transcript and the composer, so when that region runs
+  short (long command, long `detail`, keyboard up, accessibility text size) the `VStack` compresses
+  the card and plain `Text` answers by **truncating with no way to reach the rest** — users had to
+  leave and re-enter the chat (keyboard down = more room) to read what they were approving;
+  `.fixedSize` alone inverts the bug and pushes Deny/Approve off screen. **Rigid: a one-line,
+  Dynamic-Type-clamped title and the Deny/Approve row. In the scroll, IN THIS ORDER: the command,
+  then `detail`, then the "approve all" toggle.** A rigid `detail` or toggle was measured to push
+  the buttons (and the composer) off screen at AX3/AX5 and on any phone with a long `detail` — the
+  rigid remainder outgrew the region on its own — so everything unbounded scrolls; and the **order
+  is load-bearing**, because with the title and the server-controlled `detail` above it a 1000-char
+  description pushed the command *entirely* below the fold at first paint (measured: zero command
+  pixels in the viewport), and on the shortest screen the title plus two detail lines filled the
+  whole floor. The **toggle's state is mirrored on the Approve button** (`approveTitle(all:)` →
+  "Approve all"): the toggle is a scroll away with a long command, and a session-wide whitelist must
+  never be committed from a control the user cannot see as they tap. The region sits in
+  `BoundedHeightLayout`: ideal height `min(content, cap)` — so a short card hugs its content exactly
+  as before — and **compressible** down to a floor, so a tight region is absorbed by the *viewport*
+  (every byte still present and scrollable) instead of the card over-subscribing its container. The
+  cap is `@ScaledMetric(relativeTo: .callout)` (base 320pt) **clamped** to
+  `TranscriptLayout.shortestLayoutHeight * 0.6`; the floor (96pt) is deliberately unscaled and is
+  **derived from what must be readable**: `commandPadding` + three `.callout` lines + the fade ramp,
+  i.e. on the shortest screen with the keyboard up (where the region lands exactly on it) three full
+  lines *of the command* are legible above the ramp **at `.large`**. That three-line contract is a
+  `.large` one and **degrades with Dynamic Type** — the band is a constant 64pt, ~1.3 AX3 lines and
+  under one at AX5 (pinned by `testTheFloorsReadableBandDegradesWithDynamicType`); scaling the floor
+  is not available, since three AX5 lines are ~210pt of floor and reserving that on the shortest
+  keyboard-up screen is measurably what pushes Deny/Approve out. **Raising a card hands the keyboard
+  back** — `ChatView` passes `pendingInteractionToken` to `ComposerTextView.blockingCardToken`, which
+  resigns first responder once per *raised* card (keyed on the token, because `ChatView` re-renders
+  on every streamed token and an unkeyed resign makes the field untappable). It is a **resign, not a
+  disable**: `canSend` is already false while a card stands, but the field stays live so a draft is
+  still possible — do not write "the composer is disabled", it never was. That is the cheapest room
+  the fix buys, since the keyboard is what shrinks the region the card lives in (#65's own root
+  cause: leaving and re-entering the chat "fixed" the truncation because the keyboard was down). A
+  **landscape** phone whose composer is deliberately re-focused has ~100pt of fixed region and cannot
+  hold the card (~250pt compressed) *and* the composer — true before this change too; there the
+  Deny/Approve row stays inside the window (asserted on the buttons' own **accessibility frames**,
+  the only place UIKit publishes where a SwiftUI control landed — the hosted scroll view reports a
+  height its content is not painted at once the card over-subscribes) and the composer is what goes
+  under the keyboard. **`ChatView`
+  gives the card `.layoutPriority(1)`** (at the `VStack` call site — a trait written inside
+  `pendingCard`'s `@ViewBuilder` branch does not reach the stack): without it the stack offers each
+  child `remaining / remainingCount` in flexibility order, the card is less flexible than the
+  transcript, and the region collapses onto its floor with the keyboard up (measured on an iPhone 15:
+  its floor, 96pt, without the priority vs 155pt with it — 88 and 227 when first measured, before the
+  floor was raised and the region started handing a 44pt reserve back). It is **scoped to `.approval`** (`State.isApprovalPending`) — `ClarifyCardView` is
+  rigid stacked content that cannot use the extra room, so priority there only blanks the transcript
+  (measured 160pt → 13pt). And because a priority-1 child is offered everything the others do not
+  strictly need — the greedy transcript's minimum is 0 — the region **hands a fixed 44pt of its offer
+  back** (`BoundedHeightLayout.reserve`, floor-outranked): without it the transcript measured **0pt**
+  on every phone, i.e. the decision was made with no visible context. The reserve is **absolute, not
+  a fraction** — a proportional one scales with the container and so kept cutting a region that had
+  room to fit (at a 320pt offer with 320pt of content it gave back 80pt, about four command lines,
+  that nothing had asked for). The bottom fade is driven by **live scroll
+  geometry** (`hasBottomOverflow`, mirroring #59's table fade), never by the measured content
+  height (a measurement-keyed fade never clears, leaving the last line permanently ramped to
+  transparent), and its ramp is a **quarter of the viewport capped at 24pt** — a constant ramp is
+  fine against `MarkdownTableView`'s always-screen-wide edge but would tint most of a squeezed
+  region. **Every** card — approval, clarify, secret — is keyed on the reducer's monotonic
+  **`pendingInteractionToken`** (applied to `pendingCard` at the call site, not inside one
+  `@ViewBuilder` branch, so the clarify/secret shape gets it too: a secret prompt replacing another
+  would otherwise carry the typed password over): one card overwrites another without passing
+  through nil, a reused view carries the previous scroll offset, "Approve all" toggle or typed text
+  into the next one, and two back-to-back requests can be *equal* (an agent retrying the same
+  command), which a value-derived id cannot tell apart. The token is `public internal(set)` and
+  bumped only by `State.present(_:)` — **raise a card through `present`, never by assigning
+  `pendingInteraction`**, which is `public internal(set)` for the same reason (outside HermesKit
+  there is no way to raise one without its token; dismissal stays a plain `= nil`).
+  The recovered card (`command == nil`) renders no command; its region hugs the recovery copy.
+  The measured derivations — why the layout probes its subview with the height **unspecified** (a
+  `ScrollView` handed a concrete proposal swallows it whole; unspecified, it reports its content's
+  ideal), the ceiling arithmetic, the `ViewThatFits` rejection — live on `scrollableContent` /
+  `BoundedHeightLayout`; keep them there. Guarded by
+  `HermesMobileTests/ApprovalCardLayoutTests.swift`, which hosts **the real `ChatView`** at
+  keyboard-up window sizes (the card's own arithmetic being right does not mean the stack *gives*
+  it room — that is exactly how the first take shipped a collapsed region) as well as the card
+  alone. Its line-count floors are measured on the **command's own painted band** (the tinted
+  `secondarySystemBackground` block, read out of a render of the region's layer, contiguous from the
+  top of the viewport) — **never** on the viewport's height, which since the chrome shares the
+  scroll is satisfied entirely by header and detail lines: that is exactly how a region showing
+  *zero* lines of command passed a "three lines" assertion. Plus the `ChatSnapshotTests` approval
+  baselines, whose load-bearing part is the card's
+  **rendered size** (the collapsed-ideal regression showed up as 1170×553 against 1170×611 — a size
+  mismatch anti-aliasing drift cannot produce). Selection-vs-scroll gesture precedence inside the
+  region is a **manual-check item**, not a tested contract (same caveat family as #59's table cells).
 - **Session-list working glow is event-driven** via `ChatFeature.Delegate.runningChanged`
   (emitted on `message.start`/`complete`/`error` and the `session.resume` `running` flag),
   routed by `AppFeature` to `SessionListFeature` for an instant row-glow patch; the poll is only
@@ -669,17 +756,28 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   baseline — use it only for a deliberate global re-render. To add ONE new snapshot test,
   run `make snapshot` **twice**: the first run finds no baseline, records it and fails by
   design; the second asserts clean. That keeps the commit to the single new PNG.
-  **A snapshot of a horizontally-scrollable view MUST pin an explicit width**:
-  `componentImage()` renders at `.sizeThatFits`, which proposes zero width, and a
-  `ScrollView` flexible along its scroll axis takes it and records a blank sliver (a 60×645
-  one cost a recording during #59). Pin `device.size.width` for the in-transcript shape and
-  a wider explicit frame to capture the full un-panned content (`MarkdownTableSnapshotTests`).
+  **A snapshot of a SCROLLABLE view MUST pin an explicit size along its scroll axis** —
+  either axis: `componentImage()` renders at `.sizeThatFits`, which proposes nothing along a
+  flexible axis, and a `ScrollView` takes that literally and records a blank sliver (a 60×645
+  one cost a recording during #59). Pin `device.size.width` for the in-transcript shape and a
+  wider explicit frame for the full un-panned content (`MarkdownTableSnapshotTests`, horizontal);
+  pin **both** width and height for a vertical one
+  (`ChatSnapshotTests.testApprovalCard_longCommandScrolls`, #65).
 - **Layout facts a snapshot cannot prove go in a measured `UIWindow`-hosted XCTest** —
   a panned view and a clipped one produce the same first screenful, so assert the geometry
   (`UIScrollView.contentSize` vs `bounds`, hosted `sizeThatFits` heights) instead of only
-  the pixels; see `HermesMobileTests/MarkdownTableLayoutTests.swift`. Such a test must also
-  pin `.dynamicTypeSize(.large)`, or its numeric thresholds follow the simulator's text-size
-  setting.
+  the pixels; see `HermesMobileTests/MarkdownTableLayoutTests.swift` and
+  `ApprovalCardLayoutTests.swift` (the latter also hosts under a *realistically tight* region
+  and measures the **unwindowed** `sizeThatFits` — the pass a snapshot render actually takes).
+  Such a test must also pin `.dynamicTypeSize(.large)`, or its numeric thresholds follow the
+  simulator's text-size setting — and vary it in at least one case wherever a `@ScaledMetric`
+  cap is the thing under test.
+- **The recorded baselines predate the current simulator runtime**, so `make snapshot` fails
+  broadly (~92/161) with no code cause — sub-perceptual anti-aliasing drift through to visible
+  list-chrome differences, on suites no branch has touched. Judge a failure by **size mismatch
+  first**: a differing render size is a real regression, an equal size with a small pixel
+  residual (delta 1–3 on a few dozen px) is drift. A deliberate global re-record
+  (`make snapshot-record`) is the pending fix and must land as its own commit.
 
 ## Gotchas
 
@@ -688,6 +786,14 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   for direct `tuist generate`, use `TUIST_DEVELOPMENT_TEAM` / `TUIST_SERVER_URL`.
 - **New source files need `tuist generate`** before an `xcodebuild` app build picks them
   up (sources are globbed at generation time).
+- **A `ScrollView` handed a concrete proposal along its scroll axis swallows it whole** — it
+  reports the proposal, not its content, so any region whose height must be `min(content, cap)`
+  gets "always the cap" (and a `.frame(maxHeight:)` on top merely clips). Probed with that
+  dimension **unspecified** (`ProposedViewSize(width: w, height: nil)`, i.e. from a custom
+  `Layout`) the same scroll view reports its *content's* ideal instead. Symptom of getting it
+  wrong: the region sizes to its padding alone on every pass that runs before a measurement
+  state lands — a `sizeThatFits` snapshot render is exactly one such pass — and the whole
+  enclosing view renders clipped (see `BoundedHeightLayout` in `ApprovalCardView.swift`).
 - **`@Sendable` effect closures** must capture dependencies explicitly (`[dismiss]`,
   `[gateway]`) — the reducer `self` is not `Sendable`.
 - **Deployment target is iOS 18** (`Project.swift` + `HermesKit/Package.swift`). iOS-18 scroll APIs

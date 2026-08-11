@@ -21,6 +21,11 @@ struct ComposerView: View {
   /// Attachments (#8): hide the attach control when the agent can't accept uploads.
   var attachmentsSupported: Bool = true
   var attachments: [ComposerAttachment] = []
+  /// Identity of the blocking card standing over the chat, if any — raising one hands the
+  /// keyboard back so the card gets the fixed region (#65). See
+  /// `ComposerTextView.blockingCardToken`. The composer is **not** disabled: only Send is
+  /// (`canSend` is false while a card stands), so the field stays available for a draft.
+  var blockingCardToken: Int? = nil
   let onModelTap: () -> Void
   let onSend: () -> Void
   let onInterrupt: () -> Void
@@ -63,6 +68,7 @@ struct ComposerView: View {
         // Same capability gate as the paperclip: no Paste offer for an image-only clipboard
         // when the agent can't accept uploads.
         attachmentsSupported: attachmentsSupported,
+        blockingCardToken: blockingCardToken,
         onSubmit: onSend,
         onPasteBegan: onPasteBegan,
         onPasteImages: onPasteImages

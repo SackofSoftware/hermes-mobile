@@ -419,6 +419,12 @@ final class ChatSnapshotTests: SnapshotTestCase {
 
   // MARK: Approval card
 
+  /// The height is pinned for the same reason the width is on a horizontally-scrollable view
+  /// (CLAUDE.md's blank-sliver gotcha, vertical edition): the card's content region is
+  /// **compressible**, and `componentImage()` renders at `.sizeThatFits`, i.e. UIKit's
+  /// *compressed* fitting size — which for a compressible view is its FLOOR, not its natural
+  /// height. Unpinned this recorded the card 39pt short, with the region already scrolling.
+  /// The frame is generous enough that the card lays out naturally inside it.
   func testApprovalCard() {
     let view = ApprovalCardView(
       request: ApprovalRequest(
@@ -428,7 +434,31 @@ final class ChatSnapshotTests: SnapshotTestCase {
       onApprove: { _ in },
       onDeny: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 260)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// A command far taller than the cap (#65): the block stops growing at
+  /// `contentMaxHeight`, shows the first screenful, and fades its bottom edge to signal the
+  /// rest is reachable by scrolling — while Deny/Approve stay on the card.
+  ///
+  /// The frame is pinned in **both** axes: `componentImage()` renders at `.sizeThatFits`,
+  /// which proposes nothing along a `ScrollView`'s scroll axis, and a flexible scroll view
+  /// takes that literally (CLAUDE.md's blank-sliver gotcha, vertical edition).
+  func testApprovalCard_longCommandScrolls() {
+    let view = ApprovalCardView(
+      request: ApprovalRequest(
+        // One fixture, shared with the measured suite that asserts this shape's geometry —
+        // two copies would drift and the two suites would stop describing the same card.
+        command: ApprovalCardLayoutTests.longCommand,
+        detail: "Rebuild every target and re-run the full suite"
+      ),
+      onApprove: { _ in },
+      onDeny: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 460)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 
@@ -440,7 +470,11 @@ final class ChatSnapshotTests: SnapshotTestCase {
       onApprove: { _ in },
       onDeny: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    // Height pinned for the reason on `testApprovalCard` — this card's content happens to sit
+    // under the floor today, so `.sizeThatFits` is currently faithful, but a longer recovery
+    // copy would silently start recording the floor instead.
+    .frame(width: device.size?.width ?? 390, height: 220)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 

@@ -28,6 +28,7 @@ struct ClarifyFeatureTests {
 
     await store.send(.gatewayEvent(.clarifyRequest(request))) {
       $0.pendingInteraction = .clarify(request)
+      $0.pendingInteractionToken = 1
     }
     #expect(!store.state.canSend)
   }
@@ -38,6 +39,7 @@ struct ClarifyFeatureTests {
 
     await store.send(.gatewayEvent(.sudoRequest(prompt))) {
       $0.pendingInteraction = .secret(.sudo, prompt)
+      $0.pendingInteractionToken = 1
     }
   }
 
@@ -47,6 +49,7 @@ struct ClarifyFeatureTests {
 
     await store.send(.gatewayEvent(.secretRequest(prompt))) {
       $0.pendingInteraction = .secret(.secret, prompt)
+      $0.pendingInteractionToken = 1
     }
   }
 

@@ -412,6 +412,44 @@ struct SlashCommandChatTests {
     #expect(nilCatalog.state.slashSuggestions.isEmpty)
   }
 
+  @Test func aStandingCardSuppressesTheSuggestionsWithoutTouchingTheDraft() async {
+    // #65: the panel is a fixed slab in the same non-scrolling region as a blocking card and
+    // the composer, and stacking the two pushes the card's Deny/Approve row off screen on a
+    // small phone. A card standing therefore empties the suggestions — for a draft typed
+    // BEFORE the card arrives (this case) as much as for one typed after, since the card only
+    // resigns the composer, never disables it.
+    let store = TestStore(initialState: stateWithCatalog()) { ChatFeature() }
+
+    await store.send(.binding(.set(\.composerText, "/st"))) {
+      $0.composerText = "/st"
+    }
+    #expect(store.state.slashSuggestions.map(\.name) == ["/status"])
+
+    await store.send(.gatewayEvent(.approvalRequest(ApprovalRequest(command: "rm -rf /")))) {
+      $0.present(.approval(ApprovalRequest(command: "rm -rf /")))
+    }
+    #expect(store.state.slashSuggestions.isEmpty)
+    // The suppression is display-only: the draft is still there (the composer stays editable),
+    // and it could not have been submitted meanwhile anyway.
+    #expect(store.state.composerText == "/st")
+    #expect(store.state.canSend == false)
+
+    // Every blocking card, not just the approval: the clarify and secret cards own the same
+    // region (and carry a text field of their own, which the panel would sit on top of).
+    var clarifying = store.state
+    clarifying.present(.clarify(ClarifyRequest(requestID: "r", question: "Which target?")))
+    #expect(clarifying.slashSuggestions.isEmpty)
+    var secret = store.state
+    secret.present(.secret(.sudo, SecretPrompt(requestID: "r", prompt: "Password")))
+    #expect(secret.slashSuggestions.isEmpty)
+
+    // Answering the card brings the panel straight back — nothing had to be re-typed.
+    var answered = store.state
+    answered.pendingInteraction = nil
+    #expect(answered.slashSuggestions.map(\.name) == ["/status"])
+    #expect(answered.composerText == "/st")
+  }
+
   // MARK: slash.exec pipeline (Task 6)
 
   /// A ready chat with the catalog loaded and a resolved session, poised to submit.

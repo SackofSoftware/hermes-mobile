@@ -31,6 +31,11 @@ public struct SettingsFeature {
     public var notificationsDenied: Bool
     /// Drives the "Send test notification" button + result label.
     public var testPushStatus: TestPushStatus
+    /// What the agent's plugin hub reports about `hermes-push` — read on appearance. `nil`
+    /// until the probe lands (and left `nil` if it fails), which reads as "offer nothing".
+    public var pushPlugin: PushPluginInfo?
+    /// Drives the plugin-update row: button state and the result label under it.
+    public var pluginUpdate: PluginUpdateStatus
 
     /// The outcome of a "send test notification" attempt, surfaced in the view/snapshots.
     public enum TestPushStatus: Equatable, Sendable {
@@ -40,12 +45,26 @@ public struct SettingsFeature {
       case failed
     }
 
+    /// State of the in-app "update the plugin" action.
+    public enum PluginUpdateStatus: Equatable, Sendable {
+      case idle
+      case updating
+      /// Pulled new commits — the agent MUST be restarted before the new code runs.
+      case updated
+      /// The pull succeeded but changed nothing ("Already up to date").
+      case alreadyCurrent
+      /// The agent refused or the request failed; carries the server's reason verbatim.
+      case failed(String)
+    }
+
     public init(
       connection: ServerConnection,
       pushAvailable: Bool = true,
       notificationsEnabled: Bool = false,
       notificationsDenied: Bool = false,
-      testPushStatus: TestPushStatus = .idle
+      testPushStatus: TestPushStatus = .idle,
+      pushPlugin: PushPluginInfo? = nil,
+      pluginUpdate: PluginUpdateStatus = .idle
     ) {
       self.connection = connection
       self.token = connection.token ?? ""
@@ -55,6 +74,28 @@ public struct SettingsFeature {
       self.notificationsEnabled = notificationsEnabled
       self.notificationsDenied = notificationsDenied
       self.testPushStatus = testPushStatus
+      self.pushPlugin = pushPlugin
+      self.pluginUpdate = pluginUpdate
+    }
+
+    /// The installed plugin is behind `PushSetup.minimumPluginVersion` AND the agent can pull
+    /// it in place → offer the one-tap update.
+    ///
+    /// Stays `false` once an update has been attempted: after a successful pull the hub reports
+    /// the NEW version off disk while the running agent still has the old code loaded, so
+    /// re-offering the button would be misleading — the outstanding action is a restart, which
+    /// only the user can do.
+    public var pluginUpdateAvailable: Bool {
+      guard pluginUpdate == .idle, let pushPlugin else { return false }
+      return pushPlugin.isOutdated && pushPlugin.canUpdateGit
+    }
+
+    /// The plugin is behind but the agent can't pull it (pip install, hand-copied directory,
+    /// or an agent too old to report `can_update_git`) → point the user at the chat prompt
+    /// instead of a button that would only 400.
+    public var pluginUpdateNeedsManualSteps: Bool {
+      guard pluginUpdate == .idle, let pushPlugin else { return false }
+      return pushPlugin.isOutdated && !pushPlugin.canUpdateGit
     }
 
     public var serverURLString: String { connection.baseURL.absoluteString }
@@ -85,7 +126,24 @@ public struct SettingsFeature {
     /// The push guide's "Ask agent to install" button — dismiss Settings and bubble up so the
     /// app opens a new chat with the install prompt pre-filled.
     case askAgentToInstallTapped
+    /// What the plugin hub reports about `hermes-push`, read on appearance.
+    case pushPluginInfoLoaded(PushPluginInfo)
+    /// User tapped "Update plugin" — asks the agent to `git pull` it in place.
+    case updatePluginTapped
+    /// Outcome of that pull.
+    case pluginUpdateResult(PluginUpdateOutcome)
     case delegate(Delegate)
+
+    /// Result of the in-app plugin update, flattened to an `Equatable` shape (the failure
+    /// carries the server's message rather than the error value, matching `testPushResult`).
+    @CasePathable
+    public enum PluginUpdateOutcome: Equatable, Sendable {
+      /// Pulled new commits — restart required before the new code runs.
+      case updated
+      /// "Already up to date" — nothing changed, so nothing to restart for.
+      case alreadyCurrent
+      case failed(String)
+    }
 
     @CasePathable
     public enum Delegate {
@@ -126,8 +184,41 @@ public struct SettingsFeature {
           // Reflect the real OS authorization status in the toggle on appearance.
           .run { [push] send in
             await send(.authorizationStatusLoaded(push.authorizationStatus()))
+          },
+          // Read the installed plugin's version so we can offer an update. Never throws —
+          // an unreachable/old agent maps to `.unknown`, which offers nothing.
+          .run { [rest, connection = state.connection] send in
+            await send(.pushPluginInfoLoaded(rest.pushPluginInfo(connection)))
           }
         )
+
+      case let .pushPluginInfoLoaded(info):
+        state.pushPlugin = info
+        return .none
+
+      case .updatePluginTapped:
+        guard state.pluginUpdate != .updating else { return .none }
+        state.pluginUpdate = .updating
+        return .run { [rest, connection = state.connection] send in
+          do {
+            let result = try await rest.updatePushPlugin(connection)
+            await send(.pluginUpdateResult(result.unchanged ? .alreadyCurrent : .updated))
+          } catch let error as RESTError {
+            // Surface the agent's own reason (not a git checkout, non-fast-forward, git
+            // missing) verbatim — the user has to act on it on their host.
+            await send(.pluginUpdateResult(.failed(error.message)))
+          } catch {
+            await send(.pluginUpdateResult(.failed(RESTError.unreachable.message)))
+          }
+        }
+
+      case let .pluginUpdateResult(outcome):
+        switch outcome {
+        case .updated: state.pluginUpdate = .updated
+        case .alreadyCurrent: state.pluginUpdate = .alreadyCurrent
+        case let .failed(reason): state.pluginUpdate = .failed(reason)
+        }
+        return .none
 
       case let .authorizationStatusLoaded(status):
         switch status {

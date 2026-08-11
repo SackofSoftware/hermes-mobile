@@ -59,6 +59,9 @@ enum DemoMode {
     // prompt. Every other scenario reports unknown: no prompt, no sheet, no live REST.
     let pushStatus: PushPluginStatus = scenario == "notify" ? .ready : .unknown
     deps.hermesREST.pushPluginStatus = { _ in pushStatus }
+    // Settings probes the same hub for the plugin's version. Report no version so the demo
+    // never renders the "plugin update available" row in a screenshot.
+    deps.hermesREST.pushPluginInfo = { _ in PushPluginInfo(status: pushStatus) }
     // Deterministic relative timestamps.
     deps.date = .constant(now)
     // Persisted UI prefs, pre-seeded so `reloadPrefs` keeps our curated grouping/pins.

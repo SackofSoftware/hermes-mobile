@@ -676,6 +676,120 @@ struct HermesRESTClientTests {
     #expect(try await makeClient().pushPluginStatus(connection) == .unknown)
   }
 
+  // MARK: - Push plugin info (version + updatability, same hub endpoint)
+
+  @Test func pushPluginInfoReadsVersionAndUpdatability() async throws {
+    MockURLProtocol.set(json: #"""
+      {"plugins":[{"name":"other","runtime_status":"enabled","version":"9.9.9","can_update_git":true},
+                  {"name":"hermes-push","runtime_status":"enabled","version":"0.1.0","can_update_git":true}]}
+      """#)
+    let info = await makeClient().pushPluginInfo(connection)
+    #expect(info.status == .ready)
+    #expect(info.version == "0.1.0")
+    #expect(info.canUpdateGit)
+    #expect(info.isOutdated) // 0.1.0 < the shipped minimum
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/dashboard/plugins/hub")
+  }
+
+  @Test func pushPluginInfoCurrentVersionIsNotOutdated() async throws {
+    MockURLProtocol.set(json: """
+      {"plugins":[{"name":"hermes-push","runtime_status":"enabled",\
+      "version":"\(PushSetup.minimumPluginVersion)","can_update_git":true}]}
+      """)
+    let info = await makeClient().pushPluginInfo(connection)
+    #expect(info.version == PushSetup.minimumPluginVersion)
+    #expect(!info.isOutdated)
+  }
+
+  // Older agents omit both fields — decode leniently and offer no update rather than failing.
+  @Test func pushPluginInfoToleratesMissingVersionAndFlag() async throws {
+    MockURLProtocol.set(json: #"{"plugins":[{"name":"hermes-push","runtime_status":"enabled"}]}"#)
+    let info = await makeClient().pushPluginInfo(connection)
+    #expect(info.status == .ready)
+    #expect(info.version == nil)
+    #expect(!info.canUpdateGit)
+    #expect(!info.isOutdated)
+  }
+
+  // The agent emits `""` when the manifest carries no version — that is absence, not a version.
+  @Test func pushPluginInfoNormalizesBlankVersionToNil() async throws {
+    MockURLProtocol.set(json: #"""
+      {"plugins":[{"name":"hermes-push","runtime_status":"enabled","version":"  ","can_update_git":true}]}
+      """#)
+    let info = await makeClient().pushPluginInfo(connection)
+    #expect(info.version == nil)
+    #expect(!info.isOutdated)
+  }
+
+  @Test func pushPluginInfoUnreachableIsUnknownAndOffersNothing() async throws {
+    MockURLProtocol.set(fail: true)
+    let info = await makeClient().pushPluginInfo(connection)
+    #expect(info.status == .unknown)
+    #expect(info.version == nil)
+    #expect(!info.canUpdateGit)
+    #expect(!info.isOutdated)
+  }
+
+  // MARK: - Push plugin update (POST /api/dashboard/agent-plugins/{name}/update)
+
+  @Test func updatePushPluginPostsToTheAgentPluginEndpoint() async throws {
+    MockURLProtocol.set(json: #"{"ok":true,"name":"hermes-push","output":"Updating 2f1b1ea..b462f0a","unchanged":false}"#)
+    let result = try await makeClient().updatePushPlugin(connection)
+    #expect(!result.unchanged) // pulled something → the caller must ask for a restart
+
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "POST")
+    #expect(req.url?.path == "/api/dashboard/agent-plugins/hermes-push/update")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+  }
+
+  @Test func updatePushPluginReportsAnUnchangedPull() async throws {
+    MockURLProtocol.set(json: #"{"ok":true,"name":"hermes-push","output":"Already up to date.","unchanged":true}"#)
+    #expect(try await makeClient().updatePushPlugin(connection).unchanged)
+  }
+
+  // An agent too old to report `unchanged` is treated as CHANGED, so we prompt for the restart
+  // rather than telling the user nothing happened when something might have.
+  @Test func updatePushPluginAssumesChangedWhenUnchangedIsAbsent() async throws {
+    MockURLProtocol.set(json: #"{"ok":true,"name":"hermes-push"}"#)
+    #expect(try await makeClient().updatePushPlugin(connection).unchanged == false)
+  }
+
+  // The agent answers 400 with a `detail` the user has to act on (not a git checkout, no
+  // remote, non-fast-forward, git missing) — it must reach the UI verbatim.
+  @Test func updatePushPluginSurfacesTheServerDetail() async throws {
+    MockURLProtocol.set(
+      status: 400,
+      json: #"{"detail":"Plugin 'hermes-push' is not a git checkout; cannot pull updates."}"#
+    )
+    await #expect(
+      throws: RESTError.server(
+        status: 400,
+        detail: "Plugin 'hermes-push' is not a git checkout; cannot pull updates."
+      )
+    ) {
+      try await makeClient().updatePushPlugin(connection)
+    }
+  }
+
+  // A 2xx `{"ok": false}` shouldn't happen (the agent 400s on failure) but must not be read as
+  // a success — that would show "restart to apply" for an update that never ran.
+  @Test func updatePushPluginTreatsOkFalseAsFailure() async throws {
+    MockURLProtocol.set(json: #"{"ok":false,"error":"pull failed"}"#)
+    await #expect(throws: RESTError.server(status: 200, detail: "pull failed")) {
+      try await makeClient().updatePushPlugin(connection)
+    }
+  }
+
+  @Test func updatePushPluginPropagatesTransportFailure() async throws {
+    MockURLProtocol.set(fail: true)
+    await #expect(throws: RESTError.unreachable) {
+      try await makeClient().updatePushPlugin(connection)
+    }
+  }
+
   // MARK: Cron jobs
 
   @Test func cronJobsDecodesListWithoutProfileParam() async throws {

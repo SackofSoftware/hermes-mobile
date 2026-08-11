@@ -42,6 +42,52 @@ struct SettingsView: View {
       }
 
       Section {
+        // Plugin update, offered above the toggle because an out-of-date plugin sends pushes
+        // the user is actively complaining about. Shown whether or not push is currently
+        // available — an installed-but-disabled plugin is still worth updating.
+        if store.pluginUpdateAvailable {
+          VStack(alignment: .leading, spacing: 4) {
+            Label("Plugin update available", systemImage: "arrow.down.circle")
+              .font(.subheadline.weight(.semibold))
+            Text(pluginUpdateExplanation)
+              .font(.footnote).foregroundStyle(.secondary)
+          }
+          Button("Update plugin") { store.send(.updatePluginTapped) }
+            .disabled(store.pluginUpdate == .updating)
+        } else if store.pluginUpdateNeedsManualSteps {
+          // Out of date but the agent can't pull it (pip install / hand-copied directory), so
+          // a button here would only 400. Route to the guide, which offers the chat prompt.
+          VStack(alignment: .leading, spacing: 4) {
+            Label("Plugin update available", systemImage: "arrow.down.circle")
+              .font(.subheadline.weight(.semibold))
+            Text("\(pluginUpdateExplanation) This copy can't be updated from the app — ask your agent to update it.")
+              .font(.footnote).foregroundStyle(.secondary)
+          }
+          Button("How to update the plugin") { showingPushGuide = true }
+            .font(.footnote)
+        }
+        switch store.pluginUpdate {
+        case .idle:
+          EmptyView()
+        case .updating:
+          Label("Updating…", systemImage: "arrow.triangle.2.circlepath")
+            .foregroundStyle(.secondary).font(.footnote)
+        case .updated:
+          // A pull only changes files on disk — the running agent keeps the old code loaded.
+          // This restart notice is the whole point of the success state; don't soften it.
+          Label(
+            "Plugin updated. Restart your Hermes agent to apply it.",
+            systemImage: "exclamationmark.arrow.triangle.2.circlepath"
+          )
+          .foregroundStyle(.orange).font(.footnote)
+        case .alreadyCurrent:
+          Label("Plugin is already up to date", systemImage: "checkmark.circle")
+            .foregroundStyle(.green).font(.footnote)
+        case let .failed(reason):
+          Label(reason, systemImage: "exclamationmark.triangle")
+            .foregroundStyle(.orange).font(.footnote)
+        }
+
         if store.pushAvailable {
           Toggle(
             "Notify me about approvals",
@@ -109,7 +155,9 @@ struct SettingsView: View {
     }
     .sheet(isPresented: $showingPushGuide) {
       PushSetupGuideView(
-        // Already installed → the sheet is purely informational (no install actions).
+        // Installed → the sheet drops the "Later" snooze and asks the agent to UPDATE rather
+        // than install. It is never purely informational: an installed-but-outdated plugin is
+        // exactly the case that needs an action here.
         pluginInstalled: store.pushAvailable,
         onAskAgent: {
           showingPushGuide = false
@@ -119,5 +167,16 @@ struct SettingsView: View {
       )
     }
     .task { store.send(.task) }
+  }
+
+  /// Why the update matters, naming both versions when the agent reported one. Kept in the
+  /// view because it is pure display copy — the decision to show it lives in the reducer.
+  private var pluginUpdateExplanation: String {
+    let latest = PushSetup.minimumPluginVersion
+    let reason = "Older versions send a “Turn complete” push each time a delegated subagent finishes."
+    guard let installed = store.pushPlugin?.version else {
+      return "Update to \(latest). \(reason)"
+    }
+    return "Installed \(installed), latest \(latest). \(reason)"
   }
 }

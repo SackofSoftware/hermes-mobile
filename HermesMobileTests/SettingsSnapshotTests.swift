@@ -77,13 +77,72 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// The "how push works" info sheet, plugin NOT installed — shows the install actions.
+  /// An outdated, git-updatable plugin → the update row with the one-tap button.
+  func testSettingsPluginUpdateAvailable() {
+    let initial = SettingsFeature.State(
+      connection: connection,
+      pushAvailable: true,
+      notificationsEnabled: true,
+      pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
+    )
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue
+          $0.push = PushClient.inMemory(granted: true, status: .authorized).client
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// After a successful pull — the RESTART notice, which is the whole point of that state.
+  func testSettingsPluginUpdatedNeedsRestart() {
+    let initial = SettingsFeature.State(
+      connection: connection,
+      pushAvailable: true,
+      notificationsEnabled: true,
+      pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true),
+      pluginUpdate: .updated
+    )
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue
+          $0.push = PushClient.inMemory(granted: true, status: .authorized).client
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// Outdated but not a git checkout → no button, pointer to the guide instead.
+  func testSettingsPluginUpdateNeedsManualSteps() {
+    let initial = SettingsFeature.State(
+      connection: connection,
+      pushAvailable: true,
+      notificationsEnabled: true,
+      pushPlugin: PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: false)
+    )
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue
+          $0.push = PushClient.inMemory(granted: true, status: .authorized).client
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// The "how push works" info sheet, plugin NOT installed — install action + Later snooze.
   func testPushSetupGuideView() {
     let view = PushSetupGuideView(pluginInstalled: false, onAskAgent: {}, onLater: {})
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// Plugin already installed — informational only (no Ask agent / Later buttons).
+  /// Plugin already installed — the action becomes "update" and the Later snooze drops away
+  /// (there is no nag to snooze; the sheet was opened deliberately from Settings).
   func testPushSetupGuideView_installed() {
     let view = PushSetupGuideView(pluginInstalled: true, onAskAgent: {}, onLater: {})
     assertSnapshot(of: view, as: deviceImage())

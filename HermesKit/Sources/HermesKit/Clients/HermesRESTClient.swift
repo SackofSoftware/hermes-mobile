@@ -177,6 +177,24 @@ public struct HermesRESTClient: Sendable {
   /// `.notReady`; a 404 / transport failure → `.unknown` (don't nag — caller leaves capability
   /// as-is). Used on the session list and to gate the Settings toggle.
   public var pushPluginStatus: @Sendable (_ connection: ServerConnection) async throws -> PushPluginStatus
+  /// The same probe as `pushPluginStatus`, but keeping the plugin's reported `version` and
+  /// `can_update_git` — Settings uses them to offer an in-app update when the installed
+  /// plugin is older than `PushSetup.minimumPluginVersion`. Never throws: an unreachable or
+  /// unparseable hub maps to `.unknown` (offer nothing) exactly like the status probe.
+  public var pushPluginInfo: @Sendable (_ connection: ServerConnection) async -> PushPluginInfo = { _ in
+    // `@DependencyClient` needs a default for a non-throwing closure. `.unknown` is also the
+    // right unimplemented behaviour: a test that forgets to stub this offers no update.
+    PushPluginInfo(status: .unknown)
+  }
+  /// Ask the agent to update the plugin in place —
+  /// `POST /api/dashboard/agent-plugins/hermes-push/update`, which runs `git pull --ff-only`
+  /// in `~/.hermes/plugins/hermes-push`.
+  ///
+  /// This only changes files on disk; the running agent keeps the OLD code loaded until it is
+  /// restarted, so callers MUST surface the restart requirement on success. Failure throws
+  /// `RESTError` — the agent answers 400 with a `detail` (not a git checkout, no remote,
+  /// non-fast-forward, git missing) that `RESTError.server` carries verbatim.
+  public var updatePushPlugin: @Sendable (_ connection: ServerConnection) async throws -> PushPluginUpdateResult
 }
 
 public extension HermesRESTClient {
@@ -309,20 +327,28 @@ public extension HermesRESTClient {
         try await cronJobAction(conn, id: id, action: "resume", profile: profile, session: session)
       },
       pushPluginStatus: { conn in
-        let url = try makeURL(conn.baseURL, "/api/dashboard/plugins/hub")
-        do {
-          let response: PluginsHubResponse = try await get(url, token: conn.token, session: session)
-          // Match our plugin by name; `runtime_status == "enabled"` is the only "ready" state.
-          guard let plugin = response.plugins.first(where: { $0.name == PushSetup.pluginName })
-          else { return .notReady } // absent from the list → not installed
-          return plugin.runtimeStatus == "enabled" ? .ready : .notReady
-        } catch RESTError.notFound {
-          // Endpoint missing (old agent / no dashboard) → can't tell; don't nag.
-          return .unknown
-        } catch {
-          // Any transport/HTTP/decode failure → unknown (leave capability as-is).
-          return .unknown
+        await fetchPushPluginInfo(conn, session: session).status
+      },
+      pushPluginInfo: { conn in
+        await fetchPushPluginInfo(conn, session: session)
+      },
+      updatePushPlugin: { conn in
+        // The plugin name is a fixed literal, but it still rides in the path — percent-encode
+        // it rather than interpolating raw, so this can't be the place a future rename breaks.
+        let encoded = PushSetup.pluginName
+          .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? PushSetup.pluginName
+        let url = try makeURL(conn.baseURL, "/api/dashboard/agent-plugins/\(encoded)/update")
+        let response: PluginUpdateResponse = try await postJSON(
+          url, body: Data("{}".utf8), token: conn.token, session: session
+        )
+        // The agent answers 400 (→ `RESTError.server` with `detail`) for a real failure, so a
+        // 2xx `{"ok": false}` shouldn't happen. Treat it as a failure anyway rather than
+        // reporting a success that never occurred.
+        guard response.ok != false else {
+          throw RESTError.server(status: 200, detail: response.error)
         }
+        // Absent `unchanged` (older agent) → assume something changed and ask for the restart.
+        return PushPluginUpdateResult(unchanged: response.unchanged ?? false)
       }
     )
   }
@@ -622,9 +648,9 @@ private struct TranscriptionResponse: Decodable {
   let error: String?
 }
 
-/// `/api/dashboard/plugins/hub` response — `{plugins: [{name, runtime_status, …}], …}`. We
-/// only read the plugin rows (and only `name` + `runtime_status` off each); everything else is
-/// ignored leniently.
+/// `/api/dashboard/plugins/hub` response — `{plugins: [{name, runtime_status, version,
+/// can_update_git, …}], …}`. We read only the four fields below off each row; everything else
+/// is ignored leniently.
 private struct PluginsHubResponse: Decodable {
   let plugins: [PluginHubItem]
 }
@@ -632,9 +658,52 @@ private struct PluginsHubResponse: Decodable {
 private struct PluginHubItem: Decodable {
   let name: String
   let runtimeStatus: String?
+  /// The plugin's own manifest version. The agent emits `""` when the manifest carries none,
+  /// so blank is normalized to `nil` at the mapping site rather than treated as a version.
+  let version: String?
+  /// `true` when the plugin is a git checkout under `~/.hermes/plugins/` — i.e. the agent's
+  /// update endpoint can `git pull` it. Absent on older agents → `false` (no update offered).
+  let canUpdateGit: Bool?
 
   enum CodingKeys: String, CodingKey {
     case name
     case runtimeStatus = "runtime_status"
+    case version
+    case canUpdateGit = "can_update_git"
+  }
+}
+
+/// `POST /api/dashboard/agent-plugins/{name}/update` response —
+/// `{ok, name, output, unchanged}`. `unchanged` is the agent's own read of git's
+/// "Already up to date"; absent on older agents → treated as changed, so we prompt for the
+/// restart rather than claiming nothing happened.
+private struct PluginUpdateResponse: Decodable {
+  let ok: Bool?
+  let unchanged: Bool?
+  let error: String?
+}
+
+/// Fetch the plugin hub and map our row onto `PushPluginInfo`. Shared by `pushPluginStatus`
+/// (which discards everything but the status) and `pushPluginInfo`, so there is exactly one
+/// decode + mapping path and the two can never disagree about readiness.
+private func fetchPushPluginInfo(
+  _ conn: ServerConnection, session: URLSession
+) async -> PushPluginInfo {
+  do {
+    let url = try makeURL(conn.baseURL, "/api/dashboard/plugins/hub")
+    let response: PluginsHubResponse = try await get(url, token: conn.token, session: session)
+    // Match our plugin by name; `runtime_status == "enabled"` is the only "ready" state.
+    guard let plugin = response.plugins.first(where: { $0.name == PushSetup.pluginName })
+    else { return PushPluginInfo(status: .notReady) } // absent from the list → not installed
+    let version = plugin.version?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return PushPluginInfo(
+      status: plugin.runtimeStatus == "enabled" ? .ready : .notReady,
+      version: (version?.isEmpty ?? true) ? nil : version,
+      canUpdateGit: plugin.canUpdateGit ?? false
+    )
+  } catch {
+    // Endpoint missing (old agent / no dashboard), transport, HTTP or decode failure → we
+    // can't tell. `.unknown` leaves the capability as-is and offers no update.
+    return PushPluginInfo(status: .unknown)
   }
 }

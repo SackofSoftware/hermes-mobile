@@ -1,22 +1,28 @@
 import HermesKit
 import SwiftUI
 
-/// Presentation-only info sheet explaining how push notifications work and offering two
-/// actions: ask the agent to install the `hermes-push` plugin (pre-fills a new chat), or
-/// snooze ("Later"). A small text link opens the plugin's GitHub page.
+/// Presentation-only info sheet explaining how push notifications work and offering to ask
+/// the agent to install — or update — the `hermes-push` plugin (pre-fills a new chat), plus a
+/// "Later" snooze on the not-installed path. A small text link opens the plugin's GitHub page.
 ///
 /// It deliberately talks about the **plugin only** — the relay/gateway is publisher infra
-/// the user never has to know about. The two actions are surfaced as closures so both call
+/// the user never has to know about. The actions are surfaced as closures so both call
 /// sites (the sessions-list auto-present and Settings) reuse the same view.
 struct PushSetupGuideView: View {
   @Environment(\.dismiss) private var dismiss
 
-  /// When the plugin is already installed/available, the sheet is purely informational:
-  /// the install actions (Ask agent / Later) are hidden.
+  /// Whether the plugin is already installed and enabled on the agent. It switches the action
+  /// from install to UPDATE and drops the "Later" snooze (there is no nag to snooze once the
+  /// plugin is running).
+  ///
+  /// The action is deliberately NOT hidden in this case: `PushSetup.installPrompt` covers
+  /// install-or-update, and an installed-but-outdated plugin is precisely the situation where
+  /// the user opens this sheet looking for something to do. Hiding it here left the only
+  /// people who needed an update with no way to ask for one.
   let pluginInstalled: Bool
-  /// Open a new chat with the install prompt pre-filled (the caller dismisses + routes).
+  /// Open a new chat with the install/update prompt pre-filled (the caller dismisses + routes).
   let onAskAgent: () -> Void
-  /// Snooze the prompt (the caller dismisses + persists the backoff).
+  /// Snooze the prompt (the caller dismisses + persists the backoff). Not-installed path only.
   let onLater: () -> Void
 
   private static let pluginURL = URL(string: PushSetup.pluginURLString)!
@@ -39,24 +45,29 @@ struct PushSetupGuideView: View {
             text: "Notifications come from a small plugin on your own Hermes agent, relayed to Apple. Only a generic alert (e.g. “Approval needed”) leaves your server — your messages and data never do."
           )
 
-          if !pluginInstalled {
-            VStack(spacing: 12) {
-              Button {
-                onAskAgent()
-              } label: {
-                Label("Ask agent to install plugin", systemImage: "sparkles")
-                  .frame(maxWidth: .infinity)
-              }
-              .buttonStyle(.borderedProminent)
-              .controlSize(.large)
+          VStack(spacing: 12) {
+            Button {
+              onAskAgent()
+            } label: {
+              Label(
+                pluginInstalled ? "Ask agent to update plugin" : "Ask agent to install plugin",
+                systemImage: "sparkles"
+              )
+              .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
 
+            // "Later" snoozes the not-installed nag. Once the plugin is running there is no
+            // nag to snooze — the sheet is opened deliberately from Settings.
+            if !pluginInstalled {
               Button("Later") { onLater() }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
                 .frame(maxWidth: .infinity)
             }
-            .padding(.top, 4)
           }
+          .padding(.top, 4)
 
           Link("View the plugin on GitHub", destination: Self.pluginURL)
             .font(.footnote)

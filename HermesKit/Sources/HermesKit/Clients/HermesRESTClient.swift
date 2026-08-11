@@ -66,9 +66,35 @@ public enum RESTError: Error, Equatable, Sendable {
   /// Other non-2xx. `detail` carries the server's body verbatim when present (JSON
   /// `{"detail": …}`, else trimmed plain-text body) so callers can surface it.
   case server(status: Int, detail: String? = nil)
+  /// The device itself has no usable network (airplane mode, Wi-Fi/cellular off, data
+  /// disallowed). Split out of `.unreachable` so the launch connection-failed screen can
+  /// tell "you're offline" from "the server didn't answer" — see `init(transport:)`.
+  case offline
   case unreachable           // transport failure / non-HTTP response
   case decoding              // 2xx body didn't match the expected shape
   case transcriptionFailed(String) // 2xx but `{ok:false}` — carries the server's reason
+
+  /// Map a raw transport failure (what `URLSession` throws) to a `RESTError`. Only the
+  /// URLError codes that mean *this device has no network at all* become `.offline`;
+  /// everything else — timeout, DNS failure, connection refused, TLS, cancellation, a
+  /// non-`URLError` — stays `.unreachable`, because from the client's point of view the
+  /// network was usable and the server simply didn't answer.
+  ///
+  /// Only ever hand this a RAW transport failure: an already-typed `RESTError` is not a
+  /// `URLError`, so it would be flattened to `.unreachable`. Reducers normalise via
+  /// `asRESTError`, which checks the typed case first and then defers here.
+  public init(transport error: any Error) {
+    guard let urlError = error as? URLError else {
+      self = .unreachable
+      return
+    }
+    switch urlError.code {
+    case .notConnectedToInternet, .dataNotAllowed, .internationalRoamingOff:
+      self = .offline
+    default:
+      self = .unreachable
+    }
+  }
 
   public var message: String {
     switch self {
@@ -80,6 +106,7 @@ public enum RESTError: Error, Equatable, Sendable {
     // to the generic status message when the body was empty/unparseable.
     case let .server(status, detail):
       if let detail, !detail.isEmpty { detail } else { "Server error (\(status))." }
+    case .offline: "No internet connection."
     case .unreachable: "Couldn’t reach the server."
     case .decoding: "Unexpected response — is this a Hermes server?"
     case let .transcriptionFailed(reason): reason.isEmpty ? "Couldn’t transcribe the audio." : reason
@@ -362,7 +389,7 @@ func login(
   do {
     (data, response) = try await session.data(for: request)
   } catch {
-    throw RESTError.unreachable
+    throw RESTError(transport: error)
   }
 
   // Login-specific 429/503 copy is scoped here only (see `validate`'s `loginSpecific`).
@@ -398,7 +425,7 @@ func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async th
   do {
     (data, response) = try await session.data(for: request)
   } catch {
-    throw RESTError.unreachable
+    throw RESTError(transport: error)
   }
 
   try validate(response, data: data)
@@ -458,7 +485,7 @@ func postJSON<T: Decodable>(
   do {
     (data, response) = try await session.data(for: request)
   } catch {
-    throw RESTError.unreachable
+    throw RESTError(transport: error)
   }
 
   try validate(response, data: data)
@@ -487,7 +514,7 @@ func send(
   do {
     (data, response) = try await session.data(for: request)
   } catch {
-    throw RESTError.unreachable
+    throw RESTError(transport: error)
   }
 
   try validate(response, data: data)

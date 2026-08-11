@@ -238,10 +238,21 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   shares the same `connect` (re-mints the ticket) — see #18 (state-sync).
 - **The login screen's single connection-help surface is the `AgentSetupGuideView` sheet**
   (password-first setup recipe; `--insecure` + token demoted to a collapsed "Advanced"
-  disclosure). Three entry points — top form row, `.unreachable`/`.notHermes` failure
-  footer, token-disclaimer link — all toggle one local `@State` (presentation stays out
-  of the reducer). It **replaced** the token-first `SecureConnectionInfoView`; keep the
+  disclosure). Four entry points — top form row, `.unreachable`/`.notHermes` failure
+  footer, token-disclaimer link, and the launch retry screen's tertiary link — all toggle
+  one local `@State` (presentation stays out of the reducer). It **replaced** the token-first `SecureConnectionInfoView`; keep the
   README quick-start and the sheet's commands verbatim-identical.
+- **A launch auto-connect failure that isn't a verdict on the stored credentials raises a retry
+  screen, never onboarding** (#62) — a still-valid session must not be thrown away because
+  Tailscale was off. `RESTError.offline` splits out of `.unreachable` via the one
+  `RESTError.init(transport:)` every transport catch (and `asRESTError`) funnels through, and
+  `ConnectionFailedFeature.isRetryable` is the ONE routing rule shared by `.autoConnectFailed`
+  and the child's retry-failure branch: **only a credentials verdict (401/403) falls back to
+  prefilled onboarding; everything else populates `AppFeature.State.connectionFailed`** — an
+  `ifLet` child rendered through the package-side `State.rootScreen` precedence (`home` →
+  `connecting` → `connectionFailed` → `onboarding`) offering Retry, the setup-guide link and a
+  confirmed Log Out. A foreground (`.sceneBecameActive`) re-probes, **superseding** an in-flight
+  probe rather than being swallowed by `isRetrying`. Launch path only, probe once-per-process.
 - **Session re-hydration is server-authoritative** via one unified `hydrate(sessionID)`
   (open/foreground/cold-launch all funnel through `.ready` → `hydrate`): call `session.resume`
   (NOT `session.activate` — that is live-only and 404s any stored session opened from the list;

@@ -28,7 +28,11 @@ from your desk and still keep your agent moving.
   static token (loopback/`--insecure`). The app detects which methods the server offers
   and shows the right fields. Credentials live in the iOS Keychain and the app
   auto-logs-in on launch; if a gated session expires while you're using it, a quick
-  re-auth prompt gets you back in without losing your place.
+  re-auth prompt gets you back in without losing your place. And if the agent simply
+  isn't reachable at launch — VPN/Tailscale off, no internet, agent down — you get a
+  retry screen naming the server instead of a sign-in form (it retries by itself when
+  you foreground the app, right after you flip the VPN on); only a real rejection sends
+  you back to sign-in.
 - **Find any session.** Browse sessions grouped by workspace, search across all of
   them, pin the ones you care about, rename or archive them, and resume or start a
   new one.

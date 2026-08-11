@@ -51,6 +51,20 @@ struct ConnectionFeatureTests {
     await store.receive(\.serverStatusResponse) { $0.status = .unreachable }
   }
 
+  /// `.offline` is a transport failure too — it lands on the same footer as `.unreachable`
+  /// (which is the one that offers the setup-guide link), never a generic `.failed` (#62).
+  @Test func offlineDeviceUsesTheUnreachableFooter() async {
+    let store = TestStore(initialState: ConnectionFeature.State(serverURL: "http://nope.local:1")) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.status = { @Sendable _ in throw RESTError.offline }
+    }
+
+    await store.send(.serverFieldCommitted)
+    await store.receive(\.checkServer) { $0.status = .checking }
+    await store.receive(\.serverStatusResponse) { $0.status = .unreachable }
+  }
+
   @Test func reachableButNotHermes() async {
     let store = TestStore(initialState: ConnectionFeature.State(serverURL: "http://something.local:80")) {
       ConnectionFeature()
@@ -300,6 +314,32 @@ struct ConnectionFeatureTests {
     await store.receive(\.passwordLoginResponse.failure) { $0.status = .invalidCredentials }
 
     #expect(keychain.loadSession(.shared) == nil)
+  }
+
+  /// Same on the token path — and via a RAW `URLError`, proving `asRESTError` classifies
+  /// through the shared `RESTError(transport:)` funnel rather than a blanket `.unreachable`.
+  @Test func offlineDuringTokenLoginSurfacesTheOfflineCopy() async {
+    let keychain = KeychainClient.inMemory()
+    let store = TestStore(
+      initialState: ConnectionFeature.State(
+        serverURL: "http://mac.tailnet:9119",
+        token: "tok",
+        status: .reachable(version: "0.16.0")
+      )
+    ) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        throw URLError(.notConnectedToInternet)
+      }
+      $0.keychain = keychain
+    }
+
+    await store.send(.connectTapped) { $0.status = .validating }
+    await store.receive(\.tokenValidationResponse.failure) {
+      $0.status = .failed(RESTError.offline.message)
+    }
+    #expect(keychain.loadToken() == nil)
   }
 
   @Test func passwordLoginRateLimitedSurfacesServerCopy() async {

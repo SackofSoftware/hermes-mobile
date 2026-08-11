@@ -102,5 +102,13 @@ struct PasswordLoginClientTests {
       _ = try await makeClient().passwordLogin(baseURL, "basic", "alice", "pw")
     }
   }
+
+  /// The login path shares the same transport mapping as the other helpers (#62).
+  @Test func offlineTransportFailureMapsToOffline() async throws {
+    MockURLProtocol.set(fail: true, failCode: .notConnectedToInternet)
+    await #expect(throws: RESTError.offline) {
+      _ = try await makeClient().passwordLogin(baseURL, "basic", "alice", "pw")
+    }
+  }
 }
 } // extension RESTTransportSuite

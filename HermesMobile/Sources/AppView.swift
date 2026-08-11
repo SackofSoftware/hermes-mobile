@@ -22,28 +22,44 @@ struct AppView: View {
       }
   }
 
+  /// Which root branch wins is decided ONCE, by `AppFeature.State.rootScreen` in HermesKit
+  /// (where its precedence is unit-tested by `swift test`) — this `switch` only renders the
+  /// verdict. Deliberately NOT `if rootScreen == .home, let homeStore = …`: re-deriving the
+  /// same optional the resolver already consulted means a disagreement falls silently through
+  /// to onboarding, which is the exact failure the enum exists to prevent.
   @ViewBuilder
   private var content: some View {
-    if let homeStore = store.scope(state: \.home, action: \.home) {
-      NavigationStack(path: $store.scope(state: \.path, action: \.path)) {
-        SessionListView(store: homeStore)
-      } destination: { _ in
-        // The path holds only thin session-key markers — the REAL chat state lives in the
-        // app-level live-chat slot, so a running turn's socket survives pops. Defensive
-        // empty view if the slot is missing (e.g. after logout mid-pop).
-        if let chatStore = store.scope(state: \.liveChat, action: \.liveChat) {
-          ChatView(store: chatStore)
-            // The view's disappearance routes through the PARENT (never the scoped child
-            // store): `AppFeature.chatViewDisappeared` guards a nil slot (logout/quit may
-            // have cleared it while the screen was still animating away) and owns the
-            // idle-pop teardown policy — deferred here until the pop animation finished,
-            // so the outgoing screen stays rendered and no action hits an absent child.
-            .onDisappear { store.send(.chatViewDisappeared) }
+    switch store.rootScreen {
+    case .home:
+      if let homeStore = store.scope(state: \.home, action: \.home) {
+        NavigationStack(path: $store.scope(state: \.path, action: \.path)) {
+          SessionListView(store: homeStore)
+        } destination: { _ in
+          // The path holds only thin session-key markers — the REAL chat state lives in the
+          // app-level live-chat slot, so a running turn's socket survives pops. Defensive
+          // empty view if the slot is missing (e.g. after logout mid-pop).
+          if let chatStore = store.scope(state: \.liveChat, action: \.liveChat) {
+            ChatView(store: chatStore)
+              // The view's disappearance routes through the PARENT (never the scoped child
+              // store): `AppFeature.chatViewDisappeared` guards a nil slot (logout/quit may
+              // have cleared it while the screen was still animating away) and owns the
+              // idle-pop teardown policy — deferred here until the pop animation finished,
+              // so the outgoing screen stays rendered and no action hits an absent child.
+              .onDisappear { store.send(.chatViewDisappeared) }
+          }
         }
       }
-    } else if store.autoConnecting {
+    case .connecting:
       ProgressView("Connecting…")
-    } else {
+    case .connectionFailed:
+      // Launch auto-connect failed for a reason that isn't a verdict on the credentials
+      // (no network, or a proxy reporting the agent down): the stored credentials are fine,
+      // so keep them and offer a retry instead of dropping to onboarding. Auth failures never
+      // populate this slot — they land on the onboarding branch below.
+      if let failedStore = store.scope(state: \.connectionFailed, action: \.connectionFailed) {
+        ConnectionFailedView(store: failedStore)
+      }
+    case .onboarding:
       NavigationStack {
         ConnectionView(store: store.scope(state: \.onboarding, action: \.onboarding))
           .navigationTitle("Connect to Hermes")

@@ -208,7 +208,9 @@ public struct ConnectionFeature {
         state.capability = nil
         switch error {
         case .decoding: state.status = .notHermes
-        case .unreachable: state.status = .unreachable
+        // `.offline` is a transport failure like `.unreachable` — same footer (its
+        // "trouble connecting to your agent?" help link is what's wanted here too).
+        case .offline, .unreachable: state.status = .unreachable
         default: state.status = .failed(error.message)
         }
         return .none
@@ -296,11 +298,13 @@ public struct ConnectionFeature {
   }
 }
 
-/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel both auth
-/// reducers (`ConnectionFeature`, `ReauthFeature`) use after every `rest.*` call: a typed
-/// `RESTError` passes through verbatim; a raw transport failure maps to `.unreachable`.
+/// Normalize a thrown error from a REST call to a `RESTError` — the shared funnel the auth
+/// reducers (`ConnectionFeature`, `ReauthFeature`, `ConnectionFailedFeature`, `AppFeature`)
+/// use after every `rest.*` call: a typed `RESTError` passes through verbatim; anything else
+/// goes through `RESTError(transport:)`, the same classifier the live client's own transport
+/// catches use, so the offline/unreachable split survives a raw `URLError`.
 func asRESTError(_ error: any Error) -> RESTError {
-  error as? RESTError ?? .unreachable
+  error as? RESTError ?? RESTError(transport: error)
 }
 
 /// Lenient URL parsing: accept `host:port` by defaulting to `http://`.

@@ -296,24 +296,27 @@
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] verify the Overview requirements end-to-end in the simulator: queue mid-turn,
-      auto-drain on completion, park on Stop/error, delete/edit/send-now from the
-      panel, old-agent behavior unchanged (no mid-turn wire traffic)
-- [ ] verify edge cases: queue during slash exec; queue blocked by approval card;
-      socket drop with queued entries (drain after reconnect hydrate); two queued
-      entries drain strictly one turn each
-- [ ] run full suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run `make snapshot` — new baselines green; pre-existing drift judged by size
-      mismatch
-- [ ] `tuist generate` + app build succeeds with the new source files
+- [x] simulator UI smoke (AXe-driven, `HERMES_DEMO=work` scenario temporarily seeded
+      `isSending` + a live id — scaffolding reverted): mid-turn Stop → typing swaps to
+      the send arrow (the "Queue message" a11y label resolves) → tap queues (panel row
+      with clock icon, composer clears, Stop returns) → long-press shows Send Now /
+      Edit / Delete → Edit lifts the text back into the composer → Delete removes the
+      row. Auto-drain/park/server flows are TestStore-verified (no live agent was
+      running); real-agent end-to-end stays the Post-Completion device check
+- [x] edge cases covered by reducer tests: queue during slash exec; blocked by
+      approval card; drain via idle hydrate after `.gatewayClosed`; two entries drain
+      strictly one turn each; parked-not-drained; failed-drain re-park
+- [x] full suite: 1123 tests pass after the scaffolding revert
+- [x] snapshot suites: new baselines assert green; the rest is the documented drift
+- [x] `tuist generate` + app build succeed with the new source files (smoke build)
 
 ### Task 8: [Final] Update documentation
 
-- [ ] add a prompt-queuing convention bullet to `CLAUDE.md` (client-side queue
+- [x] add a prompt-queuing convention bullet to `CLAUDE.md` (client-side queue
       rationale — no server management API; park rules; send-now semantics;
-      detached-slot policy)
-- [ ] update `README.md` feature list if it enumerates chat capabilities
-- [ ] move this plan to `docs/plans/completed/`
+      detached-slot policy; the fixed-height ScrollView cap rationale)
+- [x] update `README.md` feature list ("Queue the next prompt while it works")
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

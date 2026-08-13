@@ -721,54 +721,36 @@ final class ComposerTextViewTests: XCTestCase {
 
   // MARK: - Return key
 
-  /// Parity with `TextField(axis: .vertical).onSubmit`: a lone Return submits instead of
-  /// inserting a newline. The simulator can only show the *absence* of the newline (a real
-  /// submit needs a live session), so the hand-off itself is pinned here.
-  func testReturnSubmitsInsteadOfInsertingANewline() {
-    var submits = 0
-    let composer = ComposerTextView(text: .constant(""), onSubmit: { submits += 1 })
-    let coordinator = composer.makeCoordinator()
-    let textView = ComposerInputTextView()
-    let range = NSRange(location: 0, length: 0)
-
-    XCTAssertFalse(
-      coordinator.textView(textView, shouldChangeTextIn: range, replacementText: "\n"),
-      "the newline must not reach the text buffer"
+  /// Return inserts a newline and sends nothing (#70) — the composer has no keyboard submit
+  /// path at all, so a Return is an ordinary edit that reaches the buffer *and* the binding.
+  ///
+  /// `insertText` is what the software keyboard's Return does: it consults the delegate like
+  /// any other edit, so a re-introduced `shouldChangeTextIn` interception fails this outright.
+  func testReturnInsertsANewlineAndNeverSubmits() {
+    let writes = Recorder<String>()
+    let composer = ComposerTextView(
+      text: Binding(get: { writes.values.last ?? "" }, set: { writes.values.append($0) })
     )
-    XCTAssertEqual(submits, 1)
-
-    // Ordinary edits — including a pasted multi-line string — are untouched.
-    XCTAssertTrue(coordinator.textView(textView, shouldChangeTextIn: range, replacementText: "a"))
-    XCTAssertTrue(coordinator.textView(textView, shouldChangeTextIn: range, replacementText: "a\nb"))
-    XCTAssertTrue(coordinator.textView(textView, shouldChangeTextIn: range, replacementText: ""))
-    XCTAssertEqual(submits, 1, "only a lone Return submits")
-  }
-
-  /// Hardware **Shift+Return** inserts a newline — what `TextField(axis: .vertical)` did, and
-  /// what the text-replacement interception alone cannot tell apart from a plain Return.
-  func testShiftReturnInsertsANewlineInsteadOfSubmitting() throws {
-    var submits = 0
-    let composer = ComposerTextView(text: .constant(""), onSubmit: { submits += 1 })
     let coordinator = composer.makeCoordinator()
     let view = ComposerInputTextView()
     view.delegate = coordinator
     view.text = "one"
     view.selectedRange = NSRange(location: 3, length: 0)
 
-    let command = try XCTUnwrap(
-      view.keyCommands?.first { $0.input == "\r" && $0.modifierFlags == .shift }
-    )
-    XCTAssertEqual(command.action, #selector(ComposerInputTextView.insertNewlineWithoutSubmitting))
+    view.insertText("\n")
+    view.insertText("two")
 
-    view.insertNewlineWithoutSubmitting()
+    XCTAssertEqual(view.text, "one\ntwo", "the newline reaches the text buffer")
+    XCTAssertEqual(writes.values.last, "one\ntwo", "…and the binding, so Send would carry it")
+  }
 
-    XCTAssertEqual(view.text, "one\n", "the newline reaches the buffer")
-    XCTAssertEqual(submits, 0, "…and nothing is sent")
-    // The flag is scoped to that one insertion: a plain Return still submits afterwards.
-    XCTAssertFalse(
-      coordinator.textView(view, shouldChangeTextIn: NSRange(location: 4, length: 0), replacementText: "\n")
-    )
-    XCTAssertEqual(submits, 1)
+  /// Nothing claims the Return key any more: the Shift+Return key command existed only to route
+  /// *around* the submit interception, and leaving it behind would make a shifted Return behave
+  /// differently from a plain one for no reason.
+  func testNoKeyCommandClaimsReturn() {
+    let view = ComposerInputTextView()
+
+    XCTAssertNil(view.keyCommands?.first { $0.input == "\r" })
   }
 
   // MARK: - Caret visibility

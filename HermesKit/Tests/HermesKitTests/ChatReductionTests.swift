@@ -618,8 +618,8 @@ struct ChatReductionTests {
     #expect(didSend.value == false)
   }
 
-  // The visible send button becomes the interrupt button mid-turn, but a hardware-keyboard
-  // return still fires the TextField's `.onSubmit`. A submit while a turn streams must be a
+  // The visible send button becomes the interrupt button mid-turn, but a `.composerSubmitted`
+  // can still race the swap. A submit while a turn streams must be a
   // strict no-op — a second in-flight submit corrupts `isSending`, and if it later failed it
   // would emit a spurious `runningChanged(false)` that tears down a detached slot whose
   // first turn is still genuinely running. Exhaustive: any state change or effect fails this.

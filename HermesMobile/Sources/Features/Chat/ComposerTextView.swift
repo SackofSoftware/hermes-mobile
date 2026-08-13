@@ -4,8 +4,13 @@ import SwiftUI
 import UIKit
 
 /// The composer's `UITextView`: `TextField` parity (placeholder, 1–`maxLines` growth, the
-/// scroll flip past the ceiling, Shift+Return) plus the image-paste interception it was
-/// swapped in for (#54).
+/// scroll flip past the ceiling) plus the image-paste interception it was swapped in for (#54).
+///
+/// **Return inserts a newline; the send button is the only way to submit** (#70). The field
+/// deliberately intercepts nothing about the Return key — the delegate hook that used to swallow
+/// a lone `"\n"` and call `onSubmit` is gone, along with the Shift+Return key command that
+/// existed only to route *around* it. A multi-line prompt is the common case here, and a
+/// keyboard-triggered send was too easy to hit mid-thought.
 ///
 /// SwiftUI's `TextField` never claims `paste(_:)` for a non-text clipboard, so for an
 /// image-only clipboard iOS does not even offer the **Paste** menu item. Two UIKit hooks fix
@@ -202,46 +207,14 @@ class ComposerInputTextView: UITextView {
     // immediately (the flag already matches).
     if shouldScroll { scrollRangeToVisible(selectedRange) }
   }
-
-  /// Hardware **Shift+Return** inserts a newline instead of submitting.
-  ///
-  /// Parity with the `TextField(axis: .vertical)` this replaced, whose Return submitted while
-  /// Shift+Return inserted. Without the key command the shifted Return arrives at the
-  /// delegate as an ordinary `"\n"` insertion, indistinguishable from the plain one, and
-  /// would submit. (Plain Return deliberately has no key command, so it still reaches
-  /// `shouldChangeTextIn` and submits there — the only hook the software keyboard offers.)
-  override var keyCommands: [UIKeyCommand]? {
-    let newline = UIKeyCommand(
-      input: "\r", modifierFlags: .shift, action: #selector(insertNewlineWithoutSubmitting)
-    )
-    // The text input system would otherwise handle the shifted Return itself, before any key
-    // command is consulted.
-    newline.wantsPriorityOverSystemBehavior = true
-    // `UIResponder`'s default is `nil` and `UITextView` declares no public override, so this
-    // chain is inert today — but overriding a responder's key commands without it would
-    // silently drop whatever a future OS defines there.
-    return (super.keyCommands ?? []) + [newline]
-  }
-
-  /// Set while `insertNewlineWithoutSubmitting` runs. `insertText(_:)` consults the delegate
-  /// like any other edit, so without this flag the newline it inserts would be caught by the
-  /// very interception it is meant to bypass — and Shift+Return would submit after all.
-  private(set) var isInsertingHardNewline = false
-
-  /// The Shift+Return action: an ordinary newline insertion (undo, typing attributes and
-  /// `textViewDidChange` all keep working) with the submit interception suppressed. Internal
-  /// so a test can drive it without a hardware keyboard.
-  @objc func insertNewlineWithoutSubmitting() {
-    isInsertingHardNewline = true
-    defer { isInsertingHardNewline = false }
-    insertText("\n")
-  }
 }
 
 /// The composer's text input: a `UITextView`-backed replacement for
 /// `TextField("Message", text:, axis: .vertical).lineLimit(1 ... 6)`, swapped in so a
 /// clipboard image can be intercepted (#54). Everything else is deliberate parity — the
-/// placeholder, 1–6 line growth, Return-key submit, and the body font/clear background.
+/// placeholder, 1–6 line growth, and the body font/clear background. The one departure is the
+/// Return key, which inserts a newline rather than submitting (#70): sending is the send
+/// button's job alone.
 ///
 /// There is deliberately **no focus binding**: a representable gets no `.focused(_:)` — it
 /// *is* the focusable view — so a `@FocusState` here would never latch and reading it would
@@ -271,17 +244,14 @@ struct ComposerTextView: UIViewRepresentable {
   /// **Resign, not disable.** The field stays live and editable, so a user who deliberately
   /// taps it can still draft their next message while they think about the card (the card's
   /// bounded region absorbs the keyboard coming back — that is what it is built for).
-  /// *Live* means typing, not sending: **Return is a silent no-op while a card stands** —
-  /// `shouldChangeTextIn` swallows the `\n` and routes it to `onSubmit`, which `canSend`
-  /// (false on any `pendingInteraction`) then drops, so the draft neither goes out nor gains
-  /// a newline. Pre-existing and unchanged here; Shift+Return still inserts one. It fires
+  /// *Live* means typing, not sending: Return only ever inserts a newline (#70), and Send is
+  /// disabled by `canSend` (false on any `pendingInteraction`), so a draft written under a
+  /// card cannot escape it. It fires
   /// once per *raised card*, keyed on the token rather than on `nil`-ness, so a replacement
   /// card drops the keyboard too and a re-focus is never fought over: `ChatView` re-renders on
   /// every streamed token, and an unkeyed "resign while blocked" would resign again on each one,
   /// making the field untappable in all but name.
   var blockingCardToken: Int?
-  /// Return key — matches `TextField(axis: .vertical).onSubmit`.
-  var onSubmit: () -> Void = {}
   /// Fired **synchronously** the moment a paste is claimed, before its providers have loaded.
   ///
   /// The load is asynchronous and, unlike a picker's, has no modal sheet covering it — the user
@@ -406,25 +376,6 @@ struct ComposerTextView: UIViewRepresentable {
       // `layoutSubviews` — and with it the scroll flip — unrun, stranding the new text out of
       // view. (A programmatic set is covered by the `text` observer.)
       textView.setNeedsLayout()
-    }
-
-    /// A lone Return submits instead of inserting a newline — the `TextField(axis: .vertical)`
-    /// contract this replaced.
-    ///
-    /// The text-replacement hook is the only one the *software* keyboard offers, so the
-    /// interception is necessarily "an inserted lone `\n`". A hardware **Shift+Return** is
-    /// therefore routed around it by `ComposerInputTextView.keyCommands`, which flags its
-    /// own insertion. Keyboard dictation's "new line" still submits — indistinguishable from a
-    /// Return at this layer, and the accepted cost of software-keyboard parity.
-    func textView(
-      _ textView: UITextView,
-      shouldChangeTextIn range: NSRange,
-      replacementText text: String
-    ) -> Bool {
-      if (textView as? ComposerInputTextView)?.isInsertingHardNewline == true { return true }
-      guard text == "\n" else { return true }
-      parent.onSubmit()
-      return false
     }
 
     /// Load the pasted providers' original bytes **asynchronously** — the loader is

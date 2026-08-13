@@ -461,11 +461,12 @@ public struct ChatFeature {
         // self-heal `session.create` (two live sessions born from one seed).
         && liveSessionID != nil
         && pendingInteraction == nil
-        // The visible send button becomes the interrupt button mid-turn, but a hardware-
-        // keyboard return still fires the TextField's `.onSubmit` — a second submit while a
-        // turn streams must be a no-op (it would corrupt `isSending` and, if it later
-        // failed, emit a spurious `runningChanged(false)` that tears down a detached slot
-        // whose first turn is still genuinely running).
+        // The visible send button becomes the interrupt button mid-turn, so this is
+        // defence-in-depth against a `.composerSubmitted` that races the swap (a tap already
+        // in flight, a stale view). A second submit while a turn streams must be a no-op (it
+        // would corrupt `isSending` and, if it later failed, emit a spurious
+        // `runningChanged(false)` that tears down a detached slot whose first turn is still
+        // genuinely running).
         && !isSending
         // A slash exec locks the composer via `isSending` too, but `isSending` can be
         // cleared out from under it — an interrupt tap (`.interruptTapped`) or a socket

@@ -271,6 +271,105 @@ struct AppFeatureTests {
     #expect(store.state.path.isEmpty)
   }
 
+  /// An idle pop with queued prompts waiting (#66) keeps the slot like a running turn
+  /// would: the queue is in-memory only, so the idle-pop teardown must not destroy it.
+  @Test func popWithQueuedWorkKeepsSlot() async {
+    var liveChat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    liveChat.liveSessionID = "live1"
+    liveChat.isQueueParked = true
+    liveChat.queuedPrompts = [QueuedPrompt(id: UUID(1), text: "held")]
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: liveChat
+      )
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.path(.popFrom(id: store.state.path.ids.last!)))
+    await store.send(.chatViewDisappeared)
+    await store.receive(\.liveChat.viewDisappeared)
+    #expect(store.state.liveChat != nil, "queued work keeps the slot alive across the pop")
+  }
+
+  /// Turn-end-while-detached with entries queued (#66): the slot's own reducer drained the
+  /// head in the same reduction that emitted `runningChanged(false)`, so the parent keeps
+  /// the slot (the drained turn streams into it). Once the queue is empty and THAT turn
+  /// ends, the normal detached teardown runs.
+  @Test func detachedTurnEndDrainsInsteadOfTearingDownUntilQueueEmpties() async {
+    var liveChat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    liveChat.liveSessionID = "live1"
+    liveChat.status = .ready
+    liveChat.isSending = true
+    liveChat.queuedPrompts = [QueuedPrompt(id: UUID(1), text: "next")]
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        liveChat: liveChat // detached: empty path
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = TestClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable _, _ in .object(["status": .string("streaming")]) }
+    }
+    store.exhaustivity = .off
+
+    // First turn ends detached → the drain claims the head → slot survives.
+    await store.send(.liveChat(.gatewayEvent(.messageComplete(text: "", usage: nil))))
+    await store.receive(\.liveChat.delegate.runningChanged)
+    #expect(store.state.liveChat != nil, "mid-drain slot must survive turn end")
+    #expect(store.state.liveChat?.drainingEntry != nil)
+
+    // The drained turn starts (entry consumed) and later ends with the queue empty →
+    // the normal detached teardown finally runs.
+    await store.send(.liveChat(.gatewayEvent(.messageStart)))
+    await store.send(.liveChat(.gatewayEvent(.messageComplete(text: "", usage: nil))))
+    await store.receive(\.clearLiveChat)
+    #expect(store.state.liveChat == nil)
+  }
+
+  /// A queue PARKED while detached (#66, e.g. the turn errored) keeps the slot alive
+  /// without draining — held entries wait for the user, and nothing fires on its own.
+  @Test func detachedParkedQueueKeepsSlotWithoutDraining() async {
+    let submits = LockIsolated(0)
+    var liveChat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    liveChat.liveSessionID = "live1"
+    liveChat.status = .ready
+    liveChat.isSending = true
+    liveChat.isQueueParked = true
+    liveChat.queuedPrompts = [QueuedPrompt(id: UUID(1), text: "held")]
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        liveChat: liveChat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = TestClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "prompt.submit" { submits.withValue { $0 += 1 } }
+        return .object([:])
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.liveChat(.gatewayEvent(.messageComplete(text: "", usage: nil))))
+    await store.receive(\.liveChat.delegate.runningChanged)
+    #expect(store.state.liveChat != nil, "parked entries keep the slot")
+    #expect(store.state.liveChat?.queuedPrompts.count == 1)
+    #expect(submits.value == 0, "parked queue never fires on its own")
+  }
+
   /// Opening a different session while the slot is occupied flushes the old chat's snapshot
   /// and tears it down FIRST (its socket must not leak into the replacement), then fills the
   /// slot + resets the marker.

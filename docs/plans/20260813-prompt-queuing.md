@@ -277,15 +277,16 @@
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] extend the `.runningChanged(_, false)` detached-teardown guard: tear down only
-      when the slot's `queuedPrompts` is empty; non-empty → keep the slot (the
-      slot-internal drain fires the next turn; glow continues via `runningChanged`)
-- [ ] confirm the eventual teardown still runs when the queue empties and the last
-      drained turn ends while detached
-- [ ] write tests: detached turn-end with queued entries keeps the slot and drains;
-      detached turn-end with empty queue tears down (existing behavior); parked
-      queue on a detached slot keeps the slot without draining
-- [ ] run `script -q /dev/null swift test --package-path HermesKit` — must pass
+- [x] extend the `.runningChanged(_, false)` detached-teardown guard with
+      `!chat.hasQueuedWork` (queued entries OR a mid-drain `drainingEntry`); ➕ the
+      idle-pop `chatViewDisappeared` guard gets the same check — an idle pop with a
+      parked queue must not destroy the in-memory entries either
+- [x] confirm the eventual teardown still runs when the queue empties and the last
+      drained turn ends while detached (asserted in the drain test's second half)
+- [x] write tests: detached turn-end with queued entries keeps the slot and drains
+      (then tears down once empty); parked queue on a detached slot keeps the slot
+      without draining (zero submits); idle pop with queued work keeps the slot
+- [x] run `script -q /dev/null swift test --package-path HermesKit` — 1123 tests pass
 
 ### Task 7: Verify acceptance criteria
 

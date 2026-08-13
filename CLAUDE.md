@@ -519,10 +519,14 @@ build/test/distribution, and `docs/plans/completed/` for the full design history
   `TextField`: a `TextField` never claims `paste(_:)` for a non-text clipboard, so for an
   image-only one iOS does not even *offer* the **Paste** item (measured in the simulator — see
   the plan's Task 8 notes). Everything else about the view is deliberate
-  `TextField(axis: .vertical)` parity — placeholder colour, 1–6 line growth, Return submits,
-  Shift+Return inserts — and the UIKit traps that parity costs (the `setNeedsLayout` the pinned
+  `TextField(axis: .vertical)` parity — placeholder colour, 1–6 line growth — and the UIKit traps
+  that parity costs (the `setNeedsLayout` the pinned
   ceiling needs, the one-shot `scrollRangeToVisible` on the scroll flip, the caret pin after a
-  programmatic set) are documented on the type itself. There is deliberately **no focus
+  programmatic set) are documented on the type itself. **The Return key is the one deliberate
+  departure** (#70): it inserts a newline like any other edit, and the **send button is the only
+  submit path** — the view intercepts nothing (the old `shouldChangeTextIn` `\n` swallow and its
+  `onSubmit`/Shift+Return key-command workaround are gone), so `ChatFeature`'s `canSend` guards
+  are now defence-in-depth rather than a live route. There is deliberately **no focus
   binding**: a representable gets no `.focused(_:)` — it *is* the focusable view — so a
   `@FocusState` here never latches and reading it only ever resigns the keyboard (it did: the
   composer lost the keyboard after one keystroke). The transcript dismisses the keyboard at the

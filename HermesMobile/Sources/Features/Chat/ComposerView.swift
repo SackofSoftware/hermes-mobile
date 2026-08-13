@@ -61,15 +61,15 @@ struct ComposerView: View {
     VStack(spacing: 10) {
       if !attachments.isEmpty { attachmentChips }
       // A `UITextView`-backed field rather than `TextField(axis: .vertical)`: only UIKit
-      // exposes the paste hooks an image paste needs (#54). Placeholder, 1–6 line growth and
-      // Return-key submit are parity with what it replaced (all defaulted on the type).
+      // exposes the paste hooks an image paste needs (#54). Placeholder and 1–6 line growth are
+      // parity with what it replaced (all defaulted on the type); Return inserts a newline and
+      // `sendButton` is the only way to submit (#70).
       ComposerTextView(
         text: $text,
         // Same capability gate as the paperclip: no Paste offer for an image-only clipboard
         // when the agent can't accept uploads.
         attachmentsSupported: attachmentsSupported,
         blockingCardToken: blockingCardToken,
-        onSubmit: onSend,
         onPasteBegan: onPasteBegan,
         onPasteImages: onPasteImages
       )

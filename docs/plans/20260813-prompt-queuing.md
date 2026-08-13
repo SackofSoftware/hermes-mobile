@@ -216,19 +216,21 @@
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatQueueTests.swift`
 
-- [ ] add `.queuedPromptDeleted(id:)`: remove entry (no confirmation dialog)
-- [ ] add `.queuedPromptEditTapped(id:)`: guard composer trimmed-empty and no staged
+- [x] add `.queuedPromptDeleted(id:)`: remove entry (no confirmation dialog)
+- [x] add `.queuedPromptEditTapped(id:)`: guard composer trimmed-empty and no staged
       attachments → remove entry, restore `composerText` + `attachments` from it
-- [ ] add `.queuedPromptSendNow(id:)`: idle → remove + submit immediately via the
-      shared helper; running → move entry to head, set `sendNowArmed`, clear
-      `isQueueParked`, run the interrupt effect (freeze thinking, cancel timer,
-      `session.interrupt`) WITHOUT the park; the terminal signal drains it and clears
-      `sendNowArmed`
-- [ ] write tests: delete; edit lifts into empty composer; edit no-ops (state
-      unchanged) when composer has a draft; send-now idle submits ahead of parked
-      entries; send-now running = interrupt → terminal event → that entry fires and
-      park is suppressed exactly once
-- [ ] run `script -q /dev/null swift test --package-path HermesKit` — must pass
+- [x] add `.queuedPromptSendNow(id:)`: idle → promote to head + drain immediately;
+      running → promote, set `sendNowArmed`, clear `isQueueParked`, run the interrupt
+      effect WITHOUT the park (➕ the effect also sends `.maybeDrainQueue` after the
+      interrupt RPC resolves — a deterministic re-check for a turn whose terminal never
+      arrives; ➕ during a slash exec there is no interrupt, the exec's terminal drains
+      the armed head)
+- [x] write tests: delete; edit lifts into empty composer (text + attachments); edit
+      no-ops when composer has a draft; send-now idle submits ahead of parked entries;
+      send-now running = interrupt → `.maybeDrainQueue` → single submit; ➕ the armed
+      drain also fires from the interrupted turn's `.error` terminal with the late
+      RPC re-check a no-op (one submit, not two)
+- [x] run `script -q /dev/null swift test --package-path HermesKit` — 1120 tests pass
 
 ### Task 4: Composer button swap
 

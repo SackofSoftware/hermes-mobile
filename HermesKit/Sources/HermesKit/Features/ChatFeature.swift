@@ -641,6 +641,21 @@ public struct ChatFeature {
     /// retried RPC replays. Carries the fresh stored id too when the heal learned one.
     case liveSessionIDRefreshed(liveSessionID: String, storedSessionID: String?)
     case interruptTapped
+    // Queued-prompt panel interactions (#66)
+    /// Remove a queued entry (no confirmation — it's a draft).
+    case queuedPromptDeleted(id: UUID)
+    /// Lift a queued entry back into the composer for editing (`/undo`-prefill style).
+    /// Guarded to an EMPTY composer so it can never clobber a draft mid-typing.
+    case queuedPromptEditTapped(id: UUID)
+    /// Fire this entry next, immediately: idle → submit now (ahead of any parked
+    /// entries); mid-turn → interrupt-then-send (desktop semantics — stop the current
+    /// turn, the entry fires as the next one). Un-parks the queue.
+    case queuedPromptSendNow(id: UUID)
+    /// Deterministic drain re-check, sent by the Send-now effect after its
+    /// `session.interrupt` resolves — covers a turn whose terminal event never arrives
+    /// (already over, or lost on a reconnecting socket). Safe to send any time; every
+    /// precondition is re-checked in `drainQueueIfReady`.
+    case maybeDrainQueue
     case respondToApproval(approve: Bool, all: Bool)
     /// Outcome of the awaited `approval.respond` RPC. `resolved` carries the server's
     /// `{"resolved": n}` count — `0` means the per-session queue was already empty (the
@@ -1205,6 +1220,59 @@ public struct ChatFeature {
             _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
           }
         )
+
+      case let .queuedPromptDeleted(id):
+        state.queuedPrompts.removeAll { $0.id == id }
+        return .none
+
+      case let .queuedPromptEditTapped(id):
+        // Lift the entry back into the composer (`/undo`-prefill style) — only into an
+        // EMPTY composer (no text, no staged attachments), so an edit can never clobber a
+        // draft mid-typing. The panel disables the item on the same condition; this guard
+        // is the authoritative one.
+        guard state.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              state.attachments.isEmpty,
+              let index = state.queuedPrompts.firstIndex(where: { $0.id == id })
+        else { return .none }
+        let entry = state.queuedPrompts.remove(at: index)
+        state.composerText = entry.text
+        state.attachments = entry.attachments
+        return .none
+
+      case let .queuedPromptSendNow(id):
+        guard let index = state.queuedPrompts.firstIndex(where: { $0.id == id }) else { return .none }
+        // Promote to the head (the drain always fires the head) and un-park: an explicit
+        // Send-now is the queue's resume signal after a Stop/error park.
+        let entry = state.queuedPrompts.remove(at: index)
+        state.queuedPrompts.insert(entry, at: 0)
+        state.isQueueParked = false
+        // Idle: fires immediately, ahead of everything else that was waiting.
+        if !state.isSending, !state.slashExecInFlight {
+          return drainQueueIfReady(into: &state)
+        }
+        // Busy: arm the one-shot override so the terminal event drains the promoted head
+        // even where it would otherwise park (the interrupted turn's `.error`).
+        state.sendNowArmed = true
+        // A slash exec can't be interrupted (`session.interrupt` stops TURNS; the exec
+        // round-trip finishes on its own) — the exec's terminal action drains the armed head.
+        guard !state.slashExecInFlight, let sessionID = state.liveSessionID else { return .none }
+        // Interrupt-then-send (desktop semantics): stop the current turn optimistically
+        // (mirrors `.interruptTapped`, minus its park). The terminal event drains the
+        // head — plus a deterministic re-check once the interrupt RPC resolves, covering
+        // a turn that was already over or whose terminal was lost on a dropping socket.
+        state.isSending = false
+        freezeThinking(into: &state)
+        return .merge(
+          .cancel(id: CancelID.thinkingTimer),
+          clearTurnAnchor(state),
+          .run { [gateway] send in
+            _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
+            await send(.maybeDrainQueue)
+          }
+        )
+
+      case .maybeDrainQueue:
+        return drainQueueIfReady(into: &state)
 
       case let .respondToApproval(approve, all):
         guard case .approval = state.pendingInteraction,

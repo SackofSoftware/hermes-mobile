@@ -405,6 +405,174 @@ struct ChatQueueTests {
     #expect(store.state.queuedPrompts.count == 1)
   }
 
+  // MARK: Panel interactions — delete / edit / send now
+
+  @Test func deleteRemovesTheEntry() async {
+    var initial = runningState()
+    initial.queuedPrompts = [
+      QueuedPrompt(id: uuid(90), text: "keep"),
+      QueuedPrompt(id: uuid(91), text: "drop"),
+    ]
+    let store = TestStore(initialState: initial) { ChatFeature() }
+
+    await store.send(.queuedPromptDeleted(id: self.uuid(91))) {
+      $0.queuedPrompts = [QueuedPrompt(id: self.uuid(90), text: "keep")]
+    }
+  }
+
+  @Test func editLiftsEntryIntoEmptyComposer() async {
+    let attachment = ComposerAttachment(
+      id: uuid(9), kind: .image, filename: "photo.jpg", mimeType: "image/jpeg",
+      data: Data([0x1])
+    )
+    var initial = runningState()
+    initial.queuedPrompts = [
+      QueuedPrompt(id: uuid(90), text: "edit me", attachments: [attachment])
+    ]
+    let store = TestStore(initialState: initial) { ChatFeature() }
+
+    await store.send(.queuedPromptEditTapped(id: self.uuid(90))) {
+      $0.queuedPrompts = []
+      $0.composerText = "edit me"
+      $0.attachments = [attachment]
+    }
+  }
+
+  @Test func editIsANoOpWhileComposerHoldsADraft() async {
+    var initial = runningState(composerText: "half-typed draft")
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "edit me")]
+    let store = TestStore(initialState: initial) { ChatFeature() }
+
+    // The reducer guard is authoritative (the panel's disabled item just mirrors it):
+    // an edit must never clobber what the user is typing.
+    await store.send(.queuedPromptEditTapped(id: self.uuid(90)))
+  }
+
+  @Test func sendNowWhileIdleSubmitsAheadOfParkedEntries() async {
+    let submitted = LockIsolated<[String]>([])
+    var initial = runningState()
+    initial.isSending = false
+    initial.isQueueParked = true
+    initial.queuedPrompts = [
+      QueuedPrompt(id: uuid(90), text: "still held"),
+      QueuedPrompt(id: uuid(91), text: "send me now"),
+    ]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        if method == "prompt.submit", case let .object(fields) = params,
+           case let .string(text)? = fields["text"] {
+          submitted.withValue { $0.append(text) }
+        }
+        return .object(["status": .string("streaming")])
+      }
+    }
+
+    await store.send(.queuedPromptSendNow(id: self.uuid(91))) {
+      $0.isQueueParked = false
+      $0.isSending = true
+      $0.errorBanner = nil
+      $0.queuedPrompts = [QueuedPrompt(id: self.uuid(90), text: "still held")]
+      $0.drainingEntry = QueuedPrompt(id: self.uuid(91), text: "send me now")
+      $0.drainingRowID = self.uuid(0)
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "send me now", isComplete: true))
+      ]
+    }
+    await store.finish()
+    #expect(submitted.value == ["send me now"])
+  }
+
+  @Test func sendNowMidTurnInterruptsThenSends() async {
+    let calls = LockIsolated<[String]>([])
+    var initial = runningState()
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "urgent")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        return .object([:])
+      }
+    }
+
+    // Interrupt-then-send: the current turn is stopped optimistically and the arm makes
+    // the follow-up drain ignore any park.
+    await store.send(.queuedPromptSendNow(id: self.uuid(90))) {
+      $0.isSending = false
+      $0.sendNowArmed = true
+    }
+    // The deterministic re-check after the interrupt RPC resolves drains the head even
+    // though no terminal event ever arrived.
+    await store.receive(\.maybeDrainQueue) {
+      $0.sendNowArmed = false
+      $0.isSending = true
+      $0.errorBanner = nil
+      $0.queuedPrompts = []
+      $0.drainingEntry = QueuedPrompt(id: self.uuid(90), text: "urgent")
+      $0.drainingRowID = self.uuid(0)
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "urgent", isComplete: true))
+      ]
+    }
+    await store.finish()
+    #expect(calls.value == ["session.interrupt", "prompt.submit"])
+  }
+
+  @Test func sendNowArmSurvivesTheInterruptedTurnsErrorTerminal() async {
+    // Some agents answer an interrupt with the turn's `.error` terminal BEFORE the
+    // interrupt RPC resolves — the arm must make that terminal drain instead of park.
+    let calls = LockIsolated<[String]>([])
+    let gate = AsyncStream<Void>.makeStream()
+    var initial = runningState()
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "urgent")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        if method == "session.interrupt" {
+          // Hold the interrupt RPC open until the error terminal has been folded.
+          for await _ in gate.stream { }
+        }
+        return .object([:])
+      }
+    }
+
+    await store.send(.queuedPromptSendNow(id: self.uuid(90))) {
+      $0.isSending = false
+      $0.sendNowArmed = true
+    }
+    // The interrupted turn errors out; the armed drain fires from the terminal itself.
+    await store.send(.gatewayEvent(.error(message: "interrupted"))) {
+      $0.errorBanner = nil // the drain's submit clears the banner the error just set
+      $0.sendNowArmed = false
+      $0.isSending = true
+      $0.queuedPrompts = []
+      $0.drainingEntry = QueuedPrompt(id: self.uuid(90), text: "urgent")
+      $0.drainingRowID = self.uuid(0)
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "urgent", isComplete: true))
+      ]
+    }
+    await store.receive(\.delegate.runningChanged)
+    gate.continuation.finish()
+    // The late interrupt-RPC re-check is a no-op (the entry is already draining).
+    await store.receive(\.maybeDrainQueue)
+    await store.finish()
+    #expect(calls.value.filter { $0 == "prompt.submit" }.count == 1, "one submit, not two")
+  }
+
   @Test func degenerateSlashMidTurnFailsLocallyKeepingComposer() async {
     // Same local check the idle path runs: "/" with an empty parsed name must not be
     // queued (it would only fail at drain time) and must not destroy the payload.

@@ -165,18 +165,21 @@
 - Modify: `HermesKit/Tests/HermesKitTests/ChatFeatureTests.swift` (or a new
   `ChatQueueTests.swift` if the file is unwieldy)
 
-- [ ] create `QueuedPrompt` (`Identifiable`, `Equatable`, `Sendable`): `id: UUID`,
+- [x] create `QueuedPrompt` (`Identifiable`, `Equatable`, `Sendable`): `id: UUID`,
       `text: String`, `attachments: [ComposerAttachment]`
-- [ ] add `queuedPrompts: [QueuedPrompt]`, `isQueueParked: Bool`,
-      `drainingEntry: QueuedPrompt?`, `sendNowArmed: Bool` to `ChatFeature.State`
-      (public inits updated); add computed `canQueue` per Technical Details
-- [ ] branch `.composerSubmitted`: when `isSending || slashExecInFlight` and `canQueue`,
+- [x] add `queuedPrompts: [QueuedPrompt]`, `isQueueParked: Bool`,
+      `drainingEntry: QueuedPrompt?`, `drainingRowID`, `sendNowArmed: Bool` to
+      `ChatFeature.State`; add computed `canQueue` + `hasQueuedWork`
+- [x] branch `.composerSubmitted`: when `isSending || slashExecInFlight` and `canQueue`,
       append `QueuedPrompt` (id from `@Dependency(\.uuid)`), clear `composerText` +
-      `attachments`, return `.none`; idle path stays byte-identical
-- [ ] write tests: enqueue mid-turn appends + clears composer; enqueue during slash
+      `attachments`, return `.none`; idle path stays byte-identical (degenerate-slash
+      local failure mirrored, composer kept)
+- [x] write tests: enqueue mid-turn appends + clears composer; enqueue during slash
       exec; blocked by pending approval card / branching / pending paste; idle submit
-      unaffected; two enqueues stay separate ordered entries
-- [ ] run `script -q /dev/null swift test --package-path HermesKit` — must pass
+      unaffected; two enqueues stay separate ordered entries (`ChatQueueTests`, 9 tests;
+      ➕ updated `submitWhileSendingIsNoOp` → `submitWhileSendingQueuesInsteadOfSubmitting`
+      and `canSendBlockedWhileSlashExecInFlight` — both encoded the old no-op contract)
+- [x] run `script -q /dev/null swift test --package-path HermesKit` — 1106 tests pass
 
 ### Task 2: Shared submit helper + drain state machine
 

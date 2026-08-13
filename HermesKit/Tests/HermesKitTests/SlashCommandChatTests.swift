@@ -2061,7 +2061,8 @@ struct SlashCommandChatTests {
     state.slashExecInFlight = true // ...but the exec is still running
     #expect(state.canSend == false)
 
-    // And `composerSubmitted` (guarded by `canSend`) is a hard no-op in that window.
+    // Since #66, `composerSubmitted` in that window QUEUES the draft — still no RPC while
+    // the exec holds the composer (the entry drains only after the exec's terminal action).
     let calls = LockIsolated<[String]>([])
     let store = TestStore(initialState: state) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
@@ -2073,7 +2074,10 @@ struct SlashCommandChatTests {
         return .object([:])
       }
     }
-    await store.send(.composerSubmitted) // full exhaustivity: asserts no state change
+    await store.send(.composerSubmitted) {
+      $0.queuedPrompts = [QueuedPrompt(id: self.uuid(0), text: "type something new")]
+      $0.composerText = ""
+    }
     #expect(calls.value.isEmpty, "no RPC while a slash exec holds the composer")
   }
 

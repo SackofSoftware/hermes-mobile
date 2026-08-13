@@ -618,20 +618,30 @@ struct ChatReductionTests {
     #expect(didSend.value == false)
   }
 
-  // The visible send button becomes the interrupt button mid-turn, but a `.composerSubmitted`
-  // can still race the swap. A submit while a turn streams must be a
-  // strict no-op — a second in-flight submit corrupts `isSending`, and if it later failed it
-  // would emit a spurious `runningChanged(false)` that tears down a detached slot whose
-  // first turn is still genuinely running. Exhaustive: any state change or effect fails this.
-  @Test func submitWhileSendingIsNoOp() async {
+  // A submit while a turn streams must never start a second in-flight submit (it would
+  // corrupt `isSending`, and if it later failed it would emit a spurious
+  // `runningChanged(false)` that tears down a detached slot whose first turn is still
+  // genuinely running). Since #66 the mid-turn draft QUEUES instead: no RPC, no transcript
+  // row — the entry drains through the normal pipeline once the turn ends.
+  @Test func submitWhileSendingQueuesInsteadOfSubmitting() async {
     var initial = ChatFeature.State(connection: conn, status: .ready)
     initial.liveSessionID = "live"
     initial.composerText = "second message typed mid-turn"
     initial.isSending = true
-    let store = TestStore(initialState: initial) { ChatFeature() }
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+    }
 
     #expect(initial.canSend == false)
-    await store.send(.composerSubmitted)
+    #expect(initial.canQueue == true)
+    await store.send(.composerSubmitted) {
+      $0.queuedPrompts = [
+        QueuedPrompt(id: self.uuid(0), text: "second message typed mid-turn")
+      ]
+      $0.composerText = ""
+    }
   }
 
   // MARK: Bootstrap (create on first ready)

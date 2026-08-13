@@ -154,6 +154,52 @@ public struct ChatFeature {
     /// view can dim the affordance while it runs.
     public var isBranching: Bool
 
+    /// Prompts queued while a turn (or slash exec) was running (#66), in send order.
+    /// Client-side by design — see `QueuedPrompt`. Drained head-first by
+    /// `drainQueueIfReady` when the session goes idle; rendered by `QueuedPromptsPanel`
+    /// pinned above the composer (never in the transcript, so hydrates can't touch it).
+    public var queuedPrompts: [QueuedPrompt]
+    /// True when auto-drain is suspended (#66): set by a manual Stop (auto-firing a queued
+    /// prompt right after would un-stop the agent — desktop park-on-explicit-stop parity)
+    /// and by a turn `.error` (auto-firing into whatever just failed could burn the whole
+    /// queue against a broken server). Parked entries wait for an explicit per-entry
+    /// Send-now, which clears this.
+    public var isQueueParked: Bool
+    /// The entry currently being submitted by a drain (#66) — set when the drain pops the
+    /// head, cleared once the submit demonstrably reached the server (`message.start`, a
+    /// turn terminal, `.attachmentsSubmitted`, or the slash exec's own terminal). A submit
+    /// FAILURE with this standing re-inserts it at the head + parks (never silently lost).
+    var drainingEntry: QueuedPrompt?
+    /// The optimistic echo row `submitDraft` appended for the draining entry, so a failed
+    /// drain can remove it again (the entry goes back to the panel — leaving the bubble too
+    /// would show the text twice).
+    var drainingRowID: ChatRow.ID?
+    /// One-shot Send-now override (#66): the next drain attempt ignores (and clears)
+    /// `isQueueParked`, and the interrupted turn's terminal `.error` skips re-parking.
+    /// Cleared by the drain that consumes it and by a manual Stop (stop intent wins).
+    var sendNowArmed: Bool
+
+    /// Mid-turn counterpart to `canSend` (#66): whether `.composerSubmitted` while
+    /// `isSending`/`slashExecInFlight` will queue the draft. Same gates as `canSend`
+    /// minus the two turn-lock flags (which are the whole point). The view's send arrow
+    /// is enabled by `canSend || canQueue`.
+    public var canQueue: Bool {
+      let hasContent = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        || !attachments.isEmpty
+      return hasContent
+        && (isSending || slashExecInFlight)
+        && liveSessionID != nil
+        && pendingInteraction == nil
+        && !isBranching
+        && pendingPasteCount == 0
+    }
+
+    /// True while the queue still owes work — entries waiting OR one mid-drain. The
+    /// app-level slot policy reads this alongside `isRunning`: a detached slot with
+    /// queued work must not be torn down at turn end (the drain fires the next turn
+    /// into it), and an idle pop must not destroy a parked queue.
+    public var hasQueuedWork: Bool { !queuedPrompts.isEmpty || drainingEntry != nil }
+
     /// Pastes whose clipboard providers are still loading (#54) — a counter, not a flag,
     /// because two pastes in quick succession chain in the view's coordinator and both must
     /// be outstanding at once.
@@ -406,6 +452,11 @@ public struct ChatFeature {
       self.slashExecInFlight = false
       self.isBranching = false
       self.pendingPasteCount = 0
+      self.queuedPrompts = []
+      self.isQueueParked = false
+      self.drainingEntry = nil
+      self.drainingRowID = nil
+      self.sendNowArmed = false
 
       // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
       // its cached tail + model/usage immediately, before `session.resume` lands. The
@@ -1058,6 +1109,30 @@ public struct ChatFeature {
         return hydrate(sessionID: sessionID, profile: state.scopedProfile)
 
       case .composerSubmitted:
+        // Mid-turn the draft QUEUES instead of submitting (#66): the send arrow returns as
+        // soon as the composer has content (empty composer keeps Stop), and nothing goes on
+        // the wire until the turn ends — the server's `busy_input_mode` policy deliberately
+        // never engages from mobile (its queued slot is merge-only with no edit/delete API).
+        // The queue entry freezes the whole draft; the drain replays it through the normal
+        // submit pipeline (attachments, slash routing, #17 heal) once the session is idle.
+        if state.isSending || state.slashExecInFlight {
+          guard state.canQueue else { return .none }
+          let queuedText = state.composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+          // Degenerate "/" or "/ <payload>" fails the same local check the idle path runs —
+          // WITHOUT consuming the draft (queuing it would only fail at drain time, out of
+          // sight of the typo).
+          if SlashSuggestionFilter.isCommandShaped(queuedText), state.commandCatalog != nil,
+             parseSlashCommand(queuedText).name.isEmpty {
+            state.errorBanner = "Command failed: empty command"
+            return .none
+          }
+          state.queuedPrompts.append(
+            QueuedPrompt(id: uuid(), text: queuedText, attachments: state.attachments)
+          )
+          state.composerText = ""
+          state.attachments = []
+          return .none
+        }
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }
         // Trim stray leading/trailing whitespace/newlines (soft-wrap, dictation, accidental
         // returns) before submitting; interior formatting is preserved (#31). `canSend`

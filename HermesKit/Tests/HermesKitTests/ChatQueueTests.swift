@@ -134,6 +134,277 @@ struct ChatQueueTests {
     await store.send(.composerSubmitted)
   }
 
+  // MARK: Drain
+
+  @Test func drainOnMessageCompleteFiresHeadOnlyThenSecondWaits() async {
+    let clock = TestClock()
+    let submitted = LockIsolated<[JSONValue]>([])
+    var initial = runningState()
+    initial.queuedPrompts = [
+      QueuedPrompt(id: uuid(90), text: "first"),
+      QueuedPrompt(id: uuid(91), text: "second"),
+    ]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        if method == "prompt.submit" { submitted.withValue { $0.append(params) } }
+        return .object(["status": .string("streaming")])
+      }
+    }
+
+    // Turn ends → the HEAD fires immediately as the next turn; the second entry waits
+    // for that turn's own completion (one turn per entry).
+    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil))) {
+      $0.isSending = true
+      $0.queuedPrompts = [QueuedPrompt(id: self.uuid(91), text: "second")]
+      $0.drainingEntry = QueuedPrompt(id: self.uuid(90), text: "first")
+      $0.drainingRowID = self.uuid(0)
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "first", isComplete: true))
+      ]
+    }
+    await store.receive(\.delegate.runningChanged)
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.persistSnapshotTick)
+    await store.finish()
+    #expect(submitted.value.count == 1, "head only — one submit per turn end")
+  }
+
+  @Test func drainedTurnStartConsumesTheEntry() async {
+    let clock = TestClock()
+    var initial = runningState()
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "first")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable _, _ in .object(["status": .string("streaming")]) }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil)))
+    #expect(store.state.drainingEntry != nil)
+    // The drained turn's `message.start` proves the submit reached the server — the
+    // entry is consumed, its echo row now the turn's real user row.
+    await store.send(.gatewayEvent(.messageStart))
+    #expect(store.state.drainingEntry == nil)
+    #expect(store.state.drainingRowID == nil)
+    #expect(store.state.queuedPrompts.isEmpty)
+    // Ends the ticker/persist effects `message.start` spun up.
+    await store.send(.teardown)
+    await store.finish()
+  }
+
+  @Test func failedDrainReparksAtHeadWithBannerAndNoEchoRow() async {
+    let clock = TestClock()
+    var initial = runningState()
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "doomed")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "prompt.submit" { throw GatewayError.server("boom") }
+        return .object([:])
+      }
+    }
+
+    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil))) {
+      $0.isSending = true
+      $0.queuedPrompts = []
+      $0.drainingEntry = QueuedPrompt(id: self.uuid(90), text: "doomed")
+      $0.drainingRowID = self.uuid(0)
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "doomed", isComplete: true))
+      ]
+    }
+    await store.receive(\.delegate.runningChanged)
+    // The submit failed before reaching the server: entry back at the HEAD, parked, echo
+    // row removed — the message is never silently lost, and never shows twice.
+    await store.receive(\.promptSubmitFailed) {
+      $0.errorBanner = "Prompt failed: boom"
+      $0.isSending = false
+      $0.drainingEntry = nil
+      $0.drainingRowID = nil
+      $0.queuedPrompts = [QueuedPrompt(id: self.uuid(90), text: "doomed")]
+      $0.isQueueParked = true
+      $0.transcript = []
+    }
+    await store.receive(\.delegate.runningChanged)
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.persistSnapshotTick)
+    await store.finish()
+  }
+
+  @Test func idleHydrateDrainsAndHydrateLeavesQueueIntact() async {
+    // Covers the `.gatewayClosed` finalization: no `message.complete` ever arrives on a
+    // socket drop, so the reconnect hydrate reporting `running == false` is the drain edge.
+    let clock = TestClock()
+    let submitted = LockIsolated<Int>(0)
+    var initial = runningState()
+    initial.usage = Usage(contextUsed: 1, contextMax: 100)
+    initial.commandCatalog = CommandCatalog(
+      commands: [SlashCommand(name: "/status", description: "")]
+    )
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "after reconnect")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "prompt.submit" { submitted.withValue { $0 += 1 } }
+        return .object(["status": .string("streaming")])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    // The idle-confirming hydrate is a drain edge; the queue itself is never wiped by
+    // the wholesale replace (it lives outside the transcript).
+    await store.send(.activateResult(.success(
+      ActivateResponse(sessionID: "live123", storedSessionID: "stored123", running: false)
+    )))
+    #expect(store.state.queuedPrompts.isEmpty)
+    #expect(store.state.drainingEntry?.text == "after reconnect")
+    await clock.advance(by: .seconds(1)) // the hydrate's debounced persist
+    await store.finish()
+    #expect(submitted.value == 1)
+  }
+
+  @Test func stillRunningHydrateLeavesQueueUntouched() async {
+    let submitted = LockIsolated<Int>(0)
+    var initial = runningState()
+    initial.usage = Usage(contextUsed: 1, contextMax: 100)
+    initial.commandCatalog = CommandCatalog(
+      commands: [SlashCommand(name: "/status", description: "")]
+    )
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "waiting")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = TestClock()
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "prompt.submit" { submitted.withValue { $0 += 1 } }
+        return .object([:])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.activateResult(.success(
+      ActivateResponse(sessionID: "live123", storedSessionID: "stored123", running: true)
+    )))
+    #expect(store.state.queuedPrompts.count == 1, "hydrate never touches the queue")
+    #expect(store.state.isSending)
+    #expect(submitted.value == 0)
+    // Ends the running-turn ticker the hydrate resumed.
+    await store.send(.teardown)
+    await store.finish()
+  }
+
+  // MARK: Parking
+
+  @Test func manualStopParksTheQueueAndCompleteDoesNotDrain() async {
+    let clock = TestClock()
+    let submitted = LockIsolated<Int>(0)
+    var initial = runningState()
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "held")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.continuousClock = clock
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        if method == "prompt.submit" { submitted.withValue { $0 += 1 } }
+        return .object([:])
+      }
+    }
+
+    // Stop parks: auto-firing a queued prompt right after would un-stop the agent.
+    await store.send(.interruptTapped) {
+      $0.isSending = false
+      $0.isQueueParked = true
+    }
+    // The interrupted turn's terminal must NOT drain a parked queue.
+    await store.send(.gatewayEvent(.messageComplete(text: "", usage: nil)))
+    await store.receive(\.delegate.runningChanged)
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.persistSnapshotTick)
+    await store.finish()
+    #expect(submitted.value == 0)
+    #expect(store.state.queuedPrompts.count == 1)
+  }
+
+  @Test func turnErrorParksTheQueue() async {
+    var initial = runningState()
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "held")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.chatSnapshot = .inMemory()
+    }
+
+    await store.send(.gatewayEvent(.error(message: "boom"))) {
+      $0.errorBanner = "boom"
+      $0.isSending = false
+      $0.isQueueParked = true
+    }
+    await store.receive(\.delegate.runningChanged)
+  }
+
+  @Test func idleComposerSendJumpsAheadOfParkedQueue() async {
+    let submitted = LockIsolated<[String]>([])
+    var initial = runningState(composerText: "fresh message")
+    initial.isSending = false
+    initial.isQueueParked = true
+    initial.queuedPrompts = [QueuedPrompt(id: uuid(90), text: "held")]
+    let store = TestStore(initialState: initial) {
+      ChatFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        if method == "prompt.submit", case let .object(fields) = params,
+           case let .string(text)? = fields["text"] {
+          submitted.withValue { $0.append(text) }
+        }
+        return .object(["status": .string("streaming")])
+      }
+    }
+
+    // Parked means "waiting for you", not "blocking you": an idle send goes out
+    // normally, ahead of the held entries, which stay put.
+    await store.send(.composerSubmitted) {
+      $0.composerText = ""
+      $0.isSending = true
+      $0.errorBanner = nil
+      $0.transcript = [
+        ChatRow(id: self.uuid(0), kind: .message(role: .user, text: "fresh message", isComplete: true))
+      ]
+    }
+    await store.finish()
+    #expect(submitted.value == ["fresh message"])
+    #expect(store.state.queuedPrompts.count == 1)
+  }
+
   @Test func degenerateSlashMidTurnFailsLocallyKeepingComposer() async {
     // Same local check the idle path runs: "/" with an empty parsed name must not be
     // queued (it would only fail at drain time) and must not destroy the payload.

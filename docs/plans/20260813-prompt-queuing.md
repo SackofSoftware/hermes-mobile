@@ -187,24 +187,28 @@
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ChatQueueTests.swift`
 
-- [ ] extract the idle body of `.composerSubmitted` into a helper that submits a
-      given `(text, attachments)` draft (attachment path, degenerate-slash guard,
-      compress, slash pipeline, plain prompt — all preserved); `.composerSubmitted`
-      idle path and drain both call it (assert byte-identical behavior via existing
-      submit tests staying green)
-- [ ] add `maybeDrainQueue`: preconditions per Technical Details; pop head, set
-      `drainingEntry`, submit via the helper; evaluate on `.messageComplete` and in
-      the `applyActivate` path when authoritative `running == false`
-- [ ] park on `.interruptTapped` and `.error` (skip when `sendNowArmed`); clear
-      `drainingEntry` on `.messageStart`; on `promptSubmitFailed` /
-      `.attachmentUploadFailed` with a standing `drainingEntry`, re-insert at head +
-      park + banner
-- [ ] write tests: drain fires on `messageComplete` (head only, one turn per entry,
-      second entry waits); drain on idle hydrate after `.gatewayClosed`; park on Stop;
-      park on error; failed drain re-parks at head with banner (nothing lost); hydrate
-      leaves `queuedPrompts` untouched; parked queue does not auto-drain; idle composer
-      send jumps ahead of a parked queue
-- [ ] run `script -q /dev/null swift test --package-path HermesKit` — must pass
+- [x] extract the idle body of `.composerSubmitted` into `submitDraft(text:attachments:
+      fromQueue:sessionID:state:)` (attachment path, degenerate-slash guard, compress,
+      slash pipeline, plain prompt — all preserved; existing submit tests stayed green);
+      `.attachmentsSubmitted` gained a `fromQueue` flag so a drained upload never clears
+      the live composer
+- [x] add `drainQueueIfReady` (named per its callers, not `maybeDrainQueue`):
+      preconditions per Technical Details; pop head, set `drainingEntry` +
+      `drainingRowID`, submit via the helper; evaluated on `.messageComplete` and in
+      `applyActivate` when authoritative `running == false` (covers `.gatewayClosed` +
+      the post-slash refresh)
+- [x] park on `.interruptTapped` and `.error` (skip when `sendNowArmed`); clear
+      `drainingEntry` on `.messageStart` / turn terminals / `.attachmentsSubmitted` /
+      `finishSlashExec` / `.slashCommandHandedOff`; `reparkDrainingEntry` (head + park +
+      echo-row removal) on `promptSubmitFailed` / `.attachmentUploadFailed` /
+      `.attachmentsUnsupportedDetected` / `.slashCommandFailed`
+- [x] write tests: drain fires on `messageComplete` (head only, second waits); drain on
+      idle hydrate; still-running hydrate leaves queue untouched; park on Stop (complete
+      does not drain); park on error; failed drain re-parks at head with banner + echo
+      row removed; `message.start` consumes the entry; idle composer send jumps ahead of
+      a parked queue
+- [x] run `script -q /dev/null swift test --package-path HermesKit` — 1114 tests pass
+      (twice, for flake stability)
 
 ### Task 3: Queue interactions — delete, edit, send now
 

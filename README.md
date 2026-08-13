@@ -50,6 +50,11 @@ from your desk and still keep your agent moving.
   waveform while recording; transcribed by your agent), and attach photos, camera
   captures, PDFs, or any file straight from the composer — or just paste a copied
   screenshot into the message field.
+- **Queue the next prompt while it works.** Mid-turn, the send button comes back the
+  moment you type: your draft (text and attachments) queues above the composer and
+  fires automatically as the next turn when the current one finishes. Queued messages
+  can be edited, deleted, or sent immediately (interrupting the running turn) from
+  their context menu; stopping a turn holds the queue instead of firing it.
 - **Run slash commands.** Type `/` in the composer to pull up the agent's command
   catalog — built-ins like `/compress`, `/undo`, `/status`, plus your installed
   skills — with as-you-type filtering and tap-to-insert. Commands execute through

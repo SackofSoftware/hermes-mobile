@@ -39,12 +39,14 @@ struct ChatView: View {
       pendingCard
         .id(store.pendingInteractionToken)
         .layoutPriority(store.isApprovalPending ? 1 : 0)
+      queuedPromptsPanel
       suggestionPanel
       Divider()
       ComposerView(
         text: $store.composerText,
         isSending: store.isSending,
         canSend: store.canSend,
+        canQueue: store.canQueue,
         model: store.model,
         reasoningEffort: store.reasoningEffort,
         usage: store.usage,
@@ -75,6 +77,9 @@ struct ChatView: View {
     // emptiness so mere filtering while typing never animates; nil under reduce-motion,
     // so the panel then appears/disappears instantly.
     .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: store.slashSuggestions.isEmpty)
+    // Same treatment for the queued-prompt panel (#66): animate appear/disappear (keyed
+    // to emptiness, so edits/reorders within the queue never animate the whole region).
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: store.queuedPrompts.isEmpty)
     .navigationTitle(store.title ?? "Chat")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
@@ -283,6 +288,27 @@ struct ChatView: View {
     if !suggestions.isEmpty {
       SlashSuggestionPanel(suggestions: suggestions) { store.send(.slashSuggestionTapped($0)) }
         .transition(.opacity)
+    }
+  }
+
+  /// Prompts queued while the turn runs (#66), pinned above the composer (and above the
+  /// suggestion panel). Deliberately NOT transcript rows — the panel lives on
+  /// `queuedPrompts` alone, so wholesale hydrates can't wipe or duplicate it. The panel
+  /// self-caps its height (`QueuedPromptsPanel`), respecting the #65 lesson about this
+  /// non-scrolling region.
+  @ViewBuilder
+  private var queuedPromptsPanel: some View {
+    if !store.queuedPrompts.isEmpty {
+      QueuedPromptsPanel(
+        entries: store.queuedPrompts,
+        isParked: store.isQueueParked,
+        composerHasDraft: !store.composerText
+          .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.attachments.isEmpty,
+        onSendNow: { store.send(.queuedPromptSendNow(id: $0)) },
+        onEdit: { store.send(.queuedPromptEditTapped(id: $0)) },
+        onDelete: { store.send(.queuedPromptDeleted(id: $0)) }
+      )
+      .transition(.opacity)
     }
   }
 

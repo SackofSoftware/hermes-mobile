@@ -238,16 +238,19 @@
 - Modify: `HermesMobile/Sources/Features/Chat/ComposerView.swift`
 - Modify: `HermesMobile/Sources/Features/Chat/ChatView.swift`
 
-- [ ] `ComposerView`: replace the `isSending`-only swap — stop button only when
-      `isSending` AND no content; otherwise the send arrow, enabled by a new
-      `canSubmitOrQueue` parameter; accessibility label "Queue message" when queuing
-- [ ] `ChatView`: pass `canSubmitOrQueue: store.canSend || store.canQueue`
-- [ ] verify Stop is still reachable mid-turn by clearing the composer (empty draft →
-      Stop returns); no reducer change — `.composerSubmitted` already branches
-- [ ] update/extend the composer-state snapshot baselines if the existing
-      `ChatSnapshotTests` cover the mid-turn composer (run-twice recipe for new ones)
-- [ ] run `script -q /dev/null swift test --package-path HermesKit` and `make snapshot`
-      — judge failures by size mismatch first (known drift) — must pass
+- [x] `ComposerView`: replace the `isSending`-only swap — ➕ simpler than the planned
+      `canSubmitOrQueue` param: pass `canQueue` itself (defaulted `false` so snapshot
+      call sites and all existing baselines stay byte-identical); Stop shows only while
+      `isSending && !canQueue` — which also keeps Stop reachable when a blocking card
+      suppresses queuing — else the arrow, `.disabled(!(canSend || canQueue))`,
+      accessibility label "Queue message" when queuing
+- [x] `ChatView`: pass `canQueue: store.canQueue`
+- [x] Stop stays reachable mid-turn by clearing the composer (`canQueue` loses content)
+- [x] added `testComposer_midTurnQueueable` snapshot (run-twice recipe; asserts green);
+      existing mid-turn baselines unchanged (all use an empty composer → Stop, as before)
+- [x] `swift test` green; snapshot failures triaged — every other failing composer test
+      is the documented runtime drift (incl. tests that never render the send button:
+      recording bar, transcribing, ModelPickerSheet)
 
 ### Task 5: QueuedPromptsPanel view + ChatView integration
 
@@ -257,19 +260,22 @@
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift` (or a new
   `QueuedPromptsPanelSnapshotTests.swift`)
 
-- [ ] build `QueuedPromptsPanel`: compact rows — `lineLimit(2)` text, status icon
-      (queued vs held/parked), paperclip-count badge when attachments ride along;
-      height-capped with internal scrolling beyond ~3 entries (#65 lessons: the
-      region between transcript and composer is non-scrolling and compressible —
-      keep the cap modest, never let the panel squeeze the transcript to nothing)
-- [ ] per-row context menu: Edit (disabled while the composer has content — mirror
-      the reducer guard), Delete, Send now
-- [ ] integrate in `ChatView` above the `SlashSuggestionPanel` slot; animate in/out
-      keyed to emptiness like the suggestion panel (nil under reduce-motion)
-- [ ] snapshot test: panel with queued entries and with a parked queue (run-twice
-      recipe — first run records + fails, second asserts; keep the commit to the new
-      PNGs only)
-- [ ] run `make snapshot` — must pass (size-mismatch rule for pre-existing drift)
+- [x] build `QueuedPromptsPanel`: compact rows — `lineLimit(2)` text (➕ needs
+      `.fixedSize(horizontal: false, vertical: true)`, or the HStack's ideal-height
+      pass truncates at ONE line — caught by the first recorded baseline), status icon
+      (clock vs pause) + "Held — not sent automatically" header when parked,
+      paperclip-count badge; hugs ≤3 rows, fixed `@ScaledMetric` height + internal
+      scroll beyond (fixed, not `min(content, cap)` — a `ScrollView` swallows concrete
+      height proposals, per the repo gotcha)
+- [x] per-row context menu: Send Now, Edit (disabled while the composer has content —
+      mirrors the reducer guard), Delete (destructive role)
+- [x] integrated in `ChatView` above the `SlashSuggestionPanel` slot; emptiness-keyed
+      animation matching the suggestion panel (nil under reduce-motion)
+- [x] snapshot tests: clamp+badge, parked header/icons, >3-entry fixed-height scroll
+      (run-twice recipe; all three assert green after the fixedSize re-record)
+- [x] `make snapshot` triaged: only the documented drift fails; ➕ dropped three stray
+      SettingsSnapshotTests baselines the full run auto-recorded (never committed,
+      belong to the pending global re-record) and reverted `Package.resolved` churn
 
 ### Task 6: AppFeature detached-slot policy
 

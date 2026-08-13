@@ -128,6 +128,21 @@ final class ComposerSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  /// Mid-turn with queueable content (#66): the red Stop swaps back to the send arrow —
+  /// tapping it queues the draft. (Stop-with-empty-composer is covered by
+  /// `testComposer_typingAndSending`'s second shape, which pins `canQueue`'s default.)
+  func testComposer_midTurnQueueable() {
+    let view = ComposerView(
+      text: .constant("Queue this for after the current turn"),
+      isSending: true, canSend: false,
+      canQueue: true,
+      model: "claude-opus-4-8", reasoningEffort: "high",
+      onModelTap: {}, onSend: {}, onInterrupt: {}
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
   // MARK: ModelPickerSheet
 
   func testModelPickerSheet() {

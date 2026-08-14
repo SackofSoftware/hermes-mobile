@@ -69,9 +69,28 @@ and its history."), `confirmDelete` captures a full rollback payload (session + 
 index + seen count), removes optimistically, inserts into the **`deletingIDs` in-flight guard**
 (fetch/poll results filter out `archivingIDs ∪ deletingIDs` — either window can resurrect a
 removed row), sends `delegate.sessionDeleted` FIRST, and cancels the in-flight fetch before
-running the RPC. A transient failure restores the row + pin + seen count and sets the
-"Couldn't delete the session." banner. Delete is offered on every row variant (pinned, cron
-runs, branch children) — all sections funnel through the one `row(_:)` builder.
+running the RPC. A transient failure rolls back per **`rollBackFailedRemoval`** (the ONE
+rollback rule, shared with archive) and sets the "Couldn't delete the session." banner. The
+rule is deliberately asymmetric: the **pin + seen metadata is ALWAYS restored and
+persisted** (both live under device-global prefs keys keyed by session id — not
+profile-scoped — so skipping them would lose the pin/unread baseline for a session the
+server kept), while the **row re-insert applies only when the list still shows the same
+context the RPC was issued under** — same profile scope AND same raw search query (the
+failure action carries both). A profile mismatch means a cross-profile row that opens under
+the wrong scope; a query mismatch means the saved index points into a different result set,
+and the poll is paused while searching so the wrong-query row would stick. A skipped
+re-insert self-heals: the original context's next fetch returns the still-existing row. On
+success the list emits `delegate.sessionDeleteSucceeded` — the confirmation delegate,
+distinct from the optimistic `sessionDeleted`. Success also **cancels-or-restarts** the
+shared fetch (`cancelOrRestartFetch`, shared with archive/rename success): a bare cancel of
+a fetch that was actually pending (`isLoading`, or an active search — the poll is paused
+while searching) would strand a stuck spinner / stale search results, so the current-context
+fetch restarts instead and lands an authoritative post-RPC response. A **cleared search**
+(trimmed-empty `searchQuery` binding) reloads immediately via `load` rather than the 300ms
+search debounce — `load` raises `isLoading`, which is what keeps that pending reload visible
+to `cancelOrRestartFetch` (the debounced search effect raises no flag, and with the query
+empty `isSearching` no longer covers the window). Delete is offered on every row variant
+(pinned, cron runs, branch children) — all sections funnel through the one `row(_:)` builder.
 
 **Capability gate — the 405 wrinkle**: `deleteSupported` defaults `true` and flips off lazily
 on a definitive verdict from an actual delete (no pre-probe). The verdict is `.notFound` **or**
@@ -90,13 +109,36 @@ with **`teardownSlot(flushSnapshot: false)`** — skipping the `persistNow` flus
 the flush would re-save the very snapshot the wipe deletes. Every other teardown keeps the
 flush. Same deliberate asymmetry as archive: if the DELETE later fails, the list restores the
 row but the slot and cache stay cleared — re-opening simply resumes the session fresh.
+The **pending-approval badge entry is the exception**: it's dropped on
+`sessionDeleteSucceeded` (server-confirmed), NOT at initiation — a failed delete leaves the
+approval pending on the server, and nothing short of a fresh approval push would repopulate
+a prematurely-cleared entry.
 
 **Archived-sheet delete is immediate — no confirmation (deliberate)**: those sessions are
 already tucked away and the sheet is the bulk-cleanup surface. Same optimistic shape as
 restore (`deletingIDs` guard, rollback + banner on transient failure, refresh-during-delete
-exclusion), threading `profileName` into the RPC. The sheet calls `chatSnapshot.deleteSnapshot`
-directly — no slot teardown needed, since archiving already tore the slot down (an archived
-session can never be the live slot); the wipe stays even if the DELETE later fails.
+exclusion). **The DELETE round-trip runs in the PARENT list, not the sheet**: a presented
+child's effects are cancelled when the sheet is dismissed (`ifLet` semantics), so a
+sheet-run DELETE racing Done/swipe-down would be silently dropped after the cache and badge
+were already updated. The sheet bubbles `Delegate.deleted(id:session:index:)` FIRST (with
+the rollback payload); the list forwards it as its own `sessionDeleted` (so `AppFeature`
+applies the same snapshot wipe + slot teardown as a main-list delete — an archived session
+CAN be the live slot: opening one from the sheet resumes it without un-archiving, and
+another client can archive the slot's session out from under this device; the wipe stays
+even if the DELETE later fails), threads the sheet's `profileName` into the RPC, and
+**re-injects `deleteSucceeded`/`deleteFailed` only while the SAME sheet presentation still
+owns the delete**: the round-trip is stamped with `archivedSheetGeneration` (bumped on
+every present) and the outcome must match the current generation AND find the id in the
+sheet's `deletingIDs` guard. The id alone is ambiguous — after a dismiss-and-reopen the
+same session can be deleted AGAIN, and re-injecting the first request's late failure would
+clear the new operation's guard and resurrect its row while the second request's real
+outcome then has nowhere to land. A dismissed sheet, a re-opened one's fresh fetch, and a
+stale-generation outcome all route to the list instead. With the sheet gone, a verdict
+still flips the list's `deleteSupported` (server-wide) and a transient failure surfaces the
+list's banner; success always emits `sessionDeleteSucceeded`. Inside the sheet, a completed
+delete restarts (not bare-cancels) a listing fetch still in flight — same stale-response
+resurrection window as the main list, and the sheet has no poll to self-heal a stranded
+spinner.
 
 ## Swipe default, row polish & confirmation presentation (#73)
 

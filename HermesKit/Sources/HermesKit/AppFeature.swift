@@ -565,8 +565,20 @@ public struct AppFeature {
         let wipeSnapshot: Effect<Action> = .run { [chatSnapshot] _ in
           chatSnapshot.deleteSnapshot(id)
         }
-        guard let chat = state.liveChat, chat.sessionKey == id else { return wipeSnapshot }
+        guard let chat = state.liveChat, chat.sessionKey == id else {
+          return wipeSnapshot
+        }
         return .concatenate(teardownSlot(flushSnapshot: false), wipeSnapshot)
+
+      case let .home(.delegate(.sessionDeleteSucceeded(id))):
+        // The server CONFIRMED the delete — only now drop the session's pending-approval
+        // badge entry (opening the session, the normal clear path, no longer exists).
+        // Clearing at initiation (`sessionDeleted` above) would be premature: a failed
+        // DELETE restores the row, but its still-pending approval would badge nowhere —
+        // nothing short of a fresh approval push repopulates the entry. Unlike the
+        // wipe/teardown asymmetry above, the badge waits for confirmation.
+        state.pendingApprovalSessionIDs.remove(id)
+        return setBadge(state)
 
       case .home(.delegate(.disconnect)):
         // Token cleared in Settings → tear down and return to onboarding. Nil-ing the slot

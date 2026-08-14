@@ -53,10 +53,10 @@ public struct SessionListFeature {
     /// poll skips, so a reload can't resurrect the optimistically-removed row.
     public var deletingIDs: Set<String>
     /// Whether the agent supports `DELETE /api/sessions/{id}`. Default `true` (optimistic,
-    /// no pre-probe); flipped off by a definitive 404 OR 405 from a delete — on older
-    /// agents the path exists for `PATCH`/`GET`, so an unsupported DELETE answers
-    /// **405 Method Not Allowed**, not the usual 404. When false all Delete affordances
-    /// hide and the swipe default clamps back to Archive (`effectiveSwipeAction`).
+    /// no pre-probe); flipped off by a delete answering the missing-endpoint verdict
+    /// (`RESTError.isMissingEndpointVerdict` — 404 OR 405, see that property). When false
+    /// all Delete affordances hide and the swipe default clamps back to Archive
+    /// (`effectiveSwipeAction`).
     public var deleteSupported: Bool
     /// The persisted default destructive action for the trailing swipe (Archive/Delete);
     /// loaded with the other prefs. Views must read `effectiveSwipeAction`, which clamps
@@ -116,6 +116,16 @@ public struct SessionListFeature {
     public var copiedIDToastToken: Int?
     @Presents public var settings: SettingsFeature.State?
     @Presents public var archived: ArchivedSessionsFeature.State?
+    /// Monotonic count of `archived` sheet presentations, bumped each time the sheet is
+    /// (re)presented. The sheet's DELETE round-trips (parent-run — see
+    /// `Action.archivedDeleteSucceeded`) capture it at initiation so a late outcome can be
+    /// correlated with the presentation that started it: after a dismiss-and-reopen the
+    /// same session id can be deleted AGAIN, and re-injecting the FIRST request's outcome
+    /// into the new sheet would clear the new operation's guard and resurrect its row —
+    /// leaving the second request's real outcome with nowhere to land. A stale-generation
+    /// outcome is applied at the list instead (capability verdict / banner), exactly like
+    /// an outcome landing after dismissal.
+    public var archivedSheetGeneration: Int = 0
     @Presents public var addProfile: AddProfileFeature.State?
     @Presents public var confirmationDialog: ConfirmationDialogState<Action.Dialog>?
 
@@ -385,26 +395,49 @@ public struct SessionListFeature {
     /// Switch the list grouping (workspace/chronological) and persist the choice.
     case setGroupingMode(SessionGroupingMode)
     case archiveButtonTapped(id: Session.ID)
-    /// Archive RPC succeeded — clear the transient in-flight guard and cancel any fetch that
-    /// started during the PATCH window so a stale response can't land after the guard is gone.
+    /// Archive RPC succeeded — clear the transient in-flight guard and cancel (or, when
+    /// one is pending, restart — see `cancelOrRestartFetch`) any fetch that started
+    /// during the PATCH window so a stale response can't land after the guard is gone.
     case archiveSucceeded(id: Session.ID)
     /// Archive RPC failed — the server still has the session. Clear the in-flight guard and
-    /// restore everything locally: re-insert the `session` at its saved `index`, restore the
+    /// roll back locally: re-insert the `session` at its saved `index`, restore the
     /// pin at `pinIndex` (nil if it wasn't pinned) and the prior `seenCount`, persist, and
-    /// surface the error. Local restore guarantees the row is present regardless of network.
-    case archiveFailed(id: Session.ID, session: Session, index: Int, pinIndex: Int?, seenCount: Int?)
+    /// surface the error. `profileName` + `searchQuery` are the list context the PATCH was
+    /// issued under — the row re-insert is dropped when the context changed mid-flight,
+    /// while the pin/seen restore always applies (see `rollBackFailedRemoval` for the rule).
+    case archiveFailed(
+      id: Session.ID, session: Session, index: Int, pinIndex: Int?, seenCount: Int?,
+      profileName: String?, searchQuery: String
+    )
     /// Ask to permanently delete a session (presents the confirmation dialog).
     case deleteButtonTapped(id: Session.ID)
-    /// Delete RPC succeeded — clear the transient in-flight guard and cancel any fetch that
-    /// started during the DELETE window (mirrors `archiveSucceeded`).
+    /// Delete RPC succeeded — clear the transient in-flight guard, emit
+    /// `Delegate.sessionDeleteSucceeded`, and cancel/restart any fetch that started
+    /// during the DELETE window (mirrors `archiveSucceeded`).
     case deleteSucceeded(id: Session.ID)
-    /// Delete RPC failed. Clear the in-flight guard and restore everything locally (same
-    /// rollback payload as archive). A definitive 404/405 `error` additionally flips
-    /// `deleteSupported` off SILENTLY (older agent — no banner, mirror the capability
-    /// flips); any other error surfaces the banner.
+    /// Delete RPC failed. Clear the in-flight guard and roll back locally (same rollback
+    /// payload + same context rule as archive — see `rollBackFailedRemoval`). A definitive
+    /// 404/405 `error` additionally flips `deleteSupported` off SILENTLY (older agent —
+    /// no banner, mirror the capability flips); any other error surfaces the banner.
     case deleteFailed(
       id: Session.ID, session: Session, index: Int, pinIndex: Int?, seenCount: Int?,
-      error: RESTError
+      profileName: String?, searchQuery: String, error: RESTError
+    )
+    /// The archived sheet's DELETE round-trip finished. The round-trip runs HERE, not in
+    /// the sheet — a presented child's effects are cancelled on dismissal, so a sheet-run
+    /// DELETE racing Done/swipe-down would be silently dropped after the cache wipe
+    /// already happened (see `ArchivedSessionsFeature.Delegate.deleted`). Success is
+    /// re-injected into the sheet while it still owns the delete, and the badge delegate
+    /// fires. `generation` is the sheet presentation the delete was initiated under
+    /// (`State.archivedSheetGeneration`) — the session id alone is ambiguous across a
+    /// dismiss-and-reopen, where a re-deleted id could pair with a STALE outcome.
+    case archivedDeleteSucceeded(id: Session.ID, generation: Int)
+    /// The archived sheet's DELETE failed: re-injected into the sheet while it still owns
+    /// the delete (rollback + capability verdict happen there); with the sheet gone — or
+    /// when `generation` shows the outcome belongs to a PREVIOUS presentation of the
+    /// sheet — the verdict/banner applies to the list so the outcome never vanishes.
+    case archivedDeleteFailed(
+      id: Session.ID, session: Session, index: Int, generation: Int, error: RESTError
     )
     /// Open the rename alert for a row: seeds `renameDraft` with the row's current title.
     case renameButtonTapped(id: Session.ID)
@@ -526,6 +559,13 @@ public struct SessionListFeature {
       /// live-chat slot down when it matches AND wipes the session's cached snapshot +
       /// turn anchor — a deleted session must not repaint from cache.
       case sessionDeleted(id: Session.ID)
+      /// The server CONFIRMED a permanent delete (main list or archived sheet). Distinct
+      /// from `sessionDeleted` (optimistic, at initiation): cleanup that must NOT survive
+      /// a failed delete keys off this one — `AppFeature` drops the session's
+      /// pending-approval badge entry here, because after a failed delete the approval is
+      /// still pending on the server and nothing short of a fresh push would repopulate
+      /// the entry.
+      case sessionDeleteSucceeded(id: Session.ID)
     }
   }
 
@@ -763,8 +803,16 @@ public struct SessionListFeature {
         return .none
 
       case .binding(\.searchQuery):
-        // Only the searchQuery binding drives the debounced fetch; other bound fields
-        // (renameDraft) must NOT trigger a search.
+        // Only the searchQuery binding drives the fetch; other bound fields (renameDraft)
+        // must NOT trigger a search. A CLEARED query (trimmed-empty — the field's
+        // clear/cancel, or backspacing out the text) reloads the normal list IMMEDIATELY
+        // via `load`: there is no keystroke burst to debounce on the way out, and `load`
+        // raises `isLoading` — which is what lets `cancelOrRestartFetch` see this fetch
+        // as pending. The debounced branch below sets no flag, and with the query already
+        // empty `isSearching` no longer covers the window, so a mutation success landing
+        // mid-window would otherwise bare-cancel the pending reload and strand the stale
+        // search results until the next poll.
+        guard state.isSearching else { return load(&state) }
         return .run { [
           rest, profiles, connection = state.connection, query = state.searchQuery, clock,
           profileName = state.selectedProfileName, profilesSupported = state.profilesSupported
@@ -889,6 +937,7 @@ public struct SessionListFeature {
         // Cancel any in-flight fetch (list load OR search) too: one started before this
         // archive could land afterward and resurrect the row we just optimistically removed.
         let archiveProfile = state.scopedProfileName
+        let archiveQuery = state.searchQuery
         return .concatenate(
           // Tell the parent FIRST (before the PATCH runs) so it can tear the live-chat slot
           // down when this is the slot's session — the (possibly detached) socket must not
@@ -904,7 +953,8 @@ public struct SessionListFeature {
                 await send(.archiveSucceeded(id: id))
               } catch {
                 await send(.archiveFailed(
-                  id: id, session: session, index: index, pinIndex: pinIndex, seenCount: seenCount
+                  id: id, session: session, index: index, pinIndex: pinIndex,
+                  seenCount: seenCount, profileName: archiveProfile, searchQuery: archiveQuery
                 ))
               }
             }
@@ -912,6 +962,10 @@ public struct SessionListFeature {
         )
 
       case let .deleteButtonTapped(id):
+        // Mirror of the archived sheet's guard: the view already hides Delete affordances
+        // when the capability is off, but a context menu rendered before the flag flipped
+        // can still fire — refuse rather than round-trip a doomed DELETE.
+        guard state.deleteSupported else { return .none }
         state.confirmationDialog = ConfirmationDialogState {
           TextState("Delete session?")
         } actions: {
@@ -927,7 +981,9 @@ public struct SessionListFeature {
         return .none
 
       case let .confirmationDialog(.presented(.confirmDelete(id))):
-        guard let index = state.sessions.index(id: id) else { return .none }
+        // Same capability guard as `deleteButtonTapped` — the flag can flip (e.g. mirrored
+        // from the archived sheet) while this dialog is already up.
+        guard state.deleteSupported, let index = state.sessions.index(id: id) else { return .none }
         // Mirror of `.confirmArchive`: capture rollback info BEFORE mutating (session + list
         // index + pin position + seen baseline), then optimistically remove + persist and run
         // the DELETE. On failure everything is restored locally.
@@ -943,6 +999,7 @@ public struct SessionListFeature {
         let pinnedIDs = state.pinnedIDs
         let seenCounts = state.seenCounts
         let deleteProfile = state.scopedProfileName
+        let deleteQuery = state.searchQuery
         return .concatenate(
           // Tell the parent FIRST (before the DELETE runs) so it can tear the live-chat slot
           // down when this is the slot's session and wipe the cached snapshot — the socket
@@ -961,7 +1018,8 @@ public struct SessionListFeature {
               } catch {
                 await send(.deleteFailed(
                   id: id, session: session, index: index, pinIndex: pinIndex,
-                  seenCount: seenCount, error: (error as? RESTError) ?? .unreachable
+                  seenCount: seenCount, profileName: deleteProfile, searchQuery: deleteQuery,
+                  error: asRESTError(error)
                 ))
               }
             }
@@ -970,34 +1028,32 @@ public struct SessionListFeature {
 
       case let .deleteSucceeded(id):
         // DELETE landed (an `already_absent` body is success by contract) — clear the
-        // transient guard so the poll resumes, and cancel any fetch that started during the
-        // window: with the guard now gone, its stale response could resurrect the row.
+        // transient guard so the poll resumes, and cancel/restart any fetch that started
+        // during the window (see `cancelOrRestartFetch`): with the guard now gone, its
+        // stale response could resurrect the row. The badge delegate fires on CONFIRMED
+        // deletes only — see `Delegate.sessionDeleteSucceeded`.
         state.deletingIDs.remove(id)
-        return .cancel(id: CancelID.fetch)
+        return .merge(
+          .send(.delegate(.sessionDeleteSucceeded(id: id))),
+          cancelOrRestartFetch(&state)
+        )
 
-      case let .deleteFailed(id, session, index, pinIndex, seenCount, error):
+      case let .deleteFailed(id, session, index, pinIndex, seenCount, profileName, searchQuery, error):
         // The delete didn't take — the server still has the session. Lift the guard and
-        // restore everything LOCALLY (mirrors `archiveFailed`): re-insert at the saved index,
-        // restore pin + seen baseline, persist. A definitive 404/405 means the agent lacks
-        // the DELETE endpoint (on older agents the path answers 405, since it exists for
-        // PATCH/GET) → flip the capability off SILENTLY, no banner, like the other
-        // capability flips. Anything else surfaces the banner.
+        // roll back (rollback rule: `rollBackFailedRemoval`). A missing-endpoint verdict
+        // (`isMissingEndpointVerdict`) → flip the capability off SILENTLY, no banner,
+        // like the other capability flips (the flag is server-wide, so it applies
+        // whatever the context). Anything else surfaces the banner.
         state.deletingIDs.remove(id)
-        let insertAt = min(index, state.sessions.count)
-        state.sessions.insert(session, at: insertAt)
-        if let pinIndex {
-          let pinAt = min(pinIndex, state.pinnedIDs.count)
-          state.pinnedIDs.insert(id, at: pinAt)
-        }
-        state.seenCounts[id] = seenCount
-        switch error {
-        case .notFound, .server(status: 405, detail: _):
+        rollBackFailedRemoval(
+          &state, id: id, session: session, index: index, pinIndex: pinIndex,
+          seenCount: seenCount, profileName: profileName, searchQuery: searchQuery
+        )
+        if error.isMissingEndpointVerdict {
           state.deleteSupported = false
-        default:
+        } else {
           state.loadError = "Couldn’t delete the session."
         }
-        preferences.savePinnedIDs(state.pinnedIDs)
-        preferences.saveSeenCounts(state.seenCounts)
         return .none
 
       case let .confirmationDialog(.presented(.confirmDeleteProfile(name))):
@@ -1015,30 +1071,23 @@ public struct SessionListFeature {
         return .none
 
       case let .archiveSucceeded(id):
-        // PATCH landed — clear the transient guard so the poll resumes. Cancel any fetch that
-        // started during the PATCH window: with the guard now gone, its (stale) response could
-        // otherwise resurrect the archived row. Future authoritative fetches exclude archived
-        // sessions server-side (`archived=exclude`), so no permanent filter is needed.
+        // PATCH landed — clear the transient guard so the poll resumes. Cancel/restart any
+        // fetch that started during the PATCH window (see `cancelOrRestartFetch`): with
+        // the guard now gone, its (stale) response could otherwise resurrect the archived
+        // row. Future authoritative fetches exclude archived sessions server-side
+        // (`archived=exclude`), so no permanent filter is needed.
         state.archivingIDs.remove(id)
-        return .cancel(id: CancelID.fetch)
+        return cancelOrRestartFetch(&state)
 
-      case let .archiveFailed(id, session, index, pinIndex, seenCount):
-        // The archive didn't take — the server still has the session. Lift the in-flight guard
-        // and restore everything LOCALLY (no reliance on a reload): re-insert the session at its
-        // saved index, restore the pin and seen baseline, persist, and surface the error. Local
-        // restore guarantees the row is present regardless of network; a later poll/refresh
-        // reconciles ordering/context (self-healing).
+      case let .archiveFailed(id, session, index, pinIndex, seenCount, profileName, searchQuery):
+        // The archive didn't take — the server still has the session. Lift the in-flight
+        // guard, roll back (rollback rule: `rollBackFailedRemoval`), and surface the error.
         state.archivingIDs.remove(id)
-        let insertAt = min(index, state.sessions.count)
-        state.sessions.insert(session, at: insertAt)
-        if let pinIndex {
-          let pinAt = min(pinIndex, state.pinnedIDs.count)
-          state.pinnedIDs.insert(id, at: pinAt)
-        }
-        state.seenCounts[id] = seenCount
+        rollBackFailedRemoval(
+          &state, id: id, session: session, index: index, pinIndex: pinIndex,
+          seenCount: seenCount, profileName: profileName, searchQuery: searchQuery
+        )
         state.loadError = "Couldn’t archive the session."
-        preferences.savePinnedIDs(state.pinnedIDs)
-        preferences.saveSeenCounts(state.seenCounts)
         return .none
 
       case let .renameButtonTapped(id):
@@ -1078,12 +1127,13 @@ public struct SessionListFeature {
         )
 
       case let .renameSucceeded(id):
-        // PATCH landed — the optimistic title stands; lift the in-flight guard so the poll resumes.
-        // Cancel any fetch that started during the PATCH window: with the guard now gone, its
-        // (stale) response could otherwise clobber the optimistic title with the server's pre-rename
-        // value. Mirrors archiveSucceeded's protection.
+        // PATCH landed — the optimistic title stands; lift the in-flight guard so the poll
+        // resumes. Cancel/restart any fetch that started during the PATCH window (see
+        // `cancelOrRestartFetch`): with the guard now gone, its (stale) response could
+        // otherwise clobber the optimistic title with the server's pre-rename value.
+        // Mirrors archiveSucceeded's protection.
         state.renamingInFlightIDs.remove(id)
-        return .cancel(id: CancelID.fetch)
+        return cancelOrRestartFetch(&state)
 
       case let .renameFailed(id, previousTitle):
         // The rename didn't take (e.g. a 400 for an over-long/duplicate title) — lift the guard,
@@ -1111,6 +1161,10 @@ public struct SessionListFeature {
         return .none
 
       case .archivedButtonTapped:
+        // New presentation → new generation: outcomes of DELETEs initiated under an
+        // earlier presentation must not be re-injected into this one (see
+        // `archivedSheetGeneration`).
+        state.archivedSheetGeneration += 1
         state.archived = ArchivedSessionsFeature.State(
           connection: state.connection,
           profileName: state.scopedProfileName,
@@ -1125,6 +1179,68 @@ public struct SessionListFeature {
         // Open from the archived sheet → dismiss it and resume in the main stack.
         state.archived = nil
         return .send(.delegate(.openSession(session)))
+
+      case let .archived(.presented(.delegate(.deleted(id, session, index)))):
+        // A delete inside the archived sheet. The sheet already removed the row
+        // optimistically; the DELETE round-trip runs HERE — a presented child's effects
+        // are cancelled on dismissal, so a sheet-run DELETE racing Done/swipe-down would
+        // be silently dropped after the cache wipe already happened. Forward as this
+        // list's own `sessionDeleted` FIRST so `AppFeature` wipes the cached snapshot +
+        // turn anchor and tears the live-chat slot down when the id matches (an archived
+        // session CAN be the slot: opening one from the sheet resumes it without
+        // un-archiving, and another client can archive the slot's session).
+        let profileName = state.archived?.profileName
+        // Stamp the round-trip with the CURRENT presentation so its outcome can only be
+        // re-injected into this sheet instance (id alone is ambiguous after a
+        // dismiss-and-reopen re-deletes the same session).
+        let generation = state.archivedSheetGeneration
+        return .concatenate(
+          .send(.delegate(.sessionDeleted(id: id))),
+          .run { [rest, connection = state.connection] send in
+            do {
+              try await rest.deleteSession(connection, id, profileName)
+              await send(.archivedDeleteSucceeded(id: id, generation: generation))
+            } catch {
+              await send(.archivedDeleteFailed(
+                id: id, session: session, index: index, generation: generation,
+                error: asRESTError(error)
+              ))
+            }
+          }
+        )
+
+      case let .archivedDeleteSucceeded(id, generation):
+        // Server confirmed the sheet-initiated delete → the badge delegate fires (see
+        // `Delegate.sessionDeleteSucceeded`), and the outcome is re-injected into the
+        // sheet ONLY while the SAME presentation (`generation`) still owns this delete
+        // (its `deletingIDs` guard holds the id) — a dismissed sheet has nothing to
+        // update, and a re-opened one is a different generation whose fresh fetch (or
+        // own re-delete of the same id) this must not touch.
+        let confirmed: Effect<Action> = .send(.delegate(.sessionDeleteSucceeded(id: id)))
+        guard generation == state.archivedSheetGeneration,
+          state.archived?.deletingIDs.contains(id) == true
+        else { return confirmed }
+        return .merge(confirmed, .send(.archived(.presented(.deleteSucceeded(id: id)))))
+
+      case let .archivedDeleteFailed(id, session, index, generation, error):
+        // Re-inject into the sheet while the SAME presentation still owns the delete
+        // (rollback + capability verdict happen there, and `deleteUnsupported` mirrors
+        // back here). With the sheet gone — or the outcome stamped by a PREVIOUS
+        // presentation (a stale failure must not clear a re-opened sheet's own guard and
+        // resurrect its row) — the outcome must not vanish: apply the capability
+        // verdict — it's server-wide — or the failure banner to the list itself.
+        if generation == state.archivedSheetGeneration,
+          state.archived?.deletingIDs.contains(id) == true {
+          return .send(.archived(.presented(.deleteFailed(
+            id: id, session: session, index: index, error: error
+          ))))
+        }
+        if error.isMissingEndpointVerdict {
+          state.deleteSupported = false
+        } else {
+          state.loadError = "Couldn’t delete the session."
+        }
+        return .none
 
       case .archived(.presented(.delegate(.deleteUnsupported))):
         // A delete inside the archived sheet answered 404/405 — mirror the capability
@@ -1367,6 +1483,53 @@ public struct SessionListFeature {
     // Shared `fetch` id: a newer load/search/poll cancels this one, so an older in-flight
     // fetch finishing late can't overwrite `state.sessions` (stale list or search results).
     .cancellable(id: CancelID.fetch, cancelInFlight: true)
+  }
+
+  /// A successful archive/delete/rename just lifted its in-flight guard — that guard was
+  /// the only thing filtering the removed/renamed row out of a landing response, so a
+  /// fetch that started during the RPC window must not deliver its stale response now.
+  /// When one is actually pending (`isLoading`, or an active search whose debounced fetch
+  /// may be in flight — and the poll is paused while searching, so nothing would
+  /// self-heal), RESTART the current-context fetch: it supersedes the stale one
+  /// (`cancelInFlight`) and lands an authoritative post-RPC response instead of stranding
+  /// a stuck spinner or stale search results. Otherwise a bare cancel suffices (the poll
+  /// is the backstop). A JUST-CLEARED search is covered by the `isLoading` arm: clearing
+  /// the query reloads through `load` (see the `searchQuery` binding), which raises the
+  /// flag — the debounced search effect is the only fetch that raises neither.
+  private func cancelOrRestartFetch(_ state: inout State) -> Effect<Action> {
+    guard state.isLoading || state.isSearching else { return .cancel(id: CancelID.fetch) }
+    return load(&state)
+  }
+
+  /// THE rollback rule for a failed archive/delete RPC (the server still has the session,
+  /// so the optimistic removal must be undone). Two halves, deliberately asymmetric:
+  ///
+  /// - **Pin + seen baseline: ALWAYS restored and persisted.** Both live under single
+  ///   device-global prefs keys keyed by session id (`PreferencesClient` — they are not
+  ///   profile-scoped), so the restore is correct whatever list the UI shows now; skipping
+  ///   it would permanently lose the pin/unread baseline for a session the server kept.
+  /// - **The row re-insert applies ONLY while the list still shows the SAME context the
+  ///   RPC was issued under** — same profile scope AND same (raw) search query. After a
+  ///   mid-flight profile switch the captured session belongs to the OLD profile's list
+  ///   (a cross-profile row would open under the wrong scope), and after a query change
+  ///   the saved index points into a DIFFERENT result set (the poll is paused while
+  ///   searching, so a wrong-query row would stick). A skipped re-insert self-heals: the
+  ///   original context's next fetch returns the still-existing row.
+  private func rollBackFailedRemoval(
+    _ state: inout State, id: Session.ID, session: Session, index: Int,
+    pinIndex: Int?, seenCount: Int?, profileName: String?, searchQuery: String
+  ) {
+    if let pinIndex {
+      let pinAt = min(pinIndex, state.pinnedIDs.count)
+      state.pinnedIDs.insert(id, at: pinAt)
+    }
+    state.seenCounts[id] = seenCount
+    preferences.savePinnedIDs(state.pinnedIDs)
+    preferences.saveSeenCounts(state.seenCounts)
+    if profileName == state.scopedProfileName, searchQuery == state.searchQuery {
+      let insertAt = min(index, state.sessions.count)
+      state.sessions.insert(session, at: insertAt)
+    }
   }
 
   /// Whether the push info sheet is currently snoozed — a persisted `until` exists and `now`

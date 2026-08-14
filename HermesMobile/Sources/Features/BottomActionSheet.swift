@@ -38,11 +38,20 @@ struct BottomActionSheetView<Action>: View {
   @State private var contentHeight: CGFloat = 200
 
   var body: some View {
+    // `withState` is the only public read for a store of plain (non-`@ObservableState`)
+    // value state — TCA's own `alert(_:)`/`confirmationDialog(_:)` presenters read the
+    // same way; the deprecation is a nudge toward `@ObservableState`, which
+    // `ConfirmationDialogState` doesn't adopt. Accepted warning.
     let state = store.withState { $0 }
     VStack(spacing: 20) {
       VStack(spacing: 6) {
-        Text(state.title)
-          .font(.headline)
+        // Hidden only on an explicit `.hidden`: unlike the system dialog (which also
+        // hides on `.automatic`), the title is this sheet's header — the dialogs in this
+        // app rely on it being shown (the iOS 26 title drop is the bug being fixed).
+        if state.titleVisibility != .hidden {
+          Text(state.title)
+            .font(.headline)
+        }
         if let message = state.message {
           Text(message)
             .font(.subheadline)

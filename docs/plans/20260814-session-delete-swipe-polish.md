@@ -47,8 +47,10 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 - Archived sheet (`ArchivedSessionsFeature.swift` / `ArchivedSessionsView.swift`):
   swipe has Restore only; context menu has Restore + Copy ID. Restore already does
   optimistic removal + `restoringIDs` guard + rollback — delete follows the same
-  shape. An archived session can never be the live-chat slot (archiving already
-  tears the slot down), so no slot teardown is needed there.
+  shape. (Planning-time premise, corrected in review: an archived session CAN be
+  the live-chat slot — opening one from the sheet doesn't un-archive it, and
+  another client can archive the slot's session — so the sheet's delete routes
+  through the same slot-teardown delegate as the main list.)
 - Prefs: `PreferencesClient` holds non-secret prefs, has `.inMemory()`, and **logout
   must clear every entry**. Settings UI: `SettingsFeature.swift` (HermesKit) +
   `SettingsView.swift` (app target).
@@ -119,7 +121,7 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
   `AppFeature` identically to `sessionArchived` (tear down the live-chat slot when
   it matches) **plus** wiping the session's cached snapshot + turn anchor from
   `ChatSnapshotClient` (a deleted session must not repaint from cache).
-- **Preference**: `SessionSwipeAction: String, Codable, CaseIterable`
+- **Preference**: `SessionSwipeAction: String, CaseIterable`
   (`.archive` default). Stored via `PreferencesClient`
   (`defaultSessionSwipeAction` get/save), cleared on logout, effective value
   clamps to `.archive` while `deleteSupported == false`.
@@ -305,10 +307,10 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
       also mirrors BACK to the list via a new `Delegate.deleteUnsupported` case)
 - [x] `ArchivedSessionsView`: trailing swipe gains Delete (destructive, full-swipe
       target — listed first, nearest the edge, gated), context menu gains Delete (gated)
-- [x] wipe the deleted session's snapshot via the Task-4 client endpoint (the sheet
-      calls `chatSnapshot.deleteSnapshot` directly — no slot teardown needed since an
-      archived session can never be the live slot; wipe stays even if the DELETE later
-      fails, same asymmetry as the main list)
+- [x] wipe the deleted session's snapshot + tear the slot down via
+      `Delegate.deleted(id:)`, forwarded by the list as its own `sessionDeleted`
+      (an archived session CAN be the live slot — see the corrected premise above;
+      wipe stays even if the DELETE later fails, same asymmetry as the main list)
 - [x] write tests: delete success (optimistic removal, guard, snapshot wipe, profile
       threading nil/non-nil), failure rollback + banner, capability flip on 404 and 405
       (silent, delegate mirrored, list-side flag flip + sheet seeding), unsupported tap

@@ -23,6 +23,26 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  /// Older agent without `DELETE /api/sessions/{id}` — the "Default swipe action" picker
+  /// section must be hidden entirely (Archive is the only destructive action, so the
+  /// choice would be meaningless). The default-state snapshot above shows it.
+  func testSettingsView_deleteUnsupported() {
+    var initial = SettingsFeature.State(connection: connection)
+    initial.deleteSupported = false
+    initial.log = [
+      GatewayLogEntry(id: 0, type: "gateway.ready", summary: ""),
+      GatewayLogEntry(id: 1, type: "message.delta", summary: "Here's the gist"),
+    ]
+    let view = NavigationStack {
+      SettingsView(
+        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+          $0.debugLog = .testValue // inert stream for a deterministic render
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   /// Notifications enabled: toggle on, push available, no test sent yet.
   func testSettingsNotificationsEnabled() {
     let initial = SettingsFeature.State(

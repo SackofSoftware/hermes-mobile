@@ -75,10 +75,12 @@ public struct ArchivedSessionsFeature {
     /// archived sheet is the bulk-cleanup surface and its rows are already tucked away).
     case deleteButtonTapped(id: Session.ID)
     /// DELETE landed (an `already_absent` body is success by contract) — the optimistic
-    /// removal stands.
+    /// removal stands. Re-injected by the PARENT, which owns the round-trip (see
+    /// `Delegate.deleted`).
     case deleteSucceeded(id: Session.ID)
     /// DELETE failed — re-insert at the saved index. A 404/405 `error` is the capability
     /// verdict (flip `deleteSupported` off silently); anything else surfaces the banner.
+    /// Re-injected by the PARENT, which owns the round-trip (see `Delegate.deleted`).
     case deleteFailed(id: Session.ID, session: Session, index: Int, error: RESTError)
     case sessionTapped(id: Session.ID)
     /// Put a row's session id on the pasteboard and raise the transient confirmation toast.
@@ -91,13 +93,26 @@ public struct ArchivedSessionsFeature {
     public enum Delegate {
       /// Open/resume an archived session — the parent dismisses the sheet and navigates.
       case openSession(Session)
+      /// A row's permanent delete was initiated (fires BEFORE the DELETE round-trips),
+      /// carrying the rollback payload (the removed `session` + its `index`). The PARENT
+      /// runs the DELETE round-trip and re-injects `deleteSucceeded`/`deleteFailed` while
+      /// the sheet is still up: an effect returned from this presented sheet would be
+      /// cancelled the moment the sheet is dismissed (`ifLet` cancels a presented child's
+      /// effects), so a Done/swipe-down racing the DELETE would silently leave the
+      /// session on the server after the cache and badge were already updated.
+      /// The parent also forwards the id as its own `sessionDeleted` so `AppFeature`
+      /// wipes the cached snapshot + turn anchor and tears the live-chat slot down when
+      /// the id matches. An archived session CAN be the slot: opening one from this
+      /// sheet resumes it without un-archiving, and another client can archive the
+      /// slot's session out from under this device.
+      case deleted(id: Session.ID, session: Session, index: Int)
       /// A delete answered 404/405 (agent lacks the DELETE endpoint) — the parent mirrors
       /// its own `deleteSupported` flag off so the main list hides Delete too.
       case deleteUnsupported
     }
   }
 
-  private enum CancelID { case copyIDToast }
+  private enum CancelID { case fetch, copyIDToast }
 
   /// How long a copy confirmation (the "Session ID copied" toast) stays up before
   /// auto-dismissing. Same name/value in every feature that confirms a copy.
@@ -108,7 +123,6 @@ public struct ArchivedSessionsFeature {
   @Dependency(\.date.now) var now
   @Dependency(\.continuousClock) var clock
   @Dependency(\.pasteboard) var pasteboard
-  @Dependency(\.chatSnapshot) var chatSnapshot
 
   public init() {}
 
@@ -117,24 +131,7 @@ public struct ArchivedSessionsFeature {
       switch action {
       case .task:
         state.now = now
-        state.isLoading = true
-        state.loadError = nil
-        return .run { [rest, profiles, connection = state.connection, profileName = state.profileName] send in
-          do {
-            let sessions: [Session]
-            if let profileName {
-              // Profile-scoped list → hits this profile's `state.db`, not the default's.
-              sessions = try await profiles.sessions(connection, profileName, .only, .recent, 100, 0)
-            } else {
-              sessions = try await rest.archivedSessions(connection, 100, 0)
-            }
-            await send(.archivedResponse(.success(sessions)))
-          } catch let error as RESTError {
-            await send(.archivedResponse(.failure(error)))
-          } catch {
-            await send(.archivedResponse(.failure(.unreachable)))
-          }
-        }
+        return fetchListing(&state)
 
       case let .archivedResponse(.success(sessions)):
         state.isLoading = false
@@ -182,47 +179,44 @@ public struct ArchivedSessionsFeature {
       case let .deleteButtonTapped(id):
         guard state.deleteSupported, let index = state.sessions.index(id: id) else { return .none }
         // Immediate — no confirmation dialog (planning decision; see the action doc).
-        // Optimistic removal + in-flight guard, re-insert at `index` if the DELETE fails.
-        // No live-chat slot concern here: archiving already tore the slot down, so an
-        // archived session can never be the slot — but its cached snapshot + turn anchor
-        // must still be wiped so a deleted session can't repaint from the cache. The wipe
-        // runs up front and deliberately stays even if the DELETE later fails (same
-        // asymmetry as the main list's delete: re-opening resumes fresh).
+        // Optimistic removal + in-flight guard; the DELETE itself is the PARENT's (see
+        // the delegate case doc — a presented child's effect dies with the sheet), handed
+        // over with the rollback payload. The parent forwards to `AppFeature`, which
+        // wipes the cached snapshot + turn anchor and tears the live-chat slot down when
+        // this is the slot's session (an archived session CAN be the slot). The wipe
+        // deliberately stays even if the DELETE later fails (same asymmetry as the main
+        // list: re-opening resumes fresh).
         let session = state.sessions[index]
         state.sessions.remove(id: id)
         state.deletingIDs.insert(id)
-        return .run { [rest, chatSnapshot, connection = state.connection, profileName = state.profileName] send in
-          chatSnapshot.deleteSnapshot(id)
-          do {
-            try await rest.deleteSession(connection, id, profileName)
-            await send(.deleteSucceeded(id: id))
-          } catch {
-            await send(.deleteFailed(
-              id: id, session: session, index: index,
-              error: (error as? RESTError) ?? .unreachable
-            ))
-          }
-        }
+        return .send(.delegate(.deleted(id: id, session: session, index: index)))
 
       case let .deleteSucceeded(id):
+        // DELETE landed (re-injected by the parent, which owns the round-trip) — clear
+        // the transient guard. A listing fetch still in flight at presentation would —
+        // with the guard now gone — resurrect the permanently deleted row when its stale
+        // response lands: when one is pending (`isLoading`), RESTART it for a fresh
+        // post-delete listing (a bare cancel would strand the sheet's spinner forever —
+        // the sheet has no poll); otherwise a plain cancel suffices.
         state.deletingIDs.remove(id)
-        return .none
+        guard state.isLoading else { return .cancel(id: CancelID.fetch) }
+        return fetchListing(&state)
 
       case let .deleteFailed(id, session, index, error):
-        // The delete didn't take — the server still has the session. Lift the guard and
-        // re-insert at the saved index. A definitive 404/405 means the agent lacks the
-        // DELETE endpoint (older agents answer 405 — the path exists for PATCH/GET) →
-        // flip the capability off SILENTLY (no banner, like the other capability flips),
-        // hide the Delete affordances for the rest of the sheet's lifetime, and mirror
-        // the verdict back to the session list. Anything else surfaces the banner.
+        // The delete didn't take (re-injected by the parent, which owns the round-trip)
+        // — the server still has the session. Lift the guard and re-insert at the saved
+        // index. A missing-endpoint verdict
+        // (`isMissingEndpointVerdict`) → flip the capability off SILENTLY (no banner,
+        // like the other capability flips), hide the Delete affordances for the rest of
+        // the sheet's lifetime, and mirror the verdict back to the session list.
+        // Anything else surfaces the banner.
         state.deletingIDs.remove(id)
-        let reinsertAt = min(index, state.sessions.count)
-        state.sessions.insert(session, at: reinsertAt)
-        switch error {
-        case .notFound, .server(status: 405, detail: _):
+        let insertAt = min(index, state.sessions.count)
+        state.sessions.insert(session, at: insertAt)
+        if error.isMissingEndpointVerdict {
           state.deleteSupported = false
           return .send(.delegate(.deleteUnsupported))
-        default:
+        } else {
           state.loadError = "Couldn’t delete the session."
           return .none
         }
@@ -252,5 +246,31 @@ public struct ArchivedSessionsFeature {
         return .none
       }
     }
+  }
+
+  /// Start (or restart) the archived-listing fetch: raise the spinner and fetch the
+  /// server's archived list (profile-scoped when the sheet is). ID'd so a completed
+  /// delete can supersede it — a stale listing landing after `deleteSucceeded` lifted
+  /// the `deletingIDs` filter would resurrect the permanently deleted row.
+  private func fetchListing(_ state: inout State) -> Effect<Action> {
+    state.isLoading = true
+    state.loadError = nil
+    return .run { [rest, profiles, connection = state.connection, profileName = state.profileName] send in
+      do {
+        let sessions: [Session]
+        if let profileName {
+          // Profile-scoped list → hits this profile's `state.db`, not the default's.
+          sessions = try await profiles.sessions(connection, profileName, .only, .recent, 100, 0)
+        } else {
+          sessions = try await rest.archivedSessions(connection, 100, 0)
+        }
+        await send(.archivedResponse(.success(sessions)))
+      } catch let error as RESTError {
+        await send(.archivedResponse(.failure(error)))
+      } catch {
+        await send(.archivedResponse(.failure(.unreachable)))
+      }
+    }
+    .cancellable(id: CancelID.fetch, cancelInFlight: true)
   }
 }

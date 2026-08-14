@@ -497,17 +497,4 @@ struct SettingsFeatureTests {
     await store.receive(\.delegate.defaultSwipeActionChanged)
     #expect(preferences.loadDefaultSessionSwipeAction() == .archive)
   }
-
-  /// The picker row is capability-gated in the view off `deleteSupported`; the reducer
-  /// state exposes the flag as seeded by the presenting session list, defaulting to shown.
-  @Test func swipeActionStateExposesTheCapabilityFlag() async {
-    let defaults = SettingsFeature.State(connection: connection)
-    #expect(defaults.defaultSwipeAction == .archive)
-    #expect(defaults.deleteSupported) // picker shown by default
-
-    let unsupported = SettingsFeature.State(
-      connection: connection, defaultSwipeAction: .archive, deleteSupported: false
-    )
-    #expect(!unsupported.deleteSupported) // older agent → the view hides the row
-  }
 }

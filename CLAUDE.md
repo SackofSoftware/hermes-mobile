@@ -175,8 +175,12 @@ bullets below are the compressed rules.
   `PATCH`/`GET`) — silent, mirrored both ways with the archived sheet; the swipe-default
   pref (`SessionSwipeAction`, logout-cleared) clamps to Archive via
   `effectiveSwipeAction` when unsupported. Slot delete tears down with
-  `teardownSlot(flushSnapshot: false)` + snapshot wipe (flush would re-save it).
-  Archived-sheet delete is immediate — no confirmation (deliberate).
+  `teardownSlot(flushSnapshot: false)` + snapshot wipe (flush would re-save it); the
+  approval-badge entry clears only on the CONFIRMED delete (`sessionDeleteSucceeded`).
+  Archived-sheet delete is immediate — no confirmation (deliberate) — and its DELETE
+  round-trip runs in the parent list (a presented sheet's effects die on dismissal).
+  A destructive success restarts (not bare-cancels) a pending fetch; a failure after a
+  profile switch drops the rollback re-insert. Details: `docs/features/session-list.md`.
 - **Grouping, cron jobs, and branch nesting are display-only** over the one fetched
   array: grouping is a persisted pref; cron sessions partition into an always-on
   section grouped under jobs (capability-gated; no optimistic job-state mutation);

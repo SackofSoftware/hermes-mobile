@@ -5,7 +5,7 @@ import Foundation
 /// long-press context menu always shows both actions regardless of this choice.
 /// `.delete` is only effective while the agent supports `DELETE /api/sessions/{id}` —
 /// the list clamps back to `.archive` when the capability flag is off.
-public enum SessionSwipeAction: String, Codable, Sendable, CaseIterable, Equatable {
+public enum SessionSwipeAction: String, Sendable, CaseIterable {
   case archive
   case delete
 

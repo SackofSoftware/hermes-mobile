@@ -96,6 +96,18 @@ public enum RESTError: Error, Equatable, Sendable {
     }
   }
 
+  /// The definitive "this agent lacks the endpoint" verdict for capability gating —
+  /// usually a plain 404, with one wrinkle: when the path exists for other verbs (e.g.
+  /// `/api/sessions/{id}` serves `PATCH`/`GET` on older agents), an unsupported method
+  /// answers **405 Method Not Allowed** instead, so both count. Callers flip their
+  /// `*Supported` flag off this SILENTLY (no banner), like the other capability gates.
+  public var isMissingEndpointVerdict: Bool {
+    switch self {
+    case .notFound, .server(status: 405, detail: _): true
+    default: false
+    }
+  }
+
   public var message: String {
     switch self {
     case .unauthorized: "Invalid or missing token."
@@ -148,10 +160,8 @@ public struct HermesRESTClient: Sendable {
   /// idempotent: deleting an already-absent session still answers 2xx
   /// (`{ok, already_absent}`), so any 2xx is success and the body is discarded.
   ///
-  /// Capability wrinkle: on older agents the path exists for `PATCH`/`GET`, so an
-  /// unsupported `DELETE` answers **405 Method Not Allowed**
-  /// (`RESTError.server(status: 405, …)`), not the usual 404 — callers must flip
-  /// their `deleteSupported` gate on `.notFound` OR `.server(status: 405)`.
+  /// Callers flip their `deleteSupported` gate on `RESTError.isMissingEndpointVerdict`
+  /// (404 OR 405 — see that property for the older-agent wrinkle).
   public var deleteSession: @Sendable (_ connection: ServerConnection, _ id: String, _ profile: String?) async throws -> Void
   /// Transcribe recorded audio — `POST /api/audio/transcribe` `{data_url, mime_type?}` →
   /// `{ok, transcript}`. Returns the transcript text; throws `.transcriptionFailed` on `ok:false`.

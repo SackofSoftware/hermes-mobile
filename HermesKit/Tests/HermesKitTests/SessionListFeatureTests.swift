@@ -1771,6 +1771,32 @@ struct SessionListFeatureTests {
     await store.receive(\.delegate.openSession) // forwarded to the main stack
   }
 
+  @Test func archivedSheetSeedsDeleteSupportedFromTheList() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.deleteSupported = false // an earlier delete already got the 404/405 verdict
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.archivedButtonTapped) {
+      $0.archived = ArchivedSessionsFeature.State(
+        connection: self.connection,
+        now: Date(timeIntervalSince1970: 0),
+        deleteSupported: false // seeded — the sheet hides Delete from the start
+      )
+    }
+  }
+
+  @Test func archivedSheetDeleteUnsupportedMirrorsOntoTheList() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.archived = ArchivedSessionsFeature.State(connection: connection)
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    // The sheet's delete answered 404/405 → the list's own flag flips too, so its
+    // Delete affordances (swipe default, context menu, settings row) hide as well.
+    await store.send(.archived(.presented(.delegate(.deleteUnsupported)))) {
+      $0.deleteSupported = false
+    }
+  }
+
   // MARK: - Profiles (Task 8)
 
   @Test func taskPopulatesProfilesAndScopedSessions() async {

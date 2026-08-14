@@ -189,6 +189,148 @@ struct ArchivedSessionsFeatureTests {
     #expect(restored.value == .some(nil))
   }
 
+  // MARK: Delete (permanent, immediate — no confirmation)
+
+  @Test func deleteOptimisticallyRemovesWipesSnapshotAndCallsDelete() async {
+    let deletedID = LockIsolated<String?>(nil)
+    let wiped = LockIsolated<[String]>([])
+    var state = ArchivedSessionsFeature.State(connection: connection)
+    state.sessions = [Session(id: "a", title: "Old"), Session(id: "b", title: "Older")]
+    let store = TestStore(initialState: state) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.hermesREST.deleteSession = { @Sendable _, id, _ in deletedID.setValue(id) }
+      $0.chatSnapshot.deleteSnapshot = { @Sendable id in wiped.withValue { $0.append(id) } }
+    }
+
+    // Immediate: the tap itself removes the row — no confirmation dialog in between.
+    await store.send(.deleteButtonTapped(id: "a")) {
+      $0.sessions.remove(id: "a") // optimistic removal
+      $0.deletingIDs = ["a"]
+    }
+    await store.receive(\.deleteSucceeded) {
+      $0.deletingIDs = []
+    }
+    #expect(deletedID.value == "a")
+    #expect(wiped.value == ["a"]) // cached snapshot + turn anchor wiped (Task-4 endpoint)
+  }
+
+  @Test func deleteUnderProfilePassesProfileToDeleteSession() async {
+    let profile = LockIsolated<String??>(nil)
+    var state = ArchivedSessionsFeature.State(connection: connection, profileName: "work")
+    state.sessions = [Session(id: "a", title: "Old")]
+    let store = TestStore(initialState: state) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.hermesREST.deleteSession = { @Sendable _, _, p in profile.setValue(.some(p)) }
+    }
+
+    await store.send(.deleteButtonTapped(id: "a")) {
+      $0.sessions.remove(id: "a")
+      $0.deletingIDs = ["a"]
+    }
+    await store.receive(\.deleteSucceeded) {
+      $0.deletingIDs = []
+    }
+    #expect(profile.value == .some("work"))
+  }
+
+  @Test func deleteUnderDefaultPassesNilProfileToDeleteSession() async {
+    let profile = LockIsolated<String??>(nil)
+    var state = ArchivedSessionsFeature.State(connection: connection)
+    state.sessions = [Session(id: "a", title: "Old")]
+    let store = TestStore(initialState: state) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.hermesREST.deleteSession = { @Sendable _, _, p in profile.setValue(.some(p)) }
+    }
+
+    await store.send(.deleteButtonTapped(id: "a")) {
+      $0.sessions.remove(id: "a")
+      $0.deletingIDs = ["a"]
+    }
+    await store.receive(\.deleteSucceeded) {
+      $0.deletingIDs = []
+    }
+    #expect(profile.value == .some(nil)) // default profile → omitted
+  }
+
+  @Test func deleteFailureReinsertsAndSetsBanner() async {
+    var state = ArchivedSessionsFeature.State(connection: connection)
+    state.sessions = [Session(id: "a", title: "Old"), Session(id: "b", title: "Older")]
+    let store = TestStore(initialState: state) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in throw RESTError.unreachable }
+    }
+
+    await store.send(.deleteButtonTapped(id: "a")) {
+      $0.sessions.remove(id: "a")
+      $0.deletingIDs = ["a"]
+    }
+    await store.receive(\.deleteFailed) {
+      $0.deletingIDs = []
+      $0.sessions.insert(Session(id: "a", title: "Old"), at: 0) // restored at saved index
+      $0.loadError = "Couldn’t delete the session."
+    }
+  }
+
+  @Test(arguments: [RESTError.notFound, RESTError.server(status: 405, detail: "Method Not Allowed")])
+  func deleteCapabilityVerdictFlipsFlagSilentlyAndMirrorsBack(error: RESTError) async {
+    var state = ArchivedSessionsFeature.State(connection: connection)
+    state.sessions = [Session(id: "a", title: "Old")]
+    let store = TestStore(initialState: state) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in throw error }
+    }
+
+    await store.send(.deleteButtonTapped(id: "a")) {
+      $0.sessions.remove(id: "a")
+      $0.deletingIDs = ["a"]
+    }
+    // Definitive 404/405 = agent lacks the endpoint: restore the row SILENTLY (no banner),
+    // hide Delete for the rest of the sheet's lifetime, and mirror the verdict to the list.
+    await store.receive(\.deleteFailed) {
+      $0.deletingIDs = []
+      $0.sessions.insert(Session(id: "a", title: "Old"), at: 0)
+      $0.deleteSupported = false
+    }
+    await store.receive(\.delegate.deleteUnsupported)
+    #expect(store.state.loadError == nil)
+  }
+
+  @Test func deleteTapIsNoOpWhenUnsupported() async {
+    var state = ArchivedSessionsFeature.State(connection: connection, deleteSupported: false)
+    state.sessions = [Session(id: "a", title: "Old")]
+    let store = TestStore(initialState: state) { ArchivedSessionsFeature() }
+
+    await store.send(.deleteButtonTapped(id: "a")) // guard: no removal, no request
+  }
+
+  @Test func refreshDuringDeleteExcludesTheInFlightRow() async {
+    var state = ArchivedSessionsFeature.State(connection: connection)
+    state.deletingIDs = ["a"] // DELETE in flight — its row was optimistically removed
+    let store = TestStore(initialState: state) {
+      ArchivedSessionsFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.hermesREST.archivedSessions = { @Sendable _, _, _ in
+        // A stale listing still carries the deleted row — it must not resurrect it.
+        [Session(id: "a", title: "Old"), Session(id: "b", title: "Older")]
+      }
+    }
+
+    await store.send(.task) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.archivedResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "b", title: "Older")] // "a" filtered while in flight
+    }
+  }
+
   // MARK: Copy session ID (transient toast)
 
   // Like the session list, the reducer copies the tapped id verbatim (no `state.sessions`

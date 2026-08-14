@@ -294,18 +294,26 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 - Modify: `HermesMobile/Sources/Features/ArchivedSessionsView.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ArchivedSessionsFeatureTests.swift`
 
-- [ ] state/actions: `deletingIDs`, `deleteButtonTapped(id:)` (NO confirmation —
-      immediate, decided in planning), `deleteSucceeded`/`deleteFailed(id:session:index:)`
-      mirroring the restore flow's optimistic removal + rollback
-- [ ] thread `profileName` into `rest.deleteSession`; on 404/405 restore silently
+- [x] state/actions: `deletingIDs`, `deleteButtonTapped(id:)` (NO confirmation —
+      immediate, decided in planning), `deleteSucceeded`/`deleteFailed(id:session:index:error:)`
+      mirroring the restore flow's optimistic removal + rollback (the `error` payload
+      lets the reducer tell a capability verdict from a transient failure, same as the
+      main list)
+- [x] thread `profileName` into `rest.deleteSession`; on 404/405 restore silently
       and hide Delete affordances for the rest of the sheet's lifetime
-      (`deleteSupported` on the sheet state, seeded from the list's flag)
-- [ ] `ArchivedSessionsView`: trailing swipe gains Delete (destructive, full-swipe
-      target, gated), context menu gains Delete (gated)
-- [ ] wipe the deleted session's snapshot via the Task-4 client endpoint
-- [ ] write tests: delete success (optimistic removal, guard), failure rollback +
-      banner, capability flip, refresh-during-delete exclusion
-- [ ] run tests — must pass before task 8
+      (`deleteSupported` on the sheet state, seeded from the list's flag; the verdict
+      also mirrors BACK to the list via a new `Delegate.deleteUnsupported` case)
+- [x] `ArchivedSessionsView`: trailing swipe gains Delete (destructive, full-swipe
+      target — listed first, nearest the edge, gated), context menu gains Delete (gated)
+- [x] wipe the deleted session's snapshot via the Task-4 client endpoint (the sheet
+      calls `chatSnapshot.deleteSnapshot` directly — no slot teardown needed since an
+      archived session can never be the live slot; wipe stays even if the DELETE later
+      fails, same asymmetry as the main list)
+- [x] write tests: delete success (optimistic removal, guard, snapshot wipe, profile
+      threading nil/non-nil), failure rollback + banner, capability flip on 404 and 405
+      (silent, delegate mirrored, list-side flag flip + sheet seeding), unsupported tap
+      no-op, refresh-during-delete exclusion
+- [x] run tests — must pass before task 8 (full suite: 1155 tests, 60 suites, all pass)
 
 ### Task 8: Verify acceptance criteria
 

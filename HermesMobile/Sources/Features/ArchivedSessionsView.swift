@@ -3,7 +3,8 @@ import HermesKit
 import SwiftUI
 
 /// The Archived sessions sheet: a flat list of soft-archived sessions. Swipe (or long-press)
-/// to **Restore** (un-archive), or tap to open/resume the session in the main stack.
+/// to **Restore** (un-archive) or **Delete** permanently (immediate, no confirmation —
+/// this is the bulk-cleanup surface), or tap to open/resume the session in the main stack.
 struct ArchivedSessionsView: View {
   @Bindable var store: StoreOf<ArchivedSessionsFeature>
   @Environment(\.dismiss) private var dismiss
@@ -24,6 +25,12 @@ struct ArchivedSessionsView: View {
         .buttonStyle(.plain)
         .listRowSeparator(.hidden)
         .swipeActions(edge: .trailing) {
+          // Delete FIRST: SwiftUI places the first listed button nearest the edge and
+          // makes it the full-swipe target — a full swipe deletes (immediately, no
+          // confirmation), matching the destructive-nearest-edge convention.
+          if store.deleteSupported {
+            deleteButton(session)
+          }
           restoreButton(session)
             .tint(.green)
         }
@@ -31,6 +38,9 @@ struct ArchivedSessionsView: View {
           restoreButton(session)
           Button("Copy ID", systemImage: "doc.on.doc") {
             store.send(.copyIDButtonTapped(id: session.id))
+          }
+          if store.deleteSupported {
+            deleteButton(session)
           }
         }
       }
@@ -58,6 +68,12 @@ struct ArchivedSessionsView: View {
   private func restoreButton(_ session: Session) -> some View {
     Button("Restore", systemImage: "arrow.uturn.backward") {
       store.send(.restoreButtonTapped(id: session.id))
+    }
+  }
+
+  private func deleteButton(_ session: Session) -> some View {
+    Button("Delete", systemImage: "trash", role: .destructive) {
+      store.send(.deleteButtonTapped(id: session.id))
     }
   }
 }

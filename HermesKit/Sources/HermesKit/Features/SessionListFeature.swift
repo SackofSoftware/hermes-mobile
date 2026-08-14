@@ -1114,7 +1114,10 @@ public struct SessionListFeature {
         state.archived = ArchivedSessionsFeature.State(
           connection: state.connection,
           profileName: state.scopedProfileName,
-          now: state.now
+          now: state.now,
+          // Seed the sheet with the list's capability verdict so an already-flipped flag
+          // hides the sheet's Delete affordances from the start.
+          deleteSupported: state.deleteSupported
         )
         return .none
 
@@ -1122,6 +1125,12 @@ public struct SessionListFeature {
         // Open from the archived sheet → dismiss it and resume in the main stack.
         state.archived = nil
         return .send(.delegate(.openSession(session)))
+
+      case .archived(.presented(.delegate(.deleteUnsupported))):
+        // A delete inside the archived sheet answered 404/405 — mirror the capability
+        // verdict onto the list's own flag so its Delete affordances hide too.
+        state.deleteSupported = false
+        return .none
 
       case .archived:
         return .none

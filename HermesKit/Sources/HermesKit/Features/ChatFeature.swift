@@ -154,6 +154,52 @@ public struct ChatFeature {
     /// view can dim the affordance while it runs.
     public var isBranching: Bool
 
+    /// Prompts queued while a turn (or slash exec) was running (#66), in send order.
+    /// Client-side by design — see `QueuedPrompt`. Drained head-first by
+    /// `drainQueueIfReady` when the session goes idle; rendered by `QueuedPromptsPanel`
+    /// pinned above the composer (never in the transcript, so hydrates can't touch it).
+    public var queuedPrompts: [QueuedPrompt]
+    /// True when auto-drain is suspended (#66): set by a manual Stop (auto-firing a queued
+    /// prompt right after would un-stop the agent — desktop park-on-explicit-stop parity)
+    /// and by a turn `.error` (auto-firing into whatever just failed could burn the whole
+    /// queue against a broken server). Parked entries wait for an explicit per-entry
+    /// Send-now, which clears this.
+    public var isQueueParked: Bool
+    /// The entry currently being submitted by a drain (#66) — set when the drain pops the
+    /// head, cleared once the submit demonstrably reached the server (`message.start`, a
+    /// turn terminal, `.attachmentsSubmitted`, or the slash exec's own terminal). A submit
+    /// FAILURE with this standing re-inserts it at the head + parks (never silently lost).
+    var drainingEntry: QueuedPrompt?
+    /// The optimistic echo row `submitDraft` appended for the draining entry, so a failed
+    /// drain can remove it again (the entry goes back to the panel — leaving the bubble too
+    /// would show the text twice).
+    var drainingRowID: ChatRow.ID?
+    /// One-shot Send-now override (#66): the next drain attempt ignores (and clears)
+    /// `isQueueParked`, and the interrupted turn's terminal `.error` skips re-parking.
+    /// Cleared by the drain that consumes it and by a manual Stop (stop intent wins).
+    var sendNowArmed: Bool
+
+    /// Mid-turn counterpart to `canSend` (#66): whether `.composerSubmitted` while
+    /// `isSending`/`slashExecInFlight` will queue the draft. Same gates as `canSend`
+    /// minus the two turn-lock flags (which are the whole point). The view's send arrow
+    /// is enabled by `canSend || canQueue`.
+    public var canQueue: Bool {
+      let hasContent = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        || !attachments.isEmpty
+      return hasContent
+        && (isSending || slashExecInFlight)
+        && liveSessionID != nil
+        && pendingInteraction == nil
+        && !isBranching
+        && pendingPasteCount == 0
+    }
+
+    /// True while the queue still owes work — entries waiting OR one mid-drain. The
+    /// app-level slot policy reads this alongside `isRunning`: a detached slot with
+    /// queued work must not be torn down at turn end (the drain fires the next turn
+    /// into it), and an idle pop must not destroy a parked queue.
+    public var hasQueuedWork: Bool { !queuedPrompts.isEmpty || drainingEntry != nil }
+
     /// Pastes whose clipboard providers are still loading (#54) — a counter, not a flag,
     /// because two pastes in quick succession chain in the view's coordinator and both must
     /// be outstanding at once.
@@ -406,6 +452,11 @@ public struct ChatFeature {
       self.slashExecInFlight = false
       self.isBranching = false
       self.pendingPasteCount = 0
+      self.queuedPrompts = []
+      self.isQueueParked = false
+      self.drainingEntry = nil
+      self.drainingRowID = nil
+      self.sendNowArmed = false
 
       // Instant paint: read the non-authoritative snapshot synchronously so the chat shows
       // its cached tail + model/usage immediately, before `session.resume` lands. The
@@ -590,6 +641,21 @@ public struct ChatFeature {
     /// retried RPC replays. Carries the fresh stored id too when the heal learned one.
     case liveSessionIDRefreshed(liveSessionID: String, storedSessionID: String?)
     case interruptTapped
+    // Queued-prompt panel interactions (#66)
+    /// Remove a queued entry (no confirmation — it's a draft).
+    case queuedPromptDeleted(id: UUID)
+    /// Lift a queued entry back into the composer for editing (`/undo`-prefill style).
+    /// Guarded to an EMPTY composer so it can never clobber a draft mid-typing.
+    case queuedPromptEditTapped(id: UUID)
+    /// Fire this entry next, immediately: idle → submit now (ahead of any parked
+    /// entries); mid-turn → interrupt-then-send (desktop semantics — stop the current
+    /// turn, the entry fires as the next one). Un-parks the queue.
+    case queuedPromptSendNow(id: UUID)
+    /// Deterministic drain re-check, sent by the Send-now effect after its
+    /// `session.interrupt` resolves — covers a turn whose terminal event never arrives
+    /// (already over, or lost on a reconnecting socket). Safe to send any time; every
+    /// precondition is re-checked in `drainQueueIfReady`.
+    case maybeDrainQueue
     case respondToApproval(approve: Bool, all: Bool)
     /// Outcome of the awaited `approval.respond` RPC. `resolved` carries the server's
     /// `{"resolved": n}` count — `0` means the per-session queue was already empty (the
@@ -676,7 +742,10 @@ public struct ChatFeature {
     /// banner only ever fires on something the user actually asked for and lost.
     case attachmentsDropped(count: Int)
     case removeAttachment(id: ComposerAttachment.ID)
-    case attachmentsSubmitted(displayText: String, images: [Data], rowID: UUID)
+    /// `fromQueue` marks a drained entry's upload+submit (#66): the echo row still lands,
+    /// but the live composer must NOT be cleared (it belongs to whatever the user typed
+    /// since) and the standing `drainingEntry` is consumed instead.
+    case attachmentsSubmitted(displayText: String, images: [Data], rowID: UUID, fromQueue: Bool)
     case attachmentUploadFailed(message: String)
     case attachmentsUnsupportedDetected
     // Slash commands (#36)
@@ -1058,208 +1127,47 @@ public struct ChatFeature {
         return hydrate(sessionID: sessionID, profile: state.scopedProfile)
 
       case .composerSubmitted:
+        // Mid-turn the draft QUEUES instead of submitting (#66): the send arrow returns as
+        // soon as the composer has content (empty composer keeps Stop), and nothing goes on
+        // the wire until the turn ends — the server's `busy_input_mode` policy deliberately
+        // never engages from mobile (its queued slot is merge-only with no edit/delete API).
+        // The queue entry freezes the whole draft; the drain replays it through the normal
+        // submit pipeline (attachments, slash routing, #17 heal) once the session is idle.
+        if state.isSending || state.slashExecInFlight {
+          guard state.canQueue else { return .none }
+          let queuedText = state.composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+          // Degenerate "/" or "/ <payload>" fails the same local check the idle path runs —
+          // WITHOUT consuming the draft (queuing it would only fail at drain time, out of
+          // sight of the typo).
+          if SlashSuggestionFilter.isCommandShaped(queuedText), state.commandCatalog != nil,
+             parseSlashCommand(queuedText).name.isEmpty {
+            state.errorBanner = "Command failed: empty command"
+            return .none
+          }
+          state.queuedPrompts.append(
+            QueuedPrompt(id: uuid(), text: queuedText, attachments: state.attachments)
+          )
+          state.composerText = ""
+          state.attachments = []
+          return .none
+        }
         guard state.canSend, let sessionID = state.liveSessionID else { return .none }
         // Trim stray leading/trailing whitespace/newlines (soft-wrap, dictation, accidental
         // returns) before submitting; interior formatting is preserved (#31). `canSend`
-        // already rejects whitespace-only input with no attachments, so `text` can only be
+        // already rejects whitespace-only input with no attachments, so the text can only be
         // empty here when attachments carry the send.
         let text = state.composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // With attachments we must upload bytes first (iOS shares no FS with the agent),
-        // then submit — so we keep the composer/attachments until success and only echo the
-        // user row once the upload+submit lands (a failed upload mustn't lose the input).
-        if !state.attachments.isEmpty {
-          let attachments = state.attachments
-          state.errorBanner = nil
-          state.isSending = true
-          for index in state.attachments.indices { state.attachments[index].uploadState = .uploading }
-          // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
-          let anchor = setTurnAnchor(state)
-          // An unpersisted branch's stored id has no DB row (#34) — a heal resuming it
-          // would 4007 again, so heal by recreating from the client-held seed (the typed
-          // prompt is replayed and the seeded context + parent link are rebuilt; the
-          // reap only removed them server-side).
-          let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
-          let seed = state.branchSeed
-          let profile = state.scopedProfile
-          return .merge(anchor, .run { [gateway, uuid] send in
-            // The uploads + submit target the live id, which can be stale after a
-            // background→foreground; self-heal the whole upload→submit sequence once on a
-            // "session not found" by re-resuming for a fresh id and replaying (#17). The
-            // uploads are idempotent (the agent re-stages the bytes against the fresh session).
-            func runUploadAndSubmit(_ targetID: String) async throws {
-              var refs: [String] = []
-              for attachment in attachments {
-                if let ref = try await uploadAttachment(attachment, sessionID: targetID, gateway: gateway) {
-                  refs.append(ref)
-                }
-              }
-              // `@file:` refs (from file.attach) go on their own lines above the text;
-              // image/pdf are picked up from session state by prompt.submit.
-              let body = (refs + (text.isEmpty ? [] : [text])).joined(separator: "\n")
-              _ = try await gateway.send("prompt.submit", .object([
-                "session_id": .string(targetID), "text": .string(body),
-              ]))
-            }
-            do {
-              // Stale live id: re-resume/recreate for a fresh one, apply it, replay the whole
-              // upload→submit sequence once (uploads are idempotent).
-              try await withSessionHeal(
-                runUploadAndSubmit, sessionID: sessionID, storedSessionID: stored,
-                branchSeed: seed, profile: profile, gateway: gateway, send: send
-              )
-              // Echo images as thumbnails in the bubble; non-image files (no thumbnail)
-              // fall back to their names when there's no typed text.
-              let images = attachments.filter { $0.kind == .image }.map(\.data)
-              let nonImageNames = attachments.filter { $0.kind != .image }.map(\.filename)
-              let display = text.isEmpty ? nonImageNames.joined(separator: ", ") : text
-              await send(.attachmentsSubmitted(displayText: display, images: images, rowID: uuid()))
-            } catch let error as GatewayError {
-              // An old agent without the byte-upload methods → gate the feature off.
-              if error.isUnknownMethod {
-                await send(.attachmentsUnsupportedDetected)
-              } else {
-                await send(.attachmentUploadFailed(message: error.message))
-              }
-            } catch {
-              await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
-            }
-          })
-        }
-
-        // Slash-command branch (#36): a typed command executes through the gateway's
-        // dedicated slash pipeline (`slash.exec`), never as plain prompt text — but ONLY
-        // when the text is COMMAND-SHAPED (`SlashSuggestionFilter.isCommandShaped`, the
-        // desktop's `SLASH_COMMAND_RE`) and the catalog actually loaded (backward-compat
-        // guard: an old agent without `commands.catalog`, or one whose catalog never
-        // arrived, falls through to the plain path byte-identical to today). A bare
-        // `hasPrefix("/")` would swallow prose — `/tmp/agent.log look at this`,
-        // `/Users/me/notes.md summarize`, `// TODO fix this` — fail it twice and DESTROY
-        // the text (the composer is cleared here and the echoed row is local-only). The
-        // shape rule is shared with the suggestion panel so the two always agree.
-        //
-        // Degenerate "/" or "/ <payload>" parses to an EMPTY name. The server would only
-        // answer "empty command" after a doomed round-trip, so fail locally — and crucially
-        // WITHOUT clearing the composer or echoing a row, or the payload after the slash
-        // would be lost forever (desktop restores the draft for exactly this case,
-        // `use-prompt-actions/slash.ts`).
-        if SlashSuggestionFilter.isCommandShaped(text), state.commandCatalog != nil,
-           parseSlashCommand(text).name.isEmpty {
-          state.errorBanner = "Command failed: empty command"
-          return .none
-        }
-        // The compress family (`/compress` + alias `/compact`) routes to the DEDICATED
-        // `session.compress` gateway RPC — NEVER the generic `slash.exec` pipeline (desktop
-        // parity: `use-prompt-actions/slash.ts`). This detection is BY CANONICAL INTENT — a
-        // hardcoded `compressCommandNames` set matched on the parsed first token — and runs
-        // BEFORE (and independent of) the `resolvesCommand`/canonicalization gate below,
-        // because an OLDER agent's `commands.catalog` mislabels the alias (its `canon`
-        // self-maps `/compact → /compact` instead of `→ /compress`): the client-side
-        // canonicalization is then a no-op and the raw `/compact` would fall through
-        // `slash.exec` to the isolated slash-worker subprocess whose registry can't resolve
-        // the alias → "Unknown command: /compact". `session.compress` (a first-class RPC
-        // since 2026-04-03) sidesteps the worker entirely, so it works version-independently.
-        // Gated on a loaded catalog like the slash branch (a nil-catalog / `commandsUnsupported`
-        // old agent keeps today's byte-identical plain `prompt.submit` path). The RAW typed
-        // `/compress`/`/compact` is echoed as the user row; a typed argument becomes the
-        // compression `focus_topic`.
-        if SlashSuggestionFilter.isCommandShaped(text), state.commandCatalog != nil,
-           compressCommandNames.contains(parseSlashCommand(text).name.lowercased()) {
-          let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-          state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
-          maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
-          state.composerText = ""
-          state.errorBanner = nil
-          state.isSending = true
-          state.slashExecInFlight = true
-          // Thread storedSessionID/branchSeed/profile through the same #17 session-heal the
-          // slash and prompt paths use (an unpersisted branch heals by recreating from its
-          // client-held seed, not by resuming a row-less stored id).
-          let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
-          let seed = state.branchSeed
-          let profile = state.scopedProfile
-          let focusTopic = parseSlashCommand(text).arg
-          return .run { [gateway] send in
-            await executeCompress(
-              focusTopic: focusTopic, sessionID: sessionID, storedSessionID: stored,
-              branchSeed: seed, profile: profile, gateway: gateway, send: send
-            )
-          }
-        }
-        // Take the slash pipeline ONLY when the command RESOLVES in the curated catalog (a
-        // visible command/skill route or a known alias — `CommandCatalog.resolvesCommand`).
-        // A manually-typed HIDDEN command (`/new`, `/quit`, `/branch`, `/yolo`, … — the
-        // `mobileHiddenCommands` hide-list is applied at decode) or a genuinely-unknown one
-        // would otherwise reach `slash.exec`, run in the isolated slash-worker subprocess,
-        // and report FAKE success while this live session is untouched. Those fall through
-        // to the plain `prompt.submit` path below — byte-identical to the old-agent /
-        // nil-catalog backward-compat behavior (the LLM just sees the literal text). Skill
-        // routes still resolve (they live in the catalog with `isSkill == true`), so they
-        // exec. Staged attachments always take the plain path (they returned above). The
-        // typed `/cmd` is echoed as a normal user row; no turn anchor is set (an exec is not
-        // a turn — no `message.start` will follow, so a hydrate mid-exec must not resurrect a
-        // phantom elapsed timer).
-        if SlashSuggestionFilter.isCommandShaped(text),
-           let catalog = state.commandCatalog,
-           catalog.resolvesCommand(named: parseSlashCommand(text).name) {
-          let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-          state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
-          maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
-          state.composerText = ""
-          state.errorBanner = nil
-          state.isSending = true
-          state.slashExecInFlight = true
-          // An unpersisted branch's stored id has no DB row (#34) — a heal resuming it
-          // would 4007 again, so heal by recreating from the client-held seed (context +
-          // parent link rebuilt) exactly like the plain-prompt / attachments paths do.
-          let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
-          let seed = state.branchSeed
-          let profile = state.scopedProfile
-          // Resolve a typed ALIAS to its canonical name for the WIRE command only (#36
-          // follow-up): the gateway's live handler recognizes only canonical names, so a
-          // raw alias (`/compact`) would fall through to the isolated slash-worker and
-          // report "Unknown command". The echoed user row above keeps the RAW typed text.
-          let wireCommand = catalog.canonicalizedCommandText(text)
-          return .run { [gateway] send in
-            await executeSlashCommand(
-              command: wireCommand, sessionID: sessionID, storedSessionID: stored,
-              branchSeed: seed, profile: profile, gateway: gateway, send: send
-            )
-          }
-        }
-
-        let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-        state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .user, text: text, isComplete: true)))
-        maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
-        state.composerText = ""
-        state.errorBanner = nil
-        state.isSending = true
-        // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
-        let anchor = setTurnAnchor(state)
-        // prompt.submit acks fast (`{status:"streaming"}`); the turn streams via events,
-        // so success does nothing here — only a thrown error (timeout / server / drop)
-        // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung). A stale
-        // live id after background→foreground answers "session not found" — self-heal once by
-        // re-resuming for a fresh id and replaying the submit (#17). An unpersisted branch's
-        // stored id has no DB row (#34) — its heal recreates from the client-held seed
-        // (context + parent link rebuilt) instead of resuming.
-        let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
-        let seed = state.branchSeed
-        let profile = state.scopedProfile
-        return .merge(anchor, .run { [gateway] send in
-          await submitPrompt(
-            sessionID: sessionID, storedSessionID: stored, branchSeed: seed,
-            profile: profile, gateway: gateway, send: send
-          ) { healedID in
-            _ = try await gateway.send("prompt.submit", .object([
-              "session_id": .string(healedID), "text": .string(text),
-            ]))
-          }
-        })
+        return submitDraft(
+          text: text, attachments: state.attachments, fromQueue: false,
+          sessionID: sessionID, state: &state
+        )
 
       case let .promptSubmitFailed(message):
         state.errorBanner = "Prompt failed: \(message)"
         state.isSending = false
+        // A drained entry's submit failed (#66) — back to the panel's head, parked, so the
+        // queued message is never silently lost (echo row removed with it).
+        reparkDrainingEntry(into: &state)
         // The anchor was written on submit; a failed submit never starts a turn (no
         // `message.start`/`complete` to clear it), so clear it here. This keeps every
         // `setTurnAnchor` paired with a clear, so anchors can't accumulate for sessions that
@@ -1296,6 +1204,11 @@ public struct ChatFeature {
       case .interruptTapped:
         guard let sessionID = state.liveSessionID else { return .none }
         state.isSending = false
+        // A manual Stop PARKS the queue (#66): auto-firing a queued prompt right after
+        // would un-stop the agent the user just stopped (desktop park-on-explicit-stop
+        // parity). Stop intent also wins over a not-yet-consumed Send-now arm.
+        state.sendNowArmed = false
+        if !state.queuedPrompts.isEmpty { state.isQueueParked = true }
         // Freeze the live thinking row + stop the elapsed timer (mirrors the `.error` /
         // socket-drop turn-ending paths) so an interrupt doesn't leave it shimmering forever.
         freezeThinking(into: &state)
@@ -1307,6 +1220,59 @@ public struct ChatFeature {
             _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
           }
         )
+
+      case let .queuedPromptDeleted(id):
+        state.queuedPrompts.removeAll { $0.id == id }
+        return .none
+
+      case let .queuedPromptEditTapped(id):
+        // Lift the entry back into the composer (`/undo`-prefill style) — only into an
+        // EMPTY composer (no text, no staged attachments), so an edit can never clobber a
+        // draft mid-typing. The panel disables the item on the same condition; this guard
+        // is the authoritative one.
+        guard state.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              state.attachments.isEmpty,
+              let index = state.queuedPrompts.firstIndex(where: { $0.id == id })
+        else { return .none }
+        let entry = state.queuedPrompts.remove(at: index)
+        state.composerText = entry.text
+        state.attachments = entry.attachments
+        return .none
+
+      case let .queuedPromptSendNow(id):
+        guard let index = state.queuedPrompts.firstIndex(where: { $0.id == id }) else { return .none }
+        // Promote to the head (the drain always fires the head) and un-park: an explicit
+        // Send-now is the queue's resume signal after a Stop/error park.
+        let entry = state.queuedPrompts.remove(at: index)
+        state.queuedPrompts.insert(entry, at: 0)
+        state.isQueueParked = false
+        // Idle: fires immediately, ahead of everything else that was waiting.
+        if !state.isSending, !state.slashExecInFlight {
+          return drainQueueIfReady(into: &state)
+        }
+        // Busy: arm the one-shot override so the terminal event drains the promoted head
+        // even where it would otherwise park (the interrupted turn's `.error`).
+        state.sendNowArmed = true
+        // A slash exec can't be interrupted (`session.interrupt` stops TURNS; the exec
+        // round-trip finishes on its own) — the exec's terminal action drains the armed head.
+        guard !state.slashExecInFlight, let sessionID = state.liveSessionID else { return .none }
+        // Interrupt-then-send (desktop semantics): stop the current turn optimistically
+        // (mirrors `.interruptTapped`, minus its park). The terminal event drains the
+        // head — plus a deterministic re-check once the interrupt RPC resolves, covering
+        // a turn that was already over or whose terminal was lost on a dropping socket.
+        state.isSending = false
+        freezeThinking(into: &state)
+        return .merge(
+          .cancel(id: CancelID.thinkingTimer),
+          clearTurnAnchor(state),
+          .run { [gateway] send in
+            _ = try? await gateway.send("session.interrupt", .object(["session_id": .string(sessionID)]))
+            await send(.maybeDrainQueue)
+          }
+        )
+
+      case .maybeDrainQueue:
+        return drainQueueIfReady(into: &state)
 
       case let .respondToApproval(approve, all):
         guard case .approval = state.pendingInteraction,
@@ -1761,7 +1727,7 @@ public struct ChatFeature {
         state.attachments.removeAll { $0.id == id }
         return .none
 
-      case let .attachmentsSubmitted(displayText, images, rowID):
+      case let .attachmentsSubmitted(displayText, images, rowID, fromQueue):
         // Upload + submit landed: echo the user row (with image thumbnails), clear composer +
         // attachments. isSending stays true — the turn streams (clears on completion).
         let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
@@ -1771,15 +1737,27 @@ public struct ChatFeature {
           attachmentImages: images
         ))
         maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
-        state.composerText = ""
-        state.attachments = []
+        if fromQueue {
+          // A drained entry (#66): its bytes lived in `drainingEntry`, never the composer —
+          // clearing the composer here would destroy whatever the user typed since.
+          clearDrainingEntry(into: &state)
+        } else {
+          state.composerText = ""
+          state.attachments = []
+        }
         return .none
 
       case let .attachmentUploadFailed(message):
         // Keep the composer text + attachments so the user can retry; just flag the failure.
         state.errorBanner = "Attachment failed: \(message)"
         state.isSending = false
-        for index in state.attachments.indices { state.attachments[index].uploadState = .failed(message) }
+        if state.drainingEntry != nil {
+          // A drained entry's upload failed (#66): the failed bytes live in the entry, not
+          // the composer — re-park it and leave the composer's own staged attachments alone.
+          reparkDrainingEntry(into: &state)
+        } else {
+          for index in state.attachments.indices { state.attachments[index].uploadState = .failed(message) }
+        }
         // The attachment-submit path wrote the turn anchor; a failed upload never starts a
         // turn, so clear it — keeping every `setTurnAnchor` paired with a clear (mirrors
         // `.promptSubmitFailed`). Client-side turn end: also emit `runningChanged(false)` so
@@ -1792,7 +1770,13 @@ public struct ChatFeature {
         state.attachmentsUnsupported = true
         state.isSending = false
         state.errorBanner = "This Hermes agent is too old to accept attachments. Update the agent to send files."
-        for index in state.attachments.indices { state.attachments[index].uploadState = .failed("Attachments not supported") }
+        if state.drainingEntry != nil {
+          // A drained entry hit the capability wall (#66): re-park it (edit/delete stay
+          // available from the panel) and leave the composer's staged attachments alone.
+          reparkDrainingEntry(into: &state)
+        } else {
+          for index in state.attachments.indices { state.attachments[index].uploadState = .failed("Attachments not supported") }
+        }
         // Client-side turn end (the submit was aborted; no server event will follow): emit
         // `runningChanged(false)` so a DETACHED slot waiting on the turn is torn down
         // (mirrors `.promptSubmitFailed` / `.attachmentUploadFailed`).
@@ -1830,6 +1814,8 @@ public struct ChatFeature {
         // and a REAL turn now owns `isSending` (it stays locked, driven by the turn's own
         // lifecycle). Only the mid-exec hydrate guard is released — nothing else changes.
         state.slashExecInFlight = false
+        // A drained slash entry that handed off to a real turn is consumed (#66).
+        clearDrainingEntry(into: &state)
         return .none
 
       case let .slashCommandPrefill(message, notice):
@@ -1846,6 +1832,10 @@ public struct ChatFeature {
 
       case let .slashCommandFailed(message):
         state.errorBanner = "Command failed: \(message)"
+        // A drained slash entry whose exec failed goes back to the panel, parked (#66) —
+        // its echo row comes out with it, and the park keeps `finishSlashExec` from
+        // immediately re-draining the same doomed command.
+        reparkDrainingEntry(into: &state)
         // No refresh — a failure lands no history change (unlike output/prefill).
         return finishSlashExec(refresh: false, into: &state)
 
@@ -2046,6 +2036,9 @@ public struct ChatFeature {
       state.streamingRowID = nil
       state.errorBanner = nil
       state.isSending = true
+      // The drained entry's turn started (#66) — the submit demonstrably reached the
+      // server, so the entry is consumed (its echo row is now the turn's real user row).
+      clearDrainingEntry(into: &state)
       // A turn started, so the first prompt landed — the server has persisted the DB row
       // for an unpersisted branch (#34); from here the standard `session.resume` by
       // stored id serves every subsequent hydrate, the client-held seed is durable
@@ -2099,9 +2092,18 @@ public struct ChatFeature {
       // client, letting the turn run to completion. Drop it (and the armed hint) so the
       // finished chat isn't stuck behind a phantom card locking the composer.
       clearStaleApproval(into: &state)
+      // A stale draining entry here means the start event was lost/reordered — the turn
+      // demonstrably ran, so the entry is consumed either way (never re-queued).
+      clearDrainingEntry(into: &state)
       // Turn ended — drop the anchor so a later hydrate doesn't resurrect a phantom timer,
-      // and tell the list to clear this session's working glow immediately.
-      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
+      // and tell the list to clear this session's working glow immediately. This is also
+      // the primary DRAIN edge (#66): the queue's head fires as the next turn. (The drain's
+      // own `setTurnAnchor` can race `clearTurnAnchor` across the merged effects, but
+      // `message.start` reaffirms the anchor moments later, so the race is harmless.)
+      return .merge(
+        .cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state),
+        drainQueueIfReady(into: &state)
+      )
 
     case let .thinkingDelta(text):
       appendToThinking(text, into: &state)
@@ -2162,9 +2164,22 @@ public struct ChatFeature {
       // Same staleness rule as `message.complete`: an errored turn is over, so any
       // standing approval card (real or recovered) and the recovery hint are moot.
       clearStaleApproval(into: &state)
+      // The errored turn consumed any draining entry (#66) — it ran; never re-queue it.
+      clearDrainingEntry(into: &state)
+      // An error PARKS the queue rather than draining it (#66): auto-firing the next entry
+      // into whatever just failed could burn the whole queue against a broken server. The
+      // one exception is a Send-now that interrupted this turn — its terminal lands here on
+      // some agents — where the user explicitly asked for the next entry.
+      let drain: Effect<Action>
+      if state.sendNowArmed {
+        drain = drainQueueIfReady(into: &state)
+      } else {
+        if !state.queuedPrompts.isEmpty { state.isQueueParked = true }
+        drain = .none
+      }
       // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
       // and clear the list's working glow for this session immediately.
-      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state))
+      return .merge(.cancel(id: CancelID.thinkingTimer), clearTurnAnchor(state), runningChanged(false, state), drain)
 
     case .authExpired:
       // The gated session is fully dead (ws-ticket 401). Pause reconnect — do NOT back off —
@@ -2705,15 +2720,23 @@ public struct ChatFeature {
     // catalog `nil`, making this next hydrate the natural retry point.
     let catalogEffect = commandCatalogEffect(state, sessionID: response.sessionID)
 
+    // A hydrate confirming idle is a drain edge (#66): it covers `.gatewayClosed`
+    // finalization (no `message.complete` ever arrives on a socket drop — the reconnect
+    // hydrate is what learns the turn ended), the post-slash refresh, and plain
+    // foreground/reattach. Preconditions all live in `drainQueueIfReady` — a running turn,
+    // a standing card, or a parked queue make this a no-op. Evaluated after the wholesale
+    // rebuild so the drained entry's echo row lands after the authoritative history.
+    let drainEffect = drainQueueIfReady(into: &state)
+
     // Pull usage on-demand only when the response didn't carry it (older agents) — mirrors
     // the prior resume behavior so the gauge isn't blank until the next turn.
     if state.usage == nil {
       return .merge(
         fetchUsage(sessionID: response.sessionID), persist, timerEffect, runningEffect,
-        catalogEffect
+        catalogEffect, drainEffect
       )
     }
-    return .merge(persist, timerEffect, runningEffect, catalogEffect)
+    return .merge(persist, timerEffect, runningEffect, catalogEffect, drainEffect)
   }
 
   /// The not-found/degrade/reconnect handling shared by a plain `session.activate` or
@@ -2980,6 +3003,13 @@ public struct ChatFeature {
   /// hydrate (output/prefill land history changes; a failure passes `refresh: false`).
   private func finishSlashExec(refresh: Bool, into state: inout State) -> Effect<Action> {
     state.slashExecInFlight = false
+    // A drained slash entry that reached its own terminal is consumed (#66) — a FAILED
+    // exec was already re-parked by `.slashCommandFailed` before this ran, so this only
+    // ever clears a successfully-executed entry. The queue itself drains on the refresh
+    // hydrate (`applyActivate`) rather than here, so the post-command refresh isn't
+    // clobbered by an immediately-started queued turn; the no-refresh path (a failure)
+    // is parked anyway.
+    clearDrainingEntry(into: &state)
     guard state.thinkingRowID == nil else { return .none }
     state.isSending = false
     guard refresh, let sessionID = state.liveSessionID else { return runningChanged(false, state) }
@@ -2987,6 +3017,286 @@ public struct ChatFeature {
       runningChanged(false, state),
       refreshAfterSlashCommand(sessionID: sessionID, profile: state.scopedProfile)
     )
+  }
+
+
+  // MARK: - Draft submission (shared by composer submit and queue drain, #66)
+
+  /// The ONE submit pipeline for a full draft (text + staged attachments): attachment
+  /// upload → degenerate-slash guard → compress family → slash pipeline → plain
+  /// `prompt.submit`, all with the #17 session-not-found heal. Called with
+  /// `fromQueue: false` from `.composerSubmitted`'s idle path (byte-identical to the
+  /// pre-#66 inline behavior) and with `fromQueue: true` by `drainQueueIfReady` for a
+  /// queued entry — which must NOT touch the live composer (`state.composerText` /
+  /// `state.attachments` belong to whatever the user is typing NOW), and which records
+  /// the optimistic echo row in `drainingRowID` so a failed drain can take it back out.
+  private func submitDraft(
+    text: String, attachments: [ComposerAttachment], fromQueue: Bool,
+    sessionID: String, state: inout State
+  ) -> Effect<Action> {
+    // With attachments we must upload bytes first (iOS shares no FS with the agent),
+    // then submit — so the composer path keeps the composer/attachments until success and
+    // only echoes the user row once the upload+submit lands (a failed upload mustn't lose
+    // the input); a drained entry instead rides `drainingEntry` for the same guarantee.
+    if !attachments.isEmpty {
+      state.errorBanner = nil
+      state.isSending = true
+      if !fromQueue {
+        for index in state.attachments.indices { state.attachments[index].uploadState = .uploading }
+      }
+      // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
+      let anchor = setTurnAnchor(state)
+      // An unpersisted branch's stored id has no DB row (#34) — a heal resuming it
+      // would 4007 again, so heal by recreating from the client-held seed (the typed
+      // prompt is replayed and the seeded context + parent link are rebuilt; the
+      // reap only removed them server-side).
+      let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+      let seed = state.branchSeed
+      let profile = state.scopedProfile
+      return .merge(anchor, .run { [gateway, uuid] send in
+        // The uploads + submit target the live id, which can be stale after a
+        // background→foreground; self-heal the whole upload→submit sequence once on a
+        // "session not found" by re-resuming for a fresh id and replaying (#17). The
+        // uploads are idempotent (the agent re-stages the bytes against the fresh session).
+        func runUploadAndSubmit(_ targetID: String) async throws {
+          var refs: [String] = []
+          for attachment in attachments {
+            if let ref = try await uploadAttachment(attachment, sessionID: targetID, gateway: gateway) {
+              refs.append(ref)
+            }
+          }
+          // `@file:` refs (from file.attach) go on their own lines above the text;
+          // image/pdf are picked up from session state by prompt.submit.
+          let body = (refs + (text.isEmpty ? [] : [text])).joined(separator: "\n")
+          _ = try await gateway.send("prompt.submit", .object([
+            "session_id": .string(targetID), "text": .string(body),
+          ]))
+        }
+        do {
+          // Stale live id: re-resume/recreate for a fresh one, apply it, replay the whole
+          // upload→submit sequence once (uploads are idempotent).
+          try await withSessionHeal(
+            runUploadAndSubmit, sessionID: sessionID, storedSessionID: stored,
+            branchSeed: seed, profile: profile, gateway: gateway, send: send
+          )
+          // Echo images as thumbnails in the bubble; non-image files (no thumbnail)
+          // fall back to their names when there's no typed text.
+          let images = attachments.filter { $0.kind == .image }.map(\.data)
+          let nonImageNames = attachments.filter { $0.kind != .image }.map(\.filename)
+          let display = text.isEmpty ? nonImageNames.joined(separator: ", ") : text
+          await send(.attachmentsSubmitted(
+            displayText: display, images: images, rowID: uuid(), fromQueue: fromQueue
+          ))
+        } catch let error as GatewayError {
+          // An old agent without the byte-upload methods → gate the feature off.
+          if error.isUnknownMethod {
+            await send(.attachmentsUnsupportedDetected)
+          } else {
+            await send(.attachmentUploadFailed(message: error.message))
+          }
+        } catch {
+          await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
+        }
+      })
+    }
+
+    // Slash-command branch (#36): a typed command executes through the gateway's
+    // dedicated slash pipeline (`slash.exec`), never as plain prompt text — but ONLY
+    // when the text is COMMAND-SHAPED (`SlashSuggestionFilter.isCommandShaped`, the
+    // desktop's `SLASH_COMMAND_RE`) and the catalog actually loaded (backward-compat
+    // guard: an old agent without `commands.catalog`, or one whose catalog never
+    // arrived, falls through to the plain path byte-identical to today). A bare
+    // `hasPrefix("/")` would swallow prose — `/tmp/agent.log look at this`,
+    // `/Users/me/notes.md summarize`, `// TODO fix this` — fail it twice and DESTROY
+    // the text (the composer is cleared here and the echoed row is local-only). The
+    // shape rule is shared with the suggestion panel so the two always agree.
+    //
+    // Degenerate "/" or "/ <payload>" parses to an EMPTY name. The server would only
+    // answer "empty command" after a doomed round-trip, so fail locally — and crucially
+    // WITHOUT clearing the composer or echoing a row, or the payload after the slash
+    // would be lost forever (desktop restores the draft for exactly this case,
+    // `use-prompt-actions/slash.ts`). The drain pre-checks this before popping an entry,
+    // so `fromQueue` can't reach it with `drainingEntry` standing.
+    if SlashSuggestionFilter.isCommandShaped(text), state.commandCatalog != nil,
+       parseSlashCommand(text).name.isEmpty {
+      state.errorBanner = "Command failed: empty command"
+      return .none
+    }
+    // The compress family (`/compress` + alias `/compact`) routes to the DEDICATED
+    // `session.compress` gateway RPC — NEVER the generic `slash.exec` pipeline (desktop
+    // parity: `use-prompt-actions/slash.ts`). This detection is BY CANONICAL INTENT — a
+    // hardcoded `compressCommandNames` set matched on the parsed first token — and runs
+    // BEFORE (and independent of) the `resolvesCommand`/canonicalization gate below,
+    // because an OLDER agent's `commands.catalog` mislabels the alias (its `canon`
+    // self-maps `/compact → /compact` instead of `→ /compress`): the client-side
+    // canonicalization is then a no-op and the raw `/compact` would fall through
+    // `slash.exec` to the isolated slash-worker subprocess whose registry can't resolve
+    // the alias → "Unknown command: /compact". `session.compress` (a first-class RPC
+    // since 2026-04-03) sidesteps the worker entirely, so it works version-independently.
+    // Gated on a loaded catalog like the slash branch (a nil-catalog / `commandsUnsupported`
+    // old agent keeps today's byte-identical plain `prompt.submit` path). The RAW typed
+    // `/compress`/`/compact` is echoed as the user row; a typed argument becomes the
+    // compression `focus_topic`.
+    if SlashSuggestionFilter.isCommandShaped(text), state.commandCatalog != nil,
+       compressCommandNames.contains(parseSlashCommand(text).name.lowercased()) {
+      let rowID = uuid()
+      let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+      state.transcript.append(ChatRow(id: rowID, kind: .message(role: .user, text: text, isComplete: true)))
+      maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+      if fromQueue { state.drainingRowID = rowID } else { state.composerText = "" }
+      state.errorBanner = nil
+      state.isSending = true
+      state.slashExecInFlight = true
+      // Thread storedSessionID/branchSeed/profile through the same #17 session-heal the
+      // slash and prompt paths use (an unpersisted branch heals by recreating from its
+      // client-held seed, not by resuming a row-less stored id).
+      let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+      let seed = state.branchSeed
+      let profile = state.scopedProfile
+      let focusTopic = parseSlashCommand(text).arg
+      return .run { [gateway] send in
+        await executeCompress(
+          focusTopic: focusTopic, sessionID: sessionID, storedSessionID: stored,
+          branchSeed: seed, profile: profile, gateway: gateway, send: send
+        )
+      }
+    }
+    // Take the slash pipeline ONLY when the command RESOLVES in the curated catalog (a
+    // visible command/skill route or a known alias — `CommandCatalog.resolvesCommand`).
+    // A manually-typed HIDDEN command (`/new`, `/quit`, `/branch`, `/yolo`, … — the
+    // `mobileHiddenCommands` hide-list is applied at decode) or a genuinely-unknown one
+    // would otherwise reach `slash.exec`, run in the isolated slash-worker subprocess,
+    // and report FAKE success while this live session is untouched. Those fall through
+    // to the plain `prompt.submit` path below — byte-identical to the old-agent /
+    // nil-catalog backward-compat behavior (the LLM just sees the literal text). Skill
+    // routes still resolve (they live in the catalog with `isSkill == true`), so they
+    // exec. Staged attachments always take the plain path (they returned above). The
+    // typed `/cmd` is echoed as a normal user row; no turn anchor is set (an exec is not
+    // a turn — no `message.start` will follow, so a hydrate mid-exec must not resurrect a
+    // phantom elapsed timer).
+    if SlashSuggestionFilter.isCommandShaped(text),
+       let catalog = state.commandCatalog,
+       catalog.resolvesCommand(named: parseSlashCommand(text).name) {
+      let rowID = uuid()
+      let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+      state.transcript.append(ChatRow(id: rowID, kind: .message(role: .user, text: text, isComplete: true)))
+      maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+      if fromQueue { state.drainingRowID = rowID } else { state.composerText = "" }
+      state.errorBanner = nil
+      state.isSending = true
+      state.slashExecInFlight = true
+      // An unpersisted branch's stored id has no DB row (#34) — a heal resuming it
+      // would 4007 again, so heal by recreating from the client-held seed (context +
+      // parent link rebuilt) exactly like the plain-prompt / attachments paths do.
+      let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+      let seed = state.branchSeed
+      let profile = state.scopedProfile
+      // Resolve a typed ALIAS to its canonical name for the WIRE command only (#36
+      // follow-up): the gateway's live handler recognizes only canonical names, so a
+      // raw alias (`/compact`) would fall through to the isolated slash-worker and
+      // report "Unknown command". The echoed user row above keeps the RAW typed text.
+      let wireCommand = catalog.canonicalizedCommandText(text)
+      return .run { [gateway] send in
+        await executeSlashCommand(
+          command: wireCommand, sessionID: sessionID, storedSessionID: stored,
+          branchSeed: seed, profile: profile, gateway: gateway, send: send
+        )
+      }
+    }
+
+    let rowID = uuid()
+    let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+    state.transcript.append(ChatRow(id: rowID, kind: .message(role: .user, text: text, isComplete: true)))
+    maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+    if fromQueue { state.drainingRowID = rowID } else { state.composerText = "" }
+    state.errorBanner = nil
+    state.isSending = true
+    // Anchor the turn start so a hydrate while it runs resumes the elapsed timer.
+    let anchor = setTurnAnchor(state)
+    // prompt.submit acks fast (`{status:"streaming"}`); the turn streams via events,
+    // so success does nothing here — only a thrown error (timeout / server / drop)
+    // surfaces. Don't swallow it (Issue #6: a stuck server left the spinner hung). A stale
+    // live id after background→foreground answers "session not found" — self-heal once by
+    // re-resuming for a fresh id and replaying the submit (#17). An unpersisted branch's
+    // stored id has no DB row (#34) — its heal recreates from the client-held seed
+    // (context + parent link rebuilt) instead of resuming.
+    let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
+    let seed = state.branchSeed
+    let profile = state.scopedProfile
+    return .merge(anchor, .run { [gateway] send in
+      await submitPrompt(
+        sessionID: sessionID, storedSessionID: stored, branchSeed: seed,
+        profile: profile, gateway: gateway, send: send
+      ) { healedID in
+        _ = try await gateway.send("prompt.submit", .object([
+          "session_id": .string(healedID), "text": .string(text),
+        ]))
+      }
+    })
+  }
+
+  // MARK: - Queue drain (#66)
+
+  /// Attempt to fire the queue's head as the next turn. Called at every idle edge —
+  /// `message.complete`, a `running == false` hydrate (`applyActivate`, which also covers
+  /// `.gatewayClosed` finalization + reconnect and the post-slash refresh), and Send-now's
+  /// deterministic re-check — with every precondition re-checked HERE so callers can
+  /// attempt freely. Head-only, one turn per entry: the next entry waits for this turn's
+  /// own completion. A parked queue drains only when Send-now armed the one-shot override.
+  private func drainQueueIfReady(into state: inout State) -> Effect<Action> {
+    guard !state.queuedPrompts.isEmpty,
+          state.drainingEntry == nil,
+          !state.isSending, !state.slashExecInFlight,
+          state.pendingInteraction == nil,
+          !state.isBranching,
+          state.status == .ready,
+          let sessionID = state.liveSessionID
+    else { return .none }
+    guard !state.isQueueParked || state.sendNowArmed else { return .none }
+    state.sendNowArmed = false
+    state.isQueueParked = false
+    var entry = state.queuedPrompts.removeFirst()
+    // Enqueue already trims; re-trim so a panel-edited entry can't drift from submit's rule.
+    entry.text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Degenerate "/" or "/ <payload>" (the catalog can load AFTER enqueue, so the enqueue
+    // check alone can't cover this): park it back with the same local error the composer
+    // path shows, rather than burning a doomed round-trip or silently losing the payload.
+    if entry.attachments.isEmpty, SlashSuggestionFilter.isCommandShaped(entry.text),
+       state.commandCatalog != nil, parseSlashCommand(entry.text).name.isEmpty {
+      state.queuedPrompts.insert(entry, at: 0)
+      state.isQueueParked = true
+      state.errorBanner = "Command failed: empty command"
+      return .none
+    }
+    state.drainingEntry = entry
+    return submitDraft(
+      text: entry.text, attachments: entry.attachments, fromQueue: true,
+      sessionID: sessionID, state: &state
+    )
+  }
+
+  /// A drained entry's submit failed before demonstrably reaching the server (submit RPC
+  /// error, upload failure, unsupported-attachments abort, slash failure — including an
+  /// old agent's stray 4009 in the completion race): put it back at the HEAD, parked, and
+  /// remove its optimistic echo row — a queued message is never silently lost, and its
+  /// text must not show twice (bubble + panel).
+  private func reparkDrainingEntry(into state: inout State) {
+    guard let entry = state.drainingEntry else { return }
+    state.drainingEntry = nil
+    state.queuedPrompts.insert(entry, at: 0)
+    state.isQueueParked = true
+    if let rowID = state.drainingRowID {
+      state.transcript.remove(id: rowID)
+    }
+    state.drainingRowID = nil
+  }
+
+  /// The drained entry's submit demonstrably reached the server (`message.start`, a turn
+  /// terminal, `.attachmentsSubmitted`, or the slash exec's own terminal) — the entry is
+  /// consumed and its echo row is now the turn's real user row.
+  private func clearDrainingEntry(into state: inout State) {
+    state.drainingEntry = nil
+    state.drainingRowID = nil
   }
 
   // MARK: - Snapshot write-back

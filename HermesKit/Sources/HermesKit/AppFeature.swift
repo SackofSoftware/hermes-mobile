@@ -532,7 +532,12 @@ public struct AppFeature {
         // already cleared it) → no-op.
         guard let chat = state.liveChat else { return .none }
         let cleanup: Effect<Action> = .send(.liveChat(.viewDisappeared))
-        guard state.path.isEmpty, !chat.isRunning else { return cleanup }
+        // `hasQueuedWork` (#66) keeps the slot alive like a running turn does: queued
+        // prompts are in-memory only, so an idle pop with entries waiting (a parked
+        // queue, or the gap before a drain's turn starts) must not destroy them — the
+        // drain fires the next turn into the detached slot, and teardown comes when the
+        // queue empties and that turn ends (the `runningChanged` policy below).
+        guard state.path.isEmpty, !chat.isRunning, !chat.hasQueuedWork else { return cleanup }
         return .concatenate(cleanup, teardownSlot())
 
       case let .home(.delegate(.sessionArchived(id))):
@@ -653,7 +658,15 @@ public struct AppFeature {
         // outlives the pop while its turn runs. The turn ending — `message.complete`,
         // `.error`, or a foreground hydrate confirming `running == false` — means there's
         // nothing left to keep alive: flush the snapshot, then tear the slot down.
-        guard !running, state.path.isEmpty, state.liveChat != nil else { return glow }
+        // UNLESS the queue still owes work (#66): the chat's own reducer drained (or
+        // parked) in the same reduction that emitted this delegate, so by now
+        // `hasQueuedWork` is true exactly when a next turn is mid-drain or entries are
+        // parked waiting — either way the in-memory queue must survive. The drained
+        // turn's own end (queue empty by then) re-enters here and tears down normally;
+        // a queue parked by an error while detached deliberately keeps the slot (bounded
+        // by the user re-opening or archiving the session).
+        guard !running, state.path.isEmpty, let chat = state.liveChat, !chat.hasQueuedWork
+        else { return glow }
         return .concatenate(glow, teardownSlot())
 
       case .onboarding, .connectionFailed, .home, .path, .reauth, .liveChat:

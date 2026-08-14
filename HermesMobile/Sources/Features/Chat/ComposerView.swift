@@ -9,6 +9,12 @@ struct ComposerView: View {
   @Binding var text: String
   let isSending: Bool
   let canSend: Bool
+  /// Mid-turn queueability (#66, `ChatFeature.State.canQueue`): true when the composer
+  /// holds content that a mid-turn send would QUEUE. Drives the Stop→send swap — the red
+  /// Stop shows only while sending with nothing queueable, so typing brings the send
+  /// arrow back (and a blocking card, which suppresses queuing, brings Stop back).
+  /// Defaulted so the snapshot call sites stay unchanged.
+  var canQueue: Bool = false
   let model: String?
   let reasoningEffort: String?
   /// Context-window usage (#4): a compact gauge beside the model chip. Hidden when nil or
@@ -181,17 +187,23 @@ struct ComposerView: View {
 
   @ViewBuilder
   private var sendButton: some View {
-    if isSending {
+    if isSending, !canQueue {
+      // Mid-turn with nothing queueable: Stop. Clearing the composer always brings this
+      // back, so interrupt stays reachable while a draft is parked in the field.
       Button(action: onInterrupt) {
         Image(systemName: "stop.circle.fill").font(.title)
       }
       .foregroundStyle(.red)
+      .accessibilityLabel("Stop")
     } else {
+      // Idle send — or, mid-turn, the same arrow now QUEUES the draft (#66); the reducer
+      // branches on `isSending`/`slashExecInFlight`, the view just submits.
       Button(action: onSend) {
         Image(systemName: "arrow.up.circle.fill").font(.title)
       }
       .foregroundStyle(Color.hermesAccent)
-      .disabled(!canSend)
+      .disabled(!(canSend || canQueue))
+      .accessibilityLabel(canQueue ? "Queue message" : "Send")
     }
   }
 

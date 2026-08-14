@@ -47,6 +47,21 @@ public struct SessionListFeature {
     /// land after the id is cleared; future authoritative fetches exclude archived sessions
     /// server-side (`archived=exclude`), so no permanent filter is needed.
     public var archivingIDs: Set<String>
+    /// Ids whose `DELETE /api/sessions/{id}` is currently IN FLIGHT. Same transient
+    /// contract as `archivingIDs`: added when the DELETE starts, removed on success and
+    /// failure; while an id is here a landing list/search response filters it out and the
+    /// poll skips, so a reload can't resurrect the optimistically-removed row.
+    public var deletingIDs: Set<String>
+    /// Whether the agent supports `DELETE /api/sessions/{id}`. Default `true` (optimistic,
+    /// no pre-probe); flipped off by a definitive 404 OR 405 from a delete — on older
+    /// agents the path exists for `PATCH`/`GET`, so an unsupported DELETE answers
+    /// **405 Method Not Allowed**, not the usual 404. When false all Delete affordances
+    /// hide and the swipe default clamps back to Archive (`effectiveSwipeAction`).
+    public var deleteSupported: Bool
+    /// The persisted default destructive action for the trailing swipe (Archive/Delete);
+    /// loaded with the other prefs. Views must read `effectiveSwipeAction`, which clamps
+    /// this to `.archive` while the agent lacks the DELETE capability.
+    public var defaultSwipeAction: SessionSwipeAction
     /// Ids whose rename PATCH is currently IN FLIGHT. Transient: added when the PATCH starts,
     /// removed on success/failure. While non-empty the poll skips (like `archivingIDs`) so a
     /// fetch landing mid-PATCH can't clobber the optimistic title with the server's old one.
@@ -129,6 +144,9 @@ public struct SessionListFeature {
       pinnedIDs: [String] = [],
       expandedGroups: Set<String> = [],
       archivingIDs: Set<String> = [],
+      deletingIDs: Set<String> = [],
+      deleteSupported: Bool = true,
+      defaultSwipeAction: SessionSwipeAction = .default,
       renamingInFlightIDs: Set<String> = [],
       renamingID: Session.ID? = nil,
       renameDraft: String = "",
@@ -158,6 +176,9 @@ public struct SessionListFeature {
       self.pinnedIDs = pinnedIDs
       self.expandedGroups = expandedGroups
       self.archivingIDs = archivingIDs
+      self.deletingIDs = deletingIDs
+      self.deleteSupported = deleteSupported
+      self.defaultSwipeAction = defaultSwipeAction
       self.renamingInFlightIDs = renamingInFlightIDs
       self.renamingID = renamingID
       self.renameDraft = renameDraft
@@ -189,6 +210,13 @@ public struct SessionListFeature {
     public var scopedProfileName: String? {
       guard profilesSupported, !isDefaultProfileSelected else { return nil }
       return selectedProfileName
+    }
+
+    /// The destructive action the trailing swipe actually offers: the persisted
+    /// preference, clamped back to `.archive` while the agent lacks the DELETE
+    /// capability (a stale `.delete` pref must never surface a dead button).
+    public var effectiveSwipeAction: SessionSwipeAction {
+      deleteSupported ? defaultSwipeAction : .archive
     }
 
     /// True while a search query is active — the list shows flat results, not workspace
@@ -365,6 +393,19 @@ public struct SessionListFeature {
     /// pin at `pinIndex` (nil if it wasn't pinned) and the prior `seenCount`, persist, and
     /// surface the error. Local restore guarantees the row is present regardless of network.
     case archiveFailed(id: Session.ID, session: Session, index: Int, pinIndex: Int?, seenCount: Int?)
+    /// Ask to permanently delete a session (presents the confirmation dialog).
+    case deleteButtonTapped(id: Session.ID)
+    /// Delete RPC succeeded — clear the transient in-flight guard and cancel any fetch that
+    /// started during the DELETE window (mirrors `archiveSucceeded`).
+    case deleteSucceeded(id: Session.ID)
+    /// Delete RPC failed. Clear the in-flight guard and restore everything locally (same
+    /// rollback payload as archive). A definitive 404/405 `error` additionally flips
+    /// `deleteSupported` off SILENTLY (older agent — no banner, mirror the capability
+    /// flips); any other error surfaces the banner.
+    case deleteFailed(
+      id: Session.ID, session: Session, index: Int, pinIndex: Int?, seenCount: Int?,
+      error: RESTError
+    )
     /// Open the rename alert for a row: seeds `renameDraft` with the row's current title.
     case renameButtonTapped(id: Session.ID)
     /// Commit the rename: optimistically update the row's title and fire the REST PATCH.
@@ -465,6 +506,7 @@ public struct SessionListFeature {
     @CasePathable
     public enum Dialog: Equatable {
       case confirmArchive(id: Session.ID)
+      case confirmDelete(id: Session.ID)
       case confirmDeleteProfile(name: String)
     }
 
@@ -479,6 +521,11 @@ public struct SessionListFeature {
       /// Emitted FIRST so the parent can tear the live-chat slot down when it matches — a
       /// detached slot's socket must not keep streaming into a now-archived session.
       case sessionArchived(id: Session.ID)
+      /// The user confirmed permanently deleting this session (the optimistic removal +
+      /// DELETE follow). Emitted FIRST, like `sessionArchived`, so the parent tears the
+      /// live-chat slot down when it matches AND wipes the session's cached snapshot +
+      /// turn anchor — a deleted session must not repaint from cache.
+      case sessionDeleted(id: Session.ID)
     }
   }
 
@@ -549,9 +596,11 @@ public struct SessionListFeature {
 
       case .pollTick:
         // Skip the auto-refresh while searching (don't fight the user's query), while an
-        // archive is in flight (don't churn / risk resurrecting the archiving row), or while a
-        // rename PATCH is in flight (a fetch could clobber the optimistic title with the old one).
-        guard !state.isSearching, state.archivingIDs.isEmpty, state.renamingInFlightIDs.isEmpty
+        // archive or delete is in flight (don't churn / risk resurrecting the removed row),
+        // or while a rename PATCH is in flight (a fetch could clobber the optimistic title
+        // with the old one).
+        guard !state.isSearching, state.archivingIDs.isEmpty, state.deletingIDs.isEmpty,
+          state.renamingInFlightIDs.isEmpty
         else { return .none }
         return .send(.pulledToRefresh)
 
@@ -737,11 +786,12 @@ public struct SessionListFeature {
       case let .sessionsResponse(.success(sessions)):
         state.isLoading = false
         state.loadError = nil
-        // Belt-and-suspenders: drop any session whose archive PATCH is still in flight, so a
-        // fetch that completes during the PATCH window can't repopulate the removed row.
-        let visible = state.archivingIDs.isEmpty
+        // Belt-and-suspenders: drop any session whose archive PATCH or DELETE is still in
+        // flight, so a fetch that completes during that window can't repopulate the removed row.
+        let inFlight = state.archivingIDs.union(state.deletingIDs)
+        let visible = inFlight.isEmpty
           ? sessions
-          : sessions.filter { !state.archivingIDs.contains($0.id) }
+          : sessions.filter { !inFlight.contains($0.id) }
         state.sessions = IdentifiedArray(uniqueElements: visible)
         // Seed last-seen counts for newly-discovered sessions so they don't all show as
         // unread on first sight; only later increases flag unread.
@@ -860,6 +910,95 @@ public struct SessionListFeature {
             }
           )
         )
+
+      case let .deleteButtonTapped(id):
+        state.confirmationDialog = ConfirmationDialogState {
+          TextState("Delete session?")
+        } actions: {
+          ButtonState(role: .destructive, action: .confirmDelete(id: id)) {
+            TextState("Delete")
+          }
+          ButtonState(role: .cancel) {
+            TextState("Cancel")
+          }
+        } message: {
+          TextState("This permanently deletes the session and its history.")
+        }
+        return .none
+
+      case let .confirmationDialog(.presented(.confirmDelete(id))):
+        guard let index = state.sessions.index(id: id) else { return .none }
+        // Mirror of `.confirmArchive`: capture rollback info BEFORE mutating (session + list
+        // index + pin position + seen baseline), then optimistically remove + persist and run
+        // the DELETE. On failure everything is restored locally.
+        let session = state.sessions[index]
+        let pinIndex = state.pinnedIDs.firstIndex(of: id)
+        let seenCount = state.seenCounts[id]
+        state.sessions.remove(id: id)
+        state.pinnedIDs.removeAll { $0 == id }
+        state.seenCounts[id] = nil
+        // In-flight guard: a fetch landing during the DELETE window filters this id out and
+        // the poll skips — closing the window where a reload could resurrect the removed row.
+        state.deletingIDs.insert(id)
+        let pinnedIDs = state.pinnedIDs
+        let seenCounts = state.seenCounts
+        let deleteProfile = state.scopedProfileName
+        return .concatenate(
+          // Tell the parent FIRST (before the DELETE runs) so it can tear the live-chat slot
+          // down when this is the slot's session and wipe the cached snapshot — the socket
+          // must not keep streaming into (and the cache must not repaint) a deleted session.
+          .send(.delegate(.sessionDeleted(id: id))),
+          .merge(
+            // Cancel any in-flight fetch (list load OR search): one started before this
+            // delete could land afterward and resurrect the row we just removed.
+            .cancel(id: CancelID.fetch),
+            .run { [rest, preferences, connection = state.connection] send in
+              preferences.savePinnedIDs(pinnedIDs)
+              preferences.saveSeenCounts(seenCounts)
+              do {
+                try await rest.deleteSession(connection, id, deleteProfile)
+                await send(.deleteSucceeded(id: id))
+              } catch {
+                await send(.deleteFailed(
+                  id: id, session: session, index: index, pinIndex: pinIndex,
+                  seenCount: seenCount, error: (error as? RESTError) ?? .unreachable
+                ))
+              }
+            }
+          )
+        )
+
+      case let .deleteSucceeded(id):
+        // DELETE landed (an `already_absent` body is success by contract) — clear the
+        // transient guard so the poll resumes, and cancel any fetch that started during the
+        // window: with the guard now gone, its stale response could resurrect the row.
+        state.deletingIDs.remove(id)
+        return .cancel(id: CancelID.fetch)
+
+      case let .deleteFailed(id, session, index, pinIndex, seenCount, error):
+        // The delete didn't take — the server still has the session. Lift the guard and
+        // restore everything LOCALLY (mirrors `archiveFailed`): re-insert at the saved index,
+        // restore pin + seen baseline, persist. A definitive 404/405 means the agent lacks
+        // the DELETE endpoint (on older agents the path answers 405, since it exists for
+        // PATCH/GET) → flip the capability off SILENTLY, no banner, like the other
+        // capability flips. Anything else surfaces the banner.
+        state.deletingIDs.remove(id)
+        let insertAt = min(index, state.sessions.count)
+        state.sessions.insert(session, at: insertAt)
+        if let pinIndex {
+          let pinAt = min(pinIndex, state.pinnedIDs.count)
+          state.pinnedIDs.insert(id, at: pinAt)
+        }
+        state.seenCounts[id] = seenCount
+        switch error {
+        case .notFound, .server(status: 405, detail: _):
+          state.deleteSupported = false
+        default:
+          state.loadError = "Couldn’t delete the session."
+        }
+        preferences.savePinnedIDs(state.pinnedIDs)
+        preferences.saveSeenCounts(state.seenCounts)
+        return .none
 
       case let .confirmationDialog(.presented(.confirmDeleteProfile(name))):
         guard let profile = state.profiles[id: name], !profile.isDefault else { return .none }
@@ -1177,6 +1316,7 @@ public struct SessionListFeature {
     state.seenCounts = preferences.loadSeenCounts()
     state.pinnedIDs = preferences.loadPinnedIDs()
     state.groupingMode = preferences.loadGroupingMode()
+    state.defaultSwipeAction = preferences.loadDefaultSessionSwipeAction()
   }
 
   /// Refresh "now", clear errors, reload persisted prefs, and fetch the session list

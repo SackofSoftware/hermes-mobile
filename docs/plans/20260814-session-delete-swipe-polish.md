@@ -184,30 +184,31 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 - Modify: `HermesKit/Sources/HermesKit/Features/SessionListFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
 
-- [ ] state: `deleteSupported: Bool = true`, `deletingIDs: Set<String>`,
+- [x] state: `deleteSupported: Bool = true`, `deletingIDs: Set<String>`,
       `defaultSwipeAction: SessionSwipeAction` (loaded with the other prefs on
       `.task`; computed `effectiveSwipeAction` clamps to `.archive` when
       `!deleteSupported`)
-- [ ] actions: `deleteButtonTapped(id:)` raises a `ConfirmationDialogState`
+- [x] actions: `deleteButtonTapped(id:)` raises a `ConfirmationDialogState`
       ("Delete session?" / destructive Delete / message "This permanently deletes
       the session and its history."), `Dialog.confirmDelete(id:)`,
       `deleteSucceeded(id:)`, `deleteFailed(...)` carrying the same rollback
-      payload as archive (session, index, pinIndex, seenCount)
-- [ ] `confirmDelete`: mirror `confirmArchive` — capture rollback, optimistic
+      payload as archive (session, index, pinIndex, seenCount) plus the `error`
+      (so the reducer can tell a capability verdict from a transient failure)
+- [x] `confirmDelete`: mirror `confirmArchive` — capture rollback, optimistic
       removal (list + pin + seen + persist), `deletingIDs` insert, send
       `.delegate(.sessionDeleted(id:))` FIRST, cancel in-flight fetch, run
       `rest.deleteSession` with `scopedProfileName`
-- [ ] fetch/poll guards: extend the `archivingIDs` filtering to also exclude
+- [x] fetch/poll guards: extend the `archivingIDs` filtering to also exclude
       `deletingIDs` (both windows can resurrect a removed row)
-- [ ] `deleteFailed`: on `.notFound`/`.server(405)` flip `deleteSupported = false`,
+- [x] `deleteFailed`: on `.notFound`/`.server(405)` flip `deleteSupported = false`,
       restore the row silently (no banner); any other error restores + sets
       `loadError = "Couldn't delete the session."`
-- [ ] write tests: confirm→success (optimistic removal, delegate order, prefs
+- [x] write tests: confirm→success (optimistic removal, delegate order, prefs
       persisted, guard cleared)
-- [ ] write tests: failure rollback (row/pin/seen restored, banner), capability
+- [x] write tests: failure rollback (row/pin/seen restored, banner), capability
       flip on 404 and on 405 (row restored, no banner, flag off)
-- [ ] write tests: fetch landing during the delete window excludes the row
-- [ ] run tests — must pass before task 4
+- [x] write tests: fetch landing during the delete window excludes the row
+- [x] run tests — must pass before task 4 (full suite: 1138 tests, 60 suites, all pass)
 
 ### Task 4: `AppFeature` teardown + snapshot wipe on delete
 

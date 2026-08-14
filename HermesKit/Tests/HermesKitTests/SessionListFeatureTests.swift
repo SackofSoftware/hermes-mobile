@@ -939,6 +939,257 @@ struct SessionListFeatureTests {
     #expect(store.state.sessions.map(\.id) == ["a", "b"])
   }
 
+  // MARK: Deleting (mirrors archive: dialog → optimistic removal + rollback + guard)
+
+  @Test func deleteButtonPresentsConfirmationDialog() async {
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: [Session(id: "a")])
+    ) {
+      SessionListFeature()
+    }
+
+    await store.send(.deleteButtonTapped(id: "a")) {
+      $0.confirmationDialog = ConfirmationDialogState {
+        TextState("Delete session?")
+      } actions: {
+        ButtonState(role: .destructive, action: .confirmDelete(id: "a")) {
+          TextState("Delete")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState("This permanently deletes the session and its history.")
+      }
+    }
+    // Dismissing (cancel) clears the dialog and leaves the session in place.
+    await store.send(.confirmationDialog(.dismiss)) {
+      $0.confirmationDialog = nil
+    }
+    #expect(store.state.sessions.map(\.id) == ["a"])
+  }
+
+  @Test func confirmDeleteRemovesSessionOptimisticallyAndCallsRPC() async {
+    let prefs = PreferencesClient.inMemory()
+    let deleted = LockIsolated<[(String, String?)]>([])
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [Session(id: "a"), Session(id: "b")],
+      seenCounts: ["a": 1, "b": 2],
+      pinnedIDs: ["a"]
+    )
+    initial.confirmationDialog = ConfirmationDialogState {
+      TextState("Delete session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmDelete(id: "a")) { TextState("Delete") }
+    }
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+      $0.hermesREST.deleteSession = { @Sendable _, id, profile in
+        deleted.withValue { $0.append((id, profile)) }
+      }
+    }
+
+    await store.send(.confirmationDialog(.presented(.confirmDelete(id: "a")))) {
+      $0.confirmationDialog = nil
+      $0.sessions = [Session(id: "b")]
+      $0.pinnedIDs = []
+      $0.seenCounts = ["b": 2]
+      $0.deletingIDs = ["a"] // in-flight guard while the DELETE runs
+    }
+    // The parent is told FIRST (it tears the live-chat slot down + wipes the cached snapshot).
+    await store.receive(\.delegate.sessionDeleted)
+    // Success clears the transient guard (so the poll resumes) and cancels any stale fetch.
+    await store.receive(\.deleteSucceeded) {
+      $0.deletingIDs = []
+    }
+    await store.finish()
+    #expect(store.state.deletingIDs.isEmpty)
+    #expect(deleted.value.count == 1)
+    #expect(deleted.value.first?.0 == "a")
+    #expect(deleted.value.first?.1 == nil) // default profile → no scoping
+    #expect(prefs.loadPinnedIDs() == [])
+    #expect(prefs.loadSeenCounts() == ["b": 2]) // deleted session's seen baseline persisted-cleared
+  }
+
+  @Test func deleteFailureRestoresSessionPinAndSeenStateAndSetsError() async {
+    // On failure the optimistic removal is reversed LOCALLY (no reliance on a reload): the
+    // session, its pin, and its seen baseline come back; the restored prefs are persisted.
+    let prefs = PreferencesClient.inMemory()
+    let session = Session(id: "a", title: "Keep me", messageCount: 5)
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [session, Session(id: "b")],
+      seenCounts: ["a": 3, "b": 2],
+      pinnedIDs: ["a"]
+    )
+    initial.confirmationDialog = ConfirmationDialogState {
+      TextState("Delete session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmDelete(id: "a")) { TextState("Delete") }
+    }
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in throw RESTError.unreachable }
+      // No reload happens; if one did it would throw — restore must be purely local.
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+    }
+
+    await store.send(.confirmationDialog(.presented(.confirmDelete(id: "a")))) {
+      $0.confirmationDialog = nil
+      $0.sessions = [Session(id: "b")]
+      $0.pinnedIDs = []
+      $0.seenCounts = ["b": 2]
+      $0.deletingIDs = ["a"]
+    }
+    // The parent notification fires regardless of the DELETE outcome (the delete was confirmed).
+    await store.receive(\.delegate.sessionDeleted)
+    // Failure restores the session + pin + seen baseline LOCALLY, persists them, lifts the
+    // guard, sets the banner — and the capability stays ON (a transient failure is no verdict).
+    await store.receive(\.deleteFailed) {
+      $0.sessions = [session, Session(id: "b")]
+      $0.pinnedIDs = ["a"]
+      $0.seenCounts = ["a": 3, "b": 2]
+      $0.deletingIDs = []
+      $0.loadError = "Couldn’t delete the session."
+    }
+    await store.finish()
+    #expect(store.state.deleteSupported)
+    #expect(prefs.loadPinnedIDs() == ["a"])
+    #expect(prefs.loadSeenCounts() == ["a": 3, "b": 2])
+  }
+
+  @Test(arguments: [RESTError.notFound, RESTError.server(status: 405, detail: nil)])
+  func deleteOnOlderAgentFlipsCapabilityOffSilently(error: RESTError) async {
+    // Older agents lack the DELETE route: a 404 — or a 405, since `/api/sessions/{id}`
+    // exists there for PATCH/GET — restores the row and flips `deleteSupported` off with
+    // NO banner (mirror the silent capability flips).
+    let session = Session(id: "a", title: "Keep me")
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [session, Session(id: "b")]
+    )
+    initial.confirmationDialog = ConfirmationDialogState {
+      TextState("Delete session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmDelete(id: "a")) { TextState("Delete") }
+    }
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = .inMemory()
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in throw error }
+    }
+
+    await store.send(.confirmationDialog(.presented(.confirmDelete(id: "a")))) {
+      $0.confirmationDialog = nil
+      $0.sessions = [Session(id: "b")]
+      $0.deletingIDs = ["a"]
+    }
+    await store.receive(\.delegate.sessionDeleted)
+    await store.receive(\.deleteFailed) {
+      $0.sessions = [session, Session(id: "b")]
+      $0.deletingIDs = []
+      $0.deleteSupported = false // capability off — Delete affordances hide from here on
+      // NO loadError — the flip is silent.
+    }
+    await store.finish()
+    #expect(store.state.loadError == nil)
+    // With the capability off, a persisted `.delete` swipe pref clamps back to Archive.
+    #expect(store.state.effectiveSwipeAction == .archive)
+  }
+
+  @Test func successResponseDuringDeleteIsFilteredButGuardIsTransient() async {
+    // A fetch that completes mid-DELETE (its response still carrying the deleting session)
+    // must be filtered WHILE the id is in flight. The guard is transient: deleteSucceeded
+    // clears it, so a LATER response would include the id again (no permanent filter).
+    var initial = SessionListFeature.State(
+      connection: connection,
+      sessions: [Session(id: "b")],
+      isLoading: true,
+      seenCounts: ["b": 2]
+    )
+    initial.deletingIDs = ["a"]
+    let store = TestStore(initialState: initial) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+    }
+
+    // A stale response landing DURING the in-flight window still includes "a" (and "b"); only
+    // "b" survives, and "a" is NOT re-seeded into seenCounts (filtered before the seeding loop).
+    await store.send(.sessionsResponse(.success([Session(id: "a"), Session(id: "b")]))) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "b")] // "a" filtered out while in flight
+    }
+    #expect(store.state.seenCounts["a"] == nil)
+
+    // Success clears the transient guard (cancelling any in-flight fetch).
+    await store.send(.deleteSucceeded(id: "a")) {
+      $0.deletingIDs = []
+    }
+
+    // With the guard cleared, a LATER authoritative response is no longer filtered — the
+    // server is the source of truth (a genuinely deleted session just won't be in it).
+    await store.send(.sessionsResponse(.success([Session(id: "b")])))
+    #expect(store.state.sessions.map(\.id) == ["b"])
+  }
+
+  @Test func pollSkipsWhileDeleteInFlight() async {
+    let store = TestStore(
+      initialState: {
+        var state = SessionListFeature.State(connection: connection)
+        state.deletingIDs = ["a"]
+        return state
+      }()
+    ) {
+      SessionListFeature()
+    }
+
+    // No `.pulledToRefresh` is received — the poll skips while a DELETE is in flight
+    // (a reload could resurrect the optimistically-removed row).
+    await store.send(.pollTick)
+  }
+
+  @Test func effectiveSwipeActionClampsToArchiveWhenDeleteUnsupported() {
+    var state = SessionListFeature.State(connection: connection)
+    state.defaultSwipeAction = .delete
+    #expect(state.effectiveSwipeAction == .delete) // supported → the pref rules
+
+    state.deleteSupported = false
+    #expect(state.effectiveSwipeAction == .archive) // unsupported → clamped, pref untouched
+    #expect(state.defaultSwipeAction == .delete)
+  }
+
+  @Test func loadSeedsDefaultSwipeActionFromPreferences() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveDefaultSessionSwipeAction(.delete)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.preferences = prefs
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+    }
+
+    await store.send(.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+      $0.defaultSwipeAction = .delete // seeded from prefs with the other pref reloads
+    }
+    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
+    }
+  }
+
   // MARK: Rename (optimistic + rollback, mirroring archive)
 
   @Test func renameOptimisticallyUpdatesTitleAndCallsRPC() async {

@@ -237,16 +237,18 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 - Modify: `HermesMobile/Sources/Features/Settings/SettingsView.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SettingsFeatureTests.swift`
 
-- [ ] `SettingsFeature.State`: `defaultSwipeAction` + `deleteSupported` (passed in
+- [x] `SettingsFeature.State`: `defaultSwipeAction` + `deleteSupported` (passed in
       by `SessionListFeature` when presenting the sheet)
-- [ ] action `defaultSwipeActionChanged(SessionSwipeAction)` persists via
+- [x] action `defaultSwipeActionChanged(SessionSwipeAction)` persists via
       `PreferencesClient` and bubbles a delegate so the list updates immediately
-      on sheet dismissal (mirror how other settings changes propagate)
-- [ ] `SettingsView`: a "Default swipe action" `Picker` (Archive/Delete), rendered
+      on sheet dismissal (mirror how other settings changes propagate —
+      `SessionListFeature` mirrors the value on the delegate)
+- [x] `SettingsView`: a "Default swipe action" `Picker` (Archive/Delete), rendered
       only when `deleteSupported`
-- [ ] write tests: change persists + delegate fires; row hidden state when
-      unsupported (reducer-level: state exposes the flag)
-- [ ] run tests — must pass before task 6
+- [x] write tests: change persists + delegate fires; row hidden state when
+      unsupported (reducer-level: state exposes the flag); list-side seeding +
+      delegate mirroring in `SessionListFeatureTests`
+- [x] run tests — must pass before task 6 (full suite: 1146 tests, 60 suites, all pass)
 
 ### Task 6: Main-list view changes — swipe order, default action, context menu, dialog presentation
 

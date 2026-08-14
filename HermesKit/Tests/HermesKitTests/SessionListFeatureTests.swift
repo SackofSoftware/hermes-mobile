@@ -1515,6 +1515,30 @@ struct SessionListFeatureTests {
     }
   }
 
+  @Test func settingsPresentationThreadsSwipeActionAndDeleteSupport() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.defaultSwipeAction = .delete
+    initial.deleteSupported = false // an earlier 404/405 flipped delete off
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    await store.send(.settingsButtonTapped) {
+      $0.settings = SettingsFeature.State(
+        connection: self.connection, defaultSwipeAction: .delete, deleteSupported: false
+      )
+    }
+  }
+
+  @Test func settingsSwipeActionDelegateUpdatesTheList() async {
+    var initial = SessionListFeature.State(connection: connection)
+    initial.settings = SettingsFeature.State(connection: connection)
+    let store = TestStore(initialState: initial) { SessionListFeature() }
+
+    // Settings already persisted the pref; the list mirrors it in-memory immediately.
+    await store.send(.settings(.presented(.delegate(.defaultSwipeActionChanged(.delete))))) {
+      $0.defaultSwipeAction = .delete
+    }
+  }
+
   // MARK: Push registration (Task C4)
 
   @Test func requestAuthorizationRegistersWhenAuthorized() async {

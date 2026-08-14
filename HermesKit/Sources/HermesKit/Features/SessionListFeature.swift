@@ -1103,7 +1103,10 @@ public struct SessionListFeature {
 
       case .settingsButtonTapped:
         state.settings = SettingsFeature.State(
-          connection: state.connection, pushAvailable: state.pushAvailable
+          connection: state.connection,
+          pushAvailable: state.pushAvailable,
+          defaultSwipeAction: state.defaultSwipeAction,
+          deleteSupported: state.deleteSupported
         )
         return .none
 
@@ -1281,6 +1284,12 @@ public struct SessionListFeature {
       case .settings(.presented(.delegate(.reconnect))):
         // Manual reconnect = re-fetch the list over REST.
         return .send(.pulledToRefresh)
+
+      case let .settings(.presented(.delegate(.defaultSwipeActionChanged(action)))):
+        // Mirror the new default immediately (Settings already persisted it) so the swipe
+        // rows are right the moment the sheet dismisses.
+        state.defaultSwipeAction = action
+        return .none
 
       case .settings(.presented(.delegate(.installPushPlugin))):
         // The Settings push guide's "Ask agent" → dismiss Settings (Settings already requested

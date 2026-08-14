@@ -36,6 +36,13 @@ public struct SettingsFeature {
     public var pushPlugin: PushPluginInfo?
     /// Drives the plugin-update row: button state and the result label under it.
     public var pluginUpdate: PluginUpdateStatus
+    /// The session list's default trailing-swipe action, edited via the picker below and
+    /// persisted immediately (seeded from the list's current value when presenting).
+    public var defaultSwipeAction: SessionSwipeAction
+    /// Whether the connected agent supports `DELETE /api/sessions/{id}` (seeded from the
+    /// session list's capability flag). When false the swipe-action picker is hidden —
+    /// Delete isn't offered anywhere, so the choice would be meaningless.
+    public var deleteSupported: Bool
 
     /// The outcome of a "send test notification" attempt, surfaced in the view/snapshots.
     public enum TestPushStatus: Equatable, Sendable {
@@ -64,7 +71,9 @@ public struct SettingsFeature {
       notificationsDenied: Bool = false,
       testPushStatus: TestPushStatus = .idle,
       pushPlugin: PushPluginInfo? = nil,
-      pluginUpdate: PluginUpdateStatus = .idle
+      pluginUpdate: PluginUpdateStatus = .idle,
+      defaultSwipeAction: SessionSwipeAction = .default,
+      deleteSupported: Bool = true
     ) {
       self.connection = connection
       self.token = connection.token ?? ""
@@ -76,6 +85,8 @@ public struct SettingsFeature {
       self.testPushStatus = testPushStatus
       self.pushPlugin = pushPlugin
       self.pluginUpdate = pluginUpdate
+      self.defaultSwipeAction = defaultSwipeAction
+      self.deleteSupported = deleteSupported
     }
 
     /// The installed plugin is behind `PushSetup.minimumPluginVersion` AND the agent can pull
@@ -132,6 +143,8 @@ public struct SettingsFeature {
     case updatePluginTapped
     /// Outcome of that pull.
     case pluginUpdateResult(PluginUpdateOutcome)
+    /// User picked a different default swipe action for session rows.
+    case defaultSwipeActionChanged(SessionSwipeAction)
     case delegate(Delegate)
 
     /// Result of the in-app plugin update, flattened to an `Equatable` shape (the failure
@@ -153,6 +166,9 @@ public struct SettingsFeature {
       /// The push guide's "Ask agent to install" — dismiss Settings and open a new chat with
       /// the install prompt pre-filled (handled up the chain by `AppFeature`).
       case installPushPlugin
+      /// The default swipe action changed — the session list mirrors it immediately so the
+      /// rows are right the moment the sheet dismisses.
+      case defaultSwipeActionChanged(SessionSwipeAction)
     }
   }
 
@@ -289,6 +305,12 @@ public struct SettingsFeature {
       case let .testPushResult(ok):
         state.testPushStatus = ok ? .sent : .failed
         return .none
+
+      case let .defaultSwipeActionChanged(action):
+        state.defaultSwipeAction = action
+        preferences.saveDefaultSessionSwipeAction(action)
+        // Bubble up so the session list reflects the new default immediately on dismissal.
+        return .send(.delegate(.defaultSwipeActionChanged(action)))
 
       case .askAgentToInstallTapped:
         // Dismiss Settings and bubble up — `AppFeature` opens a new chat with the install

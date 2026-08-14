@@ -471,4 +471,43 @@ struct SettingsFeatureTests {
     await store.send(.updatePluginTapped) // already `.updating` → no state change, no effect
     #expect(calls.value == 0)
   }
+
+  // MARK: Default swipe action (issue #73)
+
+  /// Picking a new default persists it via `PreferencesClient` and bubbles a delegate so
+  /// the session list mirrors it before the sheet even dismisses.
+  @Test func swipeActionChangePersistsAndBubbles() async {
+    let preferences = PreferencesClient.inMemory()
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+    }
+
+    await store.send(.defaultSwipeActionChanged(.delete)) {
+      $0.defaultSwipeAction = .delete
+    }
+    await store.receive(\.delegate.defaultSwipeActionChanged)
+    #expect(preferences.loadDefaultSessionSwipeAction() == .delete)
+
+    // And back — the picker is a toggle both ways, not a one-shot.
+    await store.send(.defaultSwipeActionChanged(.archive)) {
+      $0.defaultSwipeAction = .archive
+    }
+    await store.receive(\.delegate.defaultSwipeActionChanged)
+    #expect(preferences.loadDefaultSessionSwipeAction() == .archive)
+  }
+
+  /// The picker row is capability-gated in the view off `deleteSupported`; the reducer
+  /// state exposes the flag as seeded by the presenting session list, defaulting to shown.
+  @Test func swipeActionStateExposesTheCapabilityFlag() async {
+    let defaults = SettingsFeature.State(connection: connection)
+    #expect(defaults.defaultSwipeAction == .archive)
+    #expect(defaults.deleteSupported) // picker shown by default
+
+    let unsupported = SettingsFeature.State(
+      connection: connection, defaultSwipeAction: .archive, deleteSupported: false
+    )
+    #expect(!unsupported.deleteSupported) // older agent → the view hides the row
+  }
 }

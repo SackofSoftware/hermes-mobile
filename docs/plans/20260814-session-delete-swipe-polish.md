@@ -317,13 +317,34 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] all issue-#73 + polish requirements from Overview implemented (walk the list)
-- [ ] edge cases: delete last row, delete pinned row, delete while offline
-      (banner + rollback), delete on old agent (silent flip, UI hides), full-swipe
-      archive still confirms, archived-sheet delete does not
-- [ ] run full SPM suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run `make snapshot` — judge failures by the render-size rule
-- [ ] `tuist generate` + app build to confirm no target breakage
+- [x] all issue-#73 + polish requirements from Overview implemented (walk the list):
+      delete via `DELETE /api/sessions/{id}` in list + archived sheet; bottom
+      action sheet for archive/delete confirmations (`BottomActionSheet`); 48pt row
+      content floor; full-swipe = destructive default (listed first); capability-gated
+      Settings picker with delegate mirror; context menu always offers Archive +
+      Delete (Delete capability-gated); archived-sheet delete immediate; Delete on
+      every row variant (all list sections funnel through the one `row(...)` builder);
+      swipe pref reset in all three logout recipes (SettingsFeature clear-token,
+      retry-screen logout, reauth quit)
+- [x] edge cases: delete last row (rollback re-insert clamps via
+      `min(index, count)` — code-read), delete pinned row (tests: pin removed +
+      restored), delete while offline (`.unreachable` → rollback + banner test),
+      delete on old agent (parameterized 404/405 tests, silent flip, clamp to
+      Archive, sheet↔list mirroring), full-swipe archive still confirms (swipe
+      button sends `.archiveButtonTapped` → dialog), archived-sheet delete does not
+      (immediate-removal test, no dialog)
+- [x] run full SPM suite: 1155 tests, 60 suites, all pass
+- [x] run `make snapshot` — Task-8 fix: Task 5's picker made the SettingsView
+      baselines content-stale, so `SettingsSnapshotTests` was re-recorded in place
+      (same one-run `record: .failed` technique as Task 6; also commits the three
+      plugin-update baselines that had never been tracked). Final run: Settings +
+      SessionRowLayout clean; remaining ~67 failures are the documented pre-existing
+      drift/flake (a rotating subset incl. 7 session-suite flakes verified
+      equal-size and visually identical baseline-vs-artifact — no render-size
+      mismatch anywhere, no code cause; global re-record still pending)
+- [x] `tuist generate` + app build (`make build`, Debug, generic iOS Simulator) —
+      succeeds; only warning is a pre-noted TCA `withState` deprecation in
+      `BottomActionSheet.swift`
 
 ### Task 9: Update documentation
 

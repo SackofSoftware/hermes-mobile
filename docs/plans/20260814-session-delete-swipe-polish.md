@@ -348,14 +348,22 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 
 ### Task 9: Update documentation
 
-- [ ] update `docs/features/session-list.md` (delete flow, capability gate incl.
-      the 405 wrinkle, swipe-default setting, archived-sheet delete, row height)
-- [ ] update `CLAUDE.md` session-list bullet if the compressed rules change
-- [ ] close issue #73 reference: note in the plan that the GitHub issue can be
-      closed on merge
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `docs/features/session-list.md` (two new #73 sections: delete flow +
+      capability gate incl. the 405 wrinkle + AppFeature `flushSnapshot: false`
+      teardown/snapshot wipe; swipe-default setting, destructive-first swipe order,
+      48pt row floor, archived-sheet immediate delete, `BottomActionSheet` presenter)
+- [x] update `CLAUDE.md` session-list bullets (delete mirrors archive with the
+      404/405 silent flip + sheet mirroring + `flushSnapshot: false` teardown;
+      row-affordance bullet gains destructive-first order, 48pt floor, and the
+      `.bottomActionSheet` presentation rule)
+- [x] close issue #73 reference: noted below in Post-Completion — merging this
+      branch closes GitHub issue #73 (delete + all polish items implemented)
+- [x] plan move deferred to orchestrator completion step
 
 ## Post-Completion
+
+**Issue closure:** merging this branch closes GitHub issue #73 — every requirement
+from the issue plus the polish items in the Overview is implemented and tested.
 
 **Manual verification:**
 - On-device iOS 26 check that both confirmations present as bottom action sheets

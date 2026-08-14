@@ -195,6 +195,7 @@ public struct AppFeature {
   @Dependency(\.hermesREST) var rest
   @Dependency(\.push) var push
   @Dependency(\.backgroundTask) var backgroundTask
+  @Dependency(\.chatSnapshot) var chatSnapshot
 
   public init() {}
 
@@ -553,6 +554,20 @@ public struct AppFeature {
         // isn't worth replaying the teardown.
         return teardownSlot()
 
+      case let .home(.delegate(.sessionDeleted(id))):
+        // The user permanently deleted a session. ALWAYS wipe its cached snapshot + turn
+        // anchor — a deleted session must never repaint from the non-authoritative cache.
+        // When it's the slot's session (possibly detached mid-turn), tear the live chat
+        // down too, WITHOUT the snapshot flush (`flushSnapshot: false`): the flush would
+        // re-save the very snapshot this wipe deletes. Same deliberate asymmetry as
+        // archive: if the DELETE later fails, the list restores the row but the slot and
+        // cache stay cleared — re-opening simply resumes the session fresh.
+        let wipeSnapshot: Effect<Action> = .run { [chatSnapshot] _ in
+          chatSnapshot.deleteSnapshot(id)
+        }
+        guard let chat = state.liveChat, chat.sessionKey == id else { return wipeSnapshot }
+        return .concatenate(teardownSlot(flushSnapshot: false), wipeSnapshot)
+
       case .home(.delegate(.disconnect)):
         // Token cleared in Settings → tear down and return to onboarding. Nil-ing the slot
         // auto-cancels its effects (socket included). The tap stash is structurally nil
@@ -711,15 +726,26 @@ public struct AppFeature {
   /// early in parallel (idempotent no-ops in the foreground) — a torn-down slot has
   /// nothing left for the OS task to keep alive.
   ///
+  /// `flushSnapshot: false` skips the `persistNow` flush — used ONLY for permanent session
+  /// deletion, where flushing would re-save the very snapshot the delete path is about to
+  /// wipe from the cache. Every other teardown keeps the flush (the debounced persist is
+  /// about to be cancelled and the session still exists).
+  ///
   /// The action chain is delivered atomically: `Effect.send` emits synchronously, so the
   /// store drains persist → teardown → clear (→ fill) in one send loop — no user action
   /// can interleave between the steps.
-  private func teardownSlot(thenFill replacement: ChatFeature.State? = nil) -> Effect<Action> {
-    var chain: [Effect<Action>] = [
-      .send(.liveChat(.persistNow)),
+  private func teardownSlot(
+    thenFill replacement: ChatFeature.State? = nil,
+    flushSnapshot: Bool = true
+  ) -> Effect<Action> {
+    var chain: [Effect<Action>] = []
+    if flushSnapshot {
+      chain.append(.send(.liveChat(.persistNow)))
+    }
+    chain.append(contentsOf: [
       .send(.liveChat(.teardown)),
       .send(.clearLiveChat),
-    ]
+    ])
     if let replacement {
       chain.append(.send(.fillLiveChat(replacement)))
     }

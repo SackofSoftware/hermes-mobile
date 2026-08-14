@@ -984,6 +984,92 @@ struct AppFeatureTests {
     #expect(store.state.liveChat == nil)
   }
 
+  /// Deleting the slot's session (issue #73) tears the (possibly detached) slot down —
+  /// its socket must not keep streaming into a session the server no longer has — and
+  /// wipes the session's cached snapshot + turn anchor so it can never repaint from the
+  /// non-authoritative cache. The teardown deliberately SKIPS the snapshot flush
+  /// (`flushSnapshot: false`): flushing would re-save the very snapshot the wipe deletes,
+  /// which is also why the final cache state below is deterministic.
+  @Test func deletingSlotSessionTearsDownSlotAndWipesSnapshot() async {
+    let snapshots = ChatSnapshotClient.inMemory()
+    snapshots.saveSnapshot("s1", ChatSnapshot(model: "gpt-5", rows: []))
+    snapshots.setTurnAnchor("s1", Date(timeIntervalSince1970: 5))
+
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        // Empty path — the user is on the list (where delete lives).
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in }
+      $0.chatSnapshot = snapshots
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.deleteButtonTapped(id: "s1")))
+    await store.send(.home(.confirmationDialog(.presented(.confirmDelete(id: "s1")))))
+    // The delegate fires FIRST (optimistically, before the DELETE round-trips)…
+    await store.receive(\.home.delegate.sessionDeleted)
+    // …then the slot goes down: teardown + clear (no persist flush for a deleted session).
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat) {
+      $0.liveChat = nil
+    }
+    await store.finish()
+    #expect(snapshots.loadSnapshot("s1") == nil)
+    #expect(snapshots.turnAnchor("s1") == nil)
+  }
+
+  /// Deleting a session that is NOT the slot's leaves the live chat untouched but still
+  /// wipes the deleted session's cached snapshot + turn anchor. The slot session's own
+  /// cache entry survives.
+  @Test func deletingNonSlotSessionWipesItsSnapshotAndKeepsSlot() async {
+    let snapshots = ChatSnapshotClient.inMemory()
+    snapshots.saveSnapshot("other", ChatSnapshot(model: "gpt-5", rows: []))
+    snapshots.setTurnAnchor("other", Date(timeIntervalSince1970: 5))
+    snapshots.saveSnapshot("s1", ChatSnapshot(model: "keep-me", rows: []))
+
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, sessions: [Session(id: "s1"), Session(id: "other")]
+        ),
+        // Empty path — the user is on the list (where delete lives).
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in }
+      $0.chatSnapshot = snapshots
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.deleteButtonTapped(id: "other")))
+    await store.send(.home(.confirmationDialog(.presented(.confirmDelete(id: "other")))))
+    await store.receive(\.home.delegate.sessionDeleted)
+    await store.skipReceivedActions()
+    await store.finish()
+    #expect(store.state.liveChat != nil)
+    #expect(snapshots.loadSnapshot("other") == nil)
+    #expect(snapshots.turnAnchor("other") == nil)
+    #expect(snapshots.loadSnapshot("s1") != nil) // the slot session's cache is untouched
+  }
+
   /// Re-opening the slot's OWN session from the list (tapping the glowing row of a detached
   /// running turn) must NOT build a fresh `ChatFeature.State` — the accumulated detached
   /// rows and composer draft survive. The marker is pushed back and `.reattached` hydrates

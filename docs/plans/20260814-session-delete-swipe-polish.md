@@ -218,15 +218,17 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
   per-session wipe doesn't already exist)
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift`
 
-- [ ] handle `.sessionDeleted` like `.sessionArchived` (slot teardown via
+- [x] handle `.sessionDeleted` like `.sessionArchived` (slot teardown via
       `teardownSlot` when the deleted id matches the live slot — nil-out is
-      mandatory per the slot rules)
-- [ ] additionally wipe the deleted session's snapshot + turn anchor from
-      `ChatSnapshotClient` (add a `deleteSnapshot(sessionID:)` if missing,
-      incl. `.inMemory()`)
-- [ ] write tests: delete of the slot session tears down + wipes snapshot; delete
+      mandatory per the slot rules; teardown runs with `flushSnapshot: false` so
+      the persist flush can't re-save the snapshot the wipe deletes)
+- [x] additionally wipe the deleted session's snapshot + turn anchor from
+      `ChatSnapshotClient` (added `deleteSnapshot(sessionID:)` to client + store,
+      incl. `.inMemory()` + noop)
+- [x] write tests: delete of the slot session tears down + wipes snapshot; delete
       of a non-slot session leaves the slot untouched but still wipes its snapshot
-- [ ] run tests — must pass before task 5
+      (+ client-level tests: per-session wipe scoping, unknown-session no-op)
+- [x] run tests — must pass before task 5 (full suite: 1142 tests, 60 suites, all pass)
 
 ### Task 5: Settings toggle for the default action
 

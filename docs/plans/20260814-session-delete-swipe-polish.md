@@ -150,16 +150,16 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 - Modify: `HermesKit/Tests/HermesKitTests/HermesRESTClientTests.swift` (or the
   existing REST client test file)
 
-- [ ] add `deleteSession: @Sendable (ServerConnection, _ id: String, _ profile: String?) async throws -> Void`
+- [x] add `deleteSession: @Sendable (ServerConnection, _ id: String, _ profile: String?) async throws -> Void`
       with doc comment covering the 405-on-older-agents contract
-- [ ] `liveValue`: `DELETE /api/sessions/{id}`, `?profile=` appended only when
+- [x] `liveValue`: `DELETE /api/sessions/{id}`, `?profile=` appended only when
       non-nil (caller passes `nil` for default — same rule as `archive`)
-- [ ] map non-2xx through the existing error mapping (404 → `.notFound`, 405 →
+- [x] map non-2xx through the existing error mapping (404 → `.notFound`, 405 →
       `.server(status: 405, …)`)
-- [ ] write tests: success (method/path asserted), profile threading (omitted for
+- [x] write tests: success (method/path asserted), profile threading (omitted for
       nil, present otherwise)
-- [ ] write tests: 404 and 405 map to the expected `RESTError` cases
-- [ ] run tests — must pass before task 2
+- [x] write tests: 404 and 405 map to the expected `RESTError` cases
+- [x] run tests — must pass before task 2 (full suite: 1127 tests, 60 suites, all pass)
 
 ### Task 2: Persist the default swipe action preference
 

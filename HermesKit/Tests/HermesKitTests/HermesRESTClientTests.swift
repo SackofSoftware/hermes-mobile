@@ -527,6 +527,49 @@ struct HermesRESTClientTests {
     #expect(json == ["title": "New title", "profile": "work"])
   }
 
+  // MARK: Session deletion (#73)
+
+  @Test func deleteSessionSendsDeleteWithAuthHeaderAndNoBody() async throws {
+    // Server answers the idempotent success body; we discard it — 2xx is enough.
+    MockURLProtocol.set(json: #"{"ok":true,"already_absent":false}"#)
+    try await makeClient().deleteSession(connection, "20260610_120231_afcca6", nil)
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.httpMethod == "DELETE")
+    #expect(req.url?.path == "/api/sessions/20260610_120231_afcca6")
+    #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
+    // Default profile → no query; DELETE carries no body.
+    #expect(req.url?.query == nil)
+    #expect(bodyData(req).isEmpty)
+  }
+
+  @Test func deleteSessionWithProfileAddsProfileQueryOnly() async throws {
+    MockURLProtocol.set(status: 200)
+    try await makeClient().deleteSession(connection, "sid", "work")
+    let req = try #require(MockURLProtocol.lastRequest)
+    #expect(req.url?.path == "/api/sessions/sid")
+    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query == [URLQueryItem(name: "profile", value: "work")])
+    // No body even when scoped — the profile rides in the query alone.
+    #expect(bodyData(req).isEmpty)
+  }
+
+  @Test func deleteSessionNotFoundMapsToTypedError() async throws {
+    MockURLProtocol.set(status: 404)
+    await #expect(throws: RESTError.notFound) {
+      try await makeClient().deleteSession(connection, "sid", nil)
+    }
+  }
+
+  /// Older agents route `/api/sessions/{id}` for PATCH/GET only, so an unsupported
+  /// DELETE answers 405 — it must surface as `.server(status: 405)` (capability flip),
+  /// not get swallowed or mapped elsewhere.
+  @Test func deleteSessionMethodNotAllowedMapsToServerError() async throws {
+    MockURLProtocol.set(status: 405, json: #"{"detail":"Method Not Allowed"}"#)
+    await #expect(throws: RESTError.server(status: 405, detail: "Method Not Allowed")) {
+      try await makeClient().deleteSession(connection, "sid", nil)
+    }
+  }
+
   // MARK: Transcription (#7)
 
   @Test func transcribeReturnsTranscriptAndPostsToEndpoint() async throws {

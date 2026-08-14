@@ -189,9 +189,8 @@ bullets below are the compressed rules.
 - **Row affordances**: trailing swipe = destructive default FIRST (full-swipe target),
   then Rename; context menu always offers both Archive and Delete (gated); Copy ID
   context-menu-only; 48pt row-content floor (never a cap) keeps swipe buttons
-  icon-over-label; animations respect reduce-motion. Confirmations keep
-  `ConfirmationDialogState` but present via `.bottomActionSheet` — iOS 26 renders
-  `.confirmationDialog` as a title-less popover (FB20644893).
+  icon-over-label; animations respect reduce-motion. Confirmations follow the
+  destructive-actions idiom below (`ConfirmationDialogState` + `.bottomActionSheet`).
 
 ## UI idioms
 
@@ -199,7 +198,9 @@ bullets below are the compressed rules.
   by an explicit `.onDisappear` action (not bare `.task` cancellation); paused while
   searching; `TestClock`-drivable.
 - **Destructive actions** use TCA `ConfirmationDialogState` (`@Presents`) so
-  confirm/cancel is state-driven and unit-testable.
+  confirm/cancel is state-driven and unit-testable — but present it via
+  `.bottomActionSheet`, never `.confirmationDialog`: iOS 26 renders the system
+  dialog as a title-less popover (FB20644893).
 - **Transient toasts live in the reducer**: a per-copy token (`Int?`, not `Bool` — every
   copy bumps it) + a `cancelInFlight` clock dwell effect (`copiedFeedbackDuration`),
   duplicated per feature. Attach the overlay where nothing can swallow it (before a

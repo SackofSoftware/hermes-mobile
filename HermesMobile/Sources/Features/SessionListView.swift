@@ -66,6 +66,11 @@ struct SessionListView: View {
     .safeAreaInset(edge: .bottom) {
       newChatBar
     }
+    // `bottomActionSheet`, not `.confirmationDialog`: on iOS 26 the SwiftUI modifier
+    // renders as a floating popover (dropping the title and Cancel) wherever it's
+    // attached — the UIKit bridge restores the bottom action sheet for every entry
+    // point (swipe button and context menu alike). See `BottomActionSheet.swift`.
+    .bottomActionSheet($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .task { store.send(.task) }
     .onDisappear { store.send(.onDisappear) }
     .alert(
@@ -94,7 +99,6 @@ struct SessionListView: View {
     } message: {
       Text(ProfileName.hint)
     }
-    .confirmationDialog($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .sheet(item: $store.scope(state: \.settings, action: \.settings)) { settingsStore in
       NavigationStack {
         SettingsView(store: settingsStore)
@@ -505,13 +509,14 @@ struct SessionListView: View {
         .tint(.orange)
     }
     .swipeActions(edge: .trailing) {
+      // Destructive default FIRST: SwiftUI places the first listed button nearest the
+      // edge and makes it the full-swipe target (Mail-style) — full swipe must trigger
+      // the default destructive action, never Rename.
+      defaultSwipeActionButton(session)
       Button("Rename", systemImage: "pencil") {
         store.send(.renameButtonTapped(id: session.id))
       }
       .tint(.blue)
-      Button("Archive", systemImage: "archivebox", role: .destructive) {
-        store.send(.archiveButtonTapped(id: session.id))
-      }
     }
     .contextMenu {
       pinButton(session, isPinned: isPinned)
@@ -523,8 +528,32 @@ struct SessionListView: View {
       Button("Copy ID", systemImage: "doc.on.doc") {
         store.send(.copyIDButtonTapped(id: session.id))
       }
+      // The context menu always offers BOTH destructive actions regardless of the swipe
+      // default; Delete only exists on agents with the DELETE endpoint.
       Button("Archive", systemImage: "archivebox", role: .destructive) {
         store.send(.archiveButtonTapped(id: session.id))
+      }
+      if store.deleteSupported {
+        Button("Delete", systemImage: "trash", role: .destructive) {
+          store.send(.deleteButtonTapped(id: session.id))
+        }
+      }
+    }
+  }
+
+  /// The trailing swipe's destructive slot: Archive or Delete per the user's persisted
+  /// preference (`effectiveSwipeAction` clamps back to Archive on agents without the
+  /// DELETE endpoint). Both confirm through the same reducer-owned dialog.
+  @ViewBuilder
+  private func defaultSwipeActionButton(_ session: Session) -> some View {
+    switch store.effectiveSwipeAction {
+    case .archive:
+      Button("Archive", systemImage: "archivebox", role: .destructive) {
+        store.send(.archiveButtonTapped(id: session.id))
+      }
+    case .delete:
+      Button("Delete", systemImage: "trash", role: .destructive) {
+        store.send(.deleteButtonTapped(id: session.id))
       }
     }
   }

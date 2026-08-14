@@ -725,6 +725,36 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
+  // MARK: BottomActionSheetView
+
+  /// The archive/delete confirmation's content as the custom bottom action sheet renders
+  /// it (#73): title, wrapped message, destructive action in red over a plain Cancel. The
+  /// sheet chrome (detent, dimming) is presentation-only; the content is what's ours.
+  func testBottomActionSheet_archiveConfirmation() {
+    let dialog = ConfirmationDialogState<SessionListFeature.Action.Dialog> {
+      TextState("Archive session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmArchive(id: "s1")) {
+        TextState("Archive")
+      }
+      ButtonState(role: .cancel) {
+        TextState("Cancel")
+      }
+    } message: {
+      TextState("This hides the session from the list. You can restore it from the server.")
+    }
+    let view = BottomActionSheetView(
+      store: Store(initialState: dialog) {
+        EmptyReducer<
+          ConfirmationDialogState<SessionListFeature.Action.Dialog>,
+          SessionListFeature.Action.Dialog
+        >()
+      }
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
   // MARK: ArchivedSessionsView
 
   func testArchivedSessions() {

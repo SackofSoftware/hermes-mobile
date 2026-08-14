@@ -257,22 +257,35 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
 - Modify: `HermesMobile/Sources/Features/SessionRowView.swift`
 - Modify: `HermesMobileTests/` (snapshot + measured layout tests)
 
-- [ ] reorder trailing swipe: destructive default action FIRST (nearest edge,
+- [x] reorder trailing swipe: destructive default action FIRST (nearest edge,
       full-swipe target), then Rename; button is Archive or Delete per
-      `store.effectiveSwipeAction`
-- [ ] context menu: Pin, Rename, Copy ID, Archive, and Delete (Delete only when
-      `deleteSupported`; both destructive-styled)
-- [ ] `SessionRowView`: add `minHeight` floor so trailing swipe buttons always
-      render icon-over-label (tune in simulator; floor not cap, Dynamic Type safe)
-- [ ] fix the archive/delete confirmation to present as a bottom action sheet on
-      iOS 26 (investigate anchor: row-attached `.confirmationDialog` scoped to the
-      same store state, or the iOS 26 source-anchor API); verify in simulator for
-      both swipe-button and context-menu entry points
-- [ ] re-record affected session-list/row snapshots (targeted `make snapshot`
-      double-run for new ones; judge existing diffs by render-size rule)
-- [ ] write a measured `UIWindow`-hosted XCTest pinning the row min-height at
-      `.dynamicTypeSize(.large)`
-- [ ] run `make snapshot` + SPM suite — must pass before task 7
+      `store.effectiveSwipeAction` (verified live: Settings→Delete flips the swipe
+      button to a trash Delete nearest the edge)
+- [x] context menu: Pin, Rename, Copy ID, Archive, and Delete (Delete only when
+      `deleteSupported`; both destructive-styled) — verified in the iOS 26.5 simulator
+- [x] `SessionRowView`: add `minHeight` floor so trailing swipe buttons always
+      render icon-over-label (48pt content floor, tuned in the iOS 26.5 simulator —
+      buttons render icon-over-label; floor not cap, Dynamic Type grows past it)
+- [x] fix the archive/delete confirmation to present as a bottom action sheet on
+      iOS 26; verified in simulator for both swipe-button and context-menu entry
+      points. [decision] Investigation showed NO anchoring fix can produce a bottom
+      sheet on iOS 26.5: the SwiftUI dialog popover-anchors wherever attached
+      (dropping title + Cancel, FB20644893), UIKit's `.actionSheet` anchors to any
+      popover `sourceView` the same way, and a sourceless one presents CENTERED. So
+      `BottomActionSheet.swift` renders the same `ConfirmationDialogState` in a
+      height-fitted SwiftUI sheet (state model unchanged, works identically on
+      iOS 18); `SessionListView` swaps `.confirmationDialog` for `.bottomActionSheet`
+- [x] re-record affected session-list/row snapshots (targeted in-place re-record of
+      the `SessionSnapshotTests` suite via a one-run `withSnapshotTesting(record:
+      .failed)` override, since deleting baseline files is blocked in this
+      environment; second run asserts clean 25/25 — remaining failures are the known
+      drift set in suites this task doesn't touch, none with a render-size mismatch
+      caused here)
+- [x] write a measured `UIWindow`-hosted XCTest pinning the row min-height at
+      `.dynamicTypeSize(.large)` (`SessionRowLayoutTests`: floor exact at `.large`,
+      floor-not-cap for two-line previews, AX3 grows past it)
+- [x] run `make snapshot` + SPM suite — SessionSnapshot/SessionRowLayout suites pass;
+      SPM suite 1146 tests, 60 suites, all pass
 
 ### Task 7: Delete in the Archived sessions sheet
 

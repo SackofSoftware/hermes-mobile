@@ -20,6 +20,10 @@ public struct PreferencesClient: Sendable {
   /// How the session list groups its rows (workspace vs chronological). Device-local UI pref.
   public var loadGroupingMode: @Sendable () -> SessionGroupingMode = { .default }
   public var saveGroupingMode: @Sendable (_ mode: SessionGroupingMode) -> Void
+  /// Which destructive action the session list's trailing swipe defaults to
+  /// (archive vs permanent delete). Device-local UI pref; reset on logout.
+  public var loadDefaultSessionSwipeAction: @Sendable () -> SessionSwipeAction = { .default }
+  public var saveDefaultSessionSwipeAction: @Sendable (_ action: SessionSwipeAction) -> Void
   /// Currently selected Hermes profile name. Device-local — we never change the server's
   /// sticky active profile. `nil` means the default profile.
   public var loadSelectedProfileID: @Sendable () -> String? = { nil }
@@ -58,6 +62,7 @@ public extension PreferencesClient {
     let seenKey = "hermes.seen-message-counts"
     let pinnedKey = "hermes.pinned-session-ids"
     let groupingKey = "hermes.session-grouping-mode"
+    let swipeActionKey = "hermes.default-session-swipe-action"
     let selectedProfileKey = "hermes.selected-profile-id"
     let pushTokenKey = "hermes.push-device-token"
     let pushSnoozeCountKey = "hermes.push-prompt-snooze-count"
@@ -76,6 +81,10 @@ public extension PreferencesClient {
         store.string(forKey: groupingKey).flatMap(SessionGroupingMode.init(rawValue:)) ?? .default
       },
       saveGroupingMode: { store.set($0.rawValue, forKey: groupingKey) },
+      loadDefaultSessionSwipeAction: {
+        store.string(forKey: swipeActionKey).flatMap(SessionSwipeAction.init(rawValue:)) ?? .default
+      },
+      saveDefaultSessionSwipeAction: { store.set($0.rawValue, forKey: swipeActionKey) },
       loadSelectedProfileID: { store.string(forKey: selectedProfileKey) },
       saveSelectedProfileID: { store.set($0, forKey: selectedProfileKey) },
       clearSelectedProfileID: { store.removeObject(forKey: selectedProfileKey) },
@@ -105,6 +114,7 @@ public extension PreferencesClient {
     let seen = LockIsolated<[String: Int]>([:])
     let pinned = LockIsolated<[String]>([])
     let grouping = LockIsolated<SessionGroupingMode>(.default)
+    let swipeAction = LockIsolated<SessionSwipeAction>(.default)
     let selectedProfile = LockIsolated<String?>(nil)
     let pushToken = LockIsolated<String?>(nil)
     let pushSnooze = LockIsolated<(count: Int, until: Date)?>(nil)
@@ -118,6 +128,8 @@ public extension PreferencesClient {
       savePinnedIDs: { pinned.setValue($0) },
       loadGroupingMode: { grouping.value },
       saveGroupingMode: { grouping.setValue($0) },
+      loadDefaultSessionSwipeAction: { swipeAction.value },
+      saveDefaultSessionSwipeAction: { swipeAction.setValue($0) },
       loadSelectedProfileID: { selectedProfile.value },
       saveSelectedProfileID: { selectedProfile.setValue($0) },
       clearSelectedProfileID: { selectedProfile.setValue(nil) },

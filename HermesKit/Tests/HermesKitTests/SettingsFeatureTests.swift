@@ -15,6 +15,7 @@ struct SettingsFeatureTests {
     preferences.savePinnedIDs(["s1"])
     preferences.saveSeenCounts(["s1": 4])
     preferences.saveGroupingMode(.chronological)
+    preferences.saveDefaultSessionSwipeAction(.delete)
     preferences.saveSelectedProfileID("staging")
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
@@ -32,6 +33,7 @@ struct SettingsFeatureTests {
     #expect(preferences.loadPinnedIDs() == []) // pins are per-server — cleared on logout
     #expect(preferences.loadSeenCounts() == [:]) // unread state cleared too
     #expect(preferences.loadGroupingMode() == .workspace) // grouping pref reset on logout
+    #expect(preferences.loadDefaultSessionSwipeAction() == .archive) // swipe pref reset on logout
     #expect(preferences.loadSelectedProfileID() == nil) // selected profile cleared on logout
   }
 

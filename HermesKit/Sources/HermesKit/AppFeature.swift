@@ -294,6 +294,7 @@ public struct AppFeature {
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
         preferences.saveGroupingMode(.default)
+        preferences.saveDefaultSessionSwipeAction(.default)
         state.connectionFailed = nil
         state.path = .init()
         state.liveChat = nil
@@ -606,6 +607,7 @@ public struct AppFeature {
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
         preferences.saveGroupingMode(.default)
+        preferences.saveDefaultSessionSwipeAction(.default)
         state.reauth = nil
         state.path = .init()
         state.liveChat = nil

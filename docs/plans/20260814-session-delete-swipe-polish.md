@@ -169,13 +169,14 @@ list and the archived-sessions sheet, plus a batch of session-list interaction f
   where similar small prefs enums live, e.g. next to grouping pref if one exists)
 - Modify: the `PreferencesClient` test file
 
-- [ ] add `SessionSwipeAction` enum (`archive` | `delete`, raw `String`,
+- [x] add `SessionSwipeAction` enum (`archive` | `delete`, raw `String`,
       default `.archive`)
-- [ ] add `defaultSessionSwipeAction` load/save to `PreferencesClient`
+- [x] add `defaultSessionSwipeAction` load/save to `PreferencesClient`
       (+ `.inMemory()` support)
-- [ ] add the key to the logout wipe (**logout must clear every prefs entry**)
-- [ ] write tests: round-trip, default when unset, cleared by logout wipe
-- [ ] run tests — must pass before task 3
+- [x] add the key to the logout wipe (**logout must clear every prefs entry** — all
+      three logout recipes: Settings clear-token, retry-screen logout, reauth quit)
+- [x] write tests: round-trip, default when unset, cleared by logout wipe
+- [x] run tests — must pass before task 3 (full suite: 1130 tests, 60 suites, all pass)
 
 ### Task 3: Delete flow in `SessionListFeature`
 

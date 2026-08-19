@@ -48,6 +48,7 @@ run() {
     -workspace "$WORKSPACE" -scheme "$SCHEME" \
     -destination "id=$SIM_UDID" \
     -only-testing:HermesMobileTests \
+    -skipMacroValidation \
     CODE_SIGNING_ALLOWED=NO
 }
 

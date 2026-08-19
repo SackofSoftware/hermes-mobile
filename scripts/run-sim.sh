@@ -39,6 +39,7 @@ echo "▸ Building…"
 xcodebuild build \
   -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Debug \
   -destination "id=$SIM_UDID" \
+  -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO \
   -quiet
 

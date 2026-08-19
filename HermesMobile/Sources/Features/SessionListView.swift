@@ -9,6 +9,9 @@ import SwiftUI
 struct SessionListView: View {
   @Bindable var store: StoreOf<SessionListFeature>
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  /// Whether the Routines (cron) section is expanded. Persisted so the choice survives
+  /// relaunches — a user who collapses it wants it to stay collapsed.
+  @AppStorage("routinesSectionExpanded") private var routinesExpanded = true
 
   var body: some View {
     List {
@@ -183,7 +186,11 @@ struct SessionListView: View {
   @ViewBuilder
   private var cronJobsSection: some View {
     cronSectionHeader
-    if store.cronJobGroups.isEmpty {
+    if !routinesExpanded {
+      // Collapsed: header only. The unread badge stays visible on the header so
+      // activity is never hidden by collapsing.
+      EmptyView()
+    } else if store.cronJobGroups.isEmpty {
       // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
       ForEach(store.cronSessions) { session in
         row(session)
@@ -216,8 +223,22 @@ struct SessionListView: View {
   /// output — the desktop's `CRON JOBS 4`), so activity is visible even from the header.
   private var cronSectionHeader: some View {
     HStack(spacing: 8) {
-      Label("Cron Jobs", systemImage: "clock")
-        .font(.title2.weight(.bold))
+      Button {
+        withAnimation(reduceMotion ? nil : .snappy) { routinesExpanded.toggle() }
+      } label: {
+        HStack(spacing: 6) {
+          Label("Routines", systemImage: "clock")
+            .font(.title2.weight(.bold))
+          Image(systemName: "chevron.right")
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .rotationEffect(.degrees(routinesExpanded ? 90 : 0))
+        }
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Routines")
+      .accessibilityHint(routinesExpanded ? "Collapses the routines section" : "Expands the routines section")
+      .accessibilityAddTraits(routinesExpanded ? .isSelected : [])
       if store.cronUnreadCount > 0 {
         Text("\(store.cronUnreadCount)")
           .font(.caption.weight(.semibold))
@@ -225,7 +246,7 @@ struct SessionListView: View {
           .padding(.horizontal, 7)
           .padding(.vertical, 2)
           .background(Color.hermesAccent, in: Capsule())
-          .accessibilityLabel("\(store.cronUnreadCount) unread cron runs")
+          .accessibilityLabel("\(store.cronUnreadCount) unread routine runs")
       }
       Spacer()
     }
@@ -504,6 +525,12 @@ struct SessionListView: View {
     }
     .buttonStyle(.plain)
     .listRowSeparator(.hidden)
+    // Tighter chat list: a plain List adds ~11pt of vertical inset per row on top of
+    // the row's own 44pt content floor, which reads as a lot of dead space between
+    // chats. Zero the vertical insets (keeping the standard 16pt horizontal margin) —
+    // `SessionRowView.contentMinHeight` still guarantees icon-over-label swipe buttons,
+    // so this tightens spacing without regressing the swipe affordance.
+    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
     .swipeActions(edge: .leading) {
       pinButton(session, isPinned: isPinned)
         .tint(.orange)

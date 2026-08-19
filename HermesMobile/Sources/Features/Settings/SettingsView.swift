@@ -41,6 +41,27 @@ struct SettingsView: View {
         }
       }
 
+      // Only offered when the agent supports session deletion — otherwise Archive is the
+      // only destructive action and the choice would be meaningless.
+      if store.deleteSupported {
+        Section {
+          Picker(
+            "Default swipe action",
+            selection: Binding(
+              get: { store.defaultSwipeAction },
+              set: { store.send(.defaultSwipeActionChanged($0)) }
+            )
+          ) {
+            Text("Archive").tag(SessionSwipeAction.archive)
+            Text("Delete").tag(SessionSwipeAction.delete)
+          }
+        } header: {
+          Text("Session list")
+        } footer: {
+          Text("The action a full swipe on a session row triggers. The long-press menu always offers both.")
+        }
+      }
+
       Section {
         // Plugin update, offered above the toggle because an out-of-date plugin sends pushes
         // the user is actively complaining about. Shown whether or not push is currently

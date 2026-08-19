@@ -168,15 +168,29 @@ bullets below are the compressed rules.
 - **Persistence**: secrets → `KeychainClient`; non-secret prefs (URL, seen counts,
   pins, grouping, profile) → `PreferencesClient`. Clients over `@Shared` for test
   isolation; both have `.inMemory()`. **Logout must clear every prefs entry.**
-- **Pins are device-local; archive and rename are server-side**, optimistic with
-  rollback (list → REST `PATCH`; chat rename → `session.title`).
+- **Pins are device-local; archive, rename, and delete are server-side**, optimistic
+  with rollback (list → REST `PATCH`/`DELETE`; chat rename → `session.title`).
+- **Delete (#73) mirrors archive** (`deletingIDs` guard, rollback) with a
+  `deleteSupported` flip on 404 **or 405** (older agents serve the path for
+  `PATCH`/`GET`) — silent, mirrored both ways with the archived sheet; the swipe-default
+  pref (`SessionSwipeAction`, logout-cleared) clamps to Archive via
+  `effectiveSwipeAction` when unsupported. Slot delete tears down with
+  `teardownSlot(flushSnapshot: false)` + snapshot wipe (flush would re-save it); the
+  approval-badge entry clears only on the CONFIRMED delete (`sessionDeleteSucceeded`).
+  Archived-sheet delete is immediate — no confirmation (deliberate) — and its DELETE
+  round-trip runs in the parent list (a presented sheet's effects die on dismissal).
+  A destructive success restarts (not bare-cancels) a pending fetch; a failure after a
+  profile switch drops the rollback re-insert. Details: `docs/features/session-list.md`.
 - **Grouping, cron jobs, and branch nesting are display-only** over the one fetched
   array: grouping is a persisted pref; cron sessions partition into an always-on
   section grouped under jobs (capability-gated; no optimistic job-state mutation);
   nesting via pure `flattenSessionsWithBranches` (orphans de-nest, never hidden;
   search stays flat). Details: `docs/features/session-list.md`.
-- **Row affordances**: pin/archive via both `.swipeActions` and `.contextMenu`
-  (Copy ID context-menu-only); animations respect reduce-motion.
+- **Row affordances**: trailing swipe = destructive default FIRST (full-swipe target),
+  then Rename; context menu always offers both Archive and Delete (gated); Copy ID
+  context-menu-only; 48pt row-content floor (never a cap) keeps swipe buttons
+  icon-over-label; animations respect reduce-motion. Confirmations follow the
+  destructive-actions idiom below (`ConfirmationDialogState` + `.bottomActionSheet`).
 
 ## UI idioms
 
@@ -184,7 +198,9 @@ bullets below are the compressed rules.
   by an explicit `.onDisappear` action (not bare `.task` cancellation); paused while
   searching; `TestClock`-drivable.
 - **Destructive actions** use TCA `ConfirmationDialogState` (`@Presents`) so
-  confirm/cancel is state-driven and unit-testable.
+  confirm/cancel is state-driven and unit-testable — but present it via
+  `.bottomActionSheet`, never `.confirmationDialog`: iOS 26 renders the system
+  dialog as a title-less popover (FB20644893).
 - **Transient toasts live in the reducer**: a per-copy token (`Int?`, not `Bool` — every
   copy bumps it) + a `cancelInFlight` clock dwell effect (`copiedFeedbackDuration`),
   duplicated per feature. Attach the overlay where nothing can swallow it (before a

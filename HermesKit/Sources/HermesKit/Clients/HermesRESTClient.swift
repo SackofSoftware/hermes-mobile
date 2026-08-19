@@ -96,6 +96,18 @@ public enum RESTError: Error, Equatable, Sendable {
     }
   }
 
+  /// The definitive "this agent lacks the endpoint" verdict for capability gating —
+  /// usually a plain 404, with one wrinkle: when the path exists for other verbs (e.g.
+  /// `/api/sessions/{id}` serves `PATCH`/`GET` on older agents), an unsupported method
+  /// answers **405 Method Not Allowed** instead, so both count. Callers flip their
+  /// `*Supported` flag off this SILENTLY (no banner), like the other capability gates.
+  public var isMissingEndpointVerdict: Bool {
+    switch self {
+    case .notFound, .server(status: 405, detail: _): true
+    default: false
+    }
+  }
+
   public var message: String {
     switch self {
     case .unauthorized: "Invalid or missing token."
@@ -142,6 +154,15 @@ public struct HermesRESTClient: Sendable {
   /// Pass `profile` (non-default) to scope to that profile (added to both query and body);
   /// `nil` → today's exact request.
   public var rename: @Sendable (_ connection: ServerConnection, _ id: String, _ title: String, _ profile: String?) async throws -> Void
+  /// Permanently delete a session — `DELETE /api/sessions/{id}`. Pass `profile`
+  /// (non-default) to scope to that profile (query param only — DELETE has no body);
+  /// `nil` omits it entirely, same threading rule as `archive`. The endpoint is
+  /// idempotent: deleting an already-absent session still answers 2xx
+  /// (`{ok, already_absent}`), so any 2xx is success and the body is discarded.
+  ///
+  /// Callers flip their `deleteSupported` gate on `RESTError.isMissingEndpointVerdict`
+  /// (404 OR 405 — see that property for the older-agent wrinkle).
+  public var deleteSession: @Sendable (_ connection: ServerConnection, _ id: String, _ profile: String?) async throws -> Void
   /// Transcribe recorded audio — `POST /api/audio/transcribe` `{data_url, mime_type?}` →
   /// `{ok, transcript}`. Returns the transcript text; throws `.transcriptionFailed` on `ok:false`.
   public var transcribe: @Sendable (_ connection: ServerConnection, _ dataURL: String, _ mimeType: String?) async throws -> String
@@ -273,6 +294,17 @@ public extension HermesRESTClient {
         if let profile { payload["profile"] = profile }
         let body = try JSONSerialization.data(withJSONObject: payload)
         try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
+      },
+      deleteSession: { conn, id, profile in
+        // Same URL shape as `archive`/`rename`: interpolate the RAW id (`makeURL`
+        // percent-encodes the path). A non-nil profile rides in the query only — DELETE
+        // carries no body; `nil` → no `profile` anywhere (default-profile rule).
+        // Any 2xx is success (`{ok, already_absent}` included); the body is discarded.
+        // 404 → `.notFound`, 405 (older agent, path exists for PATCH/GET only) →
+        // `.server(status: 405, …)` via the shared `validate` mapping.
+        let query = profile.map { [URLQueryItem(name: "profile", value: $0)] } ?? []
+        let url = try makeURL(conn.baseURL, "/api/sessions/\(id)", query: query)
+        try await send(url, method: "DELETE", body: nil, token: conn.token, session: session)
       },
       transcribe: { conn, dataURL, mimeType in
         let url = try makeURL(conn.baseURL, "/api/audio/transcribe")

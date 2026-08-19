@@ -251,6 +251,20 @@ struct ChatSnapshotStore {
 
   // MARK: - Wipe
 
+  /// Drop ONE session's cached snapshot, rows, and turn anchor (permanent session
+  /// deletion — the cache must not repaint a session the server no longer has).
+  func deleteSnapshot(_ sessionID: String) throws {
+    try queue.write { db in
+      try db.execute(sql: #"DELETE FROM "sessions" WHERE "id" = ?"#, arguments: [sessionID])
+      try db.execute(
+        sql: #"DELETE FROM "snapshot_rows" WHERE "session_id" = ?"#, arguments: [sessionID]
+      )
+      try db.execute(
+        sql: #"DELETE FROM "turn_anchors" WHERE "session_id" = ?"#, arguments: [sessionID]
+      )
+    }
+  }
+
   func wipeAll() throws {
     try queue.write { db in
       try db.execute(sql: #"DELETE FROM "sessions""#)

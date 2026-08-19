@@ -984,6 +984,184 @@ struct AppFeatureTests {
     #expect(store.state.liveChat == nil)
   }
 
+  /// Deleting the slot's session (issue #73) tears the (possibly detached) slot down —
+  /// its socket must not keep streaming into a session the server no longer has — and
+  /// wipes the session's cached snapshot + turn anchor so it can never repaint from the
+  /// non-authoritative cache. The teardown deliberately SKIPS the snapshot flush
+  /// (`flushSnapshot: false`): flushing would re-save the very snapshot the wipe deletes.
+  /// The flush skip is pinned by SPYING on the cache writes — `exhaustivity = .off` would
+  /// silently skip a re-introduced `persistNow`, and the wipe running last would mask a
+  /// re-save in the final cache state, so neither can catch the regression on its own.
+  @Test func deletingSlotSessionTearsDownSlotAndWipesSnapshot() async {
+    let snapshots = ChatSnapshotClient.inMemory()
+    snapshots.saveSnapshot("s1", ChatSnapshot(model: "gpt-5", rows: []))
+    snapshots.setTurnAnchor("s1", Date(timeIntervalSince1970: 5))
+    // Spy wrapper: seeded above through the raw client, so anything recorded below is a
+    // write made DURING the delete — a flush would save the snapshot and (with
+    // `isSending = true`) re-set the turn anchor.
+    let writes = LockIsolated<[String]>([])
+    var spy = snapshots
+    spy.saveSnapshot = { @Sendable id, snapshot in
+      writes.withValue { $0.append("save:\(id)") }
+      snapshots.saveSnapshot(id, snapshot)
+    }
+    spy.setTurnAnchor = { @Sendable id, date in
+      writes.withValue { $0.append("anchor:\(id)") }
+      snapshots.setTurnAnchor(id, date)
+    }
+
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.isSending = true
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection, sessions: [Session(id: "s1")]),
+        // Empty path — the user is on the list (where delete lives).
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in }
+      $0.chatSnapshot = spy
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.deleteButtonTapped(id: "s1")))
+    await store.send(.home(.confirmationDialog(.presented(.confirmDelete(id: "s1")))))
+    // The delegate fires FIRST (optimistically, before the DELETE round-trips)…
+    await store.receive(\.home.delegate.sessionDeleted)
+    // …then the slot goes down: teardown + clear (no persist flush for a deleted session).
+    await store.receive(\.liveChat.teardown)
+    await store.receive(\.clearLiveChat) {
+      $0.liveChat = nil
+    }
+    await store.finish()
+    #expect(writes.value.isEmpty) // the flush was skipped — nothing re-saved the snapshot
+    #expect(snapshots.loadSnapshot("s1") == nil)
+    #expect(snapshots.turnAnchor("s1") == nil)
+  }
+
+  /// Deleting a session that is NOT the slot's leaves the live chat untouched but still
+  /// wipes the deleted session's cached snapshot + turn anchor. The slot session's own
+  /// cache entry survives.
+  @Test func deletingNonSlotSessionWipesItsSnapshotAndKeepsSlot() async {
+    let snapshots = ChatSnapshotClient.inMemory()
+    snapshots.saveSnapshot("other", ChatSnapshot(model: "gpt-5", rows: []))
+    snapshots.setTurnAnchor("other", Date(timeIntervalSince1970: 5))
+    snapshots.saveSnapshot("s1", ChatSnapshot(model: "keep-me", rows: []))
+
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, sessions: [Session(id: "s1"), Session(id: "other")]
+        ),
+        // Empty path — the user is on the list (where delete lives).
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in }
+      $0.chatSnapshot = snapshots
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.deleteButtonTapped(id: "other")))
+    await store.send(.home(.confirmationDialog(.presented(.confirmDelete(id: "other")))))
+    await store.receive(\.home.delegate.sessionDeleted)
+    await store.skipReceivedActions()
+    await store.finish()
+    #expect(store.state.liveChat != nil)
+    #expect(snapshots.loadSnapshot("other") == nil)
+    #expect(snapshots.turnAnchor("other") == nil)
+    #expect(snapshots.loadSnapshot("s1") != nil) // the slot session's cache is untouched
+  }
+
+  /// A deleted session's pending-approval badge entry is dropped — opening the session
+  /// (the normal clear path) is impossible once it no longer exists, so a kept entry
+  /// would badge the app icon forever. The entry is dropped on the CONFIRMED delete
+  /// (`sessionDeleteSucceeded`), not at initiation — see the failure test below. Also
+  /// covers the no-slot shape: with `liveChat` nil the handler wipes the cache only,
+  /// no teardown.
+  @Test func deletingABadgedSessionClearsItsApprovalBadgeEntry() async {
+    let snapshots = ChatSnapshotClient.inMemory()
+    snapshots.saveSnapshot("other", ChatSnapshot(model: "gpt-5", rows: []))
+    let badge = LockIsolated<Int?>(nil)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, sessions: [Session(id: "other")]
+        ),
+        pendingApprovalSessionIDs: ["other", "keep"]
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in }
+      $0.chatSnapshot = snapshots
+      $0.push.setBadgeCount = { @Sendable count in badge.setValue(count) }
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.deleteButtonTapped(id: "other")))
+    await store.send(.home(.confirmationDialog(.presented(.confirmDelete(id: "other")))))
+    // Initiation wipes the cache but leaves the badge entry alone…
+    await store.receive(\.home.delegate.sessionDeleted)
+    // …only the server-confirmed delete drops it.
+    await store.receive(\.home.delegate.sessionDeleteSucceeded) {
+      $0.pendingApprovalSessionIDs = ["keep"]
+    }
+    await store.finish()
+    #expect(badge.value == 1) // the icon badge follows the surviving entry count
+    #expect(snapshots.loadSnapshot("other") == nil)
+    #expect(store.state.liveChat == nil) // never had a slot — nothing torn down
+  }
+
+  /// A FAILED delete keeps the approval badge entry: the approval is still pending on
+  /// the server (opening the restored row remains the clear path), and nothing short of
+  /// a fresh approval push would repopulate a prematurely-cleared entry. Only the badge
+  /// waits for confirmation — the snapshot wipe/teardown asymmetry stays optimistic.
+  @Test func failedDeleteKeepsTheApprovalBadgeEntry() async {
+    let badge = LockIsolated<Int?>(nil)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(
+          connection: connection, sessions: [Session(id: "other")]
+        ),
+        pendingApprovalSessionIDs: ["other"]
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.preferences = .inMemory()
+      $0.hermesREST.deleteSession = { @Sendable _, _, _ in throw RESTError.unreachable }
+      $0.chatSnapshot = .inMemory()
+      $0.push.setBadgeCount = { @Sendable count in badge.setValue(count) }
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.home(.deleteButtonTapped(id: "other")))
+    await store.send(.home(.confirmationDialog(.presented(.confirmDelete(id: "other")))))
+    await store.skipReceivedActions()
+    await store.finish()
+    #expect(store.state.pendingApprovalSessionIDs == ["other"]) // entry survives the failure
+    #expect(badge.value == nil) // setBadge never ran — the count never changed
+    // And the row itself was rolled back by the list, so the clear path still exists.
+    #expect(store.state.home?.sessions[id: "other"] != nil)
+  }
+
   /// Re-opening the slot's OWN session from the list (tapping the glowing row of a detached
   /// running turn) must NOT build a fresh `ChatFeature.State` — the accumulated detached
   /// rows and composer draft survive. The marker is pushed back and `.reattached` hydrates
@@ -1216,6 +1394,7 @@ struct AppFeatureTests {
   @Test func quitFromReauthFullyLogsOutToOnboarding() async {
     let sessionDeleted = LockIsolated(false)
     let urlCleared = LockIsolated(false)
+    let swipeActionReset = LockIsolated(false)
     let store = TestStore(
       initialState: AppFeature.State(
         home: SessionListFeature.State(connection: cookieConnection),
@@ -1231,6 +1410,9 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.deleteSession = { @Sendable in sessionDeleted.setValue(true) }
       $0.preferences.clearServerURL = { @Sendable in urlCleared.setValue(true) }
+      $0.preferences.saveDefaultSessionSwipeAction = { @Sendable action in
+        if action == .default { swipeActionReset.setValue(true) }
+      }
     }
     store.exhaustivity = .off
 
@@ -1243,6 +1425,7 @@ struct AppFeatureTests {
     }
     #expect(sessionDeleted.value)
     #expect(urlCleared.value)
+    #expect(swipeActionReset.value) // swipe-action pref reset on the quit logout too
   }
 
   // MARK: Push cleanup on logout (Task C4)
@@ -3069,6 +3252,7 @@ struct AppFeatureTests {
     preferences.saveSeenCounts(["s-pinned": 3])
     preferences.saveSelectedProfileID("work")
     preferences.saveGroupingMode(.chronological)
+    preferences.saveDefaultSessionSwipeAction(.delete)
     preferences.savePushDeviceToken("cafef00d")
     let push = PushClient.inMemory()
 
@@ -3104,6 +3288,7 @@ struct AppFeatureTests {
     #expect(preferences.loadSeenCounts().isEmpty)
     #expect(preferences.loadSelectedProfileID() == nil)
     #expect(preferences.loadGroupingMode() == .default)
+    #expect(preferences.loadDefaultSessionSwipeAction() == .default) // swipe pref reset too
     #expect(preferences.loadPushDeviceToken() == nil)
     #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
     #expect(push.badgeCount == 0)

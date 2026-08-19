@@ -15,6 +15,7 @@ struct SettingsFeatureTests {
     preferences.savePinnedIDs(["s1"])
     preferences.saveSeenCounts(["s1": 4])
     preferences.saveGroupingMode(.chronological)
+    preferences.saveDefaultSessionSwipeAction(.delete)
     preferences.saveSelectedProfileID("staging")
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
@@ -32,6 +33,7 @@ struct SettingsFeatureTests {
     #expect(preferences.loadPinnedIDs() == []) // pins are per-server — cleared on logout
     #expect(preferences.loadSeenCounts() == [:]) // unread state cleared too
     #expect(preferences.loadGroupingMode() == .workspace) // grouping pref reset on logout
+    #expect(preferences.loadDefaultSessionSwipeAction() == .archive) // swipe pref reset on logout
     #expect(preferences.loadSelectedProfileID() == nil) // selected profile cleared on logout
   }
 
@@ -468,5 +470,31 @@ struct SettingsFeatureTests {
 
     await store.send(.updatePluginTapped) // already `.updating` → no state change, no effect
     #expect(calls.value == 0)
+  }
+
+  // MARK: Default swipe action (issue #73)
+
+  /// Picking a new default persists it via `PreferencesClient` and bubbles a delegate so
+  /// the session list mirrors it before the sheet even dismisses.
+  @Test func swipeActionChangePersistsAndBubbles() async {
+    let preferences = PreferencesClient.inMemory()
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.preferences = preferences
+    }
+
+    await store.send(.defaultSwipeActionChanged(.delete)) {
+      $0.defaultSwipeAction = .delete
+    }
+    await store.receive(\.delegate.defaultSwipeActionChanged)
+    #expect(preferences.loadDefaultSessionSwipeAction() == .delete)
+
+    // And back — the picker is a toggle both ways, not a one-shot.
+    await store.send(.defaultSwipeActionChanged(.archive)) {
+      $0.defaultSwipeAction = .archive
+    }
+    await store.receive(\.delegate.defaultSwipeActionChanged)
+    #expect(preferences.loadDefaultSessionSwipeAction() == .archive)
   }
 }

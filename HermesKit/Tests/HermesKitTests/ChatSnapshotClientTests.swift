@@ -142,6 +142,35 @@ struct ChatSnapshotClientTests {
     #expect(client.turnAnchor("s2") == Date(timeIntervalSince1970: 2))
   }
 
+  // MARK: - deleteSnapshot
+
+  @Test func deleteSnapshotClearsOnlyThatSession() {
+    // Permanent session deletion (#73): the deleted session's snapshot AND turn anchor go;
+    // every other session's cache entry is untouched.
+    let client = ChatSnapshotClient.inMemory()
+    client.saveSnapshot("gone", ChatSnapshot(model: "a", rows: [messageRow("bye")]))
+    client.setTurnAnchor("gone", Date(timeIntervalSince1970: 1))
+    client.saveSnapshot("kept", ChatSnapshot(model: "b", rows: [messageRow("hi")]))
+    client.setTurnAnchor("kept", Date(timeIntervalSince1970: 2))
+
+    client.deleteSnapshot("gone")
+
+    #expect(client.loadSnapshot("gone") == nil)
+    #expect(client.turnAnchor("gone") == nil)
+    #expect(client.loadSnapshot("kept")?.model == "b")
+    #expect(client.turnAnchor("kept") == Date(timeIntervalSince1970: 2))
+  }
+
+  @Test func deleteSnapshotOfUnknownSessionIsNoOp() {
+    // Deleting a session that was never cached must not throw or disturb others.
+    let client = ChatSnapshotClient.inMemory()
+    client.saveSnapshot("kept", ChatSnapshot(model: "b", rows: [messageRow("hi")]))
+
+    client.deleteSnapshot("ghost")
+
+    #expect(client.loadSnapshot("kept") != nil)
+  }
+
   // MARK: - wipeAll
 
   @Test func wipeAllClearsSnapshotsAndAnchors() {

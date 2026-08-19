@@ -139,7 +139,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             expandedGroups: [mobile]
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -176,7 +176,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             copiedIDToastToken: 1
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -212,7 +212,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             pinnedIDs: ["m1"] // "Plan the iOS MVP" floats to the top Pinned section
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -248,7 +248,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             groupingMode: .chronological
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -304,7 +304,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             expandedGroups: [mobile]
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -355,7 +355,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             expandedGroups: [mobile]
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -421,7 +421,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             cronJobs: IdentifiedArray(uniqueElements: jobs)
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.hermesREST.cronJobs = { _, _ in jobs }
@@ -452,7 +452,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             expandedCronJobID: "backup01"
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.hermesREST.cronJobs = { _, _ in jobs }
@@ -481,7 +481,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             cronJobsSupported: false
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -525,7 +525,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             groupingMode: .chronological
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -563,7 +563,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             expandedGroups: [mobile]
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -614,7 +614,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             profilesSupported: true
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -652,7 +652,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             profilesSupported: true
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -714,7 +714,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             profilesSupported: false
           )
         ) {
-          SessionListFeature()
+          SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -723,6 +723,36 @@ final class SessionSnapshotTests: SnapshotTestCase {
       )
     }
     assertSnapshot(of: view, as: deviceImage())
+  }
+
+  // MARK: BottomActionSheetView
+
+  /// The archive/delete confirmation's content as the custom bottom action sheet renders
+  /// it (#73): title, wrapped message, destructive action in red over a plain Cancel. The
+  /// sheet chrome (detent, dimming) is presentation-only; the content is what's ours.
+  func testBottomActionSheet_archiveConfirmation() {
+    let dialog = ConfirmationDialogState<SessionListFeature.Action.Dialog> {
+      TextState("Archive session?")
+    } actions: {
+      ButtonState(role: .destructive, action: .confirmArchive(id: "s1")) {
+        TextState("Archive")
+      }
+      ButtonState(role: .cancel) {
+        TextState("Cancel")
+      }
+    } message: {
+      TextState("This hides the session from the list. You can restore it from the server.")
+    }
+    let view = BottomActionSheetView(
+      store: Store(initialState: dialog) {
+        EmptyReducer<
+          ConfirmationDialogState<SessionListFeature.Action.Dialog>,
+          SessionListFeature.Action.Dialog
+        >()
+      }
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
   }
 
   // MARK: ArchivedSessionsView
@@ -746,7 +776,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             now: now
           )
         ) {
-          ArchivedSessionsFeature()
+          ArchivedSessionsFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.archivedSessions = { _, _, _ in sessions }
           $0.date = .constant(now)
@@ -782,7 +812,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             copiedIDToastToken: 1
           )
         ) {
-          ArchivedSessionsFeature()
+          ArchivedSessionsFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.archivedSessions = { _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
@@ -803,7 +833,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             now: now
           )
         ) {
-          ArchivedSessionsFeature()
+          ArchivedSessionsFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.archivedSessions = { _, _, _ in [] }
           $0.date = .constant(now)

@@ -80,6 +80,36 @@ struct PreferencesClientTests {
     #expect(prefs.loadGroupingMode() == .workspace) // unknown raw value → default
   }
 
+  @Test func inMemoryDefaultSwipeActionRoundTripAndDefault() {
+    let prefs = PreferencesClient.inMemory()
+    #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // default when unset
+
+    prefs.saveDefaultSessionSwipeAction(.delete)
+    #expect(prefs.loadDefaultSessionSwipeAction() == .delete)
+
+    prefs.saveDefaultSessionSwipeAction(.archive)
+    #expect(prefs.loadDefaultSessionSwipeAction() == .archive)
+  }
+
+  @Test func liveDefaultSwipeActionBacksOntoProvidedDefaults() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.swipe")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.swipe")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // default when unset
+    prefs.saveDefaultSessionSwipeAction(.delete)
+    #expect(suite.string(forKey: "hermes.default-session-swipe-action") == "delete")
+    #expect(prefs.loadDefaultSessionSwipeAction() == .delete)
+  }
+
+  @Test func liveDefaultSwipeActionDefaultsWhenValueIsGarbage() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.swipe.garbage")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.swipe.garbage")
+    suite.set("shred", forKey: "hermes.default-session-swipe-action")
+    let prefs = PreferencesClient.live(defaults: suite)
+    #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // unknown raw value → default
+  }
+
   @Test func inMemorySelectedProfileRoundTripAndClear() {
     let prefs = PreferencesClient.inMemory()
     #expect(prefs.loadSelectedProfileID() == nil)

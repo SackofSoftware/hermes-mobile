@@ -34,7 +34,9 @@ from your desk and still keep your agent moving.
   you foreground the app, right after you flip the VPN on); only a real rejection sends
   you back to sign-in.
 - **Find any session.** Browse sessions grouped by workspace, search across all of
-  them, pin the ones you care about, rename or archive them, and resume or start a
+  them, pin the ones you care about, rename or archive them — or permanently delete
+  the ones you're done with, from the main list or the archived view (a Settings
+  option picks whether a full swipe archives or deletes) — and resume or start a
   new one.
 - **Switch profiles.** Keep multiple Hermes profiles on one agent and switch between
   them from a Safari-style header pill — each profile has its own scoped session list,

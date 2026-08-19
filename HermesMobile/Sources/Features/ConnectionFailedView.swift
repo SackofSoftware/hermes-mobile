@@ -39,9 +39,9 @@ struct ConnectionFailedView: View {
       }
       .scrollBounceBehavior(.basedOnSize)
     }
-    .confirmationDialog(
-      $store.scope(state: \.confirmationDialog, action: \.confirmationDialog)
-    )
+    // `.bottomActionSheet`, not `.confirmationDialog` — on iOS 26 the system dialog
+    // renders as a title-less floating popover (FB20644893; see `BottomActionSheet.swift`).
+    .bottomActionSheet($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .sheet(isPresented: $showsSetupGuide) {
       AgentSetupGuideView()
     }

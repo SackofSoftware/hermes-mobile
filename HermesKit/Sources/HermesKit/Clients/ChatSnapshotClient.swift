@@ -19,6 +19,9 @@ public struct ChatSnapshotClient: Sendable {
   public var clearTurnAnchor: @Sendable (_ sessionID: String) -> Void
   /// Read the persisted turn-start anchor for a session, if any.
   public var turnAnchor: @Sendable (_ sessionID: String) -> Date?
+  /// Wipe ONE session's snapshot + turn anchor (permanent server-side deletion — a
+  /// deleted session must never repaint from the cache).
+  public var deleteSnapshot: @Sendable (_ sessionID: String) -> Void
   /// Wipe every snapshot + anchor (logout).
   public var wipeAll: @Sendable () -> Void
 }
@@ -45,6 +48,7 @@ public extension ChatSnapshotClient {
       setTurnAnchor: { _, _ in },
       clearTurnAnchor: { _ in },
       turnAnchor: { _ in nil },
+      deleteSnapshot: { _ in },
       wipeAll: {}
     )
   }
@@ -56,6 +60,7 @@ public extension ChatSnapshotClient {
       setTurnAnchor: { try? store.setTurnAnchor($0, $1) },
       clearTurnAnchor: { try? store.clearTurnAnchor($0) },
       turnAnchor: { try? store.turnAnchor($0) ?? nil },
+      deleteSnapshot: { try? store.deleteSnapshot($0) },
       wipeAll: { try? store.wipeAll() }
     )
   }

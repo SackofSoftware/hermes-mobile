@@ -29,7 +29,7 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 │                          //   presents ReauthFeature on .sessionExpired (identity-aware routing);
 │                          //   owns the LIVE-CHAT SLOT (liveChat: ChatFeature.State? via .ifLet)
 │                          //   and a nav path of thin ChatScreen markers — slot teardown (idle
-│                          //   pop, detached turn end, replacement, archive, logout) is
+│                          //   pop, detached turn end, replacement, archive, delete, logout) is
 │                          //   AppFeature policy, never a view event
 ├─ ConnectionFeature       // auto-validating URL + capability-aware auth toggle (Password | Token)
 ├─ ConnectionFailedFeature // launch-only "can't reach the server" retry screen (ifLet slot):
@@ -43,11 +43,15 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 ├─ ReauthFeature           // re-auth modal: fixed URL, prefilled identity, password/token field;
 │                          //   same-user resume vs different-user switch vs Quit→onboarding
 ├─ SessionListFeature      // flat list, grouped by workspace OR chronological (persisted) /
-│  │                       //   search / create; pin (client-side) + archive/rename (server) +
+│  │                       //   search / create; pin (client-side) + archive/rename/delete (server) +
 │  │                       //   working-glow auto-poll; profile pill/switcher (per-call scoped) +
 │  │                       //   presents Settings + Archived + AddProfile sheets
 │  ├─ SettingsFeature      // token mgmt, manual reconnect, debug log
-│  ├─ ArchivedSessionsFeature // archived list (?archived=only); restore + open delegate
+│  ├─ ArchivedSessionsFeature // archived list (?archived=only); restore + open delegate +
+│  │                       //   immediate delete — the `deleted` delegate carries the rollback
+│  │                       //   payload and the PARENT list runs the DELETE round-trip (a
+│  │                       //   presented sheet's effects die on dismissal); `deleteUnsupported`
+│  │                       //   mirrors the capability flag
 │  └─ AddProfileFeature    // create-then-PUT-soul; inline name validation + server-400 banner
 ├─ ChatScreen              // navigation-path marker ONLY (session key, no behavior) — pushing/
 │                          //   popping it never creates or destroys chat state
@@ -64,8 +68,8 @@ All side effects go through `@DependencyClient` structs (each with a `liveValue`
 a `testValue`/`.inMemory()` variant):
 
 - **`HermesRESTClient`** — status, sessions, archived sessions (`?archived=only`), search,
-  archive/rename (`PATCH /api/sessions/{id}`). Session-scoped reads/mutations take
-  an optional `profile` (omitted for default).
+  archive/rename (`PATCH /api/sessions/{id}`), delete (`DELETE /api/sessions/{id}`).
+  Session-scoped reads/mutations take an optional `profile` (omitted for default).
 - **`HermesProfileClient`** — profile CRUD + SOUL.md (`PUT /api/profiles/{name}/soul`) +
   profile-scoped session lists (`GET /api/profiles/sessions?profile=`). Capability-gated: a
   404 from `GET /api/profiles` hides the selector.
@@ -202,11 +206,13 @@ not assumed):
   (`PATCH /api/sessions/{id}` `{"archived": …}`), done optimistically.
 - **Rename is server-side**, optimistic with rollback (mirrors archive): the session
   list uses `PATCH /api/sessions/{id}` `{"title": …}` over REST; the chat screen uses
-  the `session.title` gateway method.
+  the `session.title` gateway method. Delete is server-side too
+  (`DELETE /api/sessions/{id}`, capability-gated); the full contract lives in
+  `docs/features/session-list.md`.
 - **Profiles are device-local with per-call scoping** — the selected profile *name* lives
   in `PreferencesClient`; we never call `POST /api/profiles/active`. Instead the scoped list
   comes from `GET /api/profiles/sessions?profile=`, and an optional `profile` param threads
-  into `session.create`/`session.resume` (gateway) and session-scoped archive/rename
+  into `session.create`/`session.resume` (gateway) and session-scoped archive/rename/delete
   (REST) — omitted for `"default"` so single-profile agents are byte-identical to today.
   **Search is not profile-scoped** (mirrors the desktop). The desktop's per-profile color is
   intentionally omitted.

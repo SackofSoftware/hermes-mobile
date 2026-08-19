@@ -38,8 +38,15 @@ class SnapshotTestCase: XCTestCase {
   /// Whole-screen snapshot: composites the iOS 26 system chrome (`drawHierarchyInKeyWindow`),
   /// so it needs the host app and isn't pixel-exact — runs at `perceptualPrecision: 0.98`.
   ///
-  /// `precision` (the fraction of pixels that must clear that perceptual bar) defaults to a
-  /// strict `1`. Lower it ONLY for a view containing a genuinely non-deterministic region —
+  /// `precision` (the fraction of pixels that must clear that perceptual bar) defaults to
+  /// `0.98`, NOT a strict 1: the Liquid Glass chrome (the nav `Done` capsule, glass circle
+  /// buttons, the nav bar's scroll-edge pocket) composites **bimodally across test
+  /// processes** — each process renders one of two states, so a baseline recorded in the
+  /// other state fails at full strictness even though nothing changed. Measured cross-mode
+  /// drift: 0.82% of pixels (Δ ≤ 10/255, the `Done` capsule alone,
+  /// `testSettingsPluginUpdate*`) up to 1.66% (capsule + scroll-edge pocket,
+  /// `testSettingsNotifications*`) — the 2% budget absorbs exactly that class of drift and
+  /// nothing bigger. Lower it further ONLY for a genuinely non-deterministic region —
   /// an indeterminate `ProgressView` spinner is captured at whatever rotation the render
   /// server happens to be at. Measure the drift before picking a number, and record the
   /// measurement at the call site: with `perceptualPrecision < 1` the check is a float area
@@ -48,7 +55,7 @@ class SnapshotTestCase: XCTestCase {
   /// `ConnectionFailedSnapshotTests.testConnectionFailedView_retrying`). A budget is fungible
   /// — it can absorb a small regression ANYWHERE on the screen, not only in the region it was
   /// sized for — so pair it with a structural assertion of whatever it could hide.
-  func deviceImage<V: SwiftUI.View>(precision: Float = 1) -> Snapshotting<V, UIImage> {
+  func deviceImage<V: SwiftUI.View>(precision: Float = 0.98) -> Snapshotting<V, UIImage> {
     .image(
       drawHierarchyInKeyWindow: true,
       precision: precision,
@@ -68,6 +75,23 @@ class SnapshotTestCase: XCTestCase {
     UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).pngData { ctx in
       color.setFill()
       ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+    }
+  }
+}
+
+extension Reducer where Action: CasePathable {
+  /// Snapshot fixtures must render EXACTLY the seeded state. `deviceImage()` hosts the view
+  /// in the real key window (`drawHierarchyInKeyWindow`), so the view's `.task` modifier
+  /// fires and the feature's startup effects — prefs reload, fetches, poll loops — race the
+  /// capture. Whether they land before or after the draw is a run-loop scheduling accident
+  /// that shifts across simulator runtimes: one re-record captured post-`.task` state and
+  /// silently wiped seeded pins, unread badges, and the archived empty state from the
+  /// baselines. Swallowing the startup action pins the render to the seeded state; the
+  /// behavior behind the startup action stays covered by the `TestStore` suites.
+  func ignoring<V>(_ startupAction: CaseKeyPath<Action, V>) -> some Reducer<State, Action> {
+    Reduce { state, action in
+      guard action[case: startupAction] == nil else { return .none }
+      return self.reduce(into: &state, action: action)
     }
   }
 }

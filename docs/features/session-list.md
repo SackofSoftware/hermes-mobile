@@ -1,4 +1,4 @@
-# Session list: grouping, cron jobs, branch nesting (#24, #34)
+# Session list: grouping, cron jobs, branch nesting, delete & swipe polish (#24, #34, #73)
 
 Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The short rules live in
 `CLAUDE.md` → "Session list"; this doc is the full contract. Design history:
@@ -58,3 +58,125 @@ workspace / chronological) after the cron partition, emitting `└─`/`├─` 
 lane) de-nest — never hidden; the Pinned lane keeps pin order (`sortTopLevelByRecency: false`; a
 pinned branch nests only when its parent is also pinned, otherwise it de-nests); search /
 archived / cron stay flat. Row identity and swipe/context affordances are unchanged.
+
+## Session delete (#73)
+
+**Delete is permanent and server-side**: REST `DELETE /api/sessions/{id}` (+`?profile=` only
+when non-default — same per-call scoping rule as archive), idempotent upstream (`already_absent`
+is success by contract; a ghost row never 404s). The main-list flow **mirrors archive exactly**:
+`deleteButtonTapped` raises a `ConfirmationDialogState` ("This permanently deletes the session
+and its history."), `confirmDelete` captures a full rollback payload (session + index + pin
+index + seen count), removes optimistically, inserts into the **`deletingIDs` in-flight guard**
+(fetch/poll results filter out `archivingIDs ∪ deletingIDs` — either window can resurrect a
+removed row), sends `delegate.sessionDeleted` FIRST, and cancels the in-flight fetch before
+running the RPC. A transient failure rolls back per **`rollBackFailedRemoval`** (the ONE
+rollback rule, shared with archive) and sets the "Couldn't delete the session." banner. The
+rule is deliberately asymmetric: the **pin + seen metadata is ALWAYS restored and
+persisted** (both live under device-global prefs keys keyed by session id — not
+profile-scoped — so skipping them would lose the pin/unread baseline for a session the
+server kept), while the **row re-insert applies only when the list still shows the same
+context the RPC was issued under** — same profile scope AND same raw search query (the
+failure action carries both). A profile mismatch means a cross-profile row that opens under
+the wrong scope; a query mismatch means the saved index points into a different result set,
+and the poll is paused while searching so the wrong-query row would stick. A skipped
+re-insert self-heals: the original context's next fetch returns the still-existing row. On
+success the list emits `delegate.sessionDeleteSucceeded` — the confirmation delegate,
+distinct from the optimistic `sessionDeleted`. Success also **cancels-or-restarts** the
+shared fetch (`cancelOrRestartFetch`, shared with archive/rename success): a bare cancel of
+a fetch that was actually pending (`isLoading`, or an active search — the poll is paused
+while searching) would strand a stuck spinner / stale search results, so the current-context
+fetch restarts instead and lands an authoritative post-RPC response. A **cleared search**
+(trimmed-empty `searchQuery` binding) reloads immediately via `load` rather than the 300ms
+search debounce — `load` raises `isLoading`, which is what keeps that pending reload visible
+to `cancelOrRestartFetch` (the debounced search effect raises no flag, and with the query
+empty `isSearching` no longer covers the window). Delete is offered on every row variant
+(pinned, cron runs, branch children) — all sections funnel through the one `row(_:)` builder.
+
+**Capability gate — the 405 wrinkle**: `deleteSupported` defaults `true` and flips off lazily
+on a definitive verdict from an actual delete (no pre-probe). The verdict is `.notFound` **or**
+`.server(status: 405)` — on older agents the path `/api/sessions/{id}` already exists for
+`PATCH`/`GET`, so an unsupported `DELETE` returns **405 Method Not Allowed**, not the usual
+404. Both flip the flag **silently** (row restored, NO banner — mirror the other silent
+capability flips) and hide every Delete affordance plus the Settings row from then on. The flag
+mirrors **both ways** with the archived sheet: the sheet's `deleteSupported` is seeded from the
+list's flag on present, and a verdict inside the sheet mirrors back via
+`ArchivedSessionsFeature.Delegate.deleteUnsupported`.
+
+**`AppFeature` on `sessionDeleted`**: ALWAYS wipe the session's cached snapshot + turn anchor
+(`ChatSnapshotClient.deleteSnapshot(sessionID:)`) — a deleted session must never repaint from
+the non-authoritative cache. When the deleted id matches the live-chat slot, tear it down too
+with **`teardownSlot(flushSnapshot: false)`** — skipping the `persistNow` flush is the point:
+the flush would re-save the very snapshot the wipe deletes. Every other teardown keeps the
+flush. Same deliberate asymmetry as archive: if the DELETE later fails, the list restores the
+row but the slot and cache stay cleared — re-opening simply resumes the session fresh.
+The **pending-approval badge entry is the exception**: it's dropped on
+`sessionDeleteSucceeded` (server-confirmed), NOT at initiation — a failed delete leaves the
+approval pending on the server, and nothing short of a fresh approval push would repopulate
+a prematurely-cleared entry.
+
+**Archived-sheet delete is immediate — no confirmation (deliberate)**: those sessions are
+already tucked away and the sheet is the bulk-cleanup surface. Same optimistic shape as
+restore (`deletingIDs` guard, rollback + banner on transient failure, refresh-during-delete
+exclusion). **The DELETE round-trip runs in the PARENT list, not the sheet**: a presented
+child's effects are cancelled when the sheet is dismissed (`ifLet` semantics), so a
+sheet-run DELETE racing Done/swipe-down would be silently dropped after the cache and badge
+were already updated. The sheet bubbles `Delegate.deleted(id:session:index:)` FIRST (with
+the rollback payload); the list forwards it as its own `sessionDeleted` (so `AppFeature`
+applies the same snapshot wipe + slot teardown as a main-list delete — an archived session
+CAN be the live slot: opening one from the sheet resumes it without un-archiving, and
+another client can archive the slot's session out from under this device; the wipe stays
+even if the DELETE later fails), threads the sheet's `profileName` into the RPC, and
+**re-injects `deleteSucceeded`/`deleteFailed` only while the SAME sheet presentation still
+owns the delete**: the round-trip is stamped with `archivedSheetGeneration` (bumped on
+every present) and the outcome must match the current generation AND find the id in the
+sheet's `deletingIDs` guard. The id alone is ambiguous — after a dismiss-and-reopen the
+same session can be deleted AGAIN, and re-injecting the first request's late failure would
+clear the new operation's guard and resurrect its row while the second request's real
+outcome then has nowhere to land. A dismissed sheet, a re-opened one's fresh fetch, and a
+stale-generation outcome all route to the list instead. With the sheet gone, a verdict
+still flips the list's `deleteSupported` (server-wide) and a transient failure surfaces the
+list's banner; success always emits `sessionDeleteSucceeded`. Inside the sheet, a completed
+delete restarts (not bare-cancels) a listing fetch still in flight — same stale-response
+resurrection window as the main list, and the sheet has no poll to self-heal a stranded
+spinner.
+
+## Swipe default, row polish & confirmation presentation (#73)
+
+**The default swipe action is a device-local pref**: `SessionSwipeAction` (`archive` |
+`delete`, `.archive` default) persisted via `PreferencesClient`, reset in **all three logout
+recipes** (Settings clear-token, retry-screen logout, reauth quit). Views must read the
+computed **`effectiveSwipeAction`**, which clamps back to `.archive` while
+`!deleteSupported` — the stored pref survives the clamp, so it re-activates if a capable agent
+returns. Settings exposes a "Default swipe action" `Picker`, rendered only when
+`deleteSupported` (the flag is passed in when presenting the sheet); a change persists and
+bubbles a delegate so the list mirrors the value immediately.
+
+**Trailing swipe order is destructive-first**: [default action (Archive or Delete per
+`effectiveSwipeAction`, destructive, listed FIRST), Rename]. SwiftUI places the first listed
+button nearest the edge and makes it the **full-swipe target** — a full swipe must trigger the
+destructive default (which still confirms via the dialog), never Rename (Mail-style layout).
+Leading swipe (Pin) unchanged. The context menu always offers BOTH Archive and Delete
+(Delete capability-gated) regardless of the swipe pref. In the archived sheet Delete is
+likewise listed first (full-swipe deletes, immediately).
+
+**Row min-height floor**: `SessionRowView.contentMinHeight = 44` pt on the row *content*
+(incl. its 2pt vertical padding; natural one-line content is ~24pt). The floor exists so iOS
+renders trailing swipe buttons in the full icon-over-label style instead of collapsing them
+into cramped text-only capsules on short rows — **44 clears that threshold** (verified by a
+real swipe in the iOS 26.5 simulator). The value is a deliberate compromise iterated with
+the user on #73: 48 was tried first (~70pt cells — too tall), then no floor (~44pt cells —
+compact, but capsule swipe buttons), then 44 (+20pt over natural). It is a **floor, never a
+cap** — two-line previews and large Dynamic Type grow past it freely; the fact is pinned by
+a measured `UIWindow`-hosted XCTest (`SessionRowLayoutTests`: exact floor at `.large`,
+floor-not-cap, AX3 grows).
+
+**Confirmations present via `BottomActionSheet`, not `.confirmationDialog`**: on iOS 26 no
+system presentation docks at the bottom any more — SwiftUI's `confirmationDialog` renders as a
+floating popover anchored to whatever view carries the modifier, **dropping the title and the
+Cancel button** (FB20644893); UIKit's `UIAlertController(.actionSheet)` anchors to any popover
+`sourceView` the same way and presents CENTERED without one. So `BottomActionSheet.swift`
+renders the same reducer-owned `ConfirmationDialogState` in a height-fitted SwiftUI sheet
+(content-measured detent, destructive button styled red) — **the state model and every reducer
+test against it are untouched**; only the presentation layer differs, and it behaves
+identically on iOS 18. Keep raising dialogs through `ConfirmationDialogState`; present them
+with `.bottomActionSheet($store.scope(...))`.

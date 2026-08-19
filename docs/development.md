@@ -160,18 +160,20 @@ asc --profile hermes builds upload --app <app id> --ipa build/testflight/export/
 The provisioning profile must be installed locally first
 (`asc --profile hermes profiles download --id <profile id>`). `build/` is gitignored.
 
-### App icon per build (internal vs production)
+### App icon per build (TestFlight vs App Store)
 
-Two icons distinguish builds on-device: the orange **`AppIcon`** for production (App
-Store / external TestFlight) and the blue blueprint **`AppIconDev`** for dev/internal
-builds. Debug builds use `AppIconDev` automatically (set per-configuration in
-`Project.swift`). For an **internal TestFlight** build, archive the Release config but
-override the icon on the command line — append to the archive command above:
+Two icons distinguish builds on-device: the orange **`AppIcon`** ONLY for **App Store
+release** builds, and the blue blueprint **`AppIconDev`** for everything else — dev
+builds and **ALL TestFlight builds, internal and external alike** (a TestFlight build
+is one build; internal and external groups share it). Debug builds use `AppIconDev`
+automatically (set per-configuration in `Project.swift`). For **any TestFlight**
+build, archive the Release config but override the icon on the command line — append
+to the archive command above:
 
 ```sh
-  ASSETCATALOG_COMPILER_APPICON_NAME=AppIconDev   # blue icon for internal builds
+  ASSETCATALOG_COMPILER_APPICON_NAME=AppIconDev   # blue icon for all TestFlight builds
 ```
 
 (A custom Xcode configuration would break Tuist's SwiftPM integration, so the icon is
-switched via this build setting rather than a separate config.) Omit the override for
-App Store / external builds to keep the orange icon.
+switched via this build setting rather than a separate config.) Omit the override only
+when archiving an App Store release submission to get the orange icon.

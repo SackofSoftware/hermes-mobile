@@ -159,12 +159,16 @@ Leading swipe (Pin) unchanged. The context menu always offers BOTH Archive and D
 (Delete capability-gated) regardless of the swipe pref. In the archived sheet Delete is
 likewise listed first (full-swipe deletes, immediately).
 
-**Rows are natural-height — no min-height floor**: a one-line row lands around ~44pt total.
-A 48pt content floor was tried for #73 (it pushes rows past the threshold where iOS renders
-trailing swipe buttons icon-over-label instead of cramped text capsules) and **deliberately
-reverted**: it inflated every one-line row to ~64–70pt, and the compact list was judged worth
-more than the fuller swipe-button style. Don't reintroduce a floor for the swipe-button
-rendering without revisiting that trade-off.
+**Row min-height floor**: `SessionRowView.contentMinHeight = 44` pt on the row *content*
+(incl. its 2pt vertical padding; natural one-line content is ~24pt). The floor exists so iOS
+renders trailing swipe buttons in the full icon-over-label style instead of collapsing them
+into cramped text-only capsules on short rows — **44 clears that threshold** (verified by a
+real swipe in the iOS 26.5 simulator). The value is a deliberate compromise iterated with
+the user on #73: 48 was tried first (~70pt cells — too tall), then no floor (~44pt cells —
+compact, but capsule swipe buttons), then 44 (+20pt over natural). It is a **floor, never a
+cap** — two-line previews and large Dynamic Type grow past it freely; the fact is pinned by
+a measured `UIWindow`-hosted XCTest (`SessionRowLayoutTests`: exact floor at `.large`,
+floor-not-cap, AX3 grows).
 
 **Confirmations present via `BottomActionSheet`, not `.confirmationDialog`**: on iOS 26 no
 system presentation docks at the bottom any more — SwiftUI's `confirmationDialog` renders as a

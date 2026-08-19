@@ -55,7 +55,11 @@ struct ModelPickerSheet: View {
   @ViewBuilder
   private func configuredModels(_ provider: ModelOptions.Provider) -> some View {
     ForEach(provider.models, id: \.self) { model in
-      selectableRow(model, selected: model == currentModel) { onSelectModel(model) }
+      selectableRow(
+        model,
+        selected: model == currentModel,
+        icon: ProviderIconView(provider: provider.id, model: model)
+      ) { onSelectModel(model) }
       // Reasoning effort drops down under the selected, reasoning-capable model.
       if model == currentModel, picker.options?.supportsReasoning(model) ?? true {
         ForEach(ModelOptions.reasoningEfforts, id: \.self) { effort in
@@ -71,9 +75,19 @@ struct ModelPickerSheet: View {
       .foregroundStyle(.secondary)
   }
 
-  private func selectableRow(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+  private func selectableRow(
+    _ label: String,
+    selected: Bool,
+    icon: ProviderIconView? = nil,
+    action: @escaping () -> Void
+  ) -> some View {
     Button(action: action) {
       HStack {
+        if let icon {
+          icon
+          // Dim the mark in step with the label while a turn is running.
+          .opacity(isBusy ? 0.5 : 1)
+        }
         Text(label).foregroundStyle(isBusy ? .secondary : .primary)
         Spacer()
         if selected {

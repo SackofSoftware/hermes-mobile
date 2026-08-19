@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 646.08 682.53">
+  <defs>
+    <style>
+      .cls-1 {
+        opacity: .52;
+      }
+
+      .cls-1, .cls-2, .cls-3, .cls-4, .cls-5 {
+        isolation: isolate;
+      }
+
+      .cls-1, .cls-6 {
+        fill: #6ee099;
+      }
+
+      .cls-7 {
+        fill: #00e464;
+      }
+
+      .cls-2 {
+        fill: #f7fdf9;
+      }
+
+      .cls-2, .cls-3, .cls-5 {
+        opacity: .65;
+      }
+
+      .cls-8 {
+        fill: url(#linear-gradient);
+      }
+
+      .cls-3 {
+        fill: #000fff;
+      }
+
+      .cls-4 {
+        opacity: .34;
+      }
+
+      .cls-4, .cls-5 {
+        fill: #0c9fa6;
+      }
+    </style>
+    <linearGradient id="linear-gradient" x1="595.46" y1="659.38" x2="595.88" y2="228.65" gradientTransform="translate(-395.62 634.95) rotate(20.49) scale(1 -.93) skewX(-19.11)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#006116"/>
+      <stop offset="1" stop-color="#00ab23"/>
+    </linearGradient>
+  </defs>
+  <g id="svg1">
+    <g id="g1">
+      <g id="g7">
+        <polygon id="rect1" class="cls-8" points="0 120.18 323.04 240.9 323.04 682.53 0 561.81 0 120.18"/>
+        <polygon id="rect2-1" class="cls-7" points="0 561.98 323.04 441.43 646.08 561.98 323.04 682.53 0 561.98"/>
+        <polygon id="rect1-3" class="cls-1" points="646.08 120.18 323.04 240.9 323.04 682.53 646.08 561.81 646.08 120.18"/>
+        <polygon id="rect2" class="cls-6" points="0 120.55 323.04 0 646.08 120.55 323.04 241.11 0 120.55"/>
+        <polygon id="rect1-0" class="cls-5" points="164.12 136.29 383.72 218.36 383.72 518.56 164.12 436.5 164.12 136.29"/>
+        <polygon id="rect2-1-6" class="cls-3" points="164.12 436.61 383.72 354.67 603.31 436.61 383.72 518.56 164.12 436.61"/>
+        <polygon id="rect1-3-2" class="cls-4" points="603.31 136.29 383.72 218.36 383.72 518.56 603.31 436.5 603.31 136.29"/>
+        <polygon id="rect2-6" class="cls-2" points="164.12 136.54 383.72 54.6 603.31 136.54 383.72 218.49 164.12 136.54"/>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -19,7 +19,29 @@ struct AppView: View {
       // immediate snapshot/anchor flush. Behaviour is unit-tested via `scenePhaseChanged`.
       .onChange(of: scenePhase) { _, newPhase in
         store.send(.scenePhaseChanged(newPhase.appPhase))
+        // A home-screen quick action may have been recorded while the app was cold- or
+        // warm-launching. Drain it on becoming active, once the root screen is resolved.
+        if newPhase == .active { performPendingQuickAction() }
       }
+      // Cold launch: `scenePhase` may already be `.active` by the time this view appears,
+      // so the onChange above never fires — drain here too. `take()` is one-shot, so the
+      // two paths can't double-fire.
+      .onAppear { performPendingQuickAction() }
+  }
+
+  /// Perform a pending home-screen quick action, but only when it can actually succeed:
+  /// "New Chat" needs the home screen (i.e. a connected, signed-in session list). If we're
+  /// still on onboarding the action is left pending, and the next activation retries — so
+  /// tapping "New Chat" on a signed-out app starts the chat right after you sign in
+  /// rather than silently doing nothing.
+  private func performPendingQuickAction() {
+    guard store.rootScreen == .home else { return }
+    switch QuickActionBox.shared.take() {
+    case .newChat:
+      store.send(.home(.newSessionButtonTapped))
+    case .none:
+      break
+    }
   }
 
   /// Which root branch wins is decided ONCE, by `AppFeature.State.rootScreen` in HermesKit

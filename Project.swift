@@ -36,6 +36,15 @@ let project = Project(
         "CFBundleShortVersionString": "$(MARKETING_VERSION)",
         "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
         "UILaunchScreen": ["UIColorName": ""],
+        // Home-screen quick actions (long-press the app icon). Handled by
+        // PushAppDelegate -> QuickActionBox -> AppView.performPendingQuickAction().
+        "UIApplicationShortcutItems": [
+          [
+            "UIApplicationShortcutItemType": "me.hawes.hermes.newchat",
+            "UIApplicationShortcutItemTitle": "New Chat",
+            "UIApplicationShortcutItemIconType": "UIApplicationShortcutIconTypeCompose",
+          ],
+        ],
         "HermesDefaultServerURL": .string(debugServerURL),
         // The app connects to user-specified self-hosted servers over http (Tailscale/LAN),
         // so domain-scoped ATS exceptions aren't possible — allow cleartext loads.
@@ -77,7 +86,7 @@ let project = Project(
           "DEVELOPMENT_TEAM": .string(developmentTeam),
           "CODE_SIGN_STYLE": "Automatic",
           "MARKETING_VERSION": "1.0",
-          "CURRENT_PROJECT_VERSION": "62",
+          "CURRENT_PROJECT_VERSION": "63",
           // App Store release default — the orange "AppIcon". ONLY App Store submission
           // builds keep it. Debug builds override to the blue "AppIconDev" below, and ALL
           // TestFlight archives (internal AND external — they share one build) override it

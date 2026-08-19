@@ -77,13 +77,17 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
     }
   }
 
-  /// Providers ordered for the picker: configured (selectable) first in server order,
-  /// then unconfigured ones (shown disabled, with a configure hint). Providers that are
-  /// neither configured nor offer a hint are dropped.
+  /// Providers shown in the picker: **only those actually configured** — authenticated
+  /// with at least one model, i.e. a key you pasted or an OAuth you signed into. The
+  /// model lists themselves are already curated server-side (Hermes builds the payload
+  /// from its model catalog, so OpenRouter comes back as the recommended subset rather
+  /// than its full several-hundred-model catalog).
+  ///
+  /// Unconfigured providers used to be listed disabled with a "paste KEY to activate"
+  /// hint; that turned the picker into a catalog of things you can't pick. Configure new
+  /// providers on the agent (`hermes auth add …`) and they appear here on the next fetch.
   public var orderedProviders: [Provider] {
-    let configured = providers.filter(\.isConfigured)
-    let unconfigured = providers.filter { !$0.isConfigured && ($0.warning?.isEmpty == false) }
-    return configured + unconfigured
+    providers.filter(\.isConfigured)
   }
 
   /// Whether `model` supports reasoning, per the provider capabilities map. Defaults to

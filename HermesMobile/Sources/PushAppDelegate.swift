@@ -12,10 +12,25 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
 
   func application(
     _: UIApplication,
-    didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     UNUserNotificationCenter.current().delegate = self
+    // A quick action that COLD-launched the app arrives here rather than through
+    // `performActionFor`. Record it; `AppView` performs it once the home screen exists.
+    if let item = launchOptions?[.shortcutItem] as? UIApplicationShortcutItem {
+      MainActor.assumeIsolated { QuickActionBox.shared.record(QuickAction(shortcutItem: item)) }
+    }
     return true
+  }
+
+  /// A quick action tapped while the app was already running (warm launch).
+  func application(
+    _: UIApplication,
+    performActionFor shortcutItem: UIApplicationShortcutItem,
+    completionHandler: @escaping (Bool) -> Void
+  ) {
+    MainActor.assumeIsolated { QuickActionBox.shared.record(QuickAction(shortcutItem: shortcutItem)) }
+    completionHandler(true)
   }
 
   // MARK: - Remote-notification registration

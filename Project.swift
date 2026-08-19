@@ -27,7 +27,7 @@ let project = Project(
       name: "HermesMobile",
       destinations: [.iPhone],
       product: .app,
-      bundleId: "me.honcharenko.HermesMobile",
+      bundleId: "com.hawes.HermesMobile",
       deploymentTargets: .iOS("18.0"),
       infoPlist: .extendingDefault(with: [
         // Wire the bundle version/short-version to the build settings below so a
@@ -106,7 +106,7 @@ let project = Project(
       name: "HermesMobileTests",
       destinations: [.iPhone],
       product: .unitTests,
-      bundleId: "me.honcharenko.HermesMobileTests",
+      bundleId: "com.hawes.HermesMobileTests",
       deploymentTargets: .iOS("18.0"),
       sources: ["HermesMobileTests/**"],
       dependencies: [

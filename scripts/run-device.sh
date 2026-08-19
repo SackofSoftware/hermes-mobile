@@ -15,7 +15,7 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SCHEME="HermesMobile"
 WORKSPACE="HermesMobile.xcworkspace"
-BUNDLE_ID="me.honcharenko.HermesMobile"
+BUNDLE_ID="com.hawes.HermesMobile"
 
 : "${DEVELOPMENT_TEAM:?Set DEVELOPMENT_TEAM=<your 10-char Apple team id> and re-run}"
 
@@ -40,6 +40,7 @@ xcodebuild build \
   -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Debug \
   -destination "id=$DEVICE_UDID" \
   -allowProvisioningUpdates \
+  -skipMacroValidation \
   -quiet
 
 APP_PATH="$(

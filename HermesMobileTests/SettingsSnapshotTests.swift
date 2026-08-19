@@ -15,7 +15,7 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     ]
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue // inert stream for a deterministic render
         }
       )
@@ -35,7 +35,7 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     ]
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue // inert stream for a deterministic render
         }
       )
@@ -44,15 +44,20 @@ final class SettingsSnapshotTests: SnapshotTestCase {
   }
 
   /// Notifications enabled: toggle on, push available, no test sent yet.
+  ///
+  /// The three Notifications-focused fixtures hide the (unrelated) "Session list" swipe
+  /// section: it sits above Notifications, and with it present the rows these snapshots
+  /// exist to prove — the test-sent label especially — fall below the device fold.
   func testSettingsNotificationsEnabled() {
-    let initial = SettingsFeature.State(
+    var initial = SettingsFeature.State(
       connection: connection,
       pushAvailable: true,
       notificationsEnabled: true
     )
+    initial.deleteSupported = false
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue
           $0.push = PushClient.inMemory(granted: true, status: .authorized).client
         }
@@ -63,13 +68,14 @@ final class SettingsSnapshotTests: SnapshotTestCase {
 
   /// Push not available on this server (plugin missing) → "not available" note, no controls.
   func testSettingsNotificationsUnavailable() {
-    let initial = SettingsFeature.State(
+    var initial = SettingsFeature.State(
       connection: connection,
       pushAvailable: false
     )
+    initial.deleteSupported = false
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue
           $0.push = PushClient.inMemory(granted: false, status: .notDetermined).client
         }
@@ -80,15 +86,16 @@ final class SettingsSnapshotTests: SnapshotTestCase {
 
   /// Test notification just sent → confirmation label.
   func testSettingsNotificationsTestSent() {
-    let initial = SettingsFeature.State(
+    var initial = SettingsFeature.State(
       connection: connection,
       pushAvailable: true,
       notificationsEnabled: true,
       testPushStatus: .sent
     )
+    initial.deleteSupported = false
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue
           $0.push = PushClient.inMemory(granted: true, status: .authorized).client
         }
@@ -107,7 +114,7 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     )
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue
           $0.push = PushClient.inMemory(granted: true, status: .authorized).client
         }
@@ -127,7 +134,7 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     )
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue
           $0.push = PushClient.inMemory(granted: true, status: .authorized).client
         }
@@ -146,7 +153,7 @@ final class SettingsSnapshotTests: SnapshotTestCase {
     )
     let view = NavigationStack {
       SettingsView(
-        store: Store(initialState: initial) { SettingsFeature() } withDependencies: {
+        store: Store(initialState: initial) { SettingsFeature().ignoring(\.task) } withDependencies: {
           $0.debugLog = .testValue
           $0.push = PushClient.inMemory(granted: true, status: .authorized).client
         }

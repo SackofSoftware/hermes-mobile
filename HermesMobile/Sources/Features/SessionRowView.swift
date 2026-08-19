@@ -23,14 +23,6 @@ struct SessionRowView: View {
   /// Drives the gentle opacity pulse of the active glow (held flat when reduce-motion is on).
   @State private var pulsing = false
 
-  /// Floor (never a cap — Dynamic Type still grows past it) on the row content's height.
-  /// A one-line row's natural content is ~30pt, which lands the whole list row around
-  /// 46pt — short enough that iOS collapses trailing swipe buttons into cramped
-  /// text-only capsules. 48pt of content puts the row past the icon-over-label
-  /// threshold so swipe actions always render in the full Mail-style layout
-  /// (verified in the iOS 26.5 simulator).
-  static let contentMinHeight: CGFloat = 48
-
   private static let relativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
     formatter.dateTimeStyle = .named
@@ -77,9 +69,6 @@ struct SessionRowView: View {
       }
     }
     .padding(.vertical, 2)
-    // `minHeight` floor so short rows still earn icon-over-label swipe buttons; content
-    // taller than the floor (two-line previews, large Dynamic Type) grows freely.
-    .frame(minHeight: Self.contentMinHeight, alignment: .leading)
     .modifier(ActiveGlow(isActive: isActive, reduceMotion: reduceMotion, pulsing: pulsing))
     .onAppear { updatePulsing() }
     // Drive the pulse off `isActive` too: when a poll flips it true on a row that's

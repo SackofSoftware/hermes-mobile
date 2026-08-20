@@ -157,6 +157,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [run] }
       $0.hermesREST.cronJobs = { @Sendable _, profile in
         requestedProfile.setValue(profile)
@@ -187,6 +188,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in
         fetchCount.withValue { $0 += 1 }
@@ -226,6 +228,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.unreachable }
     }
@@ -250,6 +253,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, profile in
         requestedProfile.setValue(profile)
@@ -298,6 +302,7 @@ struct SessionListCronTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.hermesREST.triggerCronJob = { @Sendable _, id, _ in triggered.setValue(id) }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", state: "running")] }
     }

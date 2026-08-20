@@ -20,6 +20,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown } // can't tell → don't nag
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", title: "Hello", preview: "hi")]
       }
@@ -52,6 +53,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -85,6 +87,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         fetchCount.withValue { $0 += 1 }
         return [Session(id: "s1", isActive: true)]
@@ -134,6 +137,7 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         fetchCount.withValue { $0 += 1 }
         return []
@@ -160,6 +164,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -607,6 +612,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
     }
 
@@ -773,6 +779,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesREST.archive = { @Sendable _, _, _, _ in }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         // First call (in flight at confirm time) parks forever with the STALE list —
         // cancelled, its response must never arrive. Second call (the restart) returns
@@ -834,6 +841,7 @@ struct SessionListFeatureTests {
       $0.preferences = .inMemory()
       $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did, it would throw — the row must come back regardless.
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -875,6 +883,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did it would throw — restore must be purely local.
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -1044,6 +1053,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesREST.deleteSession = { @Sendable _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did it would throw — restore must be purely local.
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -1244,6 +1254,7 @@ struct SessionListFeatureTests {
       // The cancelled load still runs its trailing cron fetch (the send is dropped) — stub
       // it so the unimplemented-dependency check doesn't trip; no response is received.
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         // Block until released, then return the OLD list (both sessions) — stale data.
         var iterator = gate.stream.makeAsyncIterator()
@@ -1295,6 +1306,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         // First call (the mid-window refresh) parks forever — stale, its response must
         // never land. Second call (the restart) returns the authoritative list.
@@ -1507,6 +1519,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.continuousClock = TestClock() // never advanced — proves there is no debounce
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "fresh")] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
     }
@@ -1542,6 +1555,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         // The cleared-search reload parks (a pre-archive response that must never
         // land); the restart returns the authoritative post-archive list.
@@ -1588,6 +1602,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = prefs
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -1659,6 +1674,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -2066,6 +2082,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
     }
 
@@ -2126,6 +2143,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -2458,6 +2476,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
         scopedFetch.withValue { $0.append(profile) }
         return [Session(id: "w1", title: "Work")]
@@ -2497,6 +2516,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         unscopedFetch.withValue { $0 += 1 }
         return [Session(id: "s1")]
@@ -2541,6 +2561,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = prefs
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
         scopedFetch.withValue { $0.append(profile) }
         return [Session(id: "w1")]
@@ -2739,6 +2760,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
         scopedFetch.withValue { $0.append(profile) }
         return [Session(id: "d1")]
@@ -3022,6 +3044,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         [Session(id: "s1", isActive: active.value)]
       }

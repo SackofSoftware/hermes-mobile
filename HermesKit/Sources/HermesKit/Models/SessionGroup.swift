@@ -22,16 +22,34 @@ public struct SessionGroup: Equatable, Sendable, Identifiable {
   /// Group `sessions` by workspace. Input order is preserved as group order (the list is
   /// already recency-sorted, so an active project floats up); rows within each group are
   /// re-sorted by `updatedAt` (last-active) desc (nil last).
-  public static func grouped(_ sessions: [Session]) -> [SessionGroup] {
+  /// - Parameter assignments: session id → workspace NAME, from the agent's
+  ///   `hermes-workspaces` plugin (auto-classified by topic). When a session has an
+  ///   assignment it wins; otherwise we fall back to the old `cwd`-derived grouping, so
+  ///   an agent without the plugin — or a chat not yet classified — behaves exactly as
+  ///   before rather than collapsing into one undifferentiated pile.
+  public static func grouped(
+    _ sessions: [Session],
+    assignments: [String: String] = [:]
+  ) -> [SessionGroup] {
     var order: [String] = []
     var byID: [String: SessionGroup] = [:]
 
     for session in sessions {
+      let assigned = assignments[session.id]?.trimmingCharacters(in: .whitespaces)
       let path = session.cwd?.trimmingCharacters(in: .whitespaces) ?? ""
-      let id = path.isEmpty ? noWorkspaceID : path
+      let id: String
+      let groupLabel: String
+      if let assigned, !assigned.isEmpty {
+        // Namespaced so a workspace NAME can never collide with a cwd PATH used as an id.
+        id = "ws:" + assigned
+        groupLabel = assigned
+      } else {
+        id = path.isEmpty ? noWorkspaceID : path
+        groupLabel = label(forPath: path)
+      }
       if byID[id] == nil {
         order.append(id)
-        byID[id] = SessionGroup(id: id, label: label(forPath: path), sessions: [])
+        byID[id] = SessionGroup(id: id, label: groupLabel, sessions: [])
       }
       byID[id]?.sessions.append(session)
     }

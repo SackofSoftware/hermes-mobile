@@ -180,6 +180,9 @@ public struct HermesRESTClient: Sendable {
   /// button to verify the end-to-end pipeline. A missing plugin surfaces as
   /// `RESTError.notFound` (404).
   public var sendTestPush: @Sendable (_ connection: ServerConnection) async throws -> Void
+  /// Auto-classified chat workspaces from the agent's `hermes-workspaces` plugin.
+  /// Returns session id → workspace name. Empty when the plugin isn't installed.
+  public var workspaceAssignments: @Sendable (_ connection: ServerConnection) async throws -> [String: String]
   /// Cron jobs on the connected agent — `GET /api/cron/jobs` (hermes-agent v0.16+). Pass
   /// `profile` (non-default) to scope to that profile's jobs; `nil` omits the param and the
   /// server aggregates every profile (each job carries its `profile` annotation). A missing
@@ -341,6 +344,16 @@ public extension HermesRESTClient {
         // No body needed — the plugin looks up the caller's registered device(s).
         // 404 → `RESTError.notFound` (plugin not installed); the caller capability-gates.
         try await send(url, method: "POST", body: Data("{}".utf8), token: conn.token, session: session)
+      },
+      workspaceAssignments: { conn in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-workspaces/assignments")
+        // Absent plugin (404) or any transport/decode failure degrades to "no
+        // assignments", which `SessionGroup.grouped` treats as the old cwd grouping —
+        // never an error the user sees, because an ungrouped list still works.
+        let response: WorkspaceAssignmentsResponse = try await get(
+          url, token: conn.token, session: session
+        )
+        return response.assignments
       },
       cronJobs: { conn, profile in
         // `nil` profile omits the param entirely — the server then aggregates all profiles
@@ -737,5 +750,21 @@ private func fetchPushPluginInfo(
     // Endpoint missing (old agent / no dashboard), transport, HTTP or decode failure → we
     // can't tell. `.unknown` leaves the capability as-is and offers no update.
     return PushPluginInfo(status: .unknown)
+  }
+}
+
+/// Payload of `GET /api/plugins/hermes-workspaces/assignments`.
+///
+/// `workspaces` (the full known list, including empty ones) is deliberately ignored for
+/// now: the list only renders groups that have sessions, so an empty workspace would be
+/// an invisible row. Decoded leniently so adding fields server-side can't break the app.
+struct WorkspaceAssignmentsResponse: Decodable {
+  var assignments: [String: String]
+
+  enum CodingKeys: String, CodingKey { case assignments }
+
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    assignments = (try? c.decode([String: String].self, forKey: .assignments)) ?? [:]
   }
 }

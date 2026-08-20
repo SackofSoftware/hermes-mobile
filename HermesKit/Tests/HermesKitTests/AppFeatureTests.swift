@@ -16,6 +16,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -45,6 +46,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .cookie(cookieSession) }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
 
@@ -64,6 +66,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("bad") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
     }
 
@@ -89,6 +92,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .cookie(cookieSession) }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
     }
 
@@ -432,6 +436,7 @@ struct AppFeatureTests {
       AppFeature()
     } withDependencies: {
       $0.chatSnapshot = snapshotClient
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
@@ -489,6 +494,7 @@ struct AppFeatureTests {
       AppFeature()
     } withDependencies: {
       $0.chatSnapshot = .inMemory()
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
@@ -1580,6 +1586,7 @@ struct AppFeatureTests {
     } withDependencies: {
       // The chat reconnect opens a never-yielding socket; the list refresh hits REST.
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
@@ -1606,6 +1613,7 @@ struct AppFeatureTests {
     ) {
       AppFeature()
     } withDependencies: {
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
@@ -1748,6 +1756,7 @@ struct AppFeatureTests {
           continuation.onTermination = { _ in socketClosed.setValue(true) }
         }
       }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
@@ -1869,6 +1878,7 @@ struct AppFeatureTests {
       $0.chatSnapshot = .inMemory()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
@@ -1966,6 +1976,7 @@ struct AppFeatureTests {
       $0.chatSnapshot = .inMemory()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
@@ -2954,6 +2965,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -2978,6 +2990,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.offline }
     }
 
@@ -3003,6 +3016,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in auth }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
     }
 
@@ -3050,6 +3064,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         throw RESTError.server(status: status, detail: nil)
       }
@@ -3078,6 +3093,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw error }
     }
 
@@ -3102,6 +3118,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw error }
     }
 
@@ -3128,6 +3145,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         throw URLError(.notConnectedToInternet)
       }
@@ -3161,6 +3179,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         probes.withValue { $0 += 1 }
         return []
@@ -3306,6 +3325,7 @@ struct AppFeatureTests {
     ) {
       AppFeature()
     } withDependencies: {
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
@@ -3337,6 +3357,7 @@ struct AppFeatureTests {
     ) {
       AppFeature()
     } withDependencies: {
+      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
       $0.hermesREST.sessions = { @Sendable _, _, _, _ in
         let attempt = probes.withValue { value -> Int in
           value += 1

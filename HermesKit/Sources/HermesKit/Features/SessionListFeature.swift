@@ -40,6 +40,9 @@ public struct SessionListFeature {
     public var pinnedIDs: [String]
     /// Workspace group ids the user expanded past the collapsed limit.
     public var expandedGroups: Set<String>
+    /// session id → workspace name, from the agent's `hermes-workspaces` plugin. Empty on
+    /// agents without the plugin, which falls the list back to `cwd` grouping.
+    public var workspaceAssignments: [String: String] = [:]
     /// Ids whose archive PATCH is currently IN FLIGHT. Transient: an id is added when its
     /// PATCH starts and removed on BOTH success and failure. While an id is here, a list/search
     /// response that lands during the in-flight window filters it out (suppressing a stale row),
@@ -334,7 +337,7 @@ public struct SessionListFeature {
     /// Sessions grouped by workspace for the (non-search) list, desktop-style.
     /// Pinned sessions are excluded — they render in the top "Pinned" section.
     public var groups: [SessionGroup] {
-      SessionGroup.grouped(unpinnedSessions)
+      SessionGroup.grouped(unpinnedSessions, assignments: workspaceAssignments)
     }
 
     /// Flat, last-active-ordered list of the unpinned sessions — the chronological mode's
@@ -383,6 +386,9 @@ public struct SessionListFeature {
     case pulledToRefresh
     case pollTick
     case sessionsResponse(Result<[Session], RESTError>)
+    /// Workspace assignments fetched alongside the session list. Failure is silent — the
+    /// list falls back to `cwd` grouping rather than surfacing an error.
+    case workspaceAssignmentsResponse([String: String])
     case sessionTapped(Session.ID)
     case newSessionButtonTapped
     case pinSession(id: Session.ID)
@@ -582,6 +588,20 @@ public struct SessionListFeature {
   static let copiedFeedbackDuration: Duration = .seconds(1.5)
 
   @Dependency(\.hermesREST) var rest
+
+  /// Best-effort fetch of the auto-classified workspace map. A missing plugin (404) or any
+  /// other failure yields an empty map, which `SessionGroup.grouped` treats as "group by
+  /// cwd like before" — never an error the user has to see.
+  private func fetchWorkspaceAssignments(_ state: inout State) -> Effect<Action> {
+    .run { [rest, connection = state.connection] send in
+      let assignments = (try? await rest.workspaceAssignments(connection)) ?? [:]
+      // An empty map carries no information — the plugin is absent, the request failed,
+      // or nothing is classified yet. Staying silent (rather than sending an empty
+      // response) keeps the previous grouping and avoids a pointless state write.
+      guard !assignments.isEmpty else { return }
+      await send(.workspaceAssignmentsResponse(assignments))
+    }
+  }
   @Dependency(\.hermesProfiles) var profiles
   @Dependency(\.continuousClock) var clock
   @Dependency(\.date.now) var now
@@ -620,6 +640,10 @@ public struct SessionListFeature {
             }
           }
           .cancellable(id: CancelID.poll, cancelInFlight: true),
+          // Workspace assignments once per appearance (the agent reclassifies on a
+          // 15-minute timer, so the 5s poll has nothing new to learn); pull-to-refresh
+          // re-fetches on demand.
+          fetchWorkspaceAssignments(&state),
           // Contextual push setup: prompt for permission now that we're past login, and (if
           // granted) start observing device tokens. Per the product decision the permission
           // prompt fires here on the sessions list — never at first launch.
@@ -645,8 +669,10 @@ public struct SessionListFeature {
         return .send(.pulledToRefresh)
 
       case .pulledToRefresh:
-        // A plain reload — does NOT (re)start the poll loop.
-        return load(&state)
+        // A plain reload — does NOT (re)start the poll loop. Workspace assignments are
+        // refreshed here rather than on every `sessionsResponse`: the agent reclassifies
+        // on a 15-minute timer, so re-fetching them on each 5s poll would be pure noise.
+        return .merge(load(&state), fetchWorkspaceAssignments(&state))
 
       case let .setSessionRunning(id, running):
         // Patch the in-memory row's working flag (drives the glow) the instant the open chat
@@ -850,6 +876,12 @@ public struct SessionListFeature {
         }
         guard seeded else { return .none }
         return persistSeenCounts(state.seenCounts)
+
+      case let .workspaceAssignmentsResponse(assignments):
+        // Only non-empty maps are ever sent (see `fetchWorkspaceAssignments`), so this
+        // can't blank out a good grouping on a transient failure.
+        state.workspaceAssignments = assignments
+        return .none
 
       case let .sessionsResponse(.failure(error)):
         state.isLoading = false

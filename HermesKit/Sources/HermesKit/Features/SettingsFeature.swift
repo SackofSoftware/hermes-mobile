@@ -43,6 +43,23 @@ public struct SettingsFeature {
     /// session list's capability flag). When false the swipe-action picker is hidden —
     /// Delete isn't offered anywhere, so the choice would be meaningless.
     public var deleteSupported: Bool
+    /// Per-provider account limits from the agent (`hermes-account-usage`). Empty until
+    /// the probe lands, and stays empty on agents without the plugin — the Providers
+    /// section simply doesn't render rather than showing an error.
+    public var providerUsage: [ProviderUsage] = []
+    /// Provider whose "paste your key" field is open, plus the text typed so far. The key
+    /// is held only until it's sent; it is never persisted on the device.
+    public var editingKeyProvider: String?
+    public var editingKeyValue: String = ""
+    /// Result of the last key save, surfaced inline under the field.
+    public var keySaveStatus: KeySaveStatus = .idle
+
+    public enum KeySaveStatus: Equatable, Sendable {
+      case idle
+      case saving
+      case saved
+      case failed(String)
+    }
 
     /// The outcome of a "send test notification" attempt, surfaced in the view/snapshots.
     public enum TestPushStatus: Equatable, Sendable {
@@ -119,6 +136,13 @@ public struct SettingsFeature {
   public enum Action: BindableAction {
     case binding(BindingAction<State>)
     case task
+    /// Account limits fetched from the agent; failure yields an empty list (no error UI).
+    case providerUsageLoaded([ProviderUsage])
+    /// Open/close the inline key field for a provider.
+    case editKeyTapped(provider: String?)
+    case keyValueChanged(String)
+    case saveKeyTapped
+    case keySaveResult(Result<String, RESTError>)
     case logUpdated([GatewayLogEntry])
     case saveTokenTapped
     case clearTokenTapped
@@ -183,6 +207,24 @@ public struct SettingsFeature {
   @Dependency(\.continuousClock) var clock
   @Dependency(\.dismiss) var dismiss
 
+  /// The `.env` variable a provider's API key belongs in. Only providers that authenticate
+  /// with a pasteable key are listed: OAuth providers (openai-codex, nous) can't be set up
+  /// from a phone — they need a device-code flow at a terminal — so they return nil and the
+  /// UI tells the user that instead of offering a field that can't work.
+  public static func envKey(forProvider provider: String) -> String? {
+    switch provider.lowercased() {
+    case "openrouter": return "OPENROUTER_API_KEY"
+    case "anthropic": return "ANTHROPIC_API_KEY"
+    case "openai": return "OPENAI_API_KEY"
+    case "google", "gemini": return "GEMINI_API_KEY"
+    case "groq": return "GROQ_API_KEY"
+    case "mistral": return "MISTRAL_API_KEY"
+    case "deepseek": return "DEEPSEEK_API_KEY"
+    case "xai", "grok": return "XAI_API_KEY"
+    default: return nil
+    }
+  }
+
   public init() {}
 
   public var body: some ReducerOf<Self> {
@@ -205,8 +247,60 @@ public struct SettingsFeature {
           // an unreachable/old agent maps to `.unknown`, which offers nothing.
           .run { [rest, connection = state.connection] send in
             await send(.pushPluginInfoLoaded(rest.pushPluginInfo(connection)))
+          },
+          // Account limits/credits. Best-effort: an agent without the plugin returns
+          // nothing and the Providers section stays hidden.
+          .run { [rest, connection = state.connection] send in
+            let usage = (try? await rest.accountUsage(connection)) ?? []
+            guard !usage.isEmpty else { return }
+            await send(.providerUsageLoaded(usage))
           }
         )
+
+      case let .providerUsageLoaded(usage):
+        state.providerUsage = usage
+        return .none
+
+      case let .editKeyTapped(provider):
+        state.editingKeyProvider = provider
+        state.editingKeyValue = ""
+        state.keySaveStatus = .idle
+        return .none
+
+      case let .keyValueChanged(value):
+        state.editingKeyValue = value
+        return .none
+
+      case .saveKeyTapped:
+        guard let provider = state.editingKeyProvider else { return .none }
+        let value = state.editingKeyValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, let envKey = Self.envKey(forProvider: provider) else { return .none }
+        state.keySaveStatus = .saving
+        return .run { [rest, connection = state.connection] send in
+          do {
+            try await rest.setEnvVar(connection, envKey, value)
+            // Re-read usage so the row flips to configured off the SERVER's answer rather
+            // than us assuming the key works.
+            let usage = (try? await rest.accountUsage(connection)) ?? []
+            if !usage.isEmpty { await send(.providerUsageLoaded(usage)) }
+            await send(.keySaveResult(.success(provider)))
+          } catch let error as RESTError {
+            await send(.keySaveResult(.failure(error)))
+          } catch {
+            await send(.keySaveResult(.failure(.unreachable)))
+          }
+        }
+
+      case .keySaveResult(.success):
+        state.keySaveStatus = .saved
+        // Clear the typed secret immediately; it lives on the agent now.
+        state.editingKeyValue = ""
+        state.editingKeyProvider = nil
+        return .none
+
+      case let .keySaveResult(.failure(error)):
+        state.keySaveStatus = .failed(error.message)
+        return .none
 
       case let .pushPluginInfoLoaded(info):
         state.pushPlugin = info

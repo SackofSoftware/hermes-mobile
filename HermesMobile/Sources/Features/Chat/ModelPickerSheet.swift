@@ -1,10 +1,16 @@
 import HermesKit
 import SwiftUI
 
-/// Interactive model + reasoning-effort picker. Configured providers are listed first and
-/// are selectable; unconfigured providers appear disabled with a "how to configure" hint
-/// (they can't be set up from mobile). The reasoning-effort options drop down inline under
-/// the selected model when that model supports reasoning. Applies via `config.set`.
+/// Interactive model + reasoning-effort picker.
+///
+/// Model and effort are SEPARATE choices and are shown that way: a "Reasoning effort"
+/// section of its own, not a sub-list nested under whichever model happens to be selected.
+/// The old nesting implied effort was a property of that one row, made the levels appear and
+/// disappear as you moved between models, and buried the current effort where you had to
+/// hunt for it.
+///
+/// Only configured providers are listed — set up new ones in Settings › Providers. Applies
+/// via `config.set`.
 struct ModelPickerSheet: View {
   let picker: ChatFeature.State.ModelPicker
   let currentModel: String?
@@ -32,11 +38,20 @@ struct ModelPickerSheet: View {
             }
             ForEach(picker.options?.orderedProviders ?? []) { provider in
               Section(provider.name) {
-                if provider.isConfigured {
-                  configuredModels(provider)
-                } else {
-                  unconfiguredRow(provider)
+                configuredModels(provider)
+              }
+            }
+            // Effort stands on its own, always in the same place. Hidden entirely for a
+            // model that doesn't reason, since the control would do nothing.
+            if picker.options?.supportsReasoning(currentModel) ?? true {
+              Section {
+                ForEach(ModelOptions.reasoningEfforts, id: \.self) { effort in
+                  effortRow(effort, selected: effort == currentEffort) { onSelectEffort(effort) }
                 }
+              } header: {
+                Text("Reasoning effort")
+              } footer: {
+                Text("Higher effort means slower, more thorough answers. Applies to the selected model.")
               }
             }
           }
@@ -60,19 +75,7 @@ struct ModelPickerSheet: View {
         selected: model == currentModel,
         icon: ProviderIconView(provider: provider.id, model: model)
       ) { onSelectModel(model) }
-      // Reasoning effort drops down under the selected, reasoning-capable model.
-      if model == currentModel, picker.options?.supportsReasoning(model) ?? true {
-        ForEach(ModelOptions.reasoningEfforts, id: \.self) { effort in
-          effortRow(effort, selected: effort == currentEffort) { onSelectEffort(effort) }
-        }
-      }
     }
-  }
-
-  private func unconfiguredRow(_ provider: ModelOptions.Provider) -> some View {
-    Label(provider.warning ?? "Not configured", systemImage: "lock")
-      .font(.footnote)
-      .foregroundStyle(.secondary)
   }
 
   private func selectableRow(
@@ -100,18 +103,17 @@ struct ModelPickerSheet: View {
     .disabled(isBusy)
   }
 
-  /// An indented reasoning-effort option shown beneath the selected model.
+  /// A reasoning-effort option. A peer of the model rows, not a child of one — so no
+  /// indent and no elbow stem, and it reads at the same weight as the model it applies to.
   private func effortRow(_ effort: String, selected: Bool, action: @escaping () -> Void) -> some View {
     Button(action: action) {
-      HStack(spacing: 8) {
-        Image(systemName: "arrow.turn.down.right").font(.caption2).foregroundStyle(.tertiary)
-        Text(effort).font(.subheadline).foregroundStyle(isBusy ? .tertiary : .secondary)
+      HStack {
+        Text(effort.capitalized).foregroundStyle(isBusy ? .secondary : .primary)
         Spacer()
         if selected {
-          Image(systemName: "checkmark").font(.subheadline).foregroundStyle(Color.hermesAccent).fontWeight(.semibold)
+          Image(systemName: "checkmark").foregroundStyle(Color.hermesAccent).fontWeight(.semibold)
         }
       }
-      .padding(.leading, 12)
       .contentShape(.rect)
     }
     .buttonStyle(.plain)

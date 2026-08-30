@@ -183,6 +183,13 @@ public struct HermesRESTClient: Sendable {
   /// Auto-classified chat workspaces from the agent's `hermes-workspaces` plugin.
   /// Returns session id → workspace name. Empty when the plugin isn't installed.
   public var workspaceAssignments: @Sendable (_ connection: ServerConnection) async throws -> [String: String]
+  /// Per-provider account limits from the agent's `hermes-account-usage` plugin: Codex
+  /// usage windows + reset times, OpenRouter balance/spend, and which providers are
+  /// configured at all. Empty when the plugin isn't installed.
+  public var accountUsage: @Sendable (_ connection: ServerConnection) async throws -> [ProviderUsage]
+  /// Write an environment variable on the agent (`PUT /api/env`) — used by Settings to
+  /// store a provider API key. The value never round-trips back to the app.
+  public var setEnvVar: @Sendable (_ connection: ServerConnection, _ key: String, _ value: String) async throws -> Void
   /// Cron jobs on the connected agent — `GET /api/cron/jobs` (hermes-agent v0.16+). Pass
   /// `profile` (non-default) to scope to that profile's jobs; `nil` omits the param and the
   /// server aggregates every profile (each job carries its `profile` annotation). A missing
@@ -354,6 +361,19 @@ public extension HermesRESTClient {
           url, token: conn.token, session: session
         )
         return response.assignments
+      },
+      accountUsage: { conn in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-account-usage/providers")
+        // Missing plugin (404) or any failure → no usage shown, never an error screen.
+        let response: AccountUsageResponse = try await get(
+          url, token: conn.token, session: session
+        )
+        return response.providers
+      },
+      setEnvVar: { conn, key, value in
+        let url = try makeURL(conn.baseURL, "/api/env")
+        let body = try JSONSerialization.data(withJSONObject: ["key": key, "value": value])
+        try await send(url, method: "PUT", body: body, token: conn.token, session: session)
       },
       cronJobs: { conn, profile in
         // `nil` profile omits the param entirely — the server then aggregates all profiles
@@ -766,5 +786,67 @@ struct WorkspaceAssignmentsResponse: Decodable {
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     assignments = (try? c.decode([String: String].self, forKey: .assignments)) ?? [:]
+  }
+}
+
+/// One provider's account limits, from `GET /api/plugins/hermes-account-usage/providers`.
+///
+/// `configured` is the signal Settings needs: false means "no key / not signed in", which
+/// is a setup row rather than a usage row. Decoded leniently so server-side additions
+/// can't break the app.
+public struct ProviderUsage: Decodable, Equatable, Sendable, Identifiable {
+  public var provider: String
+  public var configured: Bool
+  public var plan: String?
+  public var windows: [Window]
+  /// Free-form lines from the agent (OpenRouter balance/spend, banked-reset hints). Shown
+  /// verbatim so new server-side detail appears without shipping an app release.
+  public var details: [String]
+  public var unavailableReason: String?
+
+  public var id: String { provider }
+
+  public struct Window: Decodable, Equatable, Sendable, Identifiable {
+    public var label: String
+    public var usedPercent: Double?
+    /// ISO-8601. Deliberately NOT a pre-rendered "resets in 2h" — a relative string
+    /// computed on the server goes stale in the user's pocket, so the app formats it.
+    public var resetAt: String?
+    public var detail: String?
+
+    public var id: String { label }
+
+    enum CodingKeys: String, CodingKey {
+      case label
+      case usedPercent = "used_percent"
+      case resetAt = "reset_at"
+      case detail
+    }
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case provider, configured, plan, windows, details
+    case unavailableReason = "unavailable_reason"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    provider = (try? c.decode(String.self, forKey: .provider)) ?? ""
+    configured = (try? c.decode(Bool.self, forKey: .configured)) ?? false
+    plan = try? c.decodeIfPresent(String.self, forKey: .plan)
+    windows = (try? c.decode([Window].self, forKey: .windows)) ?? []
+    details = (try? c.decode([String].self, forKey: .details)) ?? []
+    unavailableReason = try? c.decodeIfPresent(String.self, forKey: .unavailableReason)
+  }
+}
+
+struct AccountUsageResponse: Decodable {
+  var providers: [ProviderUsage]
+
+  enum CodingKeys: String, CodingKey { case providers }
+
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    providers = (try? c.decode([ProviderUsage].self, forKey: .providers)) ?? []
   }
 }

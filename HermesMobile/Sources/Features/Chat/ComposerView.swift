@@ -158,19 +158,30 @@ struct ComposerView: View {
     String(format: "%d:%02d", seconds / 60, seconds % 60)
   }
 
+  /// Model and effort read as two distinct facts, not one run-on `model · effort` string.
+  /// The model is the primary label; the effort rides alongside as its own small badge so
+  /// it's legible at a glance and obviously a separate setting. One tap still opens the
+  /// picker, where they're now separate sections too.
   private var modelChip: some View {
     Button(action: onModelTap) {
-      HStack(spacing: 5) {
+      HStack(spacing: 6) {
         Text(modelLabel)
           .lineLimit(1)
+          .foregroundStyle(.secondary)
         if let effort = reasoningEffort, !effort.isEmpty {
-          Text("·").foregroundStyle(.tertiary)
-          Text(effort)
+          Text(effort.capitalized)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: Capsule())
+            .accessibilityLabel("Reasoning effort \(effort)")
         }
-        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+        Image(systemName: "chevron.up.chevron.down")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
       }
       .font(.footnote.weight(.medium))
-      .foregroundStyle(.secondary)
       .padding(.horizontal, 10)
       .padding(.vertical, 6)
       .background(.quaternary, in: Capsule())

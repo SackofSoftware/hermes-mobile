@@ -20,9 +20,21 @@ struct ProviderIconView: View {
   var body: some View {
     Group {
       if let asset = Self.assetName(provider: provider, model: model) {
-        Image(asset)
-          .resizable()
-          .aspectRatio(contentMode: .fit)
+        // Anthropic and Grok ship as single-colour marks (`currentColor` upstream), so
+        // they're template assets and must be tinted or they'd render solid black and
+        // vanish against the dark transcript. The rest carry real brand colours and are
+        // drawn as-is.
+        if Self.templateAssets.contains(asset) {
+          Image(asset)
+            .resizable()
+            .renderingMode(.template)
+            .aspectRatio(contentMode: .fit)
+            .foregroundStyle(.primary)
+        } else {
+          Image(asset)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+        }
       } else {
         // Neutral stand-in: keeps rows visually aligned when a brand mark is missing.
         Image(systemName: "cpu")
@@ -46,6 +58,12 @@ struct ProviderIconView: View {
     let hay = "\(provider) \(model ?? "")".lowercased()
 
     // Brand-specific first.
+    // Anthropic: the agent reports this provider as `anthropic` with `claude-*` models.
+    // Prefer the Claude mark (the product) over the Anthropic wordmark (the company).
+    if hay.contains("claude") { return "claude" }
+    if hay.contains("anthropic") { return "anthropic" }
+    if hay.contains("grok") || hay.contains("xai") { return "grok" }
+    if hay.contains("kimi") || hay.contains("moonshot") { return "kimi" }
     if hay.contains("deepseek") { return "deepseek" }
     if hay.contains("gemma") { return "gemma" }
     if hay.contains("gemini") || hay.contains("google") { return "gemini" }
@@ -61,8 +79,14 @@ struct ProviderIconView: View {
     // OpenAI last among matches, and only on unambiguous markers.
     if hay.contains("gpt") || hay.contains("codex") || hay.contains("openai")
       || hay.contains("o3-") || hay.contains("o4-") { return "openai" }
+    // OpenRouter absolutely LAST: it's an aggregator, so `openrouter/google/gemini-2.5`
+    // should show Gemini. Its own mark is only right when nothing else matched.
+    if hay.contains("openrouter") { return "openrouter" }
     return nil
   }
+
+  /// Assets that are single-colour and must be tinted rather than drawn as-is.
+  static let templateAssets: Set<String> = ["anthropic", "grok"]
 }
 
 #Preview {

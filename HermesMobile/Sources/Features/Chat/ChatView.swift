@@ -221,7 +221,8 @@ struct ChatView: View {
           copiedToken: store.recentlyCopiedToken,
           tokenPrefix: "\(row.id)",
           onCopyCode: { text, token in store.send(.copyCode(text: text, token: token)) },
-          attachmentImages: row.attachmentImages
+          attachmentImages: row.attachmentImages,
+          connection: store.connection
         )
         // The visible action row (#34): only under COMPLETED assistant messages with
         // real text — hidden while streaming (the reducer re-guards all of this).

@@ -12,6 +12,15 @@ struct MessageBubbleView: View {
   var onCopyCode: ((_ text: String, _ token: String) -> Void)?
   /// Raw bytes of images the user attached to this message (#8), shown as thumbnails.
   var attachmentImages: [Data] = []
+  /// Connection used to fetch files the AGENT sent (`hermes-media://` markers). Nil in
+  /// previews/snapshots, where the markers are simply stripped and nothing is fetched.
+  var connection: ServerConnection?
+
+  /// Message text with any `hermes-media://` markers pulled out. Returns the original
+  /// string untouched when there are none, which is almost every message.
+  private var parsed: (text: String, media: [MediaMarker]) {
+    MediaMarkerParser.extract(from: text)
+  }
 
   var body: some View {
     HStack(alignment: .top) {
@@ -23,7 +32,7 @@ struct MessageBubbleView: View {
             // Assistant text renders as bubble-less, leading-aligned, full-width plain
             // content (Claude-app style) — only user messages keep a bubble.
             MarkdownText(
-              text: text,
+              text: parsed.text,
               copiedToken: copiedToken,
               tokenPrefix: tokenPrefix,
               onCopyCode: onCopyCode
@@ -35,6 +44,13 @@ struct MessageBubbleView: View {
               .padding(.horizontal, 12)
               .padding(.vertical, 8)
               .background(bubbleColor, in: .rect(cornerRadius: 14))
+          }
+        }
+        // Files the agent sent, under its message. Markers were stripped from the text
+        // above, so a Markdown renderer never sees a scheme it can't fetch.
+        if role == .assistant, !parsed.media.isEmpty, let connection {
+          ForEach(parsed.media) { marker in
+            MediaAttachmentView(marker: marker, connection: connection)
           }
         }
         if !isComplete {

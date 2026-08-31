@@ -165,7 +165,9 @@ struct ComposerView: View {
   private var modelChip: some View {
     Button(action: onModelTap) {
       HStack(spacing: 6) {
-        Text(modelLabel)
+        // The brand mark plus a readable name: "ChatGPT 5.6 Terra", not "gpt-5.6-terra".
+        ProviderIconView(provider: modelLabel, model: modelLabel, size: 14)
+        Text(ModelDisplay.compactName(modelLabel))
           .lineLimit(1)
           .foregroundStyle(.secondary)
         if let effort = reasoningEffort, !effort.isEmpty {

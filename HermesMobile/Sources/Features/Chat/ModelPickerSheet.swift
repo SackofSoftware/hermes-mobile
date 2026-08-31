@@ -45,11 +45,8 @@ struct ModelPickerSheet: View {
             // model that doesn't reason, since the control would do nothing.
             if picker.options?.supportsReasoning(currentModel) ?? true {
               Section {
-                ForEach(ModelOptions.reasoningEfforts, id: \.self) { effort in
-                  effortRow(effort, selected: effort == currentEffort) { onSelectEffort(effort) }
-                }
-              } header: {
-                Text("Reasoning effort")
+                EffortSliderView(effort: currentEffort, isBusy: isBusy, onSelect: onSelectEffort)
+                  .padding(.vertical, 4)
               } footer: {
                 Text("Higher effort means slower, more thorough answers. Applies to the selected model.")
               }
@@ -71,7 +68,8 @@ struct ModelPickerSheet: View {
   private func configuredModels(_ provider: ModelOptions.Provider) -> some View {
     ForEach(provider.models, id: \.self) { model in
       selectableRow(
-        model,
+        ModelDisplay.prettyName(model),
+        subtitle: model,
         selected: model == currentModel,
         icon: ProviderIconView(provider: provider.id, model: model)
       ) { onSelectModel(model) }
@@ -80,6 +78,7 @@ struct ModelPickerSheet: View {
 
   private func selectableRow(
     _ label: String,
+    subtitle: String? = nil,
     selected: Bool,
     icon: ProviderIconView? = nil,
     action: @escaping () -> Void
@@ -91,7 +90,14 @@ struct ModelPickerSheet: View {
           // Dim the mark in step with the label while a turn is running.
           .opacity(isBusy ? 0.5 : 1)
         }
-        Text(label).foregroundStyle(isBusy ? .secondary : .primary)
+        VStack(alignment: .leading, spacing: 1) {
+          Text(label).foregroundStyle(isBusy ? .secondary : .primary)
+          // The raw id stays available — you sometimes need to match it against the
+          // agent's logs — but demoted so the readable name leads.
+          if let subtitle, subtitle != label {
+            Text(subtitle).font(.caption2).foregroundStyle(.tertiary)
+          }
+        }
         Spacer()
         if selected {
           Image(systemName: "checkmark").foregroundStyle(Color.hermesAccent).fontWeight(.semibold)
@@ -103,20 +109,5 @@ struct ModelPickerSheet: View {
     .disabled(isBusy)
   }
 
-  /// A reasoning-effort option. A peer of the model rows, not a child of one — so no
-  /// indent and no elbow stem, and it reads at the same weight as the model it applies to.
-  private func effortRow(_ effort: String, selected: Bool, action: @escaping () -> Void) -> some View {
-    Button(action: action) {
-      HStack {
-        Text(effort.capitalized).foregroundStyle(isBusy ? .secondary : .primary)
-        Spacer()
-        if selected {
-          Image(systemName: "checkmark").foregroundStyle(Color.hermesAccent).fontWeight(.semibold)
-        }
-      }
-      .contentShape(.rect)
-    }
-    .buttonStyle(.plain)
-    .disabled(isBusy)
-  }
+
 }

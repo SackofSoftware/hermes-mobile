@@ -193,6 +193,12 @@ public struct HermesRESTClient: Sendable {
   /// Scan for Ollama servers the AGENT can reach (loopback + online tailnet peers).
   /// Runs on the agent because the phone usually can't reach those hosts itself.
   public var ollamaScan: @Sendable (_ connection: ServerConnection) async throws -> [OllamaServer]
+  /// Metadata for a file the agent sent (`hermes-media://<id>`) — name, size, type.
+  /// Fetched before the bytes so a large file can be shown as a card rather than
+  /// silently downloaded.
+  public var mediaItem: @Sendable (_ connection: ServerConnection, _ id: String) async throws -> MediaItem
+  /// The bytes of a sent file.
+  public var mediaData: @Sendable (_ connection: ServerConnection, _ id: String) async throws -> Data
   /// Cron jobs on the connected agent — `GET /api/cron/jobs` (hermes-agent v0.16+). Pass
   /// `profile` (non-default) to scope to that profile's jobs; `nil` omits the param and the
   /// server aggregates every profile (each job carries its `profile` annotation). A missing
@@ -383,6 +389,14 @@ public extension HermesRESTClient {
         let response: OllamaScanResponse = try await get(url, token: conn.token, session: session)
         return response.servers
       },
+      mediaItem: { conn, id in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-media/item/\(id)")
+        return try await get(url, token: conn.token, session: session)
+      },
+      mediaData: { conn, id in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-media/file/\(id)")
+        return try await getData(url, token: conn.token, session: session)
+      },
       cronJobs: { conn, profile in
         // `nil` profile omits the param entirely — the server then aggregates all profiles
         // (its default `all`), matching how the unscoped session list behaves.
@@ -534,6 +548,27 @@ func get<T: Decodable>(_ url: URL, token: String?, session: URLSession) async th
   } catch {
     throw RESTError.decoding
   }
+}
+
+/// Fetch raw bytes (an image, a PDF) rather than JSON.
+///
+/// Deliberately capped: a media id could point at a multi-gigabyte video, and materialising
+/// that in the transcript would take the phone down. Anything over the cap throws, and the
+/// caller shows a file card with a size instead of trying to render it.
+func getData(_ url: URL, token: String?, session: URLSession, maxBytes: Int = 25 * 1024 * 1024) async throws -> Data {
+  var request = URLRequest(url: url)
+  if let token { request.setValue(token, forHTTPHeaderField: "X-Hermes-Session-Token") }
+
+  let data: Data
+  let response: URLResponse
+  do {
+    (data, response) = try await session.data(for: request)
+  } catch {
+    throw RESTError(transport: error)
+  }
+  try validate(response, data: data)
+  guard data.count <= maxBytes else { throw RESTError.decoding }
+  return data
 }
 
 /// Validate an HTTP response status, mapping non-success codes to `RESTError`. The
@@ -914,5 +949,40 @@ struct OllamaScanResponse: Decodable {
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     servers = (try? c.decode([OllamaServer].self, forKey: .servers)) ?? []
+  }
+}
+
+/// Metadata for a file the agent sent, from `GET /api/plugins/hermes-media/item/<id>`.
+public struct MediaItem: Decodable, Equatable, Sendable {
+  public var id: String
+  public var name: String
+  public var sizeBytes: Int
+  public var contentType: String
+  public var caption: String?
+
+  /// Whether the app should try to draw this inline rather than show a file card.
+  public var isImage: Bool { contentType.hasPrefix("image/") }
+
+  enum CodingKeys: String, CodingKey {
+    case id, name, caption
+    case sizeBytes = "size_bytes"
+    case contentType = "content_type"
+  }
+
+  public init(id: String, name: String, sizeBytes: Int, contentType: String, caption: String? = nil) {
+    self.id = id
+    self.name = name
+    self.sizeBytes = sizeBytes
+    self.contentType = contentType
+    self.caption = caption
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = (try? c.decode(String.self, forKey: .id)) ?? ""
+    name = (try? c.decode(String.self, forKey: .name)) ?? ""
+    sizeBytes = (try? c.decode(Int.self, forKey: .sizeBytes)) ?? 0
+    contentType = (try? c.decode(String.self, forKey: .contentType)) ?? "application/octet-stream"
+    caption = try? c.decodeIfPresent(String.self, forKey: .caption)
   }
 }

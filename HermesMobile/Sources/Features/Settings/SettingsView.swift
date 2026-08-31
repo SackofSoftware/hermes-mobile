@@ -73,7 +73,8 @@ struct SettingsView: View {
 
         ForEach(store.ollamaServers) { server in
           VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 8) {
+              ProviderIconView(provider: "ollama", model: nil, size: 16)
               Text(server.host).font(.callout.weight(.medium))
               Spacer()
               Button("Use") { store.send(.useOllamaTapped(baseURL: server.baseURL)) }

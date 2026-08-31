@@ -192,11 +192,18 @@ struct ConnectionView: View {
     store.method = .password
     store.username = user
     store.password = pass
-    // The reachability probe is debounced off the URL binding, so give it a beat to land
-    // before submitting — connecting into an unchecked server just races the check.
+    // The reachability probe is debounced off the URL binding, and how long it takes
+    // depends on the network — a fixed delay either races it or wastes time. Poll for the
+    // form to become submittable instead, and give up rather than hang if it never does
+    // (agent down, VPN off): the filled form is still there to submit by hand.
     Task {
-      try? await Task.sleep(for: .milliseconds(600))
-      if store.canConnect { store.send(.connectTapped) }
+      for _ in 0..<25 {
+        if store.canConnect {
+          store.send(.connectTapped)
+          return
+        }
+        try? await Task.sleep(for: .milliseconds(200))
+      }
     }
     #endif
   }

@@ -6,9 +6,8 @@ import SwiftUI
 /// generic OpenRouter glyph, which is what you actually want to recognise at a glance).
 ///
 /// Art is vector (SVG in the asset catalog with `preserves-vector-representation`), so it
-/// stays crisp at any Dynamic Type size. Not every provider has a mark on hand —
-/// Anthropic/Claude, Grok, Kimi and OpenRouter's own logo are missing — so anything
-/// unresolved falls back to a neutral SF Symbol rather than showing a broken image.
+/// stays crisp at any Dynamic Type size. Anything unresolved falls back to a neutral SF
+/// Symbol rather than showing a broken image.
 struct ProviderIconView: View {
   /// Provider name or slug, e.g. "openai-codex", "openrouter", "anthropic".
   let provider: String
@@ -20,10 +19,10 @@ struct ProviderIconView: View {
   var body: some View {
     Group {
       if let asset = Self.assetName(provider: provider, model: model) {
-        // Anthropic and Grok ship as single-colour marks (`currentColor` upstream), so
-        // they're template assets and must be tinted or they'd render solid black and
-        // vanish against the dark transcript. The rest carry real brand colours and are
-        // drawn as-is.
+        // Anthropic, Grok and Ollama ship as single-colour marks (`currentColor`
+        // upstream). Drawn as-is they'd be solid black and vanish against the dark
+        // transcript, so they're template assets and get tinted to the foreground —
+        // which also means they follow light/dark instead of being fixed to one.
         if Self.templateAssets.contains(asset) {
           Image(asset)
             .resizable()
@@ -64,6 +63,7 @@ struct ProviderIconView: View {
     if hay.contains("anthropic") { return "anthropic" }
     if hay.contains("grok") || hay.contains("xai") { return "grok" }
     if hay.contains("kimi") || hay.contains("moonshot") { return "kimi" }
+    if hay.contains("ollama") { return "ollama" }
     if hay.contains("deepseek") { return "deepseek" }
     if hay.contains("gemma") { return "gemma" }
     if hay.contains("gemini") || hay.contains("google") { return "gemini" }
@@ -85,8 +85,9 @@ struct ProviderIconView: View {
     return nil
   }
 
-  /// Assets that are single-colour and must be tinted rather than drawn as-is.
-  static let templateAssets: Set<String> = ["anthropic", "grok"]
+  /// Single-colour marks: tinted rather than drawn as-is, so they read correctly in BOTH
+  /// light and dark mode instead of being hard-coded to one and vanishing in the other.
+  static let templateAssets: Set<String> = ["anthropic", "grok", "ollama"]
 }
 
 #Preview {
@@ -97,7 +98,8 @@ struct ProviderIconView: View {
         ("openrouter", "google/gemini-2.5-flash-lite"),
         ("openrouter", "meta-llama/llama-3.3-70b"),
         ("openrouter", "deepseek/deepseek-r1"),
-        ("anthropic", "claude-haiku-4-5"), // no mark on hand → SF Symbol fallback
+        ("anthropic", "claude-haiku-4-5"),
+        ("ollama", "gemma3:4b"),
       ],
       id: \.1
     ) { provider, model in

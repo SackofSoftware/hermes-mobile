@@ -58,6 +58,9 @@ public struct SettingsFeature {
     /// tailnet peer and shouldn't fire every time Settings opens.
     public var ollamaServers: [OllamaServer] = []
     public var ollamaScanState: OllamaScanState = .idle
+    /// The agent's approval mode ("manual" / "smart" / "off"); nil until the probe
+    /// lands, and stays nil on agents without the plugin — the section hides.
+    public var approvalMode: String?
 
     public enum OllamaScanState: Equatable, Sendable {
       case idle
@@ -156,6 +159,8 @@ public struct SettingsFeature {
     case keyValueChanged(String)
     case saveKeyTapped
     case keySaveResult(Result<String, RESTError>)
+    case approvalModeLoaded(String)
+    case approvalModeSelected(String)
     case scanOllamaTapped
     case ollamaScanResult(Result<[OllamaServer], RESTError>)
     /// Point the agent at a discovered server (writes OLLAMA_BASE_URL).
@@ -271,6 +276,10 @@ public struct SettingsFeature {
             let usage = (try? await rest.accountUsage(connection)) ?? []
             guard !usage.isEmpty else { return }
             await send(.providerUsageLoaded(usage))
+          },
+          .run { [rest, connection = state.connection] send in
+            guard let mode = try? await rest.approvalMode(connection) else { return }
+            await send(.approvalModeLoaded(mode))
           }
         )
 
@@ -318,6 +327,22 @@ public struct SettingsFeature {
       case let .keySaveResult(.failure(error)):
         state.keySaveStatus = .failed(error.message)
         return .none
+
+      case let .approvalModeLoaded(mode):
+        state.approvalMode = mode
+        return .none
+
+      case let .approvalModeSelected(mode):
+        guard mode != state.approvalMode else { return .none }
+        state.approvalMode = mode // optimistic; re-read confirms below
+        return .run { [rest, connection = state.connection] send in
+          _ = try? await rest.setApprovalMode(connection, mode)
+          // Read back so the row shows the SERVER's truth, not our assumption —
+          // config normalization has been seen to revert this value.
+          if let confirmed = try? await rest.approvalMode(connection) {
+            await send(.approvalModeLoaded(confirmed))
+          }
+        }
 
       case .scanOllamaTapped:
         state.ollamaScanState = .scanning

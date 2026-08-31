@@ -53,6 +53,13 @@ struct MessageBubbleView: View {
             MediaAttachmentView(marker: marker, connection: connection)
           }
         }
+        // YouTube links get a tappable thumbnail card beneath the text (the inline link
+        // stays clickable too — the card adds, it doesn't hide).
+        if role == .assistant, isComplete {
+          ForEach(YouTubeLink.findAll(in: parsed.text)) { link in
+            YouTubeCardView(link: link)
+          }
+        }
         if !isComplete {
           ProgressView().controlSize(.mini)
         }

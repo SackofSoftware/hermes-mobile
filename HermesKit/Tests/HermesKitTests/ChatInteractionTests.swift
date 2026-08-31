@@ -216,6 +216,8 @@ struct ChatInteractionTests {
 
   @Test func modelChipTappedLoadsOptions() async {
     let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      // Context windows are a silent best-effort join; empty = no follow-up action.
+      $0.hermesREST.modelContextWindows = { @Sendable _, _, _ in [:] }
       $0.hermesGateway.send = { @Sendable _, _ in
         .object([
           "providers": .array([.object([
@@ -229,6 +231,7 @@ struct ChatInteractionTests {
     }
 
     await store.send(.modelChipTapped) {
+      $0.chipSheet = .modelPicker
       $0.modelPicker = ChatFeature.State.ModelPicker(isLoading: true)
     }
     await store.receive(\.modelOptionsResponse.success) {

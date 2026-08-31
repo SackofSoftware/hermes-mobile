@@ -199,6 +199,15 @@ public struct HermesRESTClient: Sendable {
   public var mediaItem: @Sendable (_ connection: ServerConnection, _ id: String) async throws -> MediaItem
   /// The bytes of a sent file.
   public var mediaData: @Sendable (_ connection: ServerConnection, _ id: String) async throws -> Data
+  /// Context windows (tokens) for a provider's models, from the agent's models.dev
+  /// cache. Served by the agent because context windows change with model releases —
+  /// the server updates, an app binary doesn't. Missing models simply aren't in the map.
+  public var modelContextWindows: @Sendable (_ connection: ServerConnection, _ provider: String, _ models: [String]) async throws -> [String: Int]
+  /// The agent's approval mode: "manual" (always ask), "smart" (guardian LLM decides),
+  /// or "off" (never ask). Read live from config.yaml, which the approval gate re-reads
+  /// per decision — so a set takes effect on the next tool call, no restart.
+  public var approvalMode: @Sendable (_ connection: ServerConnection) async throws -> String
+  public var setApprovalMode: @Sendable (_ connection: ServerConnection, _ mode: String) async throws -> String
   /// Cron jobs on the connected agent — `GET /api/cron/jobs` (hermes-agent v0.16+). Pass
   /// `profile` (non-default) to scope to that profile's jobs; `nil` omits the param and the
   /// server aggregates every profile (each job carries its `profile` annotation). A missing
@@ -396,6 +405,26 @@ public extension HermesRESTClient {
       mediaData: { conn, id in
         let url = try makeURL(conn.baseURL, "/api/plugins/hermes-media/file/\(id)")
         return try await getData(url, token: conn.token, session: session)
+      },
+      modelContextWindows: { conn, provider, models in
+        var url = try makeURL(conn.baseURL, "/api/plugins/hermes-account-usage/model-meta")
+        url = url.appending(queryItems: [
+          URLQueryItem(name: "provider", value: provider),
+          URLQueryItem(name: "models", value: models.joined(separator: ",")),
+        ])
+        let response: ModelMetaResponse = try await get(url, token: conn.token, session: session)
+        return response.contextWindows
+      },
+      approvalMode: { conn in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-account-usage/approval-mode")
+        let response: ApprovalModeResponse = try await get(url, token: conn.token, session: session)
+        return response.mode
+      },
+      setApprovalMode: { conn, mode in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-account-usage/approval-mode")
+        let body = try JSONSerialization.data(withJSONObject: ["mode": mode])
+        try await send(url, method: "POST", body: body, token: conn.token, session: session)
+        return mode
       },
       cronJobs: { conn, profile in
         // `nil` profile omits the param entirely — the server then aggregates all profiles
@@ -984,5 +1013,27 @@ public struct MediaItem: Decodable, Equatable, Sendable {
     sizeBytes = (try? c.decode(Int.self, forKey: .sizeBytes)) ?? 0
     contentType = (try? c.decode(String.self, forKey: .contentType)) ?? "application/octet-stream"
     caption = try? c.decodeIfPresent(String.self, forKey: .caption)
+  }
+}
+
+struct ModelMetaResponse: Decodable {
+  var contextWindows: [String: Int]
+
+  enum CodingKeys: String, CodingKey { case contextWindows = "context_windows" }
+
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    contextWindows = (try? c.decode([String: Int].self, forKey: .contextWindows)) ?? [:]
+  }
+}
+
+struct ApprovalModeResponse: Decodable {
+  var mode: String
+
+  enum CodingKeys: String, CodingKey { case mode }
+
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    mode = (try? c.decode(String.self, forKey: .mode)) ?? "smart"
   }
 }

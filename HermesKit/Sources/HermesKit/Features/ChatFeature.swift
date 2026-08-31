@@ -103,6 +103,17 @@ public struct ChatFeature {
     public var usage: Usage?
     /// The model/reasoning picker sheet, when open (Task 7).
     public var modelPicker: ModelPicker?
+    /// Which composer-chip sheet is presented, if any. ONE slot on purpose: the model
+    /// picker and the effort sheet used to be two independent `.sheet` flags, and two
+    /// sheets attached to the same view can fight each other (one dismissing as the
+    /// other presents). An enum makes "which sheet is up" a single fact.
+    public var chipSheet: ChipSheet?
+
+    public enum ChipSheet: String, Equatable, Sendable, Identifiable {
+      case modelPicker
+      case effort
+      public var id: String { rawValue }
+    }
     /// Draft text for the rename alert. `nil` = alert closed; non-nil = alert open
     /// with the in-progress title (Task 4).
     public var renameDraft: String?
@@ -275,6 +286,9 @@ public struct ChatFeature {
       public var isLoading: Bool
       public var options: ModelOptions?
       public var error: String?
+      /// model id → context window (tokens), joined in as the per-provider fetches land.
+      /// Cosmetic: rows without an entry just show no number.
+      public var contextWindows: [String: Int] = [:]
 
       public init(isLoading: Bool = true, options: ModelOptions? = nil, error: String? = nil) {
         self.isLoading = isLoading
@@ -705,7 +719,11 @@ public struct ChatFeature {
     case toolTapped(id: ChatRow.ID)
     case toolDetailDismissed
     case modelChipTapped
+    case effortBadgeTapped
+    case effortSheetDismissed
     case modelOptionsResponse(Result<ModelOptions, GatewayError>)
+    /// Context windows for one provider's models arrived (best-effort, may never fire).
+    case modelContextWindowsLoaded([String: Int])
     case modelSelected(String)
     case reasoningSelected(String)
     case modelPickerDismissed
@@ -1887,8 +1905,17 @@ public struct ChatFeature {
         state.presentedTool = nil
         return .none
 
+      case .effortBadgeTapped:
+        state.chipSheet = .effort
+        return .none
+
+      case .effortSheetDismissed:
+        if state.chipSheet == .effort { state.chipSheet = nil }
+        return .none
+
       case .modelChipTapped:
         guard let sessionID = state.liveSessionID else { return .none }
+        state.chipSheet = .modelPicker
         state.modelPicker = State.ModelPicker(isLoading: true)
         return .run { [gateway] send in
           do {
@@ -1908,6 +1935,25 @@ public struct ChatFeature {
       case let .modelOptionsResponse(.success(options)):
         state.modelPicker?.isLoading = false
         state.modelPicker?.options = options
+        // Join in context windows per provider, best-effort and in parallel. Failures
+        // are silent — a missing number is cosmetic, never an error the picker shows.
+        let configured = options.orderedProviders
+        guard !configured.isEmpty else { return .none }
+        return .run { [rest, connection = state.connection] send in
+          await withTaskGroup(of: [String: Int].self) { group in
+            for provider in configured {
+              group.addTask {
+                (try? await rest.modelContextWindows(connection, provider.id, provider.models)) ?? [:]
+              }
+            }
+            for await windows in group where !windows.isEmpty {
+              await send(.modelContextWindowsLoaded(windows))
+            }
+          }
+        }
+
+      case let .modelContextWindowsLoaded(windows):
+        state.modelPicker?.contextWindows.merge(windows) { _, new in new }
         return .none
 
       case let .modelOptionsResponse(.failure(error)):
@@ -1935,6 +1981,7 @@ public struct ChatFeature {
         )
 
       case .modelPickerDismissed:
+        if state.chipSheet == .modelPicker { state.chipSheet = nil }
         state.modelPicker = nil
         return .none
 

@@ -43,3 +43,30 @@ import Testing
     #expect(text.contains("hermes-media"))
   }
 }
+
+@Suite struct YouTubeLinkTests {
+  @Test func findsTheShapesPeopleActuallyPaste() {
+    let text = """
+    Try https://www.youtube.com/watch?v=dQw4w9WgXcQ or the short form
+    https://youtu.be/abc123DEF-_ — and a short https://youtube.com/shorts/AAAAAAAAAAA.
+    """
+    #expect(YouTubeLink.findAll(in: text).map(\.videoID)
+      == ["dQw4w9WgXcQ", "abc123DEF-_", "AAAAAAAAAAA"])
+  }
+
+  @Test func trailingPunctuationDoesNotStickToTheID() {
+    let links = YouTubeLink.findAll(in: "watch this: https://youtu.be/dQw4w9WgXcQ, great video")
+    #expect(links.map(\.videoID) == ["dQw4w9WgXcQ"])
+  }
+
+  @Test func duplicatesCollapseAndNonYouTubeIsIgnored() {
+    let text = "https://youtu.be/dQw4w9WgXcQ and again https://www.youtube.com/watch?v=dQw4w9WgXcQ plus https://vimeo.com/12345"
+    #expect(YouTubeLink.findAll(in: text).count == 1)
+    #expect(YouTubeLink.findAll(in: "no links here").isEmpty)
+  }
+
+  @Test func extraQueryParamsBeforeVAreHandled() {
+    let links = YouTubeLink.findAll(in: "https://www.youtube.com/watch?app=desktop&v=dQw4w9WgXcQ&t=42")
+    #expect(links.map(\.videoID) == ["dQw4w9WgXcQ"])
+  }
+}

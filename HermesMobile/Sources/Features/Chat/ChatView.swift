@@ -61,6 +61,7 @@ struct ChatView: View {
         // root cause. Not a disable: the field stays live for a draft.
         blockingCardToken: store.pendingInteraction != nil ? store.pendingInteractionToken : nil,
         onModelTap: { store.send(.modelChipTapped) },
+        onEffortTap: { store.send(.effortBadgeTapped) },
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) },
         onVoiceTap: { store.send(.voiceButtonTapped) },
@@ -113,16 +114,27 @@ struct ChatView: View {
         ToolDetailSheet(name: name, title: title, detail: detail ?? ToolDetail(), durationS: durationS)
       }
     }
-    .sheet(isPresented: modelPickerBinding) {
-      if let picker = store.modelPicker {
-        ModelPickerSheet(
-          picker: picker,
-          currentModel: store.model,
-          currentEffort: store.reasoningEffort,
+    // ONE sheet slot for both chip sheets. Two independent `.sheet` modifiers here
+    // fought each other (a present racing a dismiss left stale UI); an item-driven
+    // sheet can only ever show one thing.
+    .sheet(item: chipSheetBinding) { which in
+      switch which {
+      case .modelPicker:
+        if let picker = store.modelPicker {
+          ModelPickerSheet(
+            picker: picker,
+            currentModel: store.model,
+            isBusy: store.isSending,
+            onSelectModel: { store.send(.modelSelected($0)) },
+            onDone: { store.send(.modelPickerDismissed) }
+          )
+        }
+      case .effort:
+        EffortSheet(
+          effort: store.reasoningEffort,
           isBusy: store.isSending,
-          onSelectModel: { store.send(.modelSelected($0)) },
-          onSelectEffort: { store.send(.reasoningSelected($0)) },
-          onDone: { store.send(.modelPickerDismissed) }
+          onSelect: { store.send(.reasoningSelected($0)) },
+          onDone: { store.send(.effortSheetDismissed) }
         )
       }
     }
@@ -145,10 +157,18 @@ struct ChatView: View {
     )
   }
 
-  private var modelPickerBinding: Binding<Bool> {
+  private var chipSheetBinding: Binding<ChatFeature.State.ChipSheet?> {
     Binding(
-      get: { store.modelPicker != nil },
-      set: { if !$0 { store.send(.modelPickerDismissed) } }
+      get: { store.chipSheet },
+      set: { newValue in
+        guard newValue == nil else { return }
+        // Swipe-down lands here; route to the matching dismissal so state stays honest.
+        switch store.chipSheet {
+        case .modelPicker: store.send(.modelPickerDismissed)
+        case .effort: store.send(.effortSheetDismissed)
+        case nil: break
+        }
+      }
     )
   }
 

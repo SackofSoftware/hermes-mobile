@@ -56,6 +56,25 @@ struct SettingsView: View {
         }
       }
 
+      // Approval mode — the same three modes Claude Code offers, mapped onto what
+      // Hermes actually implements. Hidden until the agent reports its mode.
+      if let mode = store.approvalMode {
+        Section {
+          Picker("Command approvals", selection: Binding(
+            get: { mode },
+            set: { store.send(.approvalModeSelected($0)) }
+          )) {
+            Text("Auto").tag("smart")
+            Text("Manual").tag("manual")
+            Text("Bypass").tag("off")
+          }
+        } header: {
+          Text("Approvals")
+        } footer: {
+          Text(Self.approvalFooter(mode))
+        }
+      }
+
       // Local Ollama. Scanned on demand: the agent probes loopback + online tailnet
       // peers, so this is a deliberate button rather than something that fires every
       // time Settings opens.
@@ -380,6 +399,15 @@ struct SettingsView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .textSelection(.enabled)
+    }
+  }
+
+  /// One-line meaning of each approval mode, in terms of what happens on your phone.
+  static func approvalFooter(_ mode: String) -> String {
+    switch mode {
+    case "manual": return "Every risky command waits for your approval."
+    case "off": return "Nothing asks for approval. Anyone who can reach the agent gets the same free pass."
+    default: return "Hermes approves routine commands itself and only asks you about risky ones."
     }
   }
 

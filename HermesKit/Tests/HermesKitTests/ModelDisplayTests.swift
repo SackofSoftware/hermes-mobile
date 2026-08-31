@@ -36,3 +36,27 @@ import Testing
     #expect(long.hasSuffix("…"))
   }
 }
+
+@Suite struct ChipNameTests {
+  @Test func dropsBrandWordTheMarkAlreadyShows() {
+    #expect(ModelDisplay.chipName("gpt-5.6-terra") == "5.6 Terra")
+    #expect(ModelDisplay.chipName("claude-opus-4-8") == "Opus 4.8")
+    #expect(ModelDisplay.chipName("qwen/qwen3.8-flash") == "3.8 Flash")
+  }
+
+  @Test func unknownFamiliesKeepTheirFullName() {
+    // No mark to lean on → the text must still identify the model.
+    #expect(ModelDisplay.chipName("brand-new-model") == "Brand New Model")
+  }
+}
+
+@Suite struct ContextLabelTests {
+  @Test func formatsTokenCountsAtTwoFigures() {
+    #expect(ModelDisplay.contextLabel(1_050_000) == "1.1M ctx")
+    #expect(ModelDisplay.contextLabel(1_000_000) == "1M ctx")
+    #expect(ModelDisplay.contextLabel(400_000) == "400K ctx")
+    #expect(ModelDisplay.contextLabel(200_000) == "200K ctx")
+    #expect(ModelDisplay.contextLabel(32_768) == "33K ctx")
+    #expect(ModelDisplay.contextLabel(0) == "")
+  }
+}

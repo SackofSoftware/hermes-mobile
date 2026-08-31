@@ -88,4 +88,42 @@ public enum ModelDisplay {
     guard pretty.count > limit else { return pretty }
     return String(pretty.prefix(limit - 1)) + "…"
   }
+
+  /// Label for the composer chip when the BRAND MARK is drawn beside it.
+  ///
+  /// With the OpenAI logo already in the chip, "ChatGPT 5.6 Terra" spends its scarce
+  /// width saying the same thing twice — and got ellipsized into "ChatGPT 5…", the worst
+  /// of both. The mark carries the brand; the text carries the version: "5.6 Terra".
+  /// Unknown families keep their full name, since there's no mark to lean on.
+  public static func chipName(_ model: String) -> String {
+    let pretty = prettyName(model)
+    let brands = [
+      "ChatGPT ", "OpenAI o3 ", "OpenAI o4 ", "Claude ", "Gemini ", "Gemma ",
+      "Qwen ", "DeepSeek ", "Llama ", "Mistral ", "Mixtral ", "Grok ", "Kimi ", "Phi ",
+    ]
+    for brand in brands where pretty.hasPrefix(brand) {
+      let rest = String(pretty.dropFirst(brand.count))
+      // "claude-opus-4-8" → "Opus 4.8" reads fine; a bare version like "5.5" still
+      // reads fine NEXT TO THE MARK, which is the only place chipName is used.
+      return rest.isEmpty ? pretty : rest
+    }
+    return pretty
+  }
+
+  /// "1050000 → 1M", "400000 → 400K", "200000 → 200K", "32768 → 33K".
+  ///
+  /// Token counts are marketing-round numbers; two significant figures is plenty and
+  /// "1.05M" would imply a precision nobody uses when sizing a prompt.
+  public static func contextLabel(_ tokens: Int) -> String {
+    guard tokens > 0 else { return "" }
+    if tokens >= 1_000_000 {
+      let m = Double(tokens) / 1_000_000
+      let rounded = (m * 10).rounded() / 10
+      return rounded == rounded.rounded()
+        ? "\(Int(rounded))M ctx"
+        : String(format: "%.1fM ctx", rounded)
+    }
+    let k = Int((Double(tokens) / 1_000).rounded())
+    return "\(k)K ctx"
+  }
 }

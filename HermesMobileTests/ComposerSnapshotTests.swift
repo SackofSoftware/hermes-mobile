@@ -16,7 +16,7 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       canSend: false,
       model: "claude-opus-4-8",
       reasoningEffort: "high",
-      onModelTap: {}, onSend: {}, onInterrupt: {}
+      onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
@@ -28,13 +28,13 @@ final class ComposerSnapshotTests: SnapshotTestCase {
         text: .constant("Summarize the streaming protocol"),
         isSending: false, canSend: true,
         model: "claude-sonnet-4-6", reasoningEffort: "medium",
-        onModelTap: {}, onSend: {}, onInterrupt: {}
+        onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
       )
       ComposerView(
         text: .constant(""),
         isSending: true, canSend: false,
         model: "claude-opus-4-8", reasoningEffort: nil,
-        onModelTap: {}, onSend: {}, onInterrupt: {}
+        onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
       )
     }
     .frame(width: device.size?.width ?? 390)
@@ -56,13 +56,13 @@ final class ComposerSnapshotTests: SnapshotTestCase {
         text: .constant("Two lines of prose, just enough to make the field grow past one."),
         isSending: false, canSend: true,
         model: "claude-opus-4-8", reasoningEffort: "high",
-        onModelTap: {}, onSend: {}, onInterrupt: {}
+        onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
       )
       ComposerView(
         text: .constant(paragraph),
         isSending: false, canSend: true,
         model: "claude-opus-4-8", reasoningEffort: "high",
-        onModelTap: {}, onSend: {}, onInterrupt: {}
+        onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
       )
     }
     .frame(width: device.size?.width ?? 390)
@@ -77,7 +77,7 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       recording: .recording,
       waveformLevels: [0.1, 0.35, 0.6, 0.8, 0.5, 0.25, 0.4, 0.7, 0.9, 0.55, 0.3, 0.15, 0.45, 0.65],
       recordingSeconds: 7,
-      onModelTap: {}, onSend: {}, onInterrupt: {}
+      onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
@@ -89,7 +89,7 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       isSending: false, canSend: false,
       model: "claude-opus-4-8", reasoningEffort: "high",
       recording: .transcribing,
-      onModelTap: {}, onSend: {}, onInterrupt: {}
+      onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
@@ -106,7 +106,7 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       isSending: false, canSend: true,
       model: "claude-opus-4-8", reasoningEffort: "high",
       attachments: attachments,
-      onModelTap: {}, onSend: {}, onInterrupt: {}
+      onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
@@ -122,7 +122,7 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       isSending: true, canSend: false,
       model: "claude-opus-4-8", reasoningEffort: "high",
       attachments: attachments,
-      onModelTap: {}, onSend: {}, onInterrupt: {}
+      onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
@@ -137,7 +137,7 @@ final class ComposerSnapshotTests: SnapshotTestCase {
       isSending: true, canSend: false,
       canQueue: true,
       model: "claude-opus-4-8", reasoningEffort: "high",
-      onModelTap: {}, onSend: {}, onInterrupt: {}
+      onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())
@@ -162,7 +162,6 @@ final class ComposerSnapshotTests: SnapshotTestCase {
     let view = ModelPickerSheet(
       picker: picker,
       currentModel: "gpt-5", // reasoning-capable → effort options drop down under it, "high" selected
-      currentEffort: "high",
       isBusy: false,
       onSelectModel: { _ in }, onSelectEffort: { _ in }, onDone: {}
     )
@@ -187,7 +186,6 @@ final class ComposerSnapshotTests: SnapshotTestCase {
     let view = ModelPickerSheet(
       picker: picker,
       currentModel: "claude-haiku-4-5", // no reasoning → effort section hidden
-      currentEffort: nil,
       isBusy: false,
       onSelectModel: { _ in }, onSelectEffort: { _ in }, onDone: {}
     )

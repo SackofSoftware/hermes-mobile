@@ -33,6 +33,9 @@ struct ComposerView: View {
   /// (`canSend` is false while a card stands), so the field stays available for a draft.
   var blockingCardToken: Int? = nil
   let onModelTap: () -> Void
+  /// Opens the effort-only sheet. Separate from `onModelTap` on purpose: tweaking effort
+  /// shouldn't cost opening (and scrolling) the model catalog.
+  let onEffortTap: () -> Void
   let onSend: () -> Void
   let onInterrupt: () -> Void
   var onVoiceTap: () -> Void = {}
@@ -158,37 +161,47 @@ struct ComposerView: View {
     String(format: "%d:%02d", seconds / 60, seconds % 60)
   }
 
-  /// Model and effort read as two distinct facts, not one run-on `model · effort` string.
-  /// The model is the primary label; the effort rides alongside as its own small badge so
-  /// it's legible at a glance and obviously a separate setting. One tap still opens the
-  /// picker, where they're now separate sections too.
+  /// One capsule, two controls: the model (mark + name + chevron) opens the model picker;
+  /// the effort badge opens the effort-only sheet. The mark carries the brand, so the text
+  /// spends its width on the version ("5.6 Terra") instead of getting ellipsized into
+  /// "ChatGPT 5…".
   private var modelChip: some View {
-    Button(action: onModelTap) {
-      HStack(spacing: 6) {
-        // The brand mark plus a readable name: "ChatGPT 5.6 Terra", not "gpt-5.6-terra".
-        ProviderIconView(provider: modelLabel, model: modelLabel, size: 14)
-        Text(ModelDisplay.compactName(modelLabel))
-          .lineLimit(1)
-          .foregroundStyle(.secondary)
-        if let effort = reasoningEffort, !effort.isEmpty {
-          Text(effort.capitalized)
+    HStack(spacing: 6) {
+      Button(action: onModelTap) {
+        HStack(spacing: 6) {
+          ProviderIconView(provider: modelLabel, model: modelLabel, size: 14)
+          Text(ModelDisplay.chipName(modelLabel))
+            .lineLimit(1)
+            // The name is the chip's point — let the rest give way, not the name.
+            .layoutPriority(1)
+          Image(systemName: "chevron.up.chevron.down")
+            .font(.caption2)
+        }
+        .foregroundStyle(.secondary)
+        .contentShape(.rect)
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Model, \(ModelDisplay.prettyName(modelLabel))")
+      .accessibilityHint("Opens the model picker")
+
+      if let effort = reasoningEffort, !effort.isEmpty {
+        Button(action: onEffortTap) {
+          Text(effort == "xhigh" ? "Max" : effort.capitalized)
             .font(.caption2.weight(.semibold))
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
             .background(.quaternary, in: Capsule())
-            .accessibilityLabel("Reasoning effort \(effort)")
         }
-        Image(systemName: "chevron.up.chevron.down")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+        .buttonStyle(.plain)
+        .accessibilityLabel("Reasoning effort, \(effort)")
+        .accessibilityHint("Opens the effort slider")
       }
-      .font(.footnote.weight(.medium))
-      .padding(.horizontal, 10)
-      .padding(.vertical, 6)
-      .background(.quaternary, in: Capsule())
     }
-    .buttonStyle(.plain)
+    .font(.footnote.weight(.medium))
+    .padding(.horizontal, 10)
+    .padding(.vertical, 6)
+    .background(.quaternary, in: Capsule())
   }
 
   private var voiceButton: some View {

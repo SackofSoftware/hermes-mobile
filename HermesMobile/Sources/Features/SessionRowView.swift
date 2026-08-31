@@ -25,12 +25,13 @@ struct SessionRowView: View {
 
   /// Floor (never a cap — Dynamic Type and two-line previews grow past it) on the row
   /// content's height. A one-line row's natural content is ~24pt; iOS collapses trailing
-  /// swipe buttons into cramped text-only capsules on rows that short. 44pt is the sweet
-  /// spot picked with the user: 20pt over natural — enough for the icon-over-label swipe
-  /// style (verified by a real swipe in the iOS 26.5 simulator) while keeping one-line
-  /// cells noticeably more compact than the 48pt floor first tried for #73 (~70pt cells,
-  /// rejected as too tall).
-  static let contentMinHeight: CGFloat = 44
+  /// swipe buttons into cramped text-only capsules on rows that short.
+  ///
+  /// 38pt is the current setting: still comfortably above Apple's 34pt threshold for
+  /// icon-over-label swipe buttons, but 6pt tighter per row than the previous 44 — which
+  /// across a full screen of sessions is most of a row's worth of reclaimed space. Do NOT
+  /// drop below ~36 without re-checking a real swipe: the buttons degrade to text-only.
+  static let contentMinHeight: CGFloat = 38
 
   private static let relativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
@@ -53,7 +54,10 @@ struct SessionRowView: View {
             .accessibilityLabel("Unread")
         }
         Text(headline)
-          .font(.headline)
+          // .headline is 17pt semibold — heavy for a dense list where every row shouts.
+          // .subheadline (15pt) with weight carrying the unread signal instead reads
+          // calmer and fits more on screen, while unread rows still stand out.
+          .font(.subheadline)
           .fontWeight(isUnread ? .semibold : .regular)
           .lineLimit(promotesSnippet ? 2 : 1)
         if isPinned {
@@ -65,8 +69,9 @@ struct SessionRowView: View {
         Spacer()
         if let updatedAt = session.updatedAt {
           Text(Self.relativeFormatter.localizedString(for: updatedAt, relativeTo: now))
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
         }
       }
       // Show the snippet as a secondary line only when it isn't already the headline.
@@ -77,7 +82,8 @@ struct SessionRowView: View {
           .lineLimit(2)
       }
     }
-    .padding(.vertical, 2)
+    // No vertical padding: `contentMinHeight` below already sets the row's height, so
+    // padding on top of it only inflates every row by a further 4pt.
     // Floor so short rows still earn icon-over-label swipe buttons; taller content
     // (two-line previews, large Dynamic Type) grows freely past it.
     .frame(minHeight: Self.contentMinHeight, alignment: .leading)

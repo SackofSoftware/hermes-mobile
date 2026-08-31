@@ -30,6 +30,12 @@ struct SessionListView: View {
       }
     }
     .listStyle(.plain)
+    // A List enforces its own 44pt minimum row height, which silently overrode the
+    // smaller floor SessionRowView sets — dropping that floor alone changed nothing on
+    // screen. Zero it here so the row's own `contentMinHeight` actually governs.
+    .environment(\.defaultMinListRowHeight, 0)
+    // Note: .listSectionSpacing is ignored by .plain lists, so section gaps are
+    // controlled by the header rows' own insets instead (see groupHeader).
     .listSectionSeparator(.hidden) // flat list — no section hairlines (row hairlines hidden per-row)
     .overlay {
       if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
@@ -172,7 +178,8 @@ struct SessionListView: View {
   /// sections (e.g. "Cron jobs") can sit alongside it under the same profile.
   private var sessionsSectionHeader: some View {
     Text("Sessions")
-      .font(.title2.weight(.bold))
+      .font(.title3.weight(.bold))
+      .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 2, trailing: 16))
       .listRowSeparator(.hidden)
       .listRowBackground(Color.clear)
       .accessibilityAddTraits(.isHeader)
@@ -229,7 +236,7 @@ struct SessionListView: View {
       } label: {
         HStack(spacing: 6) {
           Label("Routines", systemImage: "clock")
-            .font(.title2.weight(.bold))
+            .font(.title3.weight(.bold))
           Image(systemName: "chevron.right")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.secondary)
@@ -251,6 +258,7 @@ struct SessionListView: View {
       }
       Spacer()
     }
+    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 2, trailing: 16))
     .listRowSeparator(.hidden)
     .listRowBackground(Color.clear)
     .accessibilityAddTraits(.isHeader)
@@ -472,7 +480,7 @@ struct SessionListView: View {
     let visible = store.state.visibleEntries(in: group)
     let hidden = group.sessions.count - visible.count
     let isExpanded = store.expandedGroups.contains(group.id)
-    Section(group.label) {
+    Section {
       ForEach(visible) { entry in
         row(entry)
       }
@@ -483,7 +491,20 @@ struct SessionListView: View {
         .font(.subheadline)
         .listRowSeparator(.hidden)
       }
+    } header: {
+      groupHeader(group.label)
     }
+  }
+
+  /// Workspace group header. A plain List styles string headers with generous padding and
+  /// ignores `.listSectionSpacing`, so the gap between groups is set here instead — this
+  /// is what actually controls the space between workspaces.
+  private func groupHeader(_ label: String) -> some View {
+    Text(label)
+      .font(.footnote.weight(.semibold))
+      .foregroundStyle(.secondary)
+      .textCase(nil)
+      .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
   }
 
   /// Stemmed-entry convenience: renders a lane's `SessionBranchEntry` — the standard row

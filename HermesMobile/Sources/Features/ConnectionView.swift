@@ -75,7 +75,10 @@ struct ConnectionView: View {
     }
     // Auto-validate a pre-filled server URL (after logout / a failed launch auto-connect)
     // so the user doesn't have to focus the field to unlock sign-in (#38).
-    .onAppear { store.send(.onAppear) }
+    .onAppear {
+      store.send(.onAppear)
+      applyDebugAutoLoginIfAvailable()
+    }
     .sheet(isPresented: $showsSetupGuide) {
       AgentSetupGuideView()
     }
@@ -170,6 +173,32 @@ struct ConnectionView: View {
     }
     .buttonStyle(.borderless)
     .font(.footnote)
+  }
+
+  /// Prefill and submit the sign-in form from the Debug-only baked credentials.
+  ///
+  /// A no-op in Release (`DebugAutoLogin` returns nil there) and a no-op if you've already
+  /// typed something, so it can never stomp a real attempt. Only fires with a COMPLETE
+  /// set — a half-filled form that then fails to connect would be worse than an empty one.
+  private func applyDebugAutoLoginIfAvailable() {
+    #if DEBUG
+    guard DebugAutoLogin.hasCompleteCredentials,
+          store.serverURL.isEmpty, store.username.isEmpty, store.password.isEmpty,
+          let url = DebugAutoLogin.serverURL,
+          let user = DebugAutoLogin.username,
+          let pass = DebugAutoLogin.password
+    else { return }
+    store.serverURL = url
+    store.method = .password
+    store.username = user
+    store.password = pass
+    // The reachability probe is debounced off the URL binding, so give it a beat to land
+    // before submitting — connecting into an unchecked server just races the check.
+    Task {
+      try? await Task.sleep(for: .milliseconds(600))
+      if store.canConnect { store.send(.connectTapped) }
+    }
+    #endif
   }
 }
 

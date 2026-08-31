@@ -9,6 +9,13 @@ import ProjectDescription
 // Debug-only server preset (empty by default; baked into the Debug Info.plist).
 let debugServerURL = Environment.serverUrl.getString(default: "")
 
+// Debug-only sign-in prefill. Reinstalling a simulator build clears the Keychain, so
+// without these every rebuild demands a hand-typed password. Wired to build settings that
+// are EMPTY in Release (below), so an archive can never carry them even if these env vars
+// are set — and the generated project is gitignored, so they never reach the repo.
+let debugUsername = Environment.debugUsername.getString(default: "")
+let debugPassword = Environment.debugPassword.getString(default: "")
+
 // Apple team for device/TestFlight signing. Empty for simulator-only work (simulator
 // builds pass CODE_SIGNING_ALLOWED=NO).
 let developmentTeam = Environment.developmentTeam.getString(default: "")
@@ -45,7 +52,9 @@ let project = Project(
             "UIApplicationShortcutItemIconType": "UIApplicationShortcutIconTypeCompose",
           ],
         ],
-        "HermesDefaultServerURL": .string(debugServerURL),
+        "HermesDefaultServerURL": "$(HERMES_DEBUG_SERVER_URL)",
+        "HermesDebugUsername": "$(HERMES_DEBUG_USERNAME)",
+        "HermesDebugPassword": "$(HERMES_DEBUG_PASSWORD)",
         // The app connects to user-specified self-hosted servers over http (Tailscale/LAN),
         // so domain-scoped ATS exceptions aren't possible — allow cleartext loads.
         "NSAppTransportSecurity": [
@@ -94,6 +103,10 @@ let project = Project(
           // — a custom configuration breaks Tuist's SwiftPM integration, so we switch the
           // icon via a build setting.
           "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
+          // Empty in the base so any configuration that forgets to set them yields "".
+          "HERMES_DEBUG_SERVER_URL": "",
+          "HERMES_DEBUG_USERNAME": "",
+          "HERMES_DEBUG_PASSWORD": "",
         ],
         configurations: [
           // Local dev → blue icon, so it's visually distinct from the production app.
@@ -101,12 +114,20 @@ let project = Project(
           .debug(name: "Debug", settings: [
             "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIconDev",
             "APS_ENVIRONMENT": "development",
+            "HERMES_DEBUG_SERVER_URL": .string(debugServerURL),
+            "HERMES_DEBUG_USERNAME": .string(debugUsername),
+            "HERMES_DEBUG_PASSWORD": .string(debugPassword),
           ]),
           // App Store release → orange (base). Every TestFlight archive reuses this config
           // with the icon overridden to AppIconDev on the command line (see docs/development.md).
           // `APS_ENVIRONMENT=production` → production APNs (matches non-DEBUG `apns_env`).
           .release(name: "Release", settings: [
             "APS_ENVIRONMENT": "production",
+            // Belt and braces: a shipped build carries no dev credentials, whatever the
+            // environment said at generate time.
+            "HERMES_DEBUG_SERVER_URL": "",
+            "HERMES_DEBUG_USERNAME": "",
+            "HERMES_DEBUG_PASSWORD": "",
           ]),
         ]
       )

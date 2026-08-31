@@ -117,6 +117,19 @@ struct ChatView: View {
     // ONE sheet slot for both chip sheets. Two independent `.sheet` modifiers here
     // fought each other (a present racing a dismiss left stale UI); an item-driven
     // sheet can only ever show one thing.
+    .alert(
+      "Switch model?",
+      isPresented: Binding(
+        get: { store.modelConfirm != nil },
+        set: { if !$0 { store.send(.modelConfirmCancelled) } }
+      ),
+      presenting: store.modelConfirm
+    ) { _ in
+      Button("Switch") { store.send(.modelConfirmAccepted) }
+      Button("Cancel", role: .cancel) { store.send(.modelConfirmCancelled) }
+    } message: { confirm in
+      Text(confirm.message)
+    }
     .sheet(item: chipSheetBinding) { which in
       switch which {
       case .modelPicker:

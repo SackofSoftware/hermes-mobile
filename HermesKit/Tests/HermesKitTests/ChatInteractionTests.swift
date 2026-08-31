@@ -579,3 +579,62 @@ struct ChatInteractionTests {
     await store.receive(\.copiedIDToastExpired) { $0.copiedIDToastToken = nil }
   }
 }
+
+@MainActor
+@Suite struct ExpensiveModelConfirmTests {
+  private func readyState() -> ChatFeature.State {
+    var state = ChatFeature.State(
+      connection: ServerConnection(baseURL: URL(string: "http://x")!, token: "t")
+    )
+    state.liveSessionID = "live"
+    return state
+  }
+
+  @Test func confirmRequiredRollsBackAndRaisesAlert() async {
+    var initial = readyState()
+    initial.model = "gpt-5.6-terra"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable method, _ in
+        #expect(method == "config.set")
+        return .object([
+          "confirm_required": .bool(true),
+          "confirm_message": .string("Claude Sonnet 5 is priced as expensive."),
+        ])
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.modelSelected("claude-sonnet-5"))
+    await store.receive(\.modelConfirmRequired) {
+      // The chip must tell the truth while the alert is up: rolled back, not lying.
+      $0.model = "gpt-5.6-terra"
+      $0.modelConfirm = .init(
+        model: "claude-sonnet-5",
+        message: "Claude Sonnet 5 is priced as expensive."
+      )
+    }
+  }
+
+  @Test func acceptingResendsWithConfirmFlag() async {
+    let sawConfirmFlag = LockIsolated(false)
+    var initial = readyState()
+    initial.model = "gpt-5.6-terra"
+    initial.modelConfirm = .init(model: "claude-sonnet-5", message: "…")
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable _, params in
+        if case let .object(fields) = params, case .bool(true) = fields["confirm_expensive_model"] ?? .null {
+          sawConfirmFlag.setValue(true)
+        }
+        return .object(["confirm_required": .bool(false)])
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.modelConfirmAccepted) {
+      $0.modelConfirm = nil
+      $0.model = "claude-sonnet-5"
+    }
+    await store.finish()
+    #expect(sawConfirmFlag.value)
+  }
+}

@@ -114,6 +114,22 @@ public struct ChatFeature {
       case effort
       public var id: String { rawValue }
     }
+
+    /// A model pick the server refused pending explicit confirmation (Hermes's
+    /// expensive-model guard). The chip has already been rolled back; accepting resends
+    /// the switch with `confirm_expensive_model: true`.
+    public struct ModelConfirm: Equatable, Sendable {
+      public var model: String
+      public var message: String
+
+      public init(model: String, message: String) {
+        self.model = model
+        self.message = message
+      }
+    }
+
+    /// Non-nil drives the confirmation alert.
+    public var modelConfirm: ModelConfirm?
     /// Draft text for the rename alert. `nil` = alert closed; non-nil = alert open
     /// with the in-progress title (Task 4).
     public var renameDraft: String?
@@ -724,6 +740,11 @@ public struct ChatFeature {
     case modelOptionsResponse(Result<ModelOptions, GatewayError>)
     /// Context windows for one provider's models arrived (best-effort, may never fire).
     case modelContextWindowsLoaded([String: Int])
+    /// The server wants explicit confirmation before switching to a pricier model.
+    /// `previous` restores the chip so it never lies while the alert is up.
+    case modelConfirmRequired(model: String, message: String, previous: String?)
+    case modelConfirmAccepted
+    case modelConfirmCancelled
     case modelSelected(String)
     case reasoningSelected(String)
     case modelPickerDismissed
@@ -1962,14 +1983,36 @@ public struct ChatFeature {
         return .none
 
       case let .modelSelected(model):
-        // Blocked mid-turn (server returns 4009); the picker disables selection too.
         guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
+        let previous = state.model
         state.model = model // optimistic; reconciled by the next session.info
-        return configSet(
-          key: "model", value: model, sessionID: sessionID,
+        return setModel(
+          model, confirmExpensive: false, previous: previous, sessionID: sessionID,
           storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
           profile: state.scopedProfile
         )
+
+      case let .modelConfirmRequired(model, message, previous):
+        // Roll the chip back to the truth; the pick only sticks if you confirm.
+        state.model = previous ?? state.model
+        state.modelConfirm = State.ModelConfirm(model: model, message: message)
+        return .none
+
+      case .modelConfirmAccepted:
+        guard let confirm = state.modelConfirm else { return .none }
+        state.modelConfirm = nil
+        guard let sessionID = state.liveSessionID else { return .none }
+        let previous = state.model
+        state.model = confirm.model
+        return setModel(
+          confirm.model, confirmExpensive: true, previous: previous, sessionID: sessionID,
+          storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
+          profile: state.scopedProfile
+        )
+
+      case .modelConfirmCancelled:
+        state.modelConfirm = nil
+        return .none
 
       case let .reasoningSelected(effort):
         guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
@@ -3440,6 +3483,51 @@ public struct ChatFeature {
     guard let key = anchorKey(state) else { return .none }
     return .run { [chatSnapshot] _ in
       chatSnapshot.clearTurnAnchor(key)
+    }
+  }
+
+  /// Switch the session's model, honouring the server's expensive-model guard.
+  ///
+  /// `config.set model` doesn't always switch: for models Hermes prices as expensive it
+  /// returns `confirm_required` + a message and DOES NOTHING until the client resends
+  /// with `confirm_expensive_model: true`. The old fire-and-forget path dropped that
+  /// response, so picking a Claude model silently no-oped and the chip "switched back"
+  /// on the next session.info. Now the refusal surfaces as a confirmation alert.
+  private func setModel(
+    _ model: String, confirmExpensive: Bool, previous: String?, sessionID: String,
+    storedSessionID: String?, branchSeed: State.BranchSeed?, profile: String?
+  ) -> Effect<Action> {
+    .run { [gateway] send in
+      struct ConfigSetResult: Decodable {
+        var confirmRequired: Bool?
+        var confirmMessage: String?
+
+        enum CodingKeys: String, CodingKey {
+          case confirmRequired = "confirm_required"
+          case confirmMessage = "confirm_message"
+        }
+      }
+      func setConfig(_ targetID: String) async throws {
+        var fields: [String: JSONValue] = [
+          "session_id": .string(targetID),
+          "key": .string("model"),
+          "value": .string(model),
+        ]
+        if confirmExpensive { fields["confirm_expensive_model"] = .bool(true) }
+        let result = try await gateway.send("config.set", .object(fields))
+        if let decoded = result.decoded(ConfigSetResult.self), decoded.confirmRequired == true {
+          await send(.modelConfirmRequired(
+            model: model,
+            message: decoded.confirmMessage?.nonEmpty
+              ?? "This model is priced as expensive. Switch anyway?",
+            previous: previous
+          ))
+        }
+      }
+      _ = try? await withSessionHeal(
+        setConfig, sessionID: sessionID, storedSessionID: storedSessionID,
+        branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
+      )
     }
   }
 

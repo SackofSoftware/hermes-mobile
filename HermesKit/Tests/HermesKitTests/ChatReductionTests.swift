@@ -36,6 +36,7 @@ struct ChatReductionTests {
         ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
       ]
       $0.streamingRowID = uuid(1)
+      $0.turnSegmentIDs = [uuid(1)]
     }
     await store.send(.gatewayEvent(.messageDelta(text: "lo"))) {
       $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "Hello", isComplete: false)
@@ -45,6 +46,7 @@ struct ChatReductionTests {
       $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "Hello", isComplete: true)
       $0.transcript.remove(id: self.uuid(0))
       $0.streamingRowID = nil
+      $0.turnSegmentIDs = []
       $0.thinkingRowID = nil
       $0.isSending = false
     }
@@ -86,6 +88,7 @@ struct ChatReductionTests {
         ChatRow(id: uuid(0), kind: .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 0, isComplete: false)),
       ]
       $0.streamingRowID = uuid(2)
+      $0.turnSegmentIDs = [uuid(2)]
     }
     // Completion: answer finalizes, thinking freezes into the "Thought" row — still last.
     await store.send(.gatewayEvent(.messageComplete(text: "Answer", usage: nil))) {
@@ -95,6 +98,7 @@ struct ChatReductionTests {
         ChatRow(id: uuid(0), kind: .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 0, isComplete: true)),
       ]
       $0.streamingRowID = nil
+      $0.turnSegmentIDs = []
       $0.thinkingRowID = nil
       $0.isSending = false
     }
@@ -161,6 +165,7 @@ struct ChatReductionTests {
         ChatRow(id: uuid(0), kind: .thinking(reasoning: "Thinking…", status: nil, elapsedSeconds: 0, isComplete: false)),
       ]
       $0.streamingRowID = uuid(1)
+      $0.turnSegmentIDs = [uuid(1)]
     }
     // Completion freezes the thinking row (3s baked in), keeps it (had reasoning), cancels
     // the timer, and resets the counter.
@@ -168,6 +173,7 @@ struct ChatReductionTests {
       $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "pong", isComplete: true)
       $0.transcript[id: uuid(0)]?.kind = .thinking(reasoning: "Thinking…", status: nil, elapsedSeconds: 3, isComplete: true)
       $0.streamingRowID = nil
+      $0.turnSegmentIDs = []
       $0.thinkingRowID = nil
       $0.thinkingSeconds = 0
       $0.isSending = false
@@ -1027,6 +1033,7 @@ struct ChatReductionTests {
         ),
       ]
       $0.streamingRowID = inflightAssistantID
+      $0.turnSegmentIDs = [inflightAssistantID]
       $0.thinkingRowID = inflightThinkingID
     }
     // Activate's authoritative `running:true` lights the list glow for this session.
@@ -1105,6 +1112,7 @@ struct ChatReductionTests {
         ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
       ]
       $0.streamingRowID = uuid(1)
+      $0.turnSegmentIDs = [uuid(1)]
     }
     // A summary arriving mid-turn slots in BELOW the partial assistant row and above the
     // pinned live thinking row: [assistant][summary][thinking].
@@ -1128,6 +1136,7 @@ struct ChatReductionTests {
       $0.transcript.remove(id: self.uuid(0))
       $0.thinkingRowID = nil
       $0.streamingRowID = nil
+      $0.turnSegmentIDs = []
       $0.isSending = false
     }
     #expect(store.state.transcript.map(\.id) == [uuid(1), uuid(2)])
@@ -1316,6 +1325,7 @@ struct ChatReductionTests {
       ChatRow(id: uuid(1), kind: .message(role: .assistant, text: "Half", isComplete: false)),
     ]
     initial.streamingRowID = uuid(1)
+    initial.turnSegmentIDs = [uuid(1)]
     initial.thinkingRowID = uuid(0)
     initial.thinkingSeconds = 7
     initial.isSending = true
@@ -1332,6 +1342,7 @@ struct ChatReductionTests {
       $0.transcript[id: self.uuid(1)]?.kind = .message(role: .assistant, text: "Half", isComplete: true)
       $0.transcript[id: self.uuid(0)]?.kind = .thinking(reasoning: "Hmm", status: nil, elapsedSeconds: 7, isComplete: true)
       $0.streamingRowID = nil
+      $0.turnSegmentIDs = []
       $0.thinkingRowID = nil
       $0.thinkingSeconds = 0
       $0.isSending = false
@@ -2334,5 +2345,76 @@ struct ChatReductionTests {
     #expect(store.state.expectsPendingApproval == false)
 
     await store.send(.teardown)
+  }
+}
+
+@MainActor
+@Suite struct MessageSegmentationTests {
+  private func start() -> (TestStore<ChatFeature.State, ChatFeature.Action>, ChatFeature.State) {
+    var state = ChatFeature.State(
+      connection: ServerConnection(baseURL: URL(string: "http://x")!, token: "t")
+    )
+    state.liveSessionID = "live"
+    let store = TestStore(initialState: state) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date.now = Date(timeIntervalSince1970: 0)
+      // messageStart kicks the thinking timer, which reads the clock.
+      $0.continuousClock = ImmediateClock()
+    }
+    store.exhaustivity = .off
+    return (store, state)
+  }
+
+  @Test func toolStartClosesTheOpenSegmentSoLaterTextGetsItsOwnBubble() async {
+    let (store, _) = start()
+    await store.send(.gatewayEvent(.messageStart))
+    await store.send(.gatewayEvent(.messageDelta(text: "I scrolled the page.")))
+    await store.send(.gatewayEvent(.toolStart(toolID: "t1", name: "browser_navigate", title: nil, argsText: nil)))
+    await store.send(.gatewayEvent(.messageDelta(text: "Okay, here are the videos.")))
+
+    let messages = store.state.transcript.compactMap { row -> (String, Bool)? in
+      if case let .message(role, text, complete) = row.kind, role == .assistant { return (text, complete) }
+      return nil
+    }
+    // Two bubbles, not one fused "…page.Okay, here…" — and the pre-tool one is closed.
+    #expect(messages.map(\.0) == ["I scrolled the page.", "Okay, here are the videos."])
+    #expect(messages[0].1 == true)
+    // Chronology: text row, then the tool row, then the second text row.
+    let kinds = store.state.transcript.map { row -> String in
+      switch row.kind {
+      case .message: return "msg"
+      case .tool: return "tool"
+      default: return "other"
+      }
+    }.filter { $0 != "other" }
+    #expect(kinds == ["msg", "tool", "msg"])
+  }
+
+  @Test func completeWithGluedFullTextDoesNotDuplicateSegments() async {
+    let (store, _) = start()
+    await store.send(.gatewayEvent(.messageStart))
+    await store.send(.gatewayEvent(.messageDelta(text: "Part one. ")))
+    await store.send(.gatewayEvent(.toolStart(toolID: "t1", name: "terminal", title: nil, argsText: nil)))
+    await store.send(.gatewayEvent(.messageDelta(text: "Part two.")))
+    // Server's message.complete carries the whole turn glued together.
+    await store.send(.gatewayEvent(.messageComplete(text: "Part one. Part two.", usage: nil)))
+
+    let texts = store.state.transcript.compactMap { row -> String? in
+      if case let .message(role, text, _) = row.kind, role == .assistant { return text }
+      return nil
+    }
+    #expect(texts == ["Part one. ", "Part two."])
+  }
+
+  @Test func singleSegmentTurnStillTakesServerFinalText() async {
+    let (store, _) = start()
+    await store.send(.gatewayEvent(.messageStart))
+    await store.send(.gatewayEvent(.messageDelta(text: "Hel")))
+    await store.send(.gatewayEvent(.messageComplete(text: "Hello.", usage: nil)))
+    let texts = store.state.transcript.compactMap { row -> String? in
+      if case let .message(role, text, complete) = row.kind, role == .assistant, complete { return text }
+      return nil
+    }
+    #expect(texts == ["Hello."])
   }
 }

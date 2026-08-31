@@ -627,6 +627,7 @@ struct AppFeatureTests {
         ChatRow(id: thinkingID, kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
       ]
       $0.liveChat?.streamingRowID = assistantID
+      $0.liveChat?.turnSegmentIDs = [assistantID]
     }
     // The delta's debounced persist + the live ticker are still pending — living proof the
     // slot's effects survived the pop. Cancel them via an explicit app-policy teardown.

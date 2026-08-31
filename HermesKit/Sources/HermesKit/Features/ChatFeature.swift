@@ -398,6 +398,12 @@ public struct ChatFeature {
     /// target can mirror `fillLiveChat`'s marker construction (demo mode).
     public var sessionKey: String? { storedSessionID ?? liveSessionID }
     var streamingRowID: ChatRow.ID?
+    /// Assistant rows created for THIS turn's text segments, in order. Agents narrate
+    /// between tool calls (browse → "I've scrolled…" → browse → final answer); each
+    /// segment gets its own bubble so it renders in true chronological order among the
+    /// tool rows, and `message.complete` can recognise the server's glued full text as
+    /// already-shown instead of appending a duplicate.
+    var turnSegmentIDs: [ChatRow.ID] = []
     var thinkingRowID: ChatRow.ID?
     var toolRowIDs: [String: ChatRow.ID]
     var reconnectAttempt: Int
@@ -2132,6 +2138,7 @@ public struct ChatFeature {
       // Defer creating the assistant row until the first delta — a tool-only turn emits
       // message.start with no text, and an eager empty row renders as a blank bubble.
       state.streamingRowID = nil
+      state.turnSegmentIDs = []
       state.errorBanner = nil
       state.isSending = true
       // The drained entry's turn started (#66) — the submit demonstrably reached the
@@ -2172,13 +2179,42 @@ public struct ChatFeature {
     case let .messageComplete(text, usage):
       if let u = usage { state.usage = u }
       if let id = state.streamingRowID {
-        state.transcript[id: id]?.kind = .message(role: .assistant, text: text, isComplete: true)
+        // Single open segment: the server's final text is authoritative for it — but only
+        // for THIS segment. With earlier segments closed by tool calls, the server's text
+        // is the whole turn glued together; splice out what previous bubbles already show
+        // so the last bubble carries just its own tail.
+        let priorText = state.turnSegmentIDs.dropLast().compactMap { sid -> String? in
+          if case let .message(_, t, _) = state.transcript[id: sid]?.kind { return t }
+          return nil
+        }.joined()
+        var finalText = text
+        if !priorText.isEmpty, text.hasPrefix(priorText) {
+          finalText = String(text.dropFirst(priorText.count))
+        }
+        state.transcript[id: id]?.kind = .message(role: .assistant, text: finalText, isComplete: true)
       } else if !text.isEmpty {
-        // No deltas arrived (non-streamed reply) — materialise the row now.
-        state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .assistant, text: text, isComplete: true)))
+        // No open segment. If earlier segments already rendered this turn's text (tools
+        // closed the last one), the glued full text is a duplicate — only append what
+        // the segments DON'T already contain.
+        let shown = state.turnSegmentIDs.compactMap { sid -> String? in
+          if case let .message(_, t, _) = state.transcript[id: sid]?.kind { return t }
+          return nil
+        }.joined()
+        if shown.isEmpty {
+          // Non-streamed reply — materialise the row now.
+          state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .assistant, text: text, isComplete: true)))
+        } else if text != shown, text.hasPrefix(shown) {
+          let tail = String(text.dropFirst(shown.count))
+          if !tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .assistant, text: tail, isComplete: true)))
+          }
+        }
+        // shown == text (or an unexpected mismatch): the bubbles on screen already tell
+        // the story — never append a glued duplicate below them.
       }
       // else: empty tool-only turn → no row at all.
       state.streamingRowID = nil
+      state.turnSegmentIDs = []
       // Move the thinking row below the answer, then freeze it in place so the turn ends as
       // […answer][Thought · <elapsed>].
       keepThinkingLast(into: &state)
@@ -2216,6 +2252,15 @@ public struct ChatFeature {
       return .none
 
     case let .toolStart(toolID, name, title, argsText):
+      // Close the open text segment: the agent has moved on to a tool, so any further
+      // narration belongs BELOW this tool row, not appended into the pre-tool bubble.
+      // (That gluing produced mid-sentence fusions like "…continue scrolling.Okay, I
+      // found…" and made tool rows read out of order against the text.)
+      if let sid = state.streamingRowID,
+         case let .message(role, text, _) = state.transcript[id: sid]?.kind {
+        state.transcript[id: sid]?.kind = .message(role: role, text: text, isComplete: true)
+        state.streamingRowID = nil
+      }
       let id = uuid()
       let detail = argsText.map { ToolDetail(argsText: $0) }
       state.transcript.append(ChatRow(id: id, kind: .tool(
@@ -2365,10 +2410,13 @@ public struct ChatFeature {
        case let .message(role, existing, _) = state.transcript[id: id]?.kind {
       state.transcript[id: id]?.kind = .message(role: role, text: existing + text, isComplete: false)
     } else {
-      // First delta of the turn — create the assistant row lazily (see `.messageStart`).
+      // First delta of this SEGMENT — create the assistant row lazily (see `.messageStart`).
+      // A turn can have several segments: tool calls close the open one (see `.toolStart`),
+      // so narration that arrives after a tool starts a fresh bubble below the tool row.
       let id = uuid()
       state.transcript.append(ChatRow(id: id, kind: .message(role: .assistant, text: text, isComplete: false)))
       state.streamingRowID = id
+      state.turnSegmentIDs.append(id)
     }
   }
 
@@ -2396,6 +2444,7 @@ public struct ChatFeature {
       state.transcript[id: id]?.kind = .message(role: role, text: text, isComplete: true)
     }
     state.streamingRowID = nil
+    state.turnSegmentIDs = []
     freezeThinking(into: &state)
     state.isSending = false
   }
@@ -2779,6 +2828,10 @@ public struct ChatFeature {
         )
         state.transcript.append(ChatRow(id: id, kind: assistantKind))
         state.streamingRowID = id
+        // The seeded inflight text is this turn's first SEGMENT: post-hydrate tool events
+        // close it and later deltas open a fresh bubble, exactly like a live turn — and
+        // message.complete's glued full text dedups against it.
+        state.turnSegmentIDs = [id]
       }
     }
 

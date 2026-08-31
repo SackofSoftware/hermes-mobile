@@ -69,6 +69,7 @@ struct RowIdentityTests {
         ChatRow(id: uuid(0), kind: .thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false)),
       ]
       $0.streamingRowID = uuid(1)
+      $0.turnSegmentIDs = [uuid(1)]
     }
     // Subsequent deltas only mutate the text — the id stays uuid(1).
     await store.send(.gatewayEvent(.messageDelta(text: "lo"))) {
@@ -84,6 +85,7 @@ struct RowIdentityTests {
       $0.transcript[id: uuid(1)]?.kind = .message(role: .assistant, text: "Hello world", isComplete: true)
       $0.transcript.remove(id: self.uuid(0))
       $0.streamingRowID = nil
+      $0.turnSegmentIDs = []
       $0.thinkingRowID = nil
       $0.isSending = false
     }

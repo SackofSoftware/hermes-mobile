@@ -1,3 +1,5 @@
+import Foundation
+import IdentifiedCollections
 import Testing
 @testable import HermesKit
 
@@ -44,5 +46,39 @@ import Testing
     let out = ToolDisplay.shorten(long, limit: 20)
     #expect(out.hasSuffix("the-important-bit"))
     #expect(out.hasPrefix("…"))
+  }
+}
+
+@Suite struct ProfilePillVisibilityTests {
+  private func state(profiles: [String], selected: String?, supported: Bool = true)
+    -> SessionListFeature.State
+  {
+    var s = SessionListFeature.State(
+      connection: ServerConnection(baseURL: URL(string: "http://x")!, auth: .token("t")),
+      profilesSupported: supported
+    )
+    s.profiles = IdentifiedArray(uniqueElements: profiles.map { Profile(name: $0) })
+    if let selected { s.selectedProfileName = selected }
+    return s
+  }
+
+  @Test func hiddenWhenOnlyTheDefaultProfileExists() {
+    // The case that prompted this: a switcher with one destination is pure chrome.
+    #expect(state(profiles: ["default"], selected: "default").showsProfilePill == false)
+    #expect(state(profiles: ["default"], selected: nil).showsProfilePill == false)
+  }
+
+  @Test func shownOnceThereIsSomewhereToSwitchTo() {
+    #expect(state(profiles: ["default", "work"], selected: "default").showsProfilePill)
+  }
+
+  @Test func shownWhenAScopedProfileIsSelectedEvenIfAlone() {
+    // A scoped list must always say which profile it's showing.
+    #expect(state(profiles: ["work"], selected: "work").showsProfilePill)
+  }
+
+  @Test func hiddenWhenTheAgentHasNoProfilesAPI() {
+    #expect(state(profiles: ["default", "work"], selected: "default", supported: false)
+      .showsProfilePill == false)
   }
 }

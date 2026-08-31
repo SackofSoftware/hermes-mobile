@@ -56,6 +56,65 @@ struct SettingsView: View {
         }
       }
 
+      // Local Ollama. Scanned on demand: the agent probes loopback + online tailnet
+      // peers, so this is a deliberate button rather than something that fires every
+      // time Settings opens.
+      Section {
+        Button {
+          store.send(.scanOllamaTapped)
+        } label: {
+          HStack {
+            Label("Scan for local Ollama", systemImage: "magnifyingglass")
+            Spacer()
+            if store.ollamaScanState == .scanning { ProgressView().controlSize(.mini) }
+          }
+        }
+        .disabled(store.ollamaScanState == .scanning)
+
+        ForEach(store.ollamaServers) { server in
+          VStack(alignment: .leading, spacing: 4) {
+            HStack {
+              Text(server.host).font(.callout.weight(.medium))
+              Spacer()
+              Button("Use") { store.send(.useOllamaTapped(baseURL: server.baseURL)) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            // Only chat-capable models are listed; embedding models answer the same
+            // endpoint but can't hold a conversation, so offering them would mislead.
+            ForEach(server.chatModels) { model in
+              HStack {
+                Text(model.name).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if let gb = model.sizeGB {
+                  Text("\(gb, specifier: "%.1f") GB").font(.caption2).foregroundStyle(.tertiary)
+                }
+              }
+            }
+            let hidden = server.models.count - server.chatModels.count
+            if hidden > 0 {
+              Text("\(hidden) embedding model\(hidden == 1 ? "" : "s") not shown")
+                .font(.caption2).foregroundStyle(.tertiary)
+            }
+          }
+          .padding(.vertical, 2)
+        }
+
+        switch store.ollamaScanState {
+        case let .done(found) where found == 0:
+          Text("No Ollama servers reachable from your agent.")
+            .font(.caption).foregroundStyle(.secondary)
+        case let .failed(message):
+          Text(message).font(.caption).foregroundStyle(.red)
+        default:
+          EmptyView()
+        }
+      } header: {
+        Text("Local models")
+      } footer: {
+        Text("Looks for Ollama on the agent itself and on your online Tailscale devices.")
+      }
+
       // Only offered when the agent supports session deletion — otherwise Archive is the
       // only destructive action and the choice would be meaningless.
       if store.deleteSupported {

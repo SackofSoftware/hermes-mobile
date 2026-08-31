@@ -84,6 +84,17 @@ public struct SessionListFeature {
     /// Whether the agent exposes `/api/profiles` (set false on a 404 from `profiles.list`).
     /// When false the selector is hidden and the list uses today's unscoped `/api/sessions`.
     public var profilesSupported: Bool
+
+    /// Whether to show the profile pill in the nav bar at all.
+    ///
+    /// A switcher offering one destination is pure chrome: on a single-profile agent the
+    /// pill just says "default" forever and eats the title slot. Show it only once there's
+    /// somewhere to switch TO — or when a non-default profile is selected, so a scoped list
+    /// always says which profile you're looking at and can never be silently misread.
+    public var showsProfilePill: Bool {
+      guard profilesSupported else { return false }
+      return profiles.count > 1 || !isDefaultProfileSelected
+    }
     /// Custom profile currently being renamed (drives the rename alert); nil = no alert.
     public var renamingProfileName: String?
     /// The editable text bound to the profile-rename alert's `TextField`.

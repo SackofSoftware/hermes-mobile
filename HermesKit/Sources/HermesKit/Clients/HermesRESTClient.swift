@@ -190,6 +190,9 @@ public struct HermesRESTClient: Sendable {
   /// Write an environment variable on the agent (`PUT /api/env`) — used by Settings to
   /// store a provider API key. The value never round-trips back to the app.
   public var setEnvVar: @Sendable (_ connection: ServerConnection, _ key: String, _ value: String) async throws -> Void
+  /// Scan for Ollama servers the AGENT can reach (loopback + online tailnet peers).
+  /// Runs on the agent because the phone usually can't reach those hosts itself.
+  public var ollamaScan: @Sendable (_ connection: ServerConnection) async throws -> [OllamaServer]
   /// Cron jobs on the connected agent — `GET /api/cron/jobs` (hermes-agent v0.16+). Pass
   /// `profile` (non-default) to scope to that profile's jobs; `nil` omits the param and the
   /// server aggregates every profile (each job carries its `profile` annotation). A missing
@@ -374,6 +377,11 @@ public extension HermesRESTClient {
         let url = try makeURL(conn.baseURL, "/api/env")
         let body = try JSONSerialization.data(withJSONObject: ["key": key, "value": value])
         try await send(url, method: "PUT", body: body, token: conn.token, session: session)
+      },
+      ollamaScan: { conn in
+        let url = try makeURL(conn.baseURL, "/api/plugins/hermes-account-usage/ollama")
+        let response: OllamaScanResponse = try await get(url, token: conn.token, session: session)
+        return response.servers
       },
       cronJobs: { conn, profile in
         // `nil` profile omits the param entirely — the server then aggregates all profiles
@@ -848,5 +856,63 @@ struct AccountUsageResponse: Decodable {
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     providers = (try? c.decode([ProviderUsage].self, forKey: .providers)) ?? []
+  }
+}
+
+/// An Ollama server the agent can reach, from `GET /api/plugins/hermes-account-usage/ollama`.
+public struct OllamaServer: Decodable, Equatable, Sendable, Identifiable {
+  public var host: String
+  public var baseURL: String
+  public var models: [Model]
+
+  public var id: String { baseURL }
+
+  /// Models that can actually hold a conversation — embedding models answer the same
+  /// endpoint but are useless as a chat model, so the UI shouldn't offer them.
+  public var chatModels: [Model] { models.filter(\.chatCapable) }
+
+  public struct Model: Decodable, Equatable, Sendable, Identifiable {
+    public var name: String
+    public var sizeGB: Double?
+    public var chatCapable: Bool
+
+    public var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+      case name
+      case sizeGB = "size_gb"
+      case chatCapable = "chat_capable"
+    }
+
+    public init(from decoder: Decoder) throws {
+      let c = try decoder.container(keyedBy: CodingKeys.self)
+      name = (try? c.decode(String.self, forKey: .name)) ?? ""
+      sizeGB = try? c.decodeIfPresent(Double.self, forKey: .sizeGB)
+      chatCapable = (try? c.decode(Bool.self, forKey: .chatCapable)) ?? true
+    }
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case host
+    case baseURL = "base_url"
+    case models
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    host = (try? c.decode(String.self, forKey: .host)) ?? ""
+    baseURL = (try? c.decode(String.self, forKey: .baseURL)) ?? ""
+    models = (try? c.decode([Model].self, forKey: .models)) ?? []
+  }
+}
+
+struct OllamaScanResponse: Decodable {
+  var servers: [OllamaServer]
+
+  enum CodingKeys: String, CodingKey { case servers }
+
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    servers = (try? c.decode([OllamaServer].self, forKey: .servers)) ?? []
   }
 }

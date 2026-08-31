@@ -53,6 +53,19 @@ public struct SettingsFeature {
     public var editingKeyValue: String = ""
     /// Result of the last key save, surfaced inline under the field.
     public var keySaveStatus: KeySaveStatus = .idle
+    /// Ollama servers the agent found. Empty until a scan runs — the scan is explicit
+    /// (a button) rather than automatic on appearance, because it probes every online
+    /// tailnet peer and shouldn't fire every time Settings opens.
+    public var ollamaServers: [OllamaServer] = []
+    public var ollamaScanState: OllamaScanState = .idle
+
+    public enum OllamaScanState: Equatable, Sendable {
+      case idle
+      case scanning
+      /// Scan finished; `found` distinguishes "no servers" from "never looked".
+      case done(found: Int)
+      case failed(String)
+    }
 
     public enum KeySaveStatus: Equatable, Sendable {
       case idle
@@ -143,6 +156,10 @@ public struct SettingsFeature {
     case keyValueChanged(String)
     case saveKeyTapped
     case keySaveResult(Result<String, RESTError>)
+    case scanOllamaTapped
+    case ollamaScanResult(Result<[OllamaServer], RESTError>)
+    /// Point the agent at a discovered server (writes OLLAMA_BASE_URL).
+    case useOllamaTapped(baseURL: String)
     case logUpdated([GatewayLogEntry])
     case saveTokenTapped
     case clearTokenTapped
@@ -301,6 +318,36 @@ public struct SettingsFeature {
       case let .keySaveResult(.failure(error)):
         state.keySaveStatus = .failed(error.message)
         return .none
+
+      case .scanOllamaTapped:
+        state.ollamaScanState = .scanning
+        return .run { [rest, connection = state.connection] send in
+          do {
+            await send(.ollamaScanResult(.success(try await rest.ollamaScan(connection))))
+          } catch let error as RESTError {
+            await send(.ollamaScanResult(.failure(error)))
+          } catch {
+            await send(.ollamaScanResult(.failure(.unreachable)))
+          }
+        }
+
+      case let .ollamaScanResult(.success(servers)):
+        state.ollamaServers = servers
+        state.ollamaScanState = .done(found: servers.count)
+        return .none
+
+      case let .ollamaScanResult(.failure(error)):
+        state.ollamaScanState = .failed(error.message)
+        return .none
+
+      case let .useOllamaTapped(baseURL):
+        // Hermes reads OLLAMA_BASE_URL for a non-cloud endpoint; the picker shows its
+        // models on the next refresh.
+        return .run { [rest, connection = state.connection] send in
+          try? await rest.setEnvVar(connection, "OLLAMA_BASE_URL", baseURL)
+          let usage = (try? await rest.accountUsage(connection)) ?? []
+          if !usage.isEmpty { await send(.providerUsageLoaded(usage)) }
+        }
 
       case let .pushPluginInfoLoaded(info):
         state.pushPlugin = info

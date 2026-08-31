@@ -120,6 +120,7 @@ struct SettingsFeatureTests {
         }
       }
       // `.task` also probes the plugin hub for the version. `.unknown` offers no update.
+      $0.hermesREST.ollamaScan = { @Sendable _ in [] } // no scan unless a test asks
       $0.hermesREST.accountUsage = { @Sendable _ in [] } // no usage plugin → section hidden
       $0.hermesREST.pushPluginInfo = { @Sendable _ in PushPluginInfo(status: .unknown) }
     }
@@ -144,6 +145,7 @@ struct SettingsFeatureTests {
     } withDependencies: {
       $0.debugLog.stream = { @Sendable in AsyncStream { $0.finish() } }
       $0.push = push.client
+      $0.hermesREST.ollamaScan = { @Sendable _ in [] } // no scan unless a test asks
       $0.hermesREST.accountUsage = { @Sendable _ in [] } // no usage plugin → section hidden
       $0.hermesREST.pushPluginInfo = { @Sendable _ in PushPluginInfo(status: .unknown) }
     }
@@ -314,6 +316,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.ollamaScan = { @Sendable _ in [] } // no scan unless a test asks
       $0.hermesREST.accountUsage = { @Sendable _ in [] } // no usage plugin → section hidden
       $0.hermesREST.pushPluginInfo = { @Sendable _ in
         PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
@@ -335,6 +338,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.ollamaScan = { @Sendable _ in [] } // no scan unless a test asks
       $0.hermesREST.accountUsage = { @Sendable _ in [] } // no usage plugin → section hidden
       $0.hermesREST.pushPluginInfo = { @Sendable _ in
         PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: false)
@@ -359,6 +363,7 @@ struct SettingsFeatureTests {
       let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
         SettingsFeature()
       } withDependencies: {
+        $0.hermesREST.ollamaScan = { @Sendable _ in [] } // no scan unless a test asks
         $0.hermesREST.accountUsage = { @Sendable _ in [] } // no usage plugin → section hidden
         $0.hermesREST.pushPluginInfo = { @Sendable _ in info }
       }

@@ -54,7 +54,8 @@ struct SessionListView: View {
           store.send(.settingsButtonTapped)
         }
       }
-      if store.profilesSupported {
+      // Hidden on a single-profile agent — see `State.showsProfilePill`.
+      if store.showsProfilePill {
         ToolbarItem(placement: .principal) {
           profilePill
         }

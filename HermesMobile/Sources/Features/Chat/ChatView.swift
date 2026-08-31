@@ -62,6 +62,7 @@ struct ChatView: View {
         blockingCardToken: store.pendingInteraction != nil ? store.pendingInteractionToken : nil,
         onModelTap: { store.send(.modelChipTapped) },
         onEffortTap: { store.send(.effortBadgeTapped) },
+        effortSupported: store.supportsReasoning,
         onSend: { store.send(.composerSubmitted) },
         onInterrupt: { store.send(.interruptTapped) },
         onVoiceTap: { store.send(.voiceButtonTapped) },

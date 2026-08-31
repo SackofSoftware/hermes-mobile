@@ -98,6 +98,10 @@ public struct ChatFeature {
     /// Current model + reasoning effort (from `session.info`), shown in the composer chip.
     public var model: String?
     public var reasoningEffort: String?
+    /// Whether the CURRENT model supports reasoning. Drives the effort badge/sheet: a
+    /// model with no reasoning shows no effort control at all. Defaults true (the
+    /// desktop's own `caps?.reasoning ?? true`) and tightens once picker options load.
+    public var supportsReasoning = true
     /// Latest context-window usage (from `session.info` / `message.complete`), driving the
     /// composer's context pill. `nil` until the agent reports usage (old agents never do).
     public var usage: Usage?
@@ -1956,6 +1960,7 @@ public struct ChatFeature {
       case let .modelOptionsResponse(.success(options)):
         state.modelPicker?.isLoading = false
         state.modelPicker?.options = options
+        state.supportsReasoning = options.supportsReasoning(state.model)
         // Join in context windows per provider, best-effort and in parallel. Failures
         // are silent — a missing number is cosmetic, never an error the picker shows.
         let configured = options.orderedProviders
@@ -1986,6 +1991,9 @@ public struct ChatFeature {
         guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
         let previous = state.model
         state.model = model // optimistic; reconciled by the next session.info
+        if let options = state.modelPicker?.options {
+          state.supportsReasoning = options.supportsReasoning(model)
+        }
         return setModel(
           model, confirmExpensive: false, previous: previous, sessionID: sessionID,
           storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
@@ -2310,6 +2318,9 @@ public struct ChatFeature {
       // only overwrite fields that are present.
       if let model = info.model?.nonEmpty { state.model = model }
       if let effort = info.reasoningEffort?.nonEmpty { state.reasoningEffort = effort }
+      if let options = state.modelPicker?.options {
+        state.supportsReasoning = options.supportsReasoning(state.model)
+      }
       if let u = info.usage { state.usage = u }
       return .none
 

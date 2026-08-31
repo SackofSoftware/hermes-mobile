@@ -36,6 +36,9 @@ struct ComposerView: View {
   /// Opens the effort-only sheet. Separate from `onModelTap` on purpose: tweaking effort
   /// shouldn't cost opening (and scrolling) the model catalog.
   let onEffortTap: () -> Void
+  /// Whether the current model reasons at all — false hides the effort control entirely
+  /// rather than showing a dial that does nothing.
+  var effortSupported: Bool = true
   let onSend: () -> Void
   let onInterrupt: () -> Void
   var onVoiceTap: () -> Void = {}
@@ -161,10 +164,11 @@ struct ComposerView: View {
     String(format: "%d:%02d", seconds / 60, seconds % 60)
   }
 
-  /// One capsule, two controls: the model (mark + name + chevron) opens the model picker;
-  /// the effort badge opens the effort-only sheet. The mark carries the brand, so the text
-  /// spends its width on the version ("5.6 Terra") instead of getting ellipsized into
-  /// "ChatGPT 5…".
+  /// TWO capsules, side by side: the model (mark + name + chevron) and, when the model
+  /// reasons at all, a separate effort capsule. Separate on purpose — the badge nested
+  /// inside the model capsule read as one control, and a toggle-within-an-element is
+  /// exactly the ambiguity that made it hard to hit. The mark carries the brand, so the
+  /// text spends its width on the version ("5.6 Terra") instead of getting ellipsized.
   private var modelChip: some View {
     HStack(spacing: 6) {
       Button(action: onModelTap) {
@@ -178,20 +182,29 @@ struct ComposerView: View {
             .font(.caption2)
         }
         .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.quaternary, in: Capsule())
         .contentShape(.rect)
       }
       .buttonStyle(.plain)
       .accessibilityLabel("Model, \(ModelDisplay.prettyName(modelLabel))")
       .accessibilityHint("Opens the model picker")
 
-      if let effort = reasoningEffort, !effort.isEmpty {
+      // Hidden entirely for models that don't reason — a dial that does nothing is
+      // worse than no dial.
+      if effortSupported, let effort = reasoningEffort, !effort.isEmpty {
         Button(action: onEffortTap) {
-          Text(effort == "xhigh" ? "Max" : effort.capitalized)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(.quaternary, in: Capsule())
+          HStack(spacing: 4) {
+            Image(systemName: "brain")
+              .font(.caption2)
+            Text(effort == "xhigh" ? "Max" : effort.capitalized)
+          }
+          .foregroundStyle(.secondary)
+          .padding(.horizontal, 9)
+          .padding(.vertical, 6)
+          .background(.quaternary, in: Capsule())
+          .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Reasoning effort, \(effort)")
@@ -199,9 +212,6 @@ struct ComposerView: View {
       }
     }
     .font(.footnote.weight(.medium))
-    .padding(.horizontal, 10)
-    .padding(.vertical, 6)
-    .background(.quaternary, in: Capsule())
   }
 
   private var voiceButton: some View {

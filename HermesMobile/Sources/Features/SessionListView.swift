@@ -481,6 +481,10 @@ struct SessionListView: View {
     let hidden = group.sessions.count - visible.count
     let isExpanded = store.expandedGroups.contains(group.id)
     Section {
+      // The header is the section's first ROW, not a `header:` view: a custom header view
+      // with `.listRowInsets` in a plain List rendered at zero size, hiding every group
+      // label. Rows (like the "Sessions"/"Routines" headers) always render.
+      groupHeader(group.label)
       ForEach(visible) { entry in
         row(entry)
       }
@@ -491,8 +495,6 @@ struct SessionListView: View {
         .font(.subheadline)
         .listRowSeparator(.hidden)
       }
-    } header: {
-      groupHeader(group.label)
     }
   }
 
@@ -504,7 +506,11 @@ struct SessionListView: View {
       .font(.footnote.weight(.semibold))
       .foregroundStyle(.secondary)
       .textCase(nil)
+      .frame(maxWidth: .infinity, alignment: .leading)
       .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
+      .listRowSeparator(.hidden)
+      .listRowBackground(Color.clear)
+      .accessibilityAddTraits(.isHeader)
   }
 
   /// Stemmed-entry convenience: renders a lane's `SessionBranchEntry` — the standard row

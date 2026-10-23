@@ -391,22 +391,25 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift`
 - Modify: `HermesMobileTests/SessionSnapshotTests.swift`
 
-- [ ] `sessionListContent` renders Pinned cards, then `ForEach(dateSections)` as `Section`s
+- [x] `sessionListContent` renders Pinned cards, then `ForEach(dateSections)` as `Section`s
       with their labels, then the cron section
-- [ ] `row(_:)` body → `SessionCardView`; split a `cronRunRow(_:)` that keeps
+- [x] `row(_:)` body → `SessionCardView`; split a `cronRunRow(_:)` that keeps
       `SessionRowView` for peeks and `unmatchedCronSessions`; search branch uses `row(_:)`
-      without `showsPreview`
-- [ ] cron header becomes the collapse control (chevron, snappy animation gated on
+      without `showsPreview` — both go through one shared `sessionRow(_:content:)`
+      affordance funnel; the flat cron fallback uses `cronRunRow(_:)` too
+- [x] cron header becomes the collapse control (chevron, snappy animation gated on
       reduce-motion, badge always visible, header trait + collapsed/expanded value + hint);
       job rows / peeks / unmatched runs hidden while collapsed
-- [ ] replace `organizeMenu` with the `archivebox` "Archived sessions" toolbar button
-- [ ] delete `testSessionList_chronological`, `testSessionList_cronSection_chronological`,
+- [x] replace `organizeMenu` with the `archivebox` "Archived sessions" toolbar button
+- [x] delete `testSessionList_chronological`, `testSessionList_cronSection_chronological`,
       `testSessionList_noCronSection` and their recorded snapshots; retarget the remaining list
       snapshots (fixtures get `updatedAt`s that span several buckets; `now` pinned)
-- [ ] add device snapshots: `testSessionList_dateSections` (Today / Yesterday / Last week /
+- [x] add device snapshots: `testSessionList_dateSections` (Today / Yesterday / Last week /
       month-year headers, pinned on top, a nested branch inside a section),
       `testSessionList_cronSectionCollapsed`, `testSessionList_searchResultsCards`
-- [ ] run `make snapshot` twice for the new tests, then once more as the assert pass — must pass
+      — `testSessionList_dateSections` renders at a 1250pt-tall device size
+      (`deviceImage(height:)`) so every header is in frame
+- [x] run `make snapshot` twice for the new tests, then once more as the assert pass — must pass
       (modulo the documented pre-existing drift) before task 7
 
 ### Task 7: Verify acceptance criteria

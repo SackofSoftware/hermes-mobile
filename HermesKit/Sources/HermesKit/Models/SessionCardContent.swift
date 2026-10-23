@@ -1,0 +1,61 @@
+import Foundation
+
+/// What one session-list card (`SessionCardView`) shows — derived here so the rules are
+/// unit-tested; the view only lays it out.
+public struct SessionCardContent: Equatable, Sendable {
+  /// Header workspace label, or `nil` when the workspace is unknown (a search hit carries no
+  /// `cwd`), in which case the header leaves the slot out rather than claim "No workspace".
+  public let workspace: String?
+  /// `Session.displayName` — an untitled session promotes its preview here.
+  public let title: String
+  /// The preview line, only under a real title — never the title's text twice.
+  public let preview: String?
+  /// The raw server model id, shown verbatim like the chat's model chip.
+  public let model: String?
+  /// "N message(s)", or `nil` when the count is unknown or zero.
+  public let messageCount: String?
+
+  public init(session: Session, showsWorkspace: Bool = true) {
+    workspace = showsWorkspace ? session.workspaceLabel : nil
+    title = session.displayName
+    preview = session.resolvedTitle == nil ? nil : session.resolvedPreview
+    model = session.model
+    messageCount = session.messageCount.flatMap { count in
+      count > 0 ? (count == 1 ? "1 message" : "\(count) messages") : nil
+    }
+  }
+
+  /// Whether the footer line (model · message count) renders at all.
+  public var hasFooter: Bool { model != nil || messageCount != nil }
+
+  /// The card's one combined VoiceOver label, in visual order: workspace, title, preview,
+  /// model, message count, age, then whichever state flags apply.
+  public func accessibilityLabel(
+    age: String?,
+    isUnread: Bool,
+    isPinned: Bool,
+    isActive: Bool
+  ) -> String {
+    var parts = [workspace, title, preview, model, messageCount, age].compactMap { $0 }
+    if isUnread { parts.append("Unread") }
+    if isPinned { parts.append("Pinned") }
+    if isActive { parts.append("Working") }
+    return parts.joined(separator: ", ")
+  }
+}
+
+extension Session {
+  /// The card header's workspace label: the folder basename of `cwd`, else "No workspace".
+  /// Mirrors desktop `baseName(path) || path` (root "/" has no basename, so the path itself
+  /// is shown).
+  public var workspaceLabel: String {
+    guard let path = cwd?.trimmingCharacters(in: .whitespaces), !path.isEmpty else {
+      return "No workspace"
+    }
+    let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
+    if let base = trimmed.split(separator: "/").last, !base.isEmpty {
+      return String(base)
+    }
+    return path
+  }
+}

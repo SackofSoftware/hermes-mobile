@@ -19,6 +19,8 @@ struct SessionCardView: View {
   var isPinned: Bool = false
   /// Whether the agent is currently working this session — renders a brand-tinted glow.
   var isActive: Bool = false
+  /// `false` for search hits, which carry no `cwd`: the header leaves the workspace out.
+  var showsWorkspace: Bool = true
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// Drives the gentle opacity pulse of the active glow (held flat when reduce-motion is on).
@@ -31,31 +33,32 @@ struct SessionCardView: View {
   }()
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      header
-      Text(session.displayName)
+    let content = SessionCardContent(session: session, showsWorkspace: showsWorkspace)
+    return VStack(alignment: .leading, spacing: 4) {
+      header(content)
+      Text(content.title)
         .font(.headline)
         .fontWeight(isUnread ? .bold : .semibold)
-        // `fixedSize(vertical:)` is LOAD-BEARING: without it the title can be handed a
-        // one-line height and `lineLimit(2)` never takes effect (see `SessionRowView`).
+        // `fixedSize(vertical:)` keeps the title at its ideal (up to two-line) height
+        // whatever height the row is offered.
         .lineLimit(2)
         .fixedSize(horizontal: false, vertical: true)
-      // An untitled session promotes its preview into the title slot (`displayName`), so the
-      // preview line only renders under a REAL title — never the same text twice.
-      if let preview = secondaryPreview {
+      if let preview = content.preview {
         Text(preview)
           .font(.subheadline)
           .foregroundStyle(.secondary)
           .lineLimit(1)
       }
-      if model != nil || messageCount != nil {
-        footer
+      if content.hasFooter {
+        footer(content)
       }
     }
     .padding(.vertical, 4)
     .modifier(CardActiveGlow(isActive: isActive, reduceMotion: reduceMotion, pulsing: pulsing))
     .accessibilityElement(children: .combine)
-    .accessibilityLabel(accessibilityText)
+    .accessibilityLabel(
+      content.accessibilityLabel(age: age, isUnread: isUnread, isPinned: isPinned, isActive: isActive)
+    )
     .onAppear { updatePulsing() }
     // Drive the pulse off `isActive` too: when a poll flips it true on a card that's already
     // on screen (no re-onAppear), this starts the animation; flips to false stop it.
@@ -63,28 +66,27 @@ struct SessionCardView: View {
     .onChange(of: reduceMotion) { updatePulsing() }
   }
 
-  private var header: some View {
+  private func header(_ content: SessionCardContent) -> some View {
     HStack(spacing: 6) {
       if isUnread {
         Circle().fill(Color.hermesAccent).frame(width: 8, height: 8)
-          .accessibilityLabel("Unread")
       }
       if let branchStem {
         Text(branchStem)
           .font(.caption.monospaced())
           .foregroundStyle(.tertiary)
-          .accessibilityHidden(true)
       }
-      Text(session.workspaceLabel)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .truncationMode(.tail)
+      if let workspace = content.workspace {
+        Text(workspace)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+          .truncationMode(.tail)
+      }
       if isPinned {
         Image(systemName: "pin.fill")
           .font(.caption2)
           .foregroundStyle(.secondary)
-          .accessibilityLabel("Pinned")
       }
       Spacer(minLength: 8)
       if let age {
@@ -96,14 +98,14 @@ struct SessionCardView: View {
     }
   }
 
-  private var footer: some View {
+  private func footer(_ content: SessionCardContent) -> some View {
     HStack(spacing: 8) {
-      if let model {
+      if let model = content.model {
         Text(model)
           .lineLimit(1)
       }
-      if let messageCount {
-        Text("^[\(messageCount) message](inflect: true)")
+      if let messageCount = content.messageCount {
+        Text(messageCount)
           .lineLimit(1)
       }
     }
@@ -111,42 +113,8 @@ struct SessionCardView: View {
     .foregroundStyle(.tertiary)
   }
 
-  // MARK: Derived content
-
-  /// The preview as a secondary line — only under a real title (an untitled session already
-  /// shows its preview as the title).
-  private var secondaryPreview: String? {
-    guard session.resolvedTitle != nil else { return nil }
-    return session.resolvedPreview
-  }
-
-  /// The raw server model id, shown verbatim like the chat's model chip.
-  private var model: String? { session.model }
-
-  /// Message count for the footer — `nil` when unknown or zero (nothing worth saying).
-  private var messageCount: Int? {
-    guard let count = session.messageCount, count > 0 else { return nil }
-    return count
-  }
-
   private var age: String? {
     session.updatedAt.map { Self.relativeFormatter.localizedString(for: $0, relativeTo: now) }
-  }
-
-  /// One combined VoiceOver label, read in visual order: workspace, title, preview, model,
-  /// message count, age, then whichever state flags apply.
-  private var accessibilityText: String {
-    var parts: [String] = [session.workspaceLabel, session.displayName]
-    if let secondaryPreview { parts.append(secondaryPreview) }
-    if let model { parts.append(model) }
-    if let messageCount {
-      parts.append(String(AttributedString(localized: "^[\(messageCount) message](inflect: true)").characters))
-    }
-    if let age { parts.append(age) }
-    if isUnread { parts.append("Unread") }
-    if isPinned { parts.append("Pinned") }
-    if isActive { parts.append("Working") }
-    return parts.joined(separator: ", ")
   }
 
   /// Start the repeating pulse while active (and motion is allowed); otherwise hold it flat.
@@ -191,22 +159,5 @@ private struct CardActiveGlow: ViewModifier {
             .shadow(color: Color.hermesAccent.opacity(0.6 * intensity), radius: 8)
         )
     )
-  }
-}
-
-extension Session {
-  /// Label for the card header's workspace slot: the folder basename of `cwd`, else
-  /// "No workspace". Mirrors desktop `baseName(path) || path` (root "/" has no basename, so
-  /// the path itself is shown).
-  fileprivate var workspaceLabel: String {
-    let noWorkspace = "No workspace"
-    guard let path = cwd?.trimmingCharacters(in: .whitespaces), !path.isEmpty else {
-      return noWorkspace
-    }
-    let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
-    if let base = trimmed.split(separator: "/").last, !base.isEmpty {
-      return String(base)
-    }
-    return path
   }
 }

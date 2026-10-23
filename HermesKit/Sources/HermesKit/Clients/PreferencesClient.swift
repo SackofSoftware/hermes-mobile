@@ -64,14 +64,14 @@ public extension PreferencesClient {
     let key = "hermes.server-url"
     let seenKey = "hermes.seen-message-counts"
     let pinnedKey = "hermes.pinned-session-ids"
-    // The retired workspace/chronological grouping pref (the list is always date-sectioned
-    // now); dropped alongside `legacyShowCronSectionKey` so an upgrade leaves no orphaned default behind.
-    let legacyGroupingKey = "hermes.session-grouping-mode"
     let swipeActionKey = "hermes.default-session-swipe-action"
     let cronSectionCollapsedKey = "hermes.cron-section-collapsed"
-    // Superseded by `cronSectionCollapsedKey` (the section can no longer be hidden, only
-    // collapsed); dropped on load so an upgrade leaves no orphaned default behind.
-    let legacyShowCronSectionKey = "hermes.show-cron-section"
+    // Retired prefs, dropped once when the client is built so an upgrade leaves no orphaned
+    // default behind: the workspace/chronological grouping mode (the list is always
+    // date-sectioned now) and the cron-section hide toggle (superseded by
+    // `cronSectionCollapsedKey` — the section can only be collapsed). Not migrated.
+    defaults.removeObject(forKey: "hermes.session-grouping-mode")
+    defaults.removeObject(forKey: "hermes.show-cron-section")
     let selectedProfileKey = "hermes.selected-profile-id"
     let pushTokenKey = "hermes.push-device-token"
     let pushSnoozeCountKey = "hermes.push-prompt-snooze-count"
@@ -90,13 +90,8 @@ public extension PreferencesClient {
         store.string(forKey: swipeActionKey).flatMap(SessionSwipeAction.init(rawValue:)) ?? .default
       },
       saveDefaultSessionSwipeAction: { store.set($0.rawValue, forKey: swipeActionKey) },
-      loadCronSectionCollapsed: {
-        // Removing an absent key is a no-op, so this clears the stale keys exactly once.
-        store.removeObject(forKey: legacyShowCronSectionKey)
-        store.removeObject(forKey: legacyGroupingKey)
-        // Absent key (never toggled) reads `false` — the section is expanded by default.
-        return store.bool(forKey: cronSectionCollapsedKey)
-      },
+      // Absent key (never toggled) reads `false` — the section is expanded by default.
+      loadCronSectionCollapsed: { store.bool(forKey: cronSectionCollapsedKey) },
       saveCronSectionCollapsed: { store.set($0, forKey: cronSectionCollapsedKey) },
       loadSelectedProfileID: { store.string(forKey: selectedProfileKey) },
       saveSelectedProfileID: { store.set($0, forKey: selectedProfileKey) },

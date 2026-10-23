@@ -31,7 +31,8 @@ public struct SessionDateSection: Equatable, Sendable, Identifiable {
 ///   instead of opening an out-of-order header above it.
 /// - A cluster with no `updatedAt` at all goes to the "Older" section (such rows already
 ///   sort last, so it trails).
-/// - A key that already has a section (only possible on a non-monotonic input) never
+/// - A key that already has a section (only possible on a non-monotonic input — never the
+///   case for `flattenSessionsWithBranches` output, whose keys are monotonic) never
 ///   opens a second one — the rows append to the current section, mirroring the
 ///   desktop's `emitted` guard, so section ids stay unique.
 /// - A leading branch child with no current section (cannot happen after
@@ -44,11 +45,6 @@ public func groupEntriesByDate(
 ) -> [SessionDateSection] {
   var sections: [SessionDateSection] = []
   var emitted: Set<String> = []
-
-  func open(_ id: String, label: @autoclosure () -> String, with entry: SessionBranchEntry) {
-    emitted.insert(id)
-    sections.append(SessionDateSection(id: id, label: label(), entries: [entry]))
-  }
 
   for (index, entry) in entries.enumerated() {
     if entry.branchStem != nil, !sections.isEmpty {
@@ -74,7 +70,10 @@ public func groupEntriesByDate(
     if let current = sections.last, current.id == key || emitted.contains(key) {
       sections[sections.count - 1].entries.append(entry)
     } else {
-      open(key, label: bucket?.label(calendar: calendar) ?? SessionDateSection.olderLabel, with: entry)
+      emitted.insert(key)
+      sections.append(SessionDateSection(
+        id: key, label: bucket?.label ?? SessionDateSection.olderLabel, entries: [entry]
+      ))
     }
   }
 

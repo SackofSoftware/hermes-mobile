@@ -102,30 +102,31 @@ struct PreferencesClientTests {
     #expect(prefs.loadCronSectionCollapsed() == true)
   }
 
-  @Test func liveCronSectionCollapsedLoadDropsStaleShowCronSectionKey() {
-    // A build that persisted the old hide pref leaves `hermes.show-cron-section` behind; the
-    // first load clears it and does NOT translate it — the section starts expanded.
+  @Test func liveClientDropsStaleShowCronSectionKey() {
+    // A build that persisted the old hide pref leaves `hermes.show-cron-section` behind;
+    // building the live client clears it and does NOT translate it — the section starts
+    // expanded.
     let suite = UserDefaults(suiteName: "hermes.prefs.test.croncollapsed.legacy")!
     suite.removePersistentDomain(forName: "hermes.prefs.test.croncollapsed.legacy")
     suite.set(false, forKey: "hermes.show-cron-section")
     let prefs = PreferencesClient.live(defaults: suite)
 
-    #expect(prefs.loadCronSectionCollapsed() == false)
     #expect(suite.object(forKey: "hermes.show-cron-section") == nil)
+    #expect(prefs.loadCronSectionCollapsed() == false)
   }
 
-  @Test func liveListPrefsLoadDropsStaleGroupingModeKey() {
+  @Test func liveClientDropsStaleGroupingModeKey() {
     // The workspace/chronological grouping pref is retired (the list is always
-    // date-sectioned); a build that persisted it leaves the key behind, and the list's
-    // prefs load clears it so an upgrade leaves no orphaned default.
+    // date-sectioned); a build that persisted it leaves the key behind, and building the
+    // live client clears it so an upgrade leaves no orphaned default.
     let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping.legacy")!
     suite.removePersistentDomain(forName: "hermes.prefs.test.grouping.legacy")
     suite.set("chronological", forKey: "hermes.session-grouping-mode")
     suite.set(true, forKey: "hermes.cron-section-collapsed")
     let prefs = PreferencesClient.live(defaults: suite)
 
-    #expect(prefs.loadCronSectionCollapsed() == true) // the live pref is untouched
     #expect(suite.object(forKey: "hermes.session-grouping-mode") == nil)
+    #expect(prefs.loadCronSectionCollapsed() == true) // the live pref is untouched
   }
 
   @Test func inMemorySelectedProfileRoundTripAndClear() {

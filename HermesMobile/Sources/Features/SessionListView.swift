@@ -22,10 +22,11 @@ struct SessionListView: View {
           .listRowSeparator(.hidden)
       }
       if store.isSearching {
-        // Search results are flat cards; the search DTO fills `preview` with the matching
-        // snippet, so the card shows it without a dedicated input.
+        // Search results are flat cards. A hit carries only id, snippet (as `preview`) and
+        // start time: the untitled card promotes the snippet to its title, and the header
+        // leaves out the workspace it doesn't know.
         ForEach(store.sessions) { session in
-          row(session)
+          row(session, showsWorkspace: false)
         }
       } else {
         sessionListContent
@@ -450,7 +451,11 @@ struct SessionListView: View {
   }
 
   /// An interactive session (Pinned, date sections, search) as an inbox-style card.
-  private func row(_ session: Session, branchStem: String? = nil) -> some View {
+  private func row(
+    _ session: Session,
+    branchStem: String? = nil,
+    showsWorkspace: Bool = true
+  ) -> some View {
     sessionRow(session) { isPinned in
       // Branch cards keep the 16pt indent on top of the header's elbow stem, so a nested
       // card's whole body (not just its header) reads as belonging to the parent above.
@@ -460,7 +465,8 @@ struct SessionListView: View {
         branchStem: branchStem,
         isUnread: store.unreadSessionIDs.contains(session.id),
         isPinned: isPinned,
-        isActive: session.isActive == true
+        isActive: session.isActive == true,
+        showsWorkspace: showsWorkspace
       )
       .padding(.leading, branchStem == nil ? 0 : 16)
     }

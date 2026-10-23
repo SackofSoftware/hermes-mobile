@@ -57,7 +57,7 @@ make snapshot-record  # re-record SwiftUI snapshot baselines
   (iOS XCTest target `HermesMobileTests`, separate from the SPM suite). Baselines live
   in `HermesMobileTests/__Snapshots__/`. Row timestamps are pinned to a fixed reference
   date so the images are deterministic. The recorded baselines predate the current
-  simulator runtime, so `make snapshot` fails broadly with no code cause — 40 of 229 as of
+  simulator runtime, so `make snapshot` fails broadly with no code cause — 40 of 228 as of
   the inbox session list, all at identical render size: Chat 16, Composer 11,
   ThinkingIndicator 5, ContextUsage 4, AgentSetupGuide 2, Hydration 2 (`SessionSnapshotTests`
   passes clean: its list and card baselines were recorded on the current runtime). Judge a failure by render size first (a size mismatch is

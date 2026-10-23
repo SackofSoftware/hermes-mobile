@@ -2,7 +2,8 @@ import Foundation
 
 /// Coarse calendar bucket for a session's last-active date — the session list's section
 /// unit. A straight port of the desktop's `calendarBucket` (`apps/desktop/src/lib/time.ts`)
-/// over `Calendar` date math instead of epoch-millisecond arithmetic, so it stays DST-safe.
+/// over `Calendar` date math instead of epoch-millisecond arithmetic, so day boundaries and
+/// day differences stay DST-safe.
 ///
 /// Granularity coarsens with age: today → yesterday → earlier this week → last week →
 /// earlier this month → month (same year) → month + year. Ranges are non-overlapping
@@ -22,80 +23,70 @@ public struct SessionDateBucket: Equatable, Sendable {
   /// `"this-month"` | `"m-YYYY-M"` | `"my-YYYY-M"`. Month numbers are the calendar's
   /// 1-based months (the desktop's are JS 0-based; the key is a local identity only).
   public let key: String
-  /// The nominal day start the date belongs to — used only for month formatting.
-  public let anchor: Date
+  /// Section header text. The relative buckets use fixed strings ("Today" is the top
+  /// label — the desktop says "Earlier today" only because its unlabelled head run sits
+  /// above it; mobile labels every section). Month buckets format the nominal day as a
+  /// wide month (+ year for `monthYear`) on the bucketing calendar, its time zone, and its
+  /// locale (`.current` when the calendar carries none).
+  public let label: String
 
   /// Local hour at which one nominal day rolls into the next (desktop `DAY_ROLLOVER_HOUR`).
   public static let dayRolloverHour = 4
 
-  public init(kind: Kind, key: String, anchor: Date) {
+  public init(kind: Kind, key: String, label: String) {
     self.kind = kind
     self.key = key
-    self.anchor = anchor
+    self.label = label
   }
 
   /// Start of the nominal day `date` belongs to, honouring the 4 AM rollover:
-  /// Saturday 1 AM → start of Friday.
+  /// Saturday 1 AM → start of Friday. Judged on the LOCAL hour, so a DST jump never moves
+  /// the boundary off 4 AM wall-clock time.
   public static func nominalDayStart(_ date: Date, calendar: Calendar) -> Date {
-    calendar.startOfDay(for: date.addingTimeInterval(-Double(dayRolloverHour) * 3600))
+    let start = calendar.startOfDay(for: date)
+    guard calendar.component(.hour, from: date) < dayRolloverHour else { return start }
+    return startOfDay(start, offsetBy: -1, calendar: calendar)
   }
 
-  /// Port of desktop `calendarBucket`. `calendar` supplies the time zone and
-  /// `firstWeekday` (the desktop's locale week start). A future date buckets as today.
-  public static func bucket(
-    for date: Date,
-    now: Date,
-    calendar: Calendar = .autoupdatingCurrent
-  ) -> SessionDateBucket {
+  /// Port of desktop `calendarBucket`. `calendar` supplies the time zone, `firstWeekday`
+  /// (the desktop's locale week start), and the month-label locale. A future date buckets
+  /// as today.
+  public static func bucket(for date: Date, now: Date, calendar: Calendar) -> SessionDateBucket {
     let nominal = nominalDayStart(date, calendar: calendar)
     let todayNominal = nominalDayStart(now, calendar: calendar)
     let dayDiff = calendar.dateComponents([.day], from: nominal, to: todayNominal).day ?? 0
 
     if dayDiff <= 0 {
-      return SessionDateBucket(kind: .today, key: "today", anchor: nominal)
+      return SessionDateBucket(kind: .today, key: "today", label: "Today")
     }
     if dayDiff == 1 {
-      return SessionDateBucket(kind: .yesterday, key: "yesterday", anchor: nominal)
+      return SessionDateBucket(kind: .yesterday, key: "yesterday", label: "Yesterday")
     }
 
     let weekStart = startOfWeek(containing: todayNominal, calendar: calendar)
     if nominal >= weekStart {
-      return SessionDateBucket(kind: .thisWeek, key: "this-week", anchor: nominal)
+      return SessionDateBucket(kind: .thisWeek, key: "this-week", label: "Earlier this week")
     }
-    let lastWeekStart = calendar.date(byAdding: .day, value: -7, to: weekStart)
-      .map { calendar.startOfDay(for: $0) } ?? weekStart.addingTimeInterval(-7 * 86_400)
-    if nominal >= lastWeekStart {
-      return SessionDateBucket(kind: .lastWeek, key: "last-week", anchor: nominal)
+    if nominal >= startOfDay(weekStart, offsetBy: -7, calendar: calendar) {
+      return SessionDateBucket(kind: .lastWeek, key: "last-week", label: "Last week")
     }
 
     let day = calendar.dateComponents([.year, .month], from: nominal)
     let today = calendar.dateComponents([.year, .month], from: todayNominal)
     let sameYear = day.year == today.year
     if sameYear, day.month == today.month {
-      return SessionDateBucket(kind: .thisMonth, key: "this-month", anchor: nominal)
+      return SessionDateBucket(kind: .thisMonth, key: "this-month", label: "Earlier this month")
     }
 
     let yearMonth = "\(day.year ?? 0)-\(day.month ?? 0)"
+    let month = Date.FormatStyle(
+      locale: calendar.locale ?? .current, calendar: calendar, timeZone: calendar.timeZone
+    ).month(.wide)
     return sameYear
-      ? SessionDateBucket(kind: .month, key: "m-\(yearMonth)", anchor: nominal)
-      : SessionDateBucket(kind: .monthYear, key: "my-\(yearMonth)", anchor: nominal)
-  }
-
-  /// Section header text. The relative buckets use fixed strings ("Today" is the top
-  /// label — the desktop says "Earlier today" only because its unlabelled head run sits
-  /// above it; mobile labels every section). Month buckets format the anchor with the
-  /// `"MMMM"` / `"MMMM yyyy"` templates on the injected calendar, its time zone, and its
-  /// locale (`.current` when the calendar carries none).
-  public func label(calendar: Calendar = .autoupdatingCurrent) -> String {
-    switch kind {
-    case .today: return "Today"
-    case .yesterday: return "Yesterday"
-    case .thisWeek: return "Earlier this week"
-    case .lastWeek: return "Last week"
-    case .thisMonth: return "Earlier this month"
-    case .month: return Self.format(anchor, template: "MMMM", calendar: calendar)
-    case .monthYear: return Self.format(anchor, template: "MMMM yyyy", calendar: calendar)
-    }
+      ? SessionDateBucket(kind: .month, key: "m-\(yearMonth)", label: nominal.formatted(month))
+      : SessionDateBucket(
+        kind: .monthYear, key: "my-\(yearMonth)", label: nominal.formatted(month.year())
+      )
   }
 
   // MARK: - Private
@@ -104,17 +95,13 @@ public struct SessionDateBucket: Equatable, Sendable {
   /// `calendar.firstWeekday` (1 = Sunday … 7 = Saturday).
   private static func startOfWeek(containing day: Date, calendar: Calendar) -> Date {
     let weekday = calendar.component(.weekday, from: day)
-    let back = (weekday - calendar.firstWeekday + 7) % 7
-    guard let start = calendar.date(byAdding: .day, value: -back, to: day) else { return day }
-    return calendar.startOfDay(for: start)
+    return startOfDay(day, offsetBy: -((weekday - calendar.firstWeekday + 7) % 7), calendar: calendar)
   }
 
-  private static func format(_ date: Date, template: String, calendar: Calendar) -> String {
-    let formatter = DateFormatter()
-    formatter.calendar = calendar
-    formatter.timeZone = calendar.timeZone
-    formatter.locale = calendar.locale ?? .current
-    formatter.setLocalizedDateFormatFromTemplate(template)
-    return formatter.string(from: date)
+  /// Start of the day `days` calendar days from `day` — calendar arithmetic, never a fixed
+  /// 86,400 s, so a 23- or 25-hour DST day still counts as one day.
+  private static func startOfDay(_ day: Date, offsetBy days: Int, calendar: Calendar) -> Date {
+    // A day offset is always representable on a Gregorian-style calendar.
+    calendar.startOfDay(for: calendar.date(byAdding: .day, value: days, to: day)!)
   }
 }

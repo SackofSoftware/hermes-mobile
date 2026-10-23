@@ -16,8 +16,8 @@ flat `.listStyle(.plain)`; "New chat" is a bottom bar via **`.safeAreaInset(edge
 
 **Bucketing is pure HermesKit** (`SessionDateBucket`, unit-tested on macOS), a port of desktop
 `calendarBucket` (`apps/desktop/src/lib/time.ts`). Every date is mapped to its **nominal day**
-= `startOfDay(date - 4h)` (`dayRolloverHour = 4`: a 1 AM session still counts as the previous
-day), and buckets are judged on the injected `Calendar` (time zone, locale, `firstWeekday`):
+= its local calendar day, or the day before when the local hour is under `dayRolloverHour`
+(4: a 1 AM session still counts as the previous day, DST or not), and buckets are judged on the injected `Calendar` (time zone, locale, `firstWeekday`):
 
 | Kind | Rule (nominal days) | Key | Label |
 |---|---|---|---|
@@ -31,7 +31,7 @@ day), and buckets are judged on the injected `Calendar` (time zone, locale, `fir
 
 Month keys use the Calendar's **1-based** months (`m-2026-2` = February; desktop's JS keys are
 0-based — the key is a local section identity only, never shared). Month labels come from
-`DateFormatter` templates on the calendar's locale + time zone. "Today" is the top label
+`Date.FormatStyle` (wide month, + year) on the calendar's locale + time zone. "Today" is the top label
 (desktop's "Earlier today" only exists because of its unlabelled recent-head run, which is
 deliberately **not ported** — mobile labels every section).
 
@@ -54,7 +54,8 @@ library `\.calendar` has no test value), so TestStores and snapshots pin it.
 **Cards** (`SessionCardView`) render every interactive row — Pinned, date sections, AND search
 — so one column never mixes card and one-line geometry (desktop parity). Anatomy:
 1. **Header**: unread dot, the branch elbow stem (`└─`/`├─`) when nested, the workspace label
-   (`cwd` last path component; a root path verbatim; else "No workspace"), pin glyph, then the
+   (`cwd` last path component; a root path verbatim; else "No workspace"; left out for search
+   hits, which carry no `cwd`), pin glyph, then the
    relative age on the trailing edge.
 2. **Title**: `displayName` (`resolvedTitle ?? resolvedPreview ?? id`), headline, semibold —
    bold when unread — up to two lines.
@@ -82,7 +83,7 @@ the former one-item organize `Menu` is gone) presenting a sheet backed by a serv
 bubbles up the existing `openSession` delegate.
 
 **Stale prefs**: the live `PreferencesClient` removes the retired
-`hermes.session-grouping-mode` and `hermes.show-cron-section` keys on the list-prefs load (no
+`hermes.session-grouping-mode` and `hermes.show-cron-section` keys once, when it is built (no
 migration — a previously hidden cron section comes back expanded).
 
 ## Cron sessions & the Cron Jobs section (#24)

@@ -84,28 +84,9 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
-  func testSessionRow_searchResult() {
-    // A search result: no title, `id` is a meaningless stored id, so the snippet is
-    // promoted to the headline instead of showing the raw id.
-    let view = SessionRowView(
-      session: Session(
-        id: "20260610_120231_afcca6",
-        title: nil,
-        updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
-        preview: "Can you help me refactor the WebSocket JSON-RPC parser?"
-      ),
-      now: now,
-      showsPreview: true
-    )
-    .padding()
-    .frame(width: device.size?.width ?? 390)
-    assertSnapshot(of: view, as: componentImage())
-  }
-
   func testSessionRow_untitledPromotesPreview() {
-    // In the grouped list (showsPreview: false) a session with the server's "Untitled"
-    // placeholder and no real title promotes its first-message preview to the headline —
-    // it must never render the raw id (#13).
+    // A session with the server's "Untitled" placeholder and no real title promotes its
+    // first-message preview to the headline — it must never render the raw id (#13).
     let view = SessionRowView(
       session: Session(
         id: "20260610_120231_afcca6",
@@ -193,7 +174,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
       SessionCardView(
         session: cardFixtureSession(title: "Try the incremental decoder instead", messageCount: 1),
         now: now,
-        branchStem: "└─"
+        branchStem: "└─ "
       )
     )
   }

@@ -62,8 +62,30 @@ struct SessionDateBucketTests {
     #expect(SessionDateBucket.dayRolloverHour == 4)
   }
 
-  @Test func anchorIsTheNominalDayStart() {
-    #expect(bucket(2026, 5, 28).anchor == Self.date(2026, 5, 28, 0))
+  @Test func rolloverStaysAtFourAMWallClockAcrossSpringForward() {
+    // US DST began Sun 8 Mar 2026 at 2 AM (clocks jump to 3 AM EDT).
+    let calendar = Self.calendar()
+    #expect(
+      SessionDateBucket.nominalDayStart(Self.date(2026, 3, 8, 4, 30), calendar: calendar)
+        == Self.date(2026, 3, 8, 0)
+    )
+    #expect(
+      SessionDateBucket.nominalDayStart(Self.date(2026, 3, 8, 3, 30), calendar: calendar)
+        == Self.date(2026, 3, 7, 0)
+    )
+  }
+
+  @Test func rolloverStaysAtFourAMWallClockAcrossFallBack() {
+    // US DST ended Sun 1 Nov 2026 at 2 AM (clocks fall back to 1 AM EST).
+    let calendar = Self.calendar()
+    #expect(
+      SessionDateBucket.nominalDayStart(Self.date(2026, 11, 1, 3, 30), calendar: calendar)
+        == Self.date(2026, 10, 31, 0)
+    )
+    #expect(
+      SessionDateBucket.nominalDayStart(Self.date(2026, 11, 1, 4, 0), calendar: calendar)
+        == Self.date(2026, 11, 1, 0)
+    )
   }
 
   // MARK: - Kinds
@@ -105,6 +127,22 @@ struct SessionDateBucketTests {
     #expect(kind(2026, 6, 6, firstWeekday: 1) == .thisMonth)
   }
 
+  @Test func lastWeekReachesBackAcrossAMonthBoundary() {
+    // Wed 3 Jun 2026: last week (Mon 25 – Sun 31 May) wins over the May month bucket.
+    let wednesday = Self.date(2026, 6, 3, 12)
+    #expect(kind(2026, 5, 27, now: wednesday) == .lastWeek)
+    #expect(kind(2026, 5, 25, now: wednesday) == .lastWeek)
+    #expect(kind(2026, 5, 24, now: wednesday) == .month)
+  }
+
+  @Test func weekRangesReachBackAcrossAYearBoundary() {
+    // Fri 2 Jan 2026: this week starts Mon 29 Dec 2025, last week Mon 22 Dec 2025.
+    let friday = Self.date(2026, 1, 2, 12)
+    #expect(kind(2025, 12, 29, now: friday) == .thisWeek)
+    #expect(kind(2025, 12, 22, now: friday) == .lastWeek)
+    #expect(kind(2025, 12, 21, now: friday) == .monthYear)
+  }
+
   @Test func dayDiffIsCalendarAwareAcrossDST() {
     // US DST began Sun 8 Mar 2026 (a 23-hour day) — still exactly one day back.
     let monday = Self.date(2026, 3, 9, 12)
@@ -131,28 +169,39 @@ struct SessionDateBucketTests {
   // MARK: - Labels
 
   @Test func relativeBucketsUseFixedLabels() {
-    let calendar = Self.calendar()
-    #expect(bucket(2026, 6, 18).label(calendar: calendar) == "Today")
-    #expect(bucket(2026, 6, 17).label(calendar: calendar) == "Yesterday")
-    #expect(bucket(2026, 6, 16).label(calendar: calendar) == "Earlier this week")
-    #expect(bucket(2026, 6, 10).label(calendar: calendar) == "Last week")
-    #expect(bucket(2026, 6, 2).label(calendar: calendar) == "Earlier this month")
+    #expect(bucket(2026, 6, 18).label == "Today")
+    #expect(bucket(2026, 6, 17).label == "Yesterday")
+    #expect(bucket(2026, 6, 16).label == "Earlier this week")
+    #expect(bucket(2026, 6, 10).label == "Last week")
+    #expect(bucket(2026, 6, 2).label == "Earlier this month")
   }
 
   @Test func monthBucketsFormatMonthAndMonthYear() {
-    let calendar = Self.calendar()
     let month = bucket(2026, 3, 3)
     #expect(month.kind == .month)
-    #expect(month.label(calendar: calendar) == "March")
+    #expect(month.label == "March")
 
     let monthYear = bucket(2025, 12, 3)
     #expect(monthYear.kind == .monthYear)
-    #expect(monthYear.label(calendar: calendar) == "December 2025")
+    #expect(monthYear.label == "December 2025")
   }
 
   @Test func monthLabelsFollowTheCalendarLocale() {
     var calendar = Self.calendar()
     calendar.locale = Locale(identifier: "de_DE")
-    #expect(bucket(2026, 3, 3).label(calendar: calendar) == "März")
+    let bucket = SessionDateBucket.bucket(
+      for: Self.date(2026, 3, 3), now: Self.thuNoon, calendar: calendar
+    )
+    #expect(bucket.label == "März")
+  }
+
+  @Test func monthLabelsFormatTheNominalDayInTheCalendarTimeZone() {
+    // 1 Mar 2026 06:00 UTC is 01:00 in New York — before the 4 AM rollover, so its nominal
+    // day is 28 Feb and the label names February.
+    var utc = Calendar(identifier: .gregorian)
+    utc.timeZone = TimeZone(identifier: "UTC")!
+    let instant = utc.date(from: DateComponents(year: 2026, month: 3, day: 1, hour: 6))!
+    let bucket = SessionDateBucket.bucket(for: instant, now: Self.thuNoon, calendar: Self.calendar())
+    #expect(bucket.label == "February")
   }
 }

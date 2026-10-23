@@ -282,23 +282,25 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 - Create: `HermesKit/Tests/HermesKitTests/SessionDateBucketTests.swift`
 - Create: `HermesKit/Tests/HermesKitTests/SessionDateSectionTests.swift`
 
-- [ ] add `SessionDateBucket` (`Kind`, `key`, `anchor`, `dayRolloverHour = 4`,
+- [x] add `SessionDateBucket` (`Kind`, `key`, `anchor`, `dayRolloverHour = 4`,
       `bucket(for:now:calendar:)`) as a port of desktop `calendarBucket` using `Calendar`
       date math (start-of-day, `firstWeekday`, `dateComponents(.day)` diffs)
-- [ ] add `label(calendar:)` with the five fixed strings and `DateFormatter` month /
+- [x] add `label(calendar:)` with the five fixed strings and `DateFormatter` month /
       month + year templates on the injected calendar + locale
-- [ ] add `SessionDateSection` + `groupEntriesByDate(_:now:calendar:)` (top-level entries open
+- [x] add `SessionDateSection` + `groupEntriesByDate(_:now:calendar:)` (top-level entries open
       sections on key change, branch children append, nil `updatedAt` → trailing "Older")
-- [ ] write `SessionDateBucketTests`: port `time.test.ts` cases with a fixed `now`
+      — a top-level entry buckets on its cluster's freshest `updatedAt` (matching the
+      flatten's cluster sort) and an already-emitted key never opens a duplicate section
+- [x] write `SessionDateBucketTests`: port `time.test.ts` cases with a fixed `now`
       (Thu 2026-06-18 noon) and a Gregorian calendar pinned to a fixed time zone — today /
       yesterday / this week / last week / this month / month / month-year, Monday AND Sunday
       `firstWeekday`, the 4 AM rollover (1 AM → previous day), stable keys across a month
       (`m-2026-2` twice, `my-2025-2`), and the label strings
-- [ ] write `SessionDateSectionTests`: empty input, single bucket, bucket boundary inside a
+- [x] write `SessionDateSectionTests`: empty input, single bucket, bucket boundary inside a
       parent + branch cluster (children stay with the parent), nil `updatedAt` trailing section,
       order preserved and never re-sorted, no empty sections, a leading branch child still
       yields a section
-- [ ] run `swift test` — must pass before task 2
+- [x] run `swift test` — must pass before task 2
 
 ### Task 2: Decode `model` onto `Session`
 

@@ -290,13 +290,14 @@ bullets below are the compressed rules.
 - Snapshot tests: `make snapshot` (assert) / `make snapshot-record` (re-record — it
   `rm -rf`s the whole `__Snapshots__` dir; use only for a deliberate global re-render).
   To add ONE new snapshot test, run `make snapshot` twice (first records + fails by
-  design, second asserts clean). Row timestamps are pinned for determinism.
+  design, second asserts clean). Row timestamps (and the list's section calendar) are
+  pinned for determinism — `docs/development.md`.
 - **A snapshot of a SCROLLABLE view must pin an explicit size along its scroll axis** —
   `componentImage()` renders at `.sizeThatFits`, and a `ScrollView` offered nothing
   records a blank sliver. Pin both width and height for a vertical one.
 - **A `List` cannot be component-rendered at all** — `componentImage()` paints its section
   headers and FAB but NO rows, and ignores the dark trait; list snapshots use
-  `deviceImage()` (both helpers take an `appearance:`).
+  `deviceImage()` (both helpers take an `appearance:`; `deviceImage(height:)` for a tall list).
 - **Layout facts a snapshot cannot prove go in a measured `UIWindow`-hosted XCTest**
   (assert `contentSize` vs `bounds`, hosted `sizeThatFits`) — see
   `MarkdownTableLayoutTests.swift` and `ApprovalCardLayoutTests.swift`. Pin

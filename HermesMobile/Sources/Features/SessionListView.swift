@@ -45,8 +45,8 @@ struct SessionListView: View {
       CopiedToastView(token: store.copiedIDToastToken)
     }
     // The profile pill is the centered (principal) title; "Sessions" is a list section
-    // header instead, leaving room for future sibling sections (e.g. "Cron jobs"). The
-    // pill needs the inline bar, so keep the nav title empty + inline in both cases.
+    // header instead, alongside its sibling Cron Jobs section. The pill needs the inline
+    // bar, so keep the nav title empty + inline in both cases.
     .navigationTitle("")
     .navigationBarTitleDisplayMode(.inline)
     .searchable(text: $store.searchQuery, prompt: "Search sessions")
@@ -142,8 +142,8 @@ struct SessionListView: View {
   /// budget.
   @ViewBuilder
   private var sessionListContent: some View {
-    // Top-level "Sessions" section header. Future sibling areas (e.g. "Cron jobs")
-    // render their own header the same way, all scoped to the active profile pill.
+    // Top-level "Sessions" section header; the Cron Jobs section below carries its own
+    // (collapse-button) header, both scoped to the active profile pill.
     sessionsSectionHeader
     // Pinned sessions float to the top — as cards too, so the column never mixes card and
     // one-line geometry (desktop parity).
@@ -173,8 +173,8 @@ struct SessionListView: View {
   }
 
   /// Top-level content section header. The active profile is shown in the pill (the
-  /// centered nav title); this labels the sessions list as one section so future sibling
-  /// sections (e.g. "Cron jobs") can sit alongside it under the same profile.
+  /// centered nav title); this labels the sessions list as one section, with the Cron Jobs
+  /// section alongside it under the same profile.
   private var sessionsSectionHeader: some View {
     Text("Sessions")
       .font(.title2.weight(.bold))

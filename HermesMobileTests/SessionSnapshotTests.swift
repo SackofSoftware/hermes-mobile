@@ -711,7 +711,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
 
   /// Search results are flat cards (no date sections). The rows mirror the search DTO's
   /// shape — no title or workspace, the match snippet as `preview` — so the snippet is
-  /// promoted into the card's title slot and the header reads "No workspace".
+  /// promoted into the card's title slot and the header leaves the workspace out.
   func testSessionList_searchResultsCards() {
     let now = self.now
     let sessions: [Session] = [

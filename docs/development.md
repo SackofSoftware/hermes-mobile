@@ -56,13 +56,17 @@ make snapshot-record  # re-record SwiftUI snapshot baselines
 - **Snapshots** (`scripts/snapshot.sh`) render the SwiftUI views via SnapshotTesting
   (iOS XCTest target `HermesMobileTests`, separate from the SPM suite). Baselines live
   in `HermesMobileTests/__Snapshots__/`. Row timestamps are pinned to a fixed reference
-  date so the images are deterministic. The recorded baselines predate the current
-  simulator runtime, so `make snapshot` fails broadly with no code cause — 40 of 228 as of
-  the inbox session list, all at identical render size: Chat 16, Composer 11,
-  ThinkingIndicator 5, ContextUsage 4, AgentSetupGuide 2, Hydration 2 (`SessionSnapshotTests`
-  passes clean: its list and card baselines were recorded on the current runtime). Judge a failure by render size first (a size mismatch is
-  a real regression; equal size with a small pixel residual is drift). A global re-record
-  is the pending fix and must land as its own commit.
+  date so the images are deterministic. Session-list snapshots also pin the section
+  calendar via `SessionListFeature.State(calendar:)` (UTC, `en_US`, Monday-first), or the
+  date-section headers would follow the simulator's time zone and week start;
+  `deviceImage(height:)` renders a list taller than one screen. The recorded baselines
+  predate the current simulator runtime, so `make snapshot` fails broadly with no code
+  cause — 40 of 228 as of the inbox session list, all at identical render size: Chat 16,
+  Composer 11, ThinkingIndicator 5, ContextUsage 4, AgentSetupGuide 2, Hydration 2
+  (`SessionSnapshotTests` passes clean: its list and card baselines were recorded on the
+  current runtime). Judge a failure by render size first (a size mismatch is a real
+  regression; equal size with a small pixel residual is drift). A global re-record is the
+  pending fix and must land as its own commit.
 
 ## Verifying the protocol
 

@@ -5,8 +5,9 @@ import SwiftUI
 /// a header line (workspace · age), the title, a preview line, and a footer (model · message
 /// count). Natural height — no min-height floor (#79).
 ///
-/// Deliberately separate from `SessionRowView` (which stays the compact one-liner for cron run
-/// peeks and the archived sheet) so each style owns its own glow/pulse state and can diverge.
+/// Deliberately separate from `SessionRowView` (which stays the compact one-liner for cron runs
+/// — peeks, flat fallback, unmatched — and the archived sheet) so each style owns its own
+/// glow/pulse state and can diverge.
 struct SessionCardView: View {
   let session: Session
   /// Reference date the age is relative to (injected so it's controllable).

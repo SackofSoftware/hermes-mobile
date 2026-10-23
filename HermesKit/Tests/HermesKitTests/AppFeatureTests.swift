@@ -3467,7 +3467,7 @@ struct AppFeatureTests {
   }
 
   /// "Log Out" from the retry screen runs the logout recipe — keychain session, server URL,
-  /// identity-scoped prefs, grouping mode, badge, push registration — and lands on a FRESH
+  /// identity-scoped prefs, cron collapse, badge, push registration — and lands on a FRESH
   /// (nothing prefilled) onboarding.
   @Test func logoutFromRetryScreenClearsEverythingAndShowsFreshOnboarding() async {
     let sessionDeleted = LockIsolated(false)

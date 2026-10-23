@@ -113,8 +113,8 @@ clone `/Users/eugene/Documents/Development/Personal/hermes-agent`, read via
 ## Solution Overview
 
 1. **Date bucketing is a pure HermesKit model** (`SessionDateBucket` + `SessionDateSection`),
-   a straight port of desktop's `calendarBucket` (4 AM rollover, calendar first weekday) with
-   fixed labels resolved in HermesKit so they are unit-tested. The section builder walks
+   a straight port of desktop's `calendarBucket` (4 AM local-hour rollover, calendar first
+   weekday) with fixed labels resolved in HermesKit so they are unit-tested. The section builder walks
    `chronologicalEntries` (already recency-sorted and branch-flattened) and opens a new section
    only on a top-level entry whose bucket key changes; branch children (non-nil `branchStem`)
    stay in their parent's section so a parent + branches cluster never splits across a header.
@@ -127,9 +127,10 @@ clone `/Users/eugene/Documents/Development/Personal/hermes-agent`, read via
    toggled from the header chevron; the header (with badge) is always visible.
 5. **`SessionCardView` is a new view** (Option B from the brainstorm): separate from
    `SessionRowView` so each style owns its own glow/pulse state and the compact row stays
-   untouched for cron peeks and the archived sheet. The card is a flat row with hairline
-   separators and natural height — **no min-height floor** (#79 rule stands).
-6. **`row(_:)` stays the single affordance funnel** in `SessionListView`; only its body changes.
+   untouched for cron runs and the archived sheet. The card is a flat row with no row or
+   section separators and natural height — **no min-height floor** (#79 rule stands).
+6. **One affordance funnel** in `SessionListView`: cards (`row(_:)`) and compact cron rows
+   (`cronRunRow(_:)`) share `sessionRow(_:content:)`; only the label body differs.
 
 ## Technical Details
 
@@ -139,27 +140,28 @@ clone `/Users/eugene/Documents/Development/Personal/hermes-agent`, read via
 public struct SessionDateBucket: Equatable, Sendable {
   public enum Kind: Equatable, Sendable { case today, yesterday, thisWeek, lastWeek, thisMonth, month, monthYear }
   public let kind: Kind
-  public let key: String      // "today" | "yesterday" | "this-week" | "last-week" | "this-month" | "m-YYYY-M" | "my-YYYY-M"
-  public let anchor: Date     // nominal day start — month formatting only
+  public let key: String      // "today" | "yesterday" | "this-week" | "last-week" | "this-month" | "m-YYYY-M" | "my-YYYY-M" (+ "L" leap month, "-e<era>" other era)
+  /// "Today" | "Yesterday" | "Earlier this week" | "Last week" | "Earlier this month" |
+  /// "September" (same year) | "December 2025" (prior year). Month names via
+  /// `Date.FormatStyle` (wide month, + year) on the bucketing calendar's locale/time zone.
+  public let label: String
 
   public static let dayRolloverHour = 4
 
   /// Port of desktop `calendarBucket`. `calendar` supplies time zone + `firstWeekday`.
-  public static func bucket(for date: Date, now: Date, calendar: Calendar = .autoupdatingCurrent) -> SessionDateBucket
-  /// "Today" | "Yesterday" | "Earlier this week" | "Last week" | "Earlier this month" |
-  /// "September" (same year) | "December 2025" (prior year). Month names via `DateFormatter`
-  /// templates ("MMMM" / "MMMM yyyy") on the injected calendar/locale.
-  public func label(calendar: Calendar = .autoupdatingCurrent) -> String
+  public static func bucket(for date: Date, now: Date, calendar: Calendar) -> SessionDateBucket
 }
 ```
 
 Algorithm (mirrors desktop exactly, dates instead of ms):
-- `nominalDayStart(d)` = `calendar.startOfDay(for: d - 4h)`.
+- `nominalDayStart(d)` = `calendar.startOfDay(for: d)`, minus one calendar day when d's local
+  hour is under 4 (DST-safe; never `d - 4h`).
 - `dayDiff` = whole days between `nominalDayStart(now)` and `nominalDayStart(date)`;
   `<= 0` → today, `== 1` → yesterday.
 - `weekStart` = start of the calendar week containing today's nominal day
   (`calendar.firstWeekday`); `nominal >= weekStart` → thisWeek; `>= weekStart - 7d` → lastWeek.
-- same year + month → thisMonth; same year → month (`m-`); else monthYear (`my-`).
+- same month → thisMonth; same year → month (`m-`); else monthYear (`my-`) — compared as
+  calendar intervals (`isDate(_:equalTo:toGranularity:)`) so eras and leap months never merge.
 
 Note: "Today" is the top-bucket label (desktop says "Earlier today" only because its
 unlabelled head run sits above it; mobile labels every section).
@@ -188,10 +190,9 @@ Edge: a branch child with no preceding top-level section (cannot happen after
 - Remove: `groupingMode`, `expandedGroups`, `groups`, `visibleEntries(in:)`, `showCronSection`.
 - Add: `cronSectionCollapsed: Bool = false`,
   `dateSections: [SessionDateSection] { groupEntriesByDate(chronologicalEntries, now: now, calendar: calendar) }`
-  where `calendar` is a `@Dependency(\.calendar)`-sourced value captured into state at `task`
-  (or the computed property takes a `Calendar` parameter and the view passes
-  `.autoupdatingCurrent`; pick the former so snapshots are deterministic through the
-  dependency override).
+  where `calendar` is captured into state alongside `now` on load from a dedicated
+  `@Dependency(\.sessionListCalendar)` (the library `\.calendar` has no test value), so
+  TestStores and snapshots (`State(calendar:)`) pin it.
 - Actions: remove `setGroupingMode`, `toggleGroupExpansion`, `setShowCronSection`; add
   `toggleCronSectionCollapsed` (flips state, persists via `preferences.saveCronSectionCollapsed`).
 - `task` bootstrap loads `cronSectionCollapsed` instead of `showCronSection`/`groupingMode`.
@@ -199,12 +200,12 @@ Edge: a branch child with no preceding top-level section (cannot happen after
 ### `PreferencesClient`
 
 - Remove `loadGroupingMode`/`saveGroupingMode` + key `hermes.session-grouping-mode` (the live
-  implementation also `removeObject`s the stale key once on first load — one line, so a
-  TestFlight upgrade leaves no orphaned default).
+  implementation also `removeObject`s the stale key once, when `live(defaults:)` is built, so
+  a TestFlight upgrade leaves no orphaned default).
 - Replace `loadShowCronSection`/`saveShowCronSection` with
   `loadCronSectionCollapsed: () -> Bool = { false }` / `saveCronSectionCollapsed(Bool)`, key
-  `hermes.cron-section-collapsed`; remove the old `hermes.show-cron-section` key on first load
-  the same way. `.inMemory()` mirrors.
+  `hermes.cron-section-collapsed`; remove the old `hermes.show-cron-section` key the same
+  way. `.inMemory()` mirrors.
 - All three logout recipes call `saveCronSectionCollapsed(false)` instead of the two old resets.
 
 ### `Session.model`
@@ -216,11 +217,13 @@ Edge: a branch child with no preceding top-level section (cannot happen after
 ### `SessionCardView` (`HermesMobile/Sources/Features/SessionCardView.swift`)
 
 Inputs: `session: Session`, `now: Date`, `branchStem: String?`, `isUnread`, `isPinned`,
-`isActive`. Layout (`VStack(alignment: .leading, spacing: 4)`):
+`isActive`, `showsWorkspace` (default `true`). Text and the a11y label come from HermesKit's
+unit-tested `SessionCardContent`. Layout (`VStack(alignment: .leading, spacing: 4)`):
 
-1. Header `HStack(spacing: 6)`: unread dot (8pt accent circle, "Unread" a11y), optional
-   `Text(branchStem)` monospaced caption, workspace label (`session.cwd` last path component,
-   else "No workspace") `.font(.caption).foregroundStyle(.secondary)` single line truncating,
+1. Header `HStack(spacing: 6)`: unread dot (8pt accent circle), optional
+   `Text(branchStem)` monospaced caption, workspace label (`Session.workspaceLabel`: `cwd` last
+   path component, else "No workspace"; omitted when `showsWorkspace` is false)
+   `.font(.caption).foregroundStyle(.secondary)` single line truncating,
    pin glyph when pinned, `Spacer()`, relative age (`RelativeDateTimeFormatter`, `.named`)
    `.font(.caption).foregroundStyle(.secondary)`.
 2. Title: `session.displayName` (`resolvedTitle ?? resolvedPreview ?? id`) `.font(.headline)`,
@@ -231,18 +234,19 @@ Inputs: `session: Session`, `now: Date`, `branchStem: String?`, `isUnread`, `isP
    promote the preview into the title slot and drop this line) —
    `.font(.subheadline).foregroundStyle(.secondary).lineLimit(1)`.
 4. Footer: `HStack(spacing: 8)` of `model` (raw string, `lineLimit(1)`) and
-   `"\(count) messages"` (`count > 0`, pluralised via `^[\(count) message](inflect: true)`),
+   `"1 message"` / `"\(count) messages"` (`count > 0`, plain English plural),
    `.font(.caption).foregroundStyle(.tertiary)`; the whole line is omitted when both are nil.
 5. `.padding(.vertical, 4)`, then the card's own `CardActiveGlow` modifier (copy of
    `ActiveGlow` with its own `@State pulsing`, `onAppear`/`onChange(isActive)`/
    `onChange(reduceMotion)` wiring identical) — Option B: separate so the two styles can
    diverge.
 6. `.accessibilityElement(children: .combine)` with an explicit
-   `.accessibilityLabel` built in order: workspace, title, preview, model, message count, age,
-   then "Unread"/"Pinned"/"Working" flags present.
+   `.accessibilityLabel` (`SessionCardContent.accessibilityLabel`) built in order: workspace,
+   title, preview, model, message count, age, then "Unread"/"Pinned"/"Working" flags present.
 
-Search results reuse the same card; the search DTO already fills `preview` with the match
-snippet, so the keyword line comes for free. No `showsPreview` input.
+Search results reuse the same card with `showsWorkspace: false`: a search hit carries no title
+and no `cwd`, so the match snippet (its `preview`) is promoted to the card title and the header
+leaves the workspace out. No `showsPreview` input.
 
 ### `SessionListView`
 
@@ -250,19 +254,23 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
   `ForEach(store.dateSections) { Section(section.label) { ForEach(section.entries) { row($0) } } }`
   → cron section. Section headers use the default `List` plain-style header (secondary,
   uppercase per platform) — no custom header view.
-- Search branch: `ForEach(store.sessions) { row($0) }` (card, no `showsPreview`).
+- Search branch: `ForEach(store.sessions) { row($0, showsWorkspace: false) }` (card, no
+  `showsPreview`).
 - `row(_:)`: body becomes `SessionCardView(...)`; swipe actions, context menu,
-  `listRowBackground` highlight, `accessibilityAddTraits(.isSelected)` unchanged.
+  `listRowBackground` highlight, `accessibilityAddTraits(.isSelected)` unchanged; row and
+  section separators hidden.
 - `cronSectionHeader`: wrap in a `Button` (plain style) sending
-  `.toggleCronSectionCollapsed` with `animation: reduceMotion ? nil : .snappy`; trailing
-  `Image(systemName: "chevron.down")` rotated `-90°` when collapsed; badge stays;
-  `.accessibilityAddTraits(.isHeader)` + `.accessibilityValue(collapsed ? "Collapsed" : "Expanded")`
-  + `.accessibilityHint("Double-tap to show or hide cron jobs")`. The job rows, peeks, and
+  `.toggleCronSectionCollapsed` with `animation: reduceMotion ? nil : .snappy`; the job rows'
+  disclosure — trailing `Image(systemName: "chevron.right")` turned `90°` when expanded; badge
+  stays; `.accessibilityAddTraits(.isHeader)` + one combined `.accessibilityLabel`
+  ("Cron Jobs[, N unread cron runs], expanded|collapsed", singular for 1), no hint. The section
+  renders when `showsCronSection` (cron runs OR fetched jobs); the job rows, peeks, and
   `unmatchedCronSessions` render only when `!store.cronSectionCollapsed`.
 - Toolbar: replace `organizeMenu` with
   `Button { store.send(.archivedButtonTapped) } label: { Label("Archived sessions", systemImage: "archivebox") }`.
-- Cron run rows inside a peek keep `SessionRowView` via a separate `cronRunRow(_:)` (today's
-  `row(_:)` is shared — split so cron runs don't become cards). Archived sheet untouched.
+- Cron run rows (peeks, flat fallback, unmatched) keep `SessionRowView` via a separate
+  `cronRunRow(_:)` (today's `row(_:)` is shared — split so cron runs don't become cards).
+  Archived sheet untouched.
 - `DemoMode.swift`: drop `loadGroupingMode` override and the `groupingMode:` init arg; seed
   fixture `updatedAt`s so the demo list spans at least Today / Yesterday / Last week.
 
@@ -322,7 +330,6 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 - Modify: `HermesKit/Sources/HermesKit/AppFeature.swift`
 - Modify: `HermesKit/Sources/HermesKit/Features/SettingsFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionListFeatureTests.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/SessionListCronTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift` (or wherever the logout
   recipes are asserted — locate with `grep -rn saveShowCronSection HermesKit/Tests`)
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift` (minimal: keep compiling —
@@ -451,7 +458,8 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
   card truncation at sidebar width, pinned cards, cron collapse animation and reduce-motion,
   VoiceOver reading order on a card, swipe and context affordances.
 - Against a real agent: a session with a nil `model` (older agent) and one with zero messages
-  hide the footer; search shows the keyword snippet in the preview line.
+  hide the footer; search shows the keyword snippet as the card title (search rows carry no
+  title, so the preview is promoted) with no workspace in the header.
 - TestFlight upgrade from a build that persisted `hermes.session-grouping-mode` /
   `hermes.show-cron-section`: no crash, stale keys cleared, cron section expanded by default.
 

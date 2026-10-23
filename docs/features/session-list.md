@@ -8,16 +8,19 @@ Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The shor
 
 The list is the desktop's **Inbox style**, always on and the only list UI — there is no
 grouping pref or picker (the workspace/chronological `SessionGroupingMode` was removed; the
-card names the workspace on every row). Layout, top to bottom: the "Sessions" header, a
-**Pinned** section (pin order), the **update-date sections**, then the Cron Jobs section. All of
-it is display-only over the one fetched `sessions` array (no fetch/order change). The list is a
-flat `.listStyle(.plain)`; "New chat" is a bottom bar via **`.safeAreaInset(edge: .bottom)`**
-(a `.bottomBar` toolbar renders blank in the snapshot host).
+card header names the workspace instead). Layout, top to bottom: the "Sessions" header, a
+**Pinned** section (pin order), the **update-date sections**, then the Cron Jobs section. All
+of it is display-only over the one fetched `sessions` array (no fetch/order change). The list
+is a flat `.listStyle(.plain)` with no row or section separators; "New chat" is a bottom bar
+via **`.safeAreaInset(edge: .bottom)`** (a `.bottomBar` toolbar renders blank in the snapshot
+host).
 
 **Bucketing is pure HermesKit** (`SessionDateBucket`, unit-tested on macOS), a port of desktop
 `calendarBucket` (`apps/desktop/src/lib/time.ts`). Every date is mapped to its **nominal day**
 = its local calendar day, or the day before when the local hour is under `dayRolloverHour`
-(4: a 1 AM session still counts as the previous day, DST or not), and buckets are judged on the injected `Calendar` (time zone, locale, `firstWeekday`):
+(4: a 1 AM session still counts as the previous day; judged on the local hour, so a DST jump
+never moves the boundary), and buckets are judged on the injected `Calendar` (time zone,
+locale, `firstWeekday`):
 
 | Kind | Rule (nominal days) | Key | Label |
 |---|---|---|---|
@@ -30,10 +33,13 @@ flat `.listStyle(.plain)`; "New chat" is a bottom bar via **`.safeAreaInset(edge
 | `monthYear` | prior year | `my-YYYY-M` | `MMMM yyyy` ("December 2025") |
 
 Month keys use the Calendar's **1-based** months (`m-2026-2` = February; desktop's JS keys are
-0-based — the key is a local section identity only, never shared). Month labels come from
-`Date.FormatStyle` (wide month, + year) on the calendar's locale + time zone. "Today" is the top label
-(desktop's "Earlier today" only exists because of its unlabelled recent-head run, which is
-deliberately **not ported** — mobile labels every section).
+0-based — the key is a local section identity only, never shared); a leap month appends `L`
+and an era other than today's appends `-e<era>`, and the month/year rules compare calendar
+intervals, so non-Gregorian calendars never merge distinct months (Gregorian keys carry no
+suffix). Month labels come from `Date.FormatStyle` (wide month, + year) on the calendar's
+locale + time zone. "Today" is the top label (desktop's "Earlier today" only exists because
+of its unlabelled recent-head run, which is deliberately **not ported** — mobile labels every
+section).
 
 **Sections** (`SessionDateSection`, built by pure `groupEntriesByDate`) walk the
 branch-flattened `chronologicalEntries` in order and never re-sort:
@@ -52,25 +58,28 @@ captured alongside `now` on load from the dedicated `\.sessionListCalendar` depe
 library `\.calendar` has no test value), so TestStores and snapshots pin it.
 
 **Cards** (`SessionCardView`) render every interactive row — Pinned, date sections, AND search
-— so one column never mixes card and one-line geometry (desktop parity). Anatomy:
-1. **Header**: unread dot, the branch elbow stem (`└─`/`├─`) when nested, the workspace label
-   (`cwd` last path component; a root path verbatim; else "No workspace"; left out for search
-   hits, which carry no `cwd`), pin glyph, then the
-   relative age on the trailing edge.
+— so one column never mixes card and one-line geometry (desktop parity). What a card shows is
+derived in HermesKit by `SessionCardContent` (unit-tested); the view only lays it out.
+Anatomy:
+1. **Header**: unread dot, the branch elbow stem (`└─`/`├─`) when nested, the workspace
+   label (`Session.workspaceLabel`: `cwd` last path component; a root path verbatim; else
+   "No workspace"), pin glyph, then the relative age on the trailing edge. Search passes
+   `showsWorkspace: false` — a search hit carries no `cwd`, so the slot is left out rather
+   than claim "No workspace".
 2. **Title**: `displayName` (`resolvedTitle ?? resolvedPreview ?? id`), headline, semibold —
    bold when unread — up to two lines.
 3. **Preview**: one line, shown **only under a real title**. An untitled session promotes its
    preview into the title slot and drops this line, so the text never shows twice. Search
    results (no title, snippet as preview) therefore show the match snippet as the title.
 4. **Footer**: the raw `Session.model` id (verbatim like the chat chip; decoded from the list
-   DTO, nil on older agents) and "N messages" (inflected; hidden for nil or 0). The whole line
-   is omitted when both are absent.
+   DTO, nil on older agents) and "1 message" / "N messages" (plain English plural; hidden for
+   nil or 0). The whole line is omitted when both are absent.
 
 Cards are natural-height (no min-height floor — see "Rows are natural-height" below), carry
 their own working glow (`CardActiveGlow`, separate pulse state from the row's), and expose one
-combined accessibility label (workspace, title, preview, model, count, age, then
-Unread/Pinned/Working). Nested branch cards keep a 16pt leading indent on top of the header
-stem, so the whole card reads as belonging to the parent.
+combined accessibility label (`SessionCardContent.accessibilityLabel`: workspace, title,
+preview, model, count, age, then Unread/Pinned/Working). Nested branch cards keep a 16pt
+leading indent on top of the header stem, so the whole card reads as belonging to the parent.
 
 **The compact `SessionRowView` stays only on dense surfaces**: cron run peeks, the flat cron
 fallback, unmatched cron runs (`cronRunRow(_:)`), and the archived sheet. Cards (`row(_:)`) and
@@ -78,11 +87,11 @@ compact rows share one affordance funnel, `sessionRow(_:content:)` — tap, high
 `isSelected` trait, swipes, context menu are identical for both.
 
 **Archived** is a direct top-trailing **"Archived sessions" toolbar button** (`archivebox`;
-the former one-item organize `Menu` is gone) presenting a sheet backed by a server query
-(`?archived=only`, `ArchivedSessionsFeature`); restore = `archive(id, false)`; tap-to-open
-bubbles up the existing `openSession` delegate.
+the former organize `Menu` — grouping picker, cron toggle, Archived — is gone) presenting a
+sheet backed by a server query (`?archived=only`, `ArchivedSessionsFeature`); restore =
+`archive(id, false)`; tap-to-open bubbles up the existing `openSession` delegate.
 
-**Stale prefs**: the live `PreferencesClient` removes the retired
+**Stale prefs**: `PreferencesClient.live(defaults:)` removes the retired
 `hermes.session-grouping-mode` and `hermes.show-cron-section` keys once, when it is built (no
 migration — a previously hidden cron section comes back expanded).
 
@@ -93,16 +102,23 @@ into an **always-on, separate "Cron Jobs" section**. The partition lives in the 
 computed state (`cronSessions` vs the non-cron `interactiveSessions` that feeds
 `pinnedSessions`/`unpinnedSessions` → `chronologicalSessions` → `dateSections`), so cron rows
 never appear in Pinned or the date sections. Rendered with a `clock`-icon header below the
-interactive sections, and **not shown during search** (search stays flat).
+interactive sections whenever `showsCronSection` holds (any cron run OR any fetched job, so a
+job with no runs in the fetched window stays reachable), and **not shown during search**
+(search stays flat). The "No sessions" placeholder follows `showsEmptyPlaceholder` (empty, not
+loading or failed, and searching or no cron section). An empty non-search list with no jobs
+known holds `isLoading` until the load's cron-jobs response lands (`awaitsCronJobs`), so a
+jobs-only profile never flashes "No sessions"; a transient cron failure there settles on the
+placeholder.
 
 **The header is the section's collapse control**: a plain `Button` sending
-`toggleCronSectionCollapsed` (`.snappy`, no animation under reduce-motion), with a trailing
-chevron rotated -90° when collapsed and header trait + Collapsed/Expanded value + hint for
-VoiceOver. `cronSectionCollapsed` is a persisted device-local pref
-(`hermes.cron-section-collapsed`, default expanded) reset in all three logout recipes.
-Collapsing hides the job rows, peeks, and unmatched runs, but **the header and its
-`cronUnreadCount` badge are always visible** whenever cron sessions or jobs exist (the old hide toggle
-also hid the badge).
+`toggleCronSectionCollapsed` (`.snappy`, no animation under reduce-motion), with the job rows'
+disclosure — a trailing `chevron.right` turned 90° when expanded — and, like the job rows, its
+state in one combined accessibility label ("Cron Jobs[, N unread cron runs], expanded" /
+"collapsed"; "1 unread cron run" singular; header trait, no hint). `cronSectionCollapsed` is a
+persisted device-local pref (`hermes.cron-section-collapsed`, default expanded) reset in all
+three logout recipes. Collapsing hides the job rows, peeks, and unmatched runs, but **the
+header and its `cronUnreadCount` badge are always visible** (the old hide toggle also hid the
+badge).
 
 **The Cron Jobs section groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
 fetched sequentially INSIDE the session-load effect (after `.sessionsResponse`, same CancelID —
@@ -115,8 +131,9 @@ is orange and would be indistinguishable from amber; red error, gray inactive),
 unread dot judged over ALL the job's runs (not just the peeked 5), and a context menu (Run now /
 Pause / Resume → `cronActionInFlightIDs` double-fire guard; success refetches — full load after
 trigger, jobs-only for pause/resume; **no optimistic job-state mutation**). Tap = single-open
-inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the compact `cronRunRow(_:)`;
-runs matching no fetched job render flat below (`unmatchedCronSessions` — never hide output).
+inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the compact
+`cronRunRow(_:)`; runs matching no fetched job render flat below (`unmatchedCronSessions` —
+never hide output).
 The header carries the aggregate `cronUnreadCount` badge; cron sessions use the same shared
 server-backed unread state as interactive rows (with the legacy device-local `seenCounts`
 fallback below). **Capability-gated**: a 404 flips

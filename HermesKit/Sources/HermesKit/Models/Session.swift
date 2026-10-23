@@ -10,14 +10,14 @@ public struct Session: Equatable, Sendable, Identifiable {
   public var title: String?
   public var updatedAt: Date?
   public var preview: String?
-  /// Working directory of the session — the workspace it belongs to. The list card names
-  /// it (last path component) on every row. Nil/empty → "No workspace".
+  /// Working directory of the session — the workspace it belongs to; the session card's
+  /// header label (`workspaceLabel`). Search hits carry none.
   public var cwd: String?
   /// Original start time (decoded for parity with the desktop row; the list orders by
   /// `updatedAt`).
   public var startedAt: Date?
-  /// Number of messages — used only as the unread fallback for older agents that omit
-  /// the server-backed `unread` field.
+  /// Number of messages — the session card footer's count (`SessionCardContent`), and the
+  /// unread fallback for older agents that omit the server-backed `unread` field.
   public var messageCount: Int?
   /// Server-backed read state (`last_read_at` vs activity), shared by Desktop and every
   /// mobile client. Nil means an older agent omitted the field; the list then falls back

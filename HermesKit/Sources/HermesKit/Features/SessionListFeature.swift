@@ -31,15 +31,18 @@ public struct SessionListFeature {
     public var searchQuery: String
     public var isLoading: Bool
     public var loadError: String?
-    /// Reference "now" for relative row timestamps; set from the date dependency on
-    /// load so the value is controllable (deterministic snapshots/tests).
+    /// Reference "now" for relative row timestamps AND the date-section buckets; set from
+    /// the date dependency on load (and so on every poll) so the value is controllable
+    /// (deterministic snapshots/tests) and the headers re-bucket on the poll cadence.
     public var now: Date
+    /// The calendar `dateSections` buckets with (time zone + first weekday). Captured from
+    /// `@Dependency(\.sessionListCalendar)` on load alongside `now`, so TestStore and
+    /// snapshots pin it through the dependency / init instead of the device's calendar.
+    public var calendar: Calendar
     /// Last-seen message count per session id (persisted) — drives the unread indicator.
     public var seenCounts: [String: Int]
     /// Pinned session ids (persisted), order = display order in the top "Pinned" section.
     public var pinnedIDs: [String]
-    /// Workspace group ids the user expanded past the collapsed limit.
-    public var expandedGroups: Set<String>
     /// Ids whose archive PATCH is currently IN FLIGHT. Transient: an id is added when its
     /// PATCH starts and removed on BOTH success and failure. While an id is here, a list/search
     /// response that lands during the in-flight window filters it out (suppressing a stale row),
@@ -74,8 +77,6 @@ public struct SessionListFeature {
     public var renamingID: Session.ID?
     /// The editable title text bound to the rename alert's `TextField`.
     public var renameDraft: String
-    /// How the list groups its rows (workspace vs chronological); persisted, loaded on `task`.
-    public var groupingMode: SessionGroupingMode
     /// The profiles available on the connected agent (default + any custom). Populated from
     /// `profiles.list` on `.task`; empty when the agent lacks the profiles API.
     public var profiles: IdentifiedArrayOf<Profile>
@@ -151,9 +152,6 @@ public struct SessionListFeature {
       preferences.loadSelectedProfileID() != nil
     }
 
-    /// Collapsed groups show at most this many rows before a "Show more".
-    public static let collapsedLimit = 5
-
     public init(
       connection: ServerConnection,
       sessions: IdentifiedArrayOf<Session> = [],
@@ -161,9 +159,9 @@ public struct SessionListFeature {
       isLoading: Bool = false,
       loadError: String? = nil,
       now: Date = Date(timeIntervalSince1970: 0),
+      calendar: Calendar = .autoupdatingCurrent,
       seenCounts: [String: Int] = [:],
       pinnedIDs: [String] = [],
-      expandedGroups: Set<String> = [],
       archivingIDs: Set<String> = [],
       deletingIDs: Set<String> = [],
       deleteSupported: Bool = true,
@@ -172,7 +170,6 @@ public struct SessionListFeature {
       renamingInFlightIDs: Set<String> = [],
       renamingID: Session.ID? = nil,
       renameDraft: String = "",
-      groupingMode: SessionGroupingMode = .default,
       profiles: IdentifiedArrayOf<Profile> = [],
       selectedProfileName: String = SessionListFeature.State.defaultProfileName,
       profilesSupported: Bool = false,
@@ -194,9 +191,9 @@ public struct SessionListFeature {
       self.isLoading = isLoading
       self.loadError = loadError
       self.now = now
+      self.calendar = calendar
       self.seenCounts = seenCounts
       self.pinnedIDs = pinnedIDs
-      self.expandedGroups = expandedGroups
       self.archivingIDs = archivingIDs
       self.deletingIDs = deletingIDs
       self.deleteSupported = deleteSupported
@@ -205,7 +202,6 @@ public struct SessionListFeature {
       self.renamingInFlightIDs = renamingInFlightIDs
       self.renamingID = renamingID
       self.renameDraft = renameDraft
-      self.groupingMode = groupingMode
       self.profiles = profiles
       self.selectedProfileName = selectedProfileName
       self.profilesSupported = profilesSupported
@@ -240,8 +236,8 @@ public struct SessionListFeature {
       deleteSupported ? defaultSwipeAction : .archive
     }
 
-    /// True while a search query is active — the list shows flat results, not workspace
-    /// groups (search has no `cwd`).
+    /// True while a search query is active — the list shows flat results, not date
+    /// sections.
     public var isSearching: Bool {
       !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty
     }
@@ -254,7 +250,7 @@ public struct SessionListFeature {
         .sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
     }
 
-    /// The non-cron remainder — everything the pinning/workspace/chronological computeds
+    /// The non-cron remainder — everything the pinning/chronological/date-section computeds
     /// operate on, so cron sessions never feed the interactive sections (a pinned-but-cron
     /// id surfaces only under Cron Jobs).
     public var interactiveSessions: [Session] {
@@ -293,7 +289,7 @@ public struct SessionListFeature {
     }
 
     /// Cron sessions that match none of the fetched jobs (deleted job, legacy id shape) —
-    /// rendered flat below the groups so no run is ever invisible. Empty while grouping is
+    /// rendered flat below the groups so no run is ever invisible. Empty while job grouping is
     /// inactive (the flat fallback shows everything then).
     public var unmatchedCronSessions: [Session] {
       guard cronJobsSupported, !cronJobs.isEmpty else { return [] }
@@ -336,20 +332,14 @@ public struct SessionListFeature {
       flattenSessionsWithBranches(pinnedSessions, sortTopLevelByRecency: false)
     }
 
-    /// Non-cron sessions not pinned — these feed the workspace grouping.
+    /// Non-cron sessions not pinned — these feed the date sections.
     public var unpinnedSessions: [Session] {
       let pinned = Set(pinnedIDs)
       return interactiveSessions.filter { !pinned.contains($0.id) }
     }
 
-    /// Sessions grouped by workspace for the (non-search) list, desktop-style.
-    /// Pinned sessions are excluded — they render in the top "Pinned" section.
-    public var groups: [SessionGroup] {
-      SessionGroup.grouped(unpinnedSessions)
-    }
-
-    /// Flat, last-active-ordered list of the unpinned sessions — the chronological mode's
-    /// rows (pinned sessions still render in the top "Pinned" section). `nil` dates sort last.
+    /// Flat, last-active-ordered list of the unpinned sessions — the date sections' source
+    /// (pinned sessions render in the top "Pinned" section). `nil` dates sort last.
     public var chronologicalSessions: [Session] {
       unpinnedSessions.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
     }
@@ -362,6 +352,15 @@ public struct SessionListFeature {
       flattenSessionsWithBranches(chronologicalSessions)
     }
 
+    /// The non-search list body: `chronologicalEntries` split into labelled update-date
+    /// sections (Today, Yesterday, … — see `SessionDateBucket`). Bucketed against `now`
+    /// (poll-refreshed), so headers re-bucket on the same cadence as the age labels. A
+    /// parent + branches cluster never splits across a header; pinned and cron rows never
+    /// appear here (they own their sections).
+    public var dateSections: [SessionDateSection] {
+      groupEntriesByDate(chronologicalEntries, now: now, calendar: calendar)
+    }
+
     /// Sessions with new activity since the user last opened them. New agents own this
     /// state server-side so Desktop and mobile agree; an absent field falls back to the
     /// legacy device-local message-count watermark.
@@ -372,22 +371,6 @@ public struct SessionListFeature {
         else { return nil }
         return session.id
       })
-    }
-
-
-    /// Rows to show for a group given its collapsed/expanded state.
-    public func visibleSessions(in group: SessionGroup) -> [Session] {
-      guard !expandedGroups.contains(group.id), group.sessions.count > Self.collapsedLimit
-      else { return group.sessions }
-      return Array(group.sessions.prefix(Self.collapsedLimit))
-    }
-
-    /// A workspace group's visible rows with branch nesting applied — nesting happens
-    /// within the RENDERED slice only (desktop parity), so it runs after both the cron
-    /// partition and the collapsed-limit cap: a branch whose parent got capped out (or
-    /// lives in another group) de-nests rather than hiding.
-    public func visibleEntries(in group: SessionGroup) -> [SessionBranchEntry] {
-      flattenSessionsWithBranches(visibleSessions(in: group))
     }
   }
 
@@ -406,9 +389,6 @@ public struct SessionListFeature {
     case copyIDButtonTapped(id: Session.ID)
     /// The copy toast's dwell time elapsed — hide it.
     case copiedIDToastExpired
-    case toggleGroupExpansion(groupID: String)
-    /// Switch the list grouping (workspace/chronological) and persist the choice.
-    case setGroupingMode(SessionGroupingMode)
     /// Collapse/expand the always-on "Cron Jobs" section and persist the choice.
     case toggleCronSectionCollapsed
     case archiveButtonTapped(id: Session.ID)
@@ -602,6 +582,7 @@ public struct SessionListFeature {
   @Dependency(\.hermesProfiles) var profiles
   @Dependency(\.continuousClock) var clock
   @Dependency(\.date.now) var now
+  @Dependency(\.sessionListCalendar) var calendar
   @Dependency(\.preferences) var preferences
   @Dependency(\.push) var push
   @Dependency(\.pasteboard) var pasteboard
@@ -906,21 +887,10 @@ public struct SessionListFeature {
         state.copiedIDToastToken = nil
         return .none
 
-      case let .setGroupingMode(mode):
-        guard state.groupingMode != mode else { return .none }
-        state.groupingMode = mode
-        return .run { [preferences] _ in preferences.saveGroupingMode(mode) }
-
       case .toggleCronSectionCollapsed:
         state.cronSectionCollapsed.toggle()
         let collapsed = state.cronSectionCollapsed
         return .run { [preferences] _ in preferences.saveCronSectionCollapsed(collapsed) }
-
-      case let .toggleGroupExpansion(groupID):
-        if !state.expandedGroups.insert(groupID).inserted {
-          state.expandedGroups.remove(groupID)
-        }
-        return .none
 
       case let .archiveButtonTapped(id):
         state.confirmationDialog = ConfirmationDialogState {
@@ -1304,9 +1274,8 @@ public struct SessionListFeature {
         // No-op when already selected (avoids a redundant refetch / UI reset).
         guard name != state.selectedProfileName else { return .none }
         state.selectedProfileName = name
-        // Reset the list UI on switch (search + group expansion don't carry across profiles).
+        // Reset the list UI on switch (search doesn't carry across profiles).
         state.searchQuery = ""
-        state.expandedGroups = []
         // Cron jobs are profile-scoped too: drop the old profile's jobs + peek so the
         // section can't show cross-profile rows while the scoped refetch is in flight.
         state.cronJobs = []
@@ -1412,7 +1381,6 @@ public struct SessionListFeature {
         if state.selectedProfileName == name {
           state.selectedProfileName = Self.State.defaultProfileName
           state.searchQuery = ""
-          state.expandedGroups = []
           state.cronJobs = []
           state.expandedCronJobID = nil
           preferences.saveSelectedProfileID(Self.State.defaultProfileName)
@@ -1467,15 +1435,16 @@ public struct SessionListFeature {
     .ifLet(\.$confirmationDialog, action: \.confirmationDialog)
   }
 
-  /// Refresh "now", clear errors, and reload the non-secret persisted prefs (seen counts,
-  /// pins, grouping). Shared by `.task` and `load()` — `.task` additionally reloads the
-  /// selected profile before probing the profiles capability.
+  /// Refresh "now" + the section calendar, clear errors, and reload the non-secret persisted
+  /// prefs (seen counts, pins, swipe action, cron collapse). Shared by `.task` and `load()`
+  /// — `.task` additionally reloads the selected profile before probing the profiles
+  /// capability.
   private func reloadPrefs(_ state: inout State) {
     state.now = now
+    state.calendar = calendar
     state.loadError = nil
     state.seenCounts = preferences.loadSeenCounts()
     state.pinnedIDs = preferences.loadPinnedIDs()
-    state.groupingMode = preferences.loadGroupingMode()
     state.defaultSwipeAction = preferences.loadDefaultSessionSwipeAction()
     state.cronSectionCollapsed = preferences.loadCronSectionCollapsed()
   }
@@ -1605,6 +1574,23 @@ public struct SessionListFeature {
   /// the first occurrence) — `IdentifiedArray(uniqueElements:)` traps on duplicates (#78).
   private static func dedupedProfiles(_ profiles: [Profile]) -> IdentifiedArrayOf<Profile> {
     IdentifiedArray(profiles, uniquingIDsWith: { first, _ in first })
+  }
+}
+
+private enum SessionListCalendarKey: DependencyKey {
+  static let liveValue = Calendar.autoupdatingCurrent
+  // Same value as `State.calendar`'s default so capturing it on load is a no-op diff in
+  // every exhaustive TestStore; date-section tests override it with a pinned calendar.
+  static let testValue = Calendar.autoupdatingCurrent
+}
+
+public extension DependencyValues {
+  /// The calendar the session list's date sections bucket with. A dedicated key rather than
+  /// the library's `\.calendar`, whose test value is unimplemented — reading that from the
+  /// shared `reloadPrefs` would report an issue in every suite that loads the list.
+  var sessionListCalendar: Calendar {
+    get { self[SessionListCalendarKey.self] }
+    set { self[SessionListCalendarKey.self] = newValue }
   }
 }
 

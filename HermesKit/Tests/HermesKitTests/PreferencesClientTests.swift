@@ -50,36 +50,6 @@ struct PreferencesClientTests {
     #expect(prefs.loadPinnedIDs() == ["a", "b"])
   }
 
-  @Test func inMemoryGroupingModeRoundTripAndDefault() {
-    let prefs = PreferencesClient.inMemory()
-    #expect(prefs.loadGroupingMode() == .workspace) // default when unset
-
-    prefs.saveGroupingMode(.chronological)
-    #expect(prefs.loadGroupingMode() == .chronological)
-
-    prefs.saveGroupingMode(.workspace)
-    #expect(prefs.loadGroupingMode() == .workspace)
-  }
-
-  @Test func liveGroupingModeBacksOntoProvidedDefaults() {
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping")
-    let prefs = PreferencesClient.live(defaults: suite)
-
-    #expect(prefs.loadGroupingMode() == .workspace) // default when unset
-    prefs.saveGroupingMode(.chronological)
-    #expect(suite.string(forKey: "hermes.session-grouping-mode") == "chronological")
-    #expect(prefs.loadGroupingMode() == .chronological)
-  }
-
-  @Test func liveGroupingModeDefaultsWhenValueIsGarbage() {
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping.garbage")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping.garbage")
-    suite.set("not-a-mode", forKey: "hermes.session-grouping-mode")
-    let prefs = PreferencesClient.live(defaults: suite)
-    #expect(prefs.loadGroupingMode() == .workspace) // unknown raw value → default
-  }
-
   @Test func inMemoryDefaultSwipeActionRoundTripAndDefault() {
     let prefs = PreferencesClient.inMemory()
     #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // default when unset
@@ -142,6 +112,20 @@ struct PreferencesClientTests {
 
     #expect(prefs.loadCronSectionCollapsed() == false)
     #expect(suite.object(forKey: "hermes.show-cron-section") == nil)
+  }
+
+  @Test func liveListPrefsLoadDropsStaleGroupingModeKey() {
+    // The workspace/chronological grouping pref is retired (the list is always
+    // date-sectioned); a build that persisted it leaves the key behind, and the list's
+    // prefs load clears it so an upgrade leaves no orphaned default.
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping.legacy")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping.legacy")
+    suite.set("chronological", forKey: "hermes.session-grouping-mode")
+    suite.set(true, forKey: "hermes.cron-section-collapsed")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    #expect(prefs.loadCronSectionCollapsed() == true) // the live pref is untouched
+    #expect(suite.object(forKey: "hermes.session-grouping-mode") == nil)
   }
 
   @Test func inMemorySelectedProfileRoundTripAndClear() {

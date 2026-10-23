@@ -2,10 +2,9 @@ import ComposableArchitecture
 import HermesKit
 import SwiftUI
 
-/// The session list: a flat (Codex-style) list, searchable, pull-to-refresh. Grouping
-/// (by workspace / chronological) is chosen from the top-trailing menu, which also opens
-/// the Archived sessions sheet. "New chat" lives in the bottom bar (alongside the iOS 26
-/// bottom search field).
+/// The session list: searchable, pull-to-refresh, sectioned by update date (Today,
+/// Yesterday, …). The top-trailing menu opens the Archived sessions sheet. "New chat"
+/// lives in the bottom bar (alongside the iOS 26 bottom search field).
 struct SessionListView: View {
   @Bindable var store: StoreOf<SessionListFeature>
   /// The session shown in the split view's detail column (#80), whose row gets the
@@ -132,7 +131,7 @@ struct SessionListView: View {
   }
 
   /// The non-search list body: the "Sessions" header, the pinned section, the interactive
-  /// sessions (workspace groups or chronological), then the always-on Cron Jobs section.
+  /// sessions split into update-date sections, then the always-on Cron Jobs section.
   /// Extracted from `body` to keep the `List` builder within the compiler's type-check
   /// budget.
   @ViewBuilder
@@ -140,7 +139,7 @@ struct SessionListView: View {
     // Top-level "Sessions" section header. Future sibling areas (e.g. "Cron jobs")
     // render their own header the same way, all scoped to the active profile pill.
     sessionsSectionHeader
-    // Pinned sessions float to the top in both grouping modes.
+    // Pinned sessions float to the top.
     if !store.pinnedSessions.isEmpty {
       Section("Pinned") {
         ForEach(store.pinnedEntries) { entry in
@@ -148,22 +147,19 @@ struct SessionListView: View {
         }
       }
     }
-    switch store.groupingMode {
-    case .workspace:
-      ForEach(store.groups) { group in
-        groupSection(group)
-      }
-    case .chronological:
-      // One last-active-ordered list — no workspace headers; branches nest under
-      // their parent with elbow stems.
-      ForEach(store.chronologicalEntries) { entry in
-        row(entry)
+    // The last-active-ordered lane, split into date sections (Today, Yesterday, …);
+    // branches nest under their parent with elbow stems and never split across a header.
+    ForEach(store.dateSections) { section in
+      Section(section.label) {
+        ForEach(section.entries) { entry in
+          row(entry)
+        }
       }
     }
     // Cron-scheduled sessions live in their own always-on section below the
-    // interactive list, in both grouping modes (filtered out of pinned/groups/
-    // chronological by the reducer). Hidden only when there are none; a collapsed
-    // section keeps its header (and unread badge).
+    // interactive list (filtered out of pinned and the date sections by the reducer).
+    // Hidden only when there are none; a collapsed section keeps its header (and
+    // unread badge).
     if !store.cronSessions.isEmpty {
       cronJobsSection
     }
@@ -425,24 +421,10 @@ struct SessionListView: View {
     .padding(.vertical, 8)
   }
 
-  /// Top-trailing menu: choose the grouping mode (checkmark on the active one), then a
-  /// divider and the Archived sessions entry. Mirrors the Codex "Organize / Manage" menu.
+  /// Top-trailing menu: the interim cron-section collapse toggle, then a divider and the
+  /// Archived sessions entry. Mirrors the Codex "Organize / Manage" menu.
   private var organizeMenu: some View {
     Menu {
-      Picker(
-        "Grouping",
-        selection: Binding(
-          get: { store.groupingMode },
-          set: { store.send(.setGroupingMode($0)) }
-        )
-      ) {
-        Label("By workspace", systemImage: "folder").tag(SessionGroupingMode.workspace)
-        Label("Chronological", systemImage: "clock").tag(SessionGroupingMode.chronological)
-      }
-      .pickerStyle(.inline)
-
-      Divider()
-
       Toggle(isOn: Binding(
         get: { store.cronSectionCollapsed },
         set: { if $0 != store.cronSectionCollapsed { store.send(.toggleCronSectionCollapsed) } }
@@ -459,25 +441,6 @@ struct SessionListView: View {
       }
     } label: {
       Label("Organize", systemImage: "line.3.horizontal.decrease.circle")
-    }
-  }
-
-  @ViewBuilder
-  private func groupSection(_ group: SessionGroup) -> some View {
-    let visible = store.state.visibleEntries(in: group)
-    let hidden = group.sessions.count - visible.count
-    let isExpanded = store.expandedGroups.contains(group.id)
-    Section(group.label) {
-      ForEach(visible) { entry in
-        row(entry)
-      }
-      if hidden > 0 || isExpanded, group.sessions.count > SessionListFeature.State.collapsedLimit {
-        Button(isExpanded ? "Show less" : "Show \(hidden) more") {
-          store.send(.toggleGroupExpansion(groupID: group.id))
-        }
-        .font(.subheadline)
-        .listRowSeparator(.hidden)
-      }
     }
   }
 
@@ -603,7 +566,7 @@ struct SessionListView: View {
 
   @ViewBuilder
   private func pinButton(_ session: Session, isPinned: Bool) -> some View {
-    // Animate the send so the row glides between its workspace group and the Pinned
+    // Animate the send so the row glides between its date section and the Pinned
     // section (and the section itself fades in/out) instead of jumping.
     if isPinned {
       Button("Unpin", systemImage: "pin.slash") {

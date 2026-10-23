@@ -10,10 +10,11 @@ public struct Session: Equatable, Sendable, Identifiable {
   public var title: String?
   public var updatedAt: Date?
   public var preview: String?
-  /// Working directory of the session — the workspace it belongs to. Used to group the
-  /// list like the desktop app (see `SessionGroup`). Nil/empty → "No workspace".
+  /// Working directory of the session — the workspace it belongs to. The list card names
+  /// it (last path component) on every row. Nil/empty → "No workspace".
   public var cwd: String?
-  /// Original start time; used to order rows within a workspace group (desktop parity).
+  /// Original start time (decoded for parity with the desktop row; the list orders by
+  /// `updatedAt`).
   public var startedAt: Date?
   /// Number of messages — used only as the unread fallback for older agents that omit
   /// the server-backed `unread` field.

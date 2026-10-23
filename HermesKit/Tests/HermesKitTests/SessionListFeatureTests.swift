@@ -377,7 +377,7 @@ struct SessionListFeatureTests {
 
   // MARK: Pinning
 
-  @Test func pinMovesSessionIntoPinnedSetAndOutOfGroup() async {
+  @Test func pinMovesSessionIntoPinnedSetAndOutOfMainLane() async {
     let prefs = PreferencesClient.inMemory()
     let sessions = [
       Session(id: "a", cwd: "/w", startedAt: Date(timeIntervalSince1970: 1)),
@@ -392,17 +392,17 @@ struct SessionListFeatureTests {
     }
 
     #expect(store.state.pinnedSessions.isEmpty)
-    #expect(store.state.groups[0].sessions.map(\.id) == ["a", "b"])
+    #expect(store.state.unpinnedSessions.map(\.id) == ["a", "b"])
 
     await store.send(.pinSession(id: "a")) {
       $0.pinnedIDs = ["a"]
     }
     #expect(store.state.pinnedSessions.map(\.id) == ["a"])
-    #expect(store.state.groups[0].sessions.map(\.id) == ["b"]) // pinned dropped from group
+    #expect(store.state.unpinnedSessions.map(\.id) == ["b"]) // pinned dropped from the main lane
     #expect(prefs.loadPinnedIDs() == ["a"]) // persisted
   }
 
-  @Test func unpinRestoresSessionToGroup() async {
+  @Test func unpinRestoresSessionToMainLane() async {
     let prefs = PreferencesClient.inMemory()
     let sessions = [
       Session(id: "a", cwd: "/w", startedAt: Date(timeIntervalSince1970: 1)),
@@ -426,7 +426,7 @@ struct SessionListFeatureTests {
       $0.pinnedIDs = []
     }
     #expect(store.state.pinnedSessions.isEmpty)
-    #expect(store.state.groups[0].sessions.map(\.id) == ["a", "b"]) // restored to group
+    #expect(store.state.unpinnedSessions.map(\.id) == ["a", "b"]) // restored to the main lane
     #expect(prefs.loadPinnedIDs() == []) // persisted
   }
 
@@ -525,9 +525,9 @@ struct SessionListFeatureTests {
     // Interactive sections see only non-cron rows.
     #expect(state.interactiveSessions.map(\.id) == ["i1", "i2"])
     #expect(state.chronologicalSessions.map(\.id) == ["i2", "i1"]) // updatedAt desc
-    let groupedIDs = state.groups.flatMap { $0.sessions.map(\.id) }
-    #expect(groupedIDs.sorted() == ["i1", "i2"])
-    #expect(groupedIDs.contains(where: { $0.hasPrefix("c") }) == false)
+    let sectionedIDs = state.dateSections.flatMap { $0.entries.map(\.id) }
+    #expect(sectionedIDs == ["i2", "i1"])
+    #expect(sectionedIDs.contains(where: { $0.hasPrefix("c") }) == false)
   }
 
   @Test func pinnedCronSessionSurfacesOnlyUnderCronJobs() {
@@ -563,7 +563,7 @@ struct SessionListFeatureTests {
     #expect(state.pinnedSessions.map(\.id) == ["a"])
     #expect(state.unpinnedSessions.map(\.id) == ["b"])
     #expect(state.chronologicalSessions.map(\.id) == ["b"])
-    #expect(state.groups.flatMap { $0.sessions.map(\.id) } == ["b"])
+    #expect(state.dateSections.flatMap { $0.entries.map(\.id) } == ["b"])
   }
 
   // MARK: Branch nesting per lane
@@ -584,45 +584,6 @@ struct SessionListFeatureTests {
     // member (the branch at 20), still below "other" (30).
     #expect(state.chronologicalEntries.map(\.id) == ["other", "parent", "branch"])
     #expect(state.chronologicalEntries.map(\.branchStem) == [nil, nil, "└─ "])
-  }
-
-  @Test func branchNestsUnderParentInWorkspaceGroupLane() throws {
-    let sessions = [
-      Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10), cwd: "/w"),
-      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 20), cwd: "/w", parentSessionID: "parent"),
-      Session(id: "other", updatedAt: Date(timeIntervalSince1970: 30), cwd: "/w"),
-    ]
-    let state = SessionListFeature.State(
-      connection: connection,
-      sessions: IdentifiedArray(uniqueElements: sessions)
-    )
-
-    let group = try #require(state.groups.first)
-    let entries = state.visibleEntries(in: group)
-    #expect(entries.map(\.id) == ["other", "parent", "branch"])
-    #expect(entries.map(\.branchStem) == [nil, nil, "└─ "])
-  }
-
-  @Test func branchWhoseParentIsCappedOutOfCollapsedGroupDeNests() throws {
-    // Six rows in one workspace: the collapsed cap (5) cuts the stale parent, so its
-    // (visible) branch de-nests — nesting happens within the RENDERED slice only.
-    var sessions = (1...4).map { i in
-      Session(id: "s\(i)", updatedAt: Date(timeIntervalSince1970: Double(100 - i)), cwd: "/w")
-    }
-    sessions.append(
-      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 50), cwd: "/w", parentSessionID: "parent")
-    )
-    sessions.append(Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 1), cwd: "/w"))
-    let state = SessionListFeature.State(
-      connection: connection,
-      sessions: IdentifiedArray(uniqueElements: sessions)
-    )
-
-    let group = try #require(state.groups.first)
-    let entries = state.visibleEntries(in: group)
-    #expect(entries.count == SessionListFeature.State.collapsedLimit)
-    #expect(!entries.map(\.id).contains("parent")) // capped out while collapsed
-    #expect(entries.first { $0.id == "branch" }?.branchStem == nil) // de-nested, not hidden
   }
 
   @Test func pinnedBranchDeNestsInPinnedLane() {
@@ -745,27 +706,6 @@ struct SessionListFeatureTests {
       $0.cronJobsSupported = false
     }
     await store.send(.onDisappear) // cancels the auto-poll loop
-  }
-
-  @Test func toggleGroupExpansionExpandsThenCollapses() async {
-    let sessions = (0..<7).map { Session(id: "s\($0)", cwd: "/w", startedAt: Date(timeIntervalSince1970: Double($0))) }
-    let store = TestStore(
-      initialState: SessionListFeature.State(connection: connection, sessions: IdentifiedArray(uniqueElements: sessions))
-    ) {
-      SessionListFeature()
-    }
-    let group = store.state.groups[0]
-    #expect(store.state.visibleSessions(in: group).count == 5) // collapsed
-
-    await store.send(.toggleGroupExpansion(groupID: group.id)) {
-      $0.expandedGroups = [group.id]
-    }
-    #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 7) // expanded
-
-    await store.send(.toggleGroupExpansion(groupID: group.id)) {
-      $0.expandedGroups = []
-    }
-    #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 5) // re-collapsed
   }
 
   // MARK: Archiving
@@ -2212,35 +2152,22 @@ struct SessionListFeatureTests {
     }
   }
 
-  // MARK: - Grouping mode
+  // MARK: - Date sections
 
-  @Test func setGroupingModeUpdatesStateAndPersists() async {
-    let prefs = PreferencesClient.inMemory()
-    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
-      SessionListFeature()
-    } withDependencies: {
-      $0.preferences = prefs
-    }
+  /// Gregorian, New York, en_US, Monday-first — the bucket suite's pinned calendar.
+  private let sectionCalendar = SessionDateBucketTests.calendar()
 
-    #expect(store.state.groupingMode == .workspace) // default
-    await store.send(.setGroupingMode(.chronological)) {
-      $0.groupingMode = .chronological
-    }
-    #expect(prefs.loadGroupingMode() == .chronological) // persisted
-
-    // Re-sending the same mode is a no-op (no state change).
-    await store.send(.setGroupingMode(.chronological))
+  private func localDate(_ month: Int, _ day: Int, _ hour: Int = 10) -> Date {
+    SessionDateBucketTests.date(2026, month, day, hour)
   }
 
-  @Test func loadSeedsGroupingModeFromPreferences() async {
-    let prefs = PreferencesClient.inMemory()
-    prefs.saveGroupingMode(.chronological)
+  @Test func taskCapturesTheSessionListCalendar() async {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()
     } withDependencies: {
       $0.date = .constant(now)
+      $0.sessionListCalendar = sectionCalendar
       $0.continuousClock = TestClock()
-      $0.preferences = prefs
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
@@ -2249,8 +2176,8 @@ struct SessionListFeatureTests {
 
     await store.send(.task) {
       $0.now = self.now
+      $0.calendar = self.sectionCalendar // captured from the dependency with `now`
       $0.isLoading = true
-      $0.groupingMode = .chronological // seeded from prefs on load
     }
     await store.receive(\.setupPush)
     await store.receive(\.pushPluginStatusLoaded)
@@ -2260,6 +2187,78 @@ struct SessionListFeatureTests {
       $0.cronJobsSupported = false
     }
     await store.send(.onDisappear)
+  }
+
+  @Test func pollTickAcrossTheDayRolloverRebucketsDateSections() async {
+    let session = Session(id: "s1", updatedAt: localDate(6, 18, 10))
+    let currentDate = LockIsolated(SessionDateBucketTests.thuNoon) // Thu 18 Jun, noon
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [session],
+        now: SessionDateBucketTests.thuNoon,
+        calendar: sectionCalendar,
+        seenCounts: ["s1": 0]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = DateGenerator { currentDate.value }
+      $0.sessionListCalendar = sectionCalendar
+      $0.preferences.loadSeenCounts = { ["s1": 0] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [session] }
+    }
+    #expect(store.state.dateSections.map(\.id) == ["today"])
+    #expect(store.state.dateSections.map(\.label) == ["Today"])
+
+    // The poll refreshes `now` past the NEXT nominal day's 4 AM rollover — the same row
+    // (unchanged on the server) re-buckets under "Yesterday" with no new ticker.
+    let nextMorning = localDate(6, 19, 5)
+    currentDate.setValue(nextMorning)
+    await store.send(.pollTick)
+    await store.receive(\.pulledToRefresh) {
+      $0.now = nextMorning
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.cronJobsResponse.failure) { $0.cronJobsSupported = false }
+    #expect(store.state.dateSections.map(\.id) == ["yesterday"])
+    #expect(store.state.dateSections.map(\.label) == ["Yesterday"])
+    #expect(store.state.dateSections.flatMap { $0.entries.map(\.id) } == ["s1"])
+  }
+
+  @Test func dateSectionsExcludePinnedAndCronRowsAndKeepBranchClustersIntact() {
+    let sessions = [
+      Session(id: "today", updatedAt: localDate(6, 18, 11)),
+      Session(id: "pinned", updatedAt: localDate(6, 18, 9)),
+      Session(id: "cron_job1_1", updatedAt: localDate(6, 18, 8), source: "cron"),
+      // A stale parent from last week, lifted by its fresh branch: the whole cluster
+      // lands in "Today" (never split across a header).
+      Session(id: "parent", updatedAt: localDate(6, 10)),
+      Session(id: "branch", updatedAt: localDate(6, 18, 7), parentSessionID: "parent"),
+      Session(id: "yesterday", updatedAt: localDate(6, 17)),
+      Session(id: "lastWeek", updatedAt: localDate(6, 9)),
+      Session(id: "undated"),
+    ]
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions),
+      now: SessionDateBucketTests.thuNoon,
+      calendar: sectionCalendar,
+      pinnedIDs: ["pinned"]
+    )
+
+    let sections = state.dateSections
+    #expect(sections.map(\.id) == ["today", "yesterday", "last-week", SessionDateSection.olderID])
+    #expect(sections.map(\.label) == ["Today", "Yesterday", "Last week", "Older"])
+    #expect(sections[0].entries.map(\.id) == ["today", "parent", "branch"])
+    #expect(sections[0].entries.map(\.branchStem) == [nil, nil, "└─ "])
+    let sectionedIDs = sections.flatMap { $0.entries.map(\.id) }
+    #expect(!sectionedIDs.contains("pinned")) // owns the Pinned section
+    #expect(!sectionedIDs.contains("cron_job1_1")) // owns the Cron Jobs section
+    // The sections are exactly the chronological lane, split — nothing dropped or reordered.
+    #expect(sectionedIDs == state.chronologicalEntries.map(\.id))
   }
 
   // MARK: - Cron section collapse
@@ -2758,7 +2757,6 @@ struct SessionListFeatureTests {
       initialState: SessionListFeature.State(
         connection: connection,
         searchQuery: "stale",
-        expandedGroups: ["g1"],
         profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
         selectedProfileName: "default",
         profilesSupported: true
@@ -2778,7 +2776,6 @@ struct SessionListFeatureTests {
     await store.send(.selectProfile(name: "work")) {
       $0.selectedProfileName = "work"
       $0.searchQuery = "" // list UI reset on switch
-      $0.expandedGroups = []
       $0.now = self.now
       $0.isLoading = true
     }

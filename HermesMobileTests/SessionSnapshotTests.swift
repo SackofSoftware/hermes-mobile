@@ -152,8 +152,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
@@ -261,8 +260,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            groupingMode: .chronological
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
@@ -317,8 +315,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
@@ -362,8 +359,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
@@ -423,8 +419,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
@@ -489,7 +484,6 @@ final class SessionSnapshotTests: SnapshotTestCase {
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
             seenCounts: seen,
-            groupingMode: .chronological,
             cronJobs: IdentifiedArray(uniqueElements: jobs)
           )
         ) {
@@ -519,7 +513,6 @@ final class SessionSnapshotTests: SnapshotTestCase {
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
             seenCounts: seen,
-            groupingMode: .chronological,
             cronJobs: IdentifiedArray(uniqueElements: jobs),
             expandedCronJobID: "backup01"
           )
@@ -549,7 +542,6 @@ final class SessionSnapshotTests: SnapshotTestCase {
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
             seenCounts: seen,
-            groupingMode: .chronological,
             cronJobsSupported: false
           )
         ) {
@@ -593,8 +585,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            groupingMode: .chronological
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
@@ -631,8 +622,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)

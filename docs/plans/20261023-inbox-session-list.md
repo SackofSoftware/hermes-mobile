@@ -354,18 +354,19 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
   `dateSections` in place of the `switch groupingMode`; drop the picker from the menu)
 - Modify: `HermesMobile/Sources/DemoMode.swift`
 
-- [ ] delete `SessionGroupingMode`, `SessionGroup`, and the `loadGroupingMode`/
+- [x] delete `SessionGroupingMode`, `SessionGroup`, and the `loadGroupingMode`/
       `saveGroupingMode` client members + key (live load removes the stale key once)
-- [ ] remove `State.groupingMode`, `expandedGroups`, `groups`, `visibleEntries(in:)` and
+- [x] remove `State.groupingMode`, `expandedGroups`, `groups`, `visibleEntries(in:)` and
       actions `setGroupingMode`, `toggleGroupExpansion`; drop the three logout-recipe resets
-- [ ] add `State.dateSections` computed from `chronologicalEntries` + `now` (+ calendar
-      dependency captured at `task` so TestStore/snapshots pin it)
-- [ ] update `SessionListFeatureTests`: delete grouping tests; add `dateSections` cases —
+- [x] add `State.dateSections` computed from `chronologicalEntries` + `now` (+ calendar
+      dependency captured at `task` so TestStore/snapshots pin it) — a dedicated
+      `\.sessionListCalendar` key (the library `\.calendar` has no test value)
+- [x] update `SessionListFeatureTests`: delete grouping tests; add `dateSections` cases —
       sections follow `now` (a `pollTick` that moves `now` across midnight re-buckets), cron and
       pinned rows never appear in `dateSections`, branch clusters intact
-- [ ] update `DemoMode` (drop the grouping override + init arg; spread fixture `updatedAt`s
+- [x] update `DemoMode` (drop the grouping override + init arg; spread fixture `updatedAt`s
       across Today / Yesterday / Last week)
-- [ ] run `swift test` — must pass before task 5
+- [x] run `swift test` — must pass before task 5
 
 ### Task 5: Add `SessionCardView`
 

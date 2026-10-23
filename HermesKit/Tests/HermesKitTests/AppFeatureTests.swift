@@ -3477,7 +3477,6 @@ struct AppFeatureTests {
     preferences.savePinnedIDs(["s-pinned"])
     preferences.saveSeenCounts(["s-pinned": 3])
     preferences.saveSelectedProfileID("work")
-    preferences.saveGroupingMode(.chronological)
     preferences.saveDefaultSessionSwipeAction(.delete)
     preferences.saveCronSectionCollapsed(true)
     preferences.savePushDeviceToken("cafef00d")
@@ -3514,7 +3513,6 @@ struct AppFeatureTests {
     #expect(preferences.loadPinnedIDs().isEmpty)
     #expect(preferences.loadSeenCounts().isEmpty)
     #expect(preferences.loadSelectedProfileID() == nil)
-    #expect(preferences.loadGroupingMode() == .default)
     #expect(preferences.loadDefaultSessionSwipeAction() == .default) // swipe pref reset too
     #expect(preferences.loadCronSectionCollapsed() == false) // cron collapse reset too
     #expect(preferences.loadPushDeviceToken() == nil)

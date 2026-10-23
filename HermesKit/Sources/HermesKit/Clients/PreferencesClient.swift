@@ -17,9 +17,6 @@ public struct PreferencesClient: Sendable {
   /// Pinned session ids, ordered = display order in the top "Pinned" section.
   public var loadPinnedIDs: @Sendable () -> [String] = { [] }
   public var savePinnedIDs: @Sendable (_ ids: [String]) -> Void
-  /// How the session list groups its rows (workspace vs chronological). Device-local UI pref.
-  public var loadGroupingMode: @Sendable () -> SessionGroupingMode = { .default }
-  public var saveGroupingMode: @Sendable (_ mode: SessionGroupingMode) -> Void
   /// Which destructive action the session list's trailing swipe defaults to
   /// (archive vs permanent delete). Device-local UI pref; reset on logout.
   public var loadDefaultSessionSwipeAction: @Sendable () -> SessionSwipeAction = { .default }
@@ -53,7 +50,7 @@ public extension PreferencesClient {
   /// Drop the prefs that are scoped to a *specific user/account* — pins, per-session unread
   /// counts, and the selected profile. Used on a re-auth **user-switch** (different account
   /// signs in mid-session) where the prior user's device-local state must not leak across.
-  /// The server URL (and grouping mode) survive — the user stays on the same server.
+  /// The server URL (and the list's UI prefs) survive — the user stays on the same server.
   func clearIdentityScopedPrefs() {
     savePinnedIDs([])
     saveSeenCounts([:])
@@ -67,7 +64,9 @@ public extension PreferencesClient {
     let key = "hermes.server-url"
     let seenKey = "hermes.seen-message-counts"
     let pinnedKey = "hermes.pinned-session-ids"
-    let groupingKey = "hermes.session-grouping-mode"
+    // The retired workspace/chronological grouping pref (the list is always date-sectioned
+    // now); dropped alongside `legacyShowCronSectionKey` so an upgrade leaves no orphaned default behind.
+    let legacyGroupingKey = "hermes.session-grouping-mode"
     let swipeActionKey = "hermes.default-session-swipe-action"
     let cronSectionCollapsedKey = "hermes.cron-section-collapsed"
     // Superseded by `cronSectionCollapsedKey` (the section can no longer be hidden, only
@@ -87,17 +86,14 @@ public extension PreferencesClient {
       saveSeenCounts: { store.set($0, forKey: seenKey) },
       loadPinnedIDs: { (store.array(forKey: pinnedKey) as? [String]) ?? [] },
       savePinnedIDs: { store.set($0, forKey: pinnedKey) },
-      loadGroupingMode: {
-        store.string(forKey: groupingKey).flatMap(SessionGroupingMode.init(rawValue:)) ?? .default
-      },
-      saveGroupingMode: { store.set($0.rawValue, forKey: groupingKey) },
       loadDefaultSessionSwipeAction: {
         store.string(forKey: swipeActionKey).flatMap(SessionSwipeAction.init(rawValue:)) ?? .default
       },
       saveDefaultSessionSwipeAction: { store.set($0.rawValue, forKey: swipeActionKey) },
       loadCronSectionCollapsed: {
-        // Removing an absent key is a no-op, so this clears the stale key exactly once.
+        // Removing an absent key is a no-op, so this clears the stale keys exactly once.
         store.removeObject(forKey: legacyShowCronSectionKey)
+        store.removeObject(forKey: legacyGroupingKey)
         // Absent key (never toggled) reads `false` — the section is expanded by default.
         return store.bool(forKey: cronSectionCollapsedKey)
       },
@@ -130,7 +126,6 @@ public extension PreferencesClient {
     let box = LockIsolated<String?>(nil)
     let seen = LockIsolated<[String: Int]>([:])
     let pinned = LockIsolated<[String]>([])
-    let grouping = LockIsolated<SessionGroupingMode>(.default)
     let swipeAction = LockIsolated<SessionSwipeAction>(.default)
     let cronSectionCollapsed = LockIsolated<Bool>(false)
     let selectedProfile = LockIsolated<String?>(nil)
@@ -144,8 +139,6 @@ public extension PreferencesClient {
       saveSeenCounts: { seen.setValue($0) },
       loadPinnedIDs: { pinned.value },
       savePinnedIDs: { pinned.setValue($0) },
-      loadGroupingMode: { grouping.value },
-      saveGroupingMode: { grouping.setValue($0) },
       loadDefaultSessionSwipeAction: { swipeAction.value },
       saveDefaultSessionSwipeAction: { swipeAction.setValue($0) },
       loadCronSectionCollapsed: { cronSectionCollapsed.value },

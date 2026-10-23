@@ -391,7 +391,6 @@ public struct AppFeature {
         try? keychain.deleteSession()
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
-        preferences.saveGroupingMode(.default)
         preferences.saveDefaultSessionSwipeAction(.default)
         preferences.saveCronSectionCollapsed(false)
         state.connectionFailed = nil
@@ -758,7 +757,6 @@ public struct AppFeature {
         try? keychain.deleteSession()
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
-        preferences.saveGroupingMode(.default)
         preferences.saveDefaultSessionSwipeAction(.default)
         preferences.saveCronSectionCollapsed(false)
         state.reauth = nil

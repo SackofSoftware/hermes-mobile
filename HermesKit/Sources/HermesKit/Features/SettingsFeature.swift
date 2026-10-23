@@ -351,8 +351,7 @@ public struct SettingsFeature {
         preferences.clearServerURL()
         preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
         preferences.saveSeenCounts([:]) // unread state is per-server; drop it too
-        preferences.saveGroupingMode(.default) // reset the list grouping pref on logout
-        preferences.saveDefaultSessionSwipeAction(.default) // reset the swipe-action pref too
+        preferences.saveDefaultSessionSwipeAction(.default) // reset the swipe-action pref on logout
         preferences.saveCronSectionCollapsed(false) // reset the cron-section collapse pref too
         preferences.clearSelectedProfileID() // selected profile is per-server — clear on logout
         chatSnapshot.wipeAll() // snapshots + turn anchors are per-server — wipe on logout

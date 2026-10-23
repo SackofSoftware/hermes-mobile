@@ -374,16 +374,16 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 - Create: `HermesMobile/Sources/Features/SessionCardView.swift`
 - Modify: `HermesMobileTests/SessionSnapshotTests.swift`
 
-- [ ] implement the card per Technical Details (header / title / preview / footer, own
+- [x] implement the card per Technical Details (header / title / preview / footer, own
       `CardActiveGlow` + pulse state, combined accessibility label, no min-height floor)
-- [ ] workspace label helper: `cwd` last path component else "No workspace" (small private
+- [x] workspace label helper: `cwd` last path component else "No workspace" (small private
       `Session` extension in the view file; keep `SessionGroup.noWorkspaceLabel`'s string)
-- [ ] `tuist generate` so the new file is picked up
-- [ ] add component snapshots (`componentImage()`, pinned width, dark + light where the
+- [x] `tuist generate` so the new file is picked up
+- [x] add component snapshots (`componentImage()`, pinned width, dark + light where the
       existing row tests do): titled, untitled-promoted (no preview line), unread, pinned,
       working glow, no footer (nil model + 0 messages), branch stem, long title wraps to two
       lines
-- [ ] run `make snapshot` twice (record, then assert) — must pass before task 6
+- [x] run `make snapshot` twice (record, then assert) — must pass before task 6
 
 ### Task 6: Wire the list: date sections, cron collapse header, Archived button
 

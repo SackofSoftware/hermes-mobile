@@ -120,6 +120,98 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  // MARK: SessionCardView
+
+  /// The inbox card's full anatomy: workspace (cwd basename) + age header, title, preview
+  /// line, and the model · message-count footer. Variants below change one input each.
+  private func cardFixtureSession(
+    title: String? = "Refactor the streaming parser",
+    preview: String? = "Can you help me refactor the WebSocket JSON-RPC parser?",
+    cwd: String? = "/Users/eugene/Developer/hermes-mobile",
+    messageCount: Int? = 12,
+    model: String? = "claude-sonnet-4-5"
+  ) -> Session {
+    Session(
+      id: "20260610_120231_afcca6",
+      title: title,
+      updatedAt: Date(timeIntervalSince1970: 1_749_599_700),
+      preview: preview,
+      cwd: cwd,
+      messageCount: messageCount,
+      model: model
+    )
+  }
+
+  private func assertCardSnapshot(
+    _ card: SessionCardView,
+    width: CGFloat? = nil,
+    testName: String = #function,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    let view = card
+      .padding()
+      .frame(width: width ?? device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage(), file: file, testName: testName, line: line)
+  }
+
+  func testSessionCard_titled() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now))
+  }
+
+  /// An untitled session (server "Untitled" placeholder) promotes its preview into the title
+  /// slot and drops the preview line — the same text must never render twice.
+  func testSessionCard_untitledPromotesPreview() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(title: "Untitled"), now: now))
+  }
+
+  func testSessionCard_unread() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now, isUnread: true))
+  }
+
+  func testSessionCard_pinned() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now, isPinned: true))
+  }
+
+  func testSessionCard_workingGlow() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now, isActive: true))
+  }
+
+  /// Older agent (no `model`) and zero messages: the whole footer line is omitted, and a
+  /// missing `cwd` reads "No workspace".
+  func testSessionCard_noFooter() {
+    assertCardSnapshot(
+      SessionCardView(
+        session: cardFixtureSession(cwd: nil, messageCount: 0, model: nil),
+        now: now
+      )
+    )
+  }
+
+  func testSessionCard_branchStem() {
+    assertCardSnapshot(
+      SessionCardView(
+        session: cardFixtureSession(title: "Try the incremental decoder instead", messageCount: 1),
+        now: now,
+        branchStem: "└─"
+      )
+    )
+  }
+
+  /// A long title wraps to a second line before truncating — rendered at the 320pt iPad
+  /// sidebar width, where one line would lose the distinguishing part.
+  func testSessionCard_longTitleWrapsToTwoLines() {
+    assertCardSnapshot(
+      SessionCardView(
+        session: cardFixtureSession(
+          title: "Dnipro to Bratislava travel options with train changes and border crossings"
+        ),
+        now: now
+      ),
+      width: 320
+    )
+  }
+
   // MARK: SessionListView
 
   func testSessionList() {

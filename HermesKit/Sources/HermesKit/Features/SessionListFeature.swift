@@ -312,6 +312,13 @@ public struct SessionListFeature {
       sessions.isEmpty && !isLoading && loadError == nil && (isSearching || !showsCronSection)
     }
 
+    /// An empty non-search list with no jobs known yet: only the load's sequential cron
+    /// fetch can tell "No sessions" from a jobs-only Cron Jobs section, so `isLoading`
+    /// holds until that response lands.
+    var awaitsCronJobs: Bool {
+      sessions.isEmpty && cronJobs.isEmpty && cronJobsSupported && !isSearching
+    }
+
     /// Cron sessions with unseen output — the section header's aggregate badge (the
     /// desktop's `CRON JOBS 4`), visible without scrolling into the section.
     public var cronUnreadCount: Int {
@@ -668,6 +675,7 @@ public struct SessionListFeature {
         return .none
 
       case let .cronJobsResponse(.success(jobs)):
+        if state.awaitsCronJobs { state.isLoading = false }
         state.cronJobsSupported = true
         // Defensive uniquing (first wins): the unscoped fetch aggregates every profile's
         // jobs file, so never crash on a duplicated id (e.g. a copied profile home).
@@ -677,6 +685,7 @@ public struct SessionListFeature {
       case let .cronJobsResponse(.failure(error)):
         // A definitive 404 → old agent without the cron API. Fall back to the flat section
         // and stop fetching. Anything transient keeps the previous jobs (no flapping).
+        if state.awaitsCronJobs { state.isLoading = false }
         if error == .notFound {
           state.cronJobsSupported = false
           state.cronJobs = []
@@ -839,7 +848,6 @@ public struct SessionListFeature {
         return .none
 
       case let .sessionsResponse(.success(sessions)):
-        state.isLoading = false
         state.loadError = nil
         // Belt-and-suspenders: drop any session whose archive PATCH or DELETE is still in
         // flight, so a fetch that completes during that window can't repopulate the removed row.
@@ -851,6 +859,7 @@ public struct SessionListFeature {
         // (#78). `IdentifiedArray(uniqueElements:)` preconditions on unique ids and
         // trapped in the field, so dedupe first — keep the FIRST occurrence (server order).
         state.sessions = IdentifiedArray(filtered, uniquingIDsWith: { first, _ in first })
+        state.isLoading = state.awaitsCronJobs
         let visible = state.sessions
         // Seed last-seen counts for newly-discovered sessions so they don't all show as
         // unread on first sight; only later increases flag unread.

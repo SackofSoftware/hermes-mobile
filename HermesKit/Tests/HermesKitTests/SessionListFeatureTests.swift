@@ -177,10 +177,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -333,10 +332,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
 
@@ -1654,8 +1652,9 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.defaultSwipeAction = .delete // seeded from prefs with the other pref reloads
     }
-    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -1734,10 +1733,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -2182,8 +2180,9 @@ struct SessionListFeatureTests {
     await store.receive(\.setupPush)
     await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
-    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
     await store.send(.onDisappear)
@@ -2307,8 +2306,9 @@ struct SessionListFeatureTests {
     await store.receive(\.setupPush)
     await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
-    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
     await store.send(.onDisappear)
@@ -2830,10 +2830,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
     #expect(prefs.loadSelectedProfileID() == "fresh")
@@ -2886,10 +2885,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
     #expect(deleted.value == ["work"])
@@ -3460,10 +3458,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
     }
     #expect(prefs.loadSelectedProfileID() == "default")
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -3493,10 +3490,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
     }
     #expect(prefs.loadSelectedProfileID() == persisted)
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }

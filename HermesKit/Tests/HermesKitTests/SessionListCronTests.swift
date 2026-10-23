@@ -242,10 +242,9 @@ struct SessionListCronTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
 
@@ -305,11 +304,59 @@ struct SessionListCronTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
+    await store.receive(\.sessionsResponse.success)
+    await store.receive(\.cronJobsResponse.success) {
       $0.isLoading = false
     }
-    await store.receive(\.cronJobsResponse.success)
     #expect(requestedProfile.value == nil)
+  }
+
+  @Test func jobsOnlyLoadNeverFlashesTheEmptyPlaceholder() async {
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", name: "Digest")] }
+    }
+
+    await store.send(.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    // An empty list is still loading until the sequential cron fetch lands.
+    await store.receive(\.sessionsResponse.success)
+    #expect(!store.state.showsEmptyPlaceholder)
+    await store.receive(\.cronJobsResponse.success) {
+      $0.isLoading = false
+      $0.cronJobs = [CronJob(id: "job1", name: "Digest")]
+    }
+    #expect(store.state.showsCronSection)
+    #expect(!store.state.showsEmptyPlaceholder)
+  }
+
+  @Test func emptyLoadWithTransientCronFailureSettlesOnThePlaceholder() async {
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.unreachable }
+    }
+
+    await store.send(.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success)
+    // A transient jobs failure still ends the load (no stuck spinner); no job is known.
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
+    }
+    #expect(store.state.cronJobsSupported)
+    #expect(store.state.showsEmptyPlaceholder)
   }
 
   // MARK: Inline peek + unread-on-open
@@ -354,10 +401,9 @@ struct SessionListCronTests {
       $0.now = self.now
       $0.isLoading = true  // trigger → FULL load so the new run session appears
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.success) {
+      $0.isLoading = false
       $0.cronJobs = [CronJob(id: "job1", state: "running")]
     }
     #expect(triggered.value == "job1")

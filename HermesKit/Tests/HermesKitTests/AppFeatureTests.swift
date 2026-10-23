@@ -5736,10 +5736,9 @@ struct AppFeatureTests {
       $0.home?.now = Date(timeIntervalSince1970: 0)
       $0.home?.isLoading = true
     }
-    await store.receive(\.home.sessionsResponse) {
-      $0.home?.isLoading = false
-    }
+    await store.receive(\.home.sessionsResponse)
     await store.receive(\.home.cronJobsResponse) {
+      $0.home?.isLoading = false
       $0.home?.cronJobsSupported = false
     }
     #expect(store.state.liveChat == chat)
@@ -5774,10 +5773,9 @@ struct AppFeatureTests {
       $0.home?.now = Date(timeIntervalSince1970: 0)
       $0.home?.isLoading = true
     }
-    await store.receive(\.home.sessionsResponse) {
-      $0.home?.isLoading = false
-    }
+    await store.receive(\.home.sessionsResponse)
     await store.receive(\.home.cronJobsResponse) {
+      $0.home?.isLoading = false
       $0.home?.cronJobsSupported = false
     }
     #expect(store.state.liveChat == chat)

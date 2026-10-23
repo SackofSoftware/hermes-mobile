@@ -1,29 +1,107 @@
-# Session list: grouping, cron jobs, branch nesting, delete & swipe polish (#24, #34, #73)
+# Session list: date sections, inbox cards, cron jobs, branch nesting, delete & swipe polish (#24, #34, #73)
 
 Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The short rules live in
 `CLAUDE.md` → "Session list"; this doc is the full contract. Design history:
 `docs/plans/completed/`.
 
-## Grouping & archived
+## Date sections and inbox cards
 
-Session-list grouping is a persisted UI pref (`SessionGroupingMode`: `.workspace` /
-`.chronological`) in `PreferencesClient` — display-only over the one fetched `sessions` array
-(no fetch/order change), reset on logout. The list is a flat `.listStyle(.plain)`; grouping
-options + the **Archived sessions** entry live in a top-trailing `Menu`; "New chat" is a bottom
-bar via **`.safeAreaInset(edge: .bottom)`** (a `.bottomBar` toolbar renders blank in the
-snapshot host). **Archived** is a server query (`?archived=only`) shown in a sheet
-(`ArchivedSessionsFeature`); restore = `archive(id, false)`; tap-to-open bubbles up the existing
-`openSession` delegate.
+The list is the desktop's **Inbox style**, always on and the only list UI — there is no
+grouping pref or picker (the workspace/chronological `SessionGroupingMode` was removed; the
+card names the workspace on every row). Layout, top to bottom: the "Sessions" header, a
+**Pinned** section (pin order), the **update-date sections**, then the Cron Jobs section. All of
+it is display-only over the one fetched `sessions` array (no fetch/order change). The list is a
+flat `.listStyle(.plain)`; "New chat" is a bottom bar via **`.safeAreaInset(edge: .bottom)`**
+(a `.bottomBar` toolbar renders blank in the snapshot host).
+
+**Bucketing is pure HermesKit** (`SessionDateBucket`, unit-tested on macOS), a port of desktop
+`calendarBucket` (`apps/desktop/src/lib/time.ts`). Every date is mapped to its **nominal day**
+= `startOfDay(date - 4h)` (`dayRolloverHour = 4`: a 1 AM session still counts as the previous
+day), and buckets are judged on the injected `Calendar` (time zone, locale, `firstWeekday`):
+
+| Kind | Rule (nominal days) | Key | Label |
+|---|---|---|---|
+| `today` | day diff `<= 0` | `today` | Today |
+| `yesterday` | day diff `== 1` | `yesterday` | Yesterday |
+| `thisWeek` | on/after this calendar week's start | `this-week` | Earlier this week |
+| `lastWeek` | on/after the previous week's start | `last-week` | Last week |
+| `thisMonth` | same year + month | `this-month` | Earlier this month |
+| `month` | same year | `m-YYYY-M` | `MMMM` ("September") |
+| `monthYear` | prior year | `my-YYYY-M` | `MMMM yyyy` ("December 2025") |
+
+Month keys use the Calendar's **1-based** months (`m-2026-2` = February; desktop's JS keys are
+0-based — the key is a local section identity only, never shared). Month labels come from
+`DateFormatter` templates on the calendar's locale + time zone. "Today" is the top label
+(desktop's "Earlier today" only exists because of its unlabelled recent-head run, which is
+deliberately **not ported** — mobile labels every section).
+
+**Sections** (`SessionDateSection`, built by pure `groupEntriesByDate`) walk the
+branch-flattened `chronologicalEntries` in order and never re-sort:
+- a section opens only on a **top-level** entry whose key changes; branch children append to
+  the current section, so a parent + branches cluster never splits across a header;
+- a top-level entry buckets on its **cluster's freshest `updatedAt`** (itself + the branch
+  children beneath it) — the same key `flattenSessionsWithBranches` sorts clusters by, so a
+  stale parent lifted by a fresh branch lands in the fresh section;
+- **a key never repeats**: on a non-monotonic input the rows append to the current section
+  (desktop's `emitted` guard), so `ForEach` section ids stay unique; no empty section exists;
+- a cluster with no `updatedAt` goes to a trailing **"Older"** section (id `older`).
+
+`State.dateSections` is computed from `state.now` (poll-refreshed for the age labels and the
+cron countdown — headers re-bucket on the same cadence, no new ticker) and `State.calendar`,
+captured alongside `now` on load from the dedicated `\.sessionListCalendar` dependency (the
+library `\.calendar` has no test value), so TestStores and snapshots pin it.
+
+**Cards** (`SessionCardView`) render every interactive row — Pinned, date sections, AND search
+— so one column never mixes card and one-line geometry (desktop parity). Anatomy:
+1. **Header**: unread dot, the branch elbow stem (`└─`/`├─`) when nested, the workspace label
+   (`cwd` last path component; a root path verbatim; else "No workspace"), pin glyph, then the
+   relative age on the trailing edge.
+2. **Title**: `displayName` (`resolvedTitle ?? resolvedPreview ?? id`), headline, semibold —
+   bold when unread — up to two lines.
+3. **Preview**: one line, shown **only under a real title**. An untitled session promotes its
+   preview into the title slot and drops this line, so the text never shows twice. Search
+   results (no title, snippet as preview) therefore show the match snippet as the title.
+4. **Footer**: the raw `Session.model` id (verbatim like the chat chip; decoded from the list
+   DTO, nil on older agents) and "N messages" (inflected; hidden for nil or 0). The whole line
+   is omitted when both are absent.
+
+Cards are natural-height (no min-height floor — see "Rows are natural-height" below), carry
+their own working glow (`CardActiveGlow`, separate pulse state from the row's), and expose one
+combined accessibility label (workspace, title, preview, model, count, age, then
+Unread/Pinned/Working). Nested branch cards keep a 16pt leading indent on top of the header
+stem, so the whole card reads as belonging to the parent.
+
+**The compact `SessionRowView` stays only on dense surfaces**: cron run peeks, the flat cron
+fallback, unmatched cron runs (`cronRunRow(_:)`), and the archived sheet. Cards (`row(_:)`) and
+compact rows share one affordance funnel, `sessionRow(_:content:)` — tap, highlight +
+`isSelected` trait, swipes, context menu are identical for both.
+
+**Archived** is a direct top-trailing **"Archived sessions" toolbar button** (`archivebox`;
+the former one-item organize `Menu` is gone) presenting a sheet backed by a server query
+(`?archived=only`, `ArchivedSessionsFeature`); restore = `archive(id, false)`; tap-to-open
+bubbles up the existing `openSession` delegate.
+
+**Stale prefs**: the live `PreferencesClient` removes the retired
+`hermes.session-grouping-mode` and `hermes.show-cron-section` keys on the list-prefs load (no
+migration — a previously hidden cron section comes back expanded).
 
 ## Cron sessions & the Cron Jobs section (#24)
 
 **Cron sessions** (`source == "cron"`, decoded onto `Session` via `SessionListDTO`) are pulled
-into an **always-on, separate "Cron Jobs" section** — orthogonal to the grouping mode (no new
-`SessionGroupingMode` case). The partition lives in the reducer's computed state (`cronSessions`
-vs the non-cron `interactiveSessions` that feeds
-`pinnedSessions`/`groups`/`chronologicalSessions`), so cron rows never appear in
-Pinned/workspace/chronological. Rendered with a `clock`-icon header below the interactive
-sections, and **not shown during search** (search stays flat).
+into an **always-on, separate "Cron Jobs" section**. The partition lives in the reducer's
+computed state (`cronSessions` vs the non-cron `interactiveSessions` that feeds
+`pinnedSessions`/`unpinnedSessions` → `chronologicalSessions` → `dateSections`), so cron rows
+never appear in Pinned or the date sections. Rendered with a `clock`-icon header below the
+interactive sections, and **not shown during search** (search stays flat).
+
+**The header is the section's collapse control**: a plain `Button` sending
+`toggleCronSectionCollapsed` (`.snappy`, no animation under reduce-motion), with a trailing
+chevron rotated -90° when collapsed and header trait + Collapsed/Expanded value + hint for
+VoiceOver. `cronSectionCollapsed` is a persisted device-local pref
+(`hermes.cron-section-collapsed`, default expanded) reset in all three logout recipes.
+Collapsing hides the job rows, peeks, and unmatched runs, but **the header and its
+`cronUnreadCount` badge are always visible** whenever cron sessions exist (the old hide toggle
+also hid the badge).
 
 **The Cron Jobs section groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
 fetched sequentially INSIDE the session-load effect (after `.sessionsResponse`, same CancelID —
@@ -36,7 +114,7 @@ is orange and would be indistinguishable from amber; red error, gray inactive),
 unread dot judged over ALL the job's runs (not just the peeked 5), and a context menu (Run now /
 Pause / Resume → `cronActionInFlightIDs` double-fire guard; success refetches — full load after
 trigger, jobs-only for pause/resume; **no optimistic job-state mutation**). Tap = single-open
-inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the standard `row(_:)`;
+inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the compact `cronRunRow(_:)`;
 runs matching no fetched job render flat below (`unmatchedCronSessions` — never hide output).
 The header carries the aggregate `cronUnreadCount` badge; cron sessions use the same shared
 server-backed unread state as interactive rows (with the legacy device-local `seenCounts`
@@ -69,7 +147,8 @@ per-row fallback—not a server-wide capability latch—so mixed/transitional re
 sort, group-recency lift, recursion, cycle-safe, trailing sweep, **`byVisibleID` lineage
 aliasing**: `_lineage_root_id` → `Session.lineageRootID` keeps a branch nested after its parent
 auto-compresses and the row id rotates to the continuation tip) runs per rendered lane (pinned /
-workspace / chronological) after the cron partition, emitting `└─`/`├─` stems. Recency is
+chronological — the latter then split into date sections without breaking a cluster) after the
+cron partition, emitting `└─`/`├─` stems. Recency is
 `updatedAt ?? .distantPast` — deliberately the SAME rule the lanes sort by (no desktop
 `started_at` fallback), so nesting never reorders flat rows. Orphans (parent absent from the
 lane) de-nest — never hidden; the Pinned lane keeps pin order (`sortTopLevelByRecency: false`; a
@@ -107,7 +186,8 @@ fetch restarts instead and lands an authoritative post-RPC response. A **cleared
 search debounce — `load` raises `isLoading`, which is what keeps that pending reload visible
 to `cancelOrRestartFetch` (the debounced search effect raises no flag, and with the query
 empty `isSearching` no longer covers the window). Delete is offered on every row variant
-(pinned, cron runs, branch children) — all sections funnel through the one `row(_:)` builder.
+(pinned, cron runs, branch children) — cards and compact rows alike funnel through the one
+`sessionRow(_:content:)` builder.
 
 **Capability gate — the 405 wrinkle**: `deleteSupported` defaults `true` and flips off lazily
 on a definitive verdict from an actual delete (no pre-probe). The verdict is `.notFound` **or**
@@ -178,9 +258,9 @@ Leading swipe (Pin) unchanged. The context menu always offers BOTH Archive and D
 (Delete capability-gated) regardless of the swipe pref. In the archived sheet Delete is
 likewise listed first (full-swipe deletes, immediately).
 
-**Rows are natural-height — no min-height floor**: a one-line row lands around ~44pt total,
-and its trailing swipe buttons render as iOS's compact text capsules (the icon-over-label
-style needs a taller row). A content floor was tried twice for #73 — 48pt (~70pt cells) and
+**Rows are natural-height — no min-height floor** (inbox cards included): a one-line row
+lands around ~44pt total, and its trailing swipe buttons render as iOS's compact text capsules
+(the icon-over-label style needs a taller row). A content floor was tried twice for #73 — 48pt (~70pt cells) and
 then 44pt (+20pt over natural, shipped to TestFlight in `df56ca0`) — and **reverted both
 times** (#79: testers reported the list "way too high"). The compact list is worth more than
 the fuller swipe-button style; the swipe buttons are plain `Button`s, so nothing else keys off

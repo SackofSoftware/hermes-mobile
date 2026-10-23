@@ -431,18 +431,18 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 
 ### Task 8: [Final] Update documentation
 
-- [ ] `docs/features/session-list.md`: replace "Grouping & archived" with "Date sections and
+- [x] `docs/features/session-list.md`: replace "Grouping & archived" with "Date sections and
       inbox cards" (bucket table with keys + labels, 4 AM rollover, branch-cluster rule, the
       "Older" section, card anatomy and the untitled-promotion rule, cron collapse pref, the
       Archived toolbar button, which surfaces keep the compact row)
-- [ ] `CLAUDE.md` "Session list": rewrite the grouping bullet in place at the same length
+- [x] `CLAUDE.md` "Session list": rewrite the grouping bullet in place at the same length
       (date sections + cards always on; `SessionDateBucket` pure; cron collapse pref; compact
       row only for cron peeks + archived) and drop stale `SessionGroupingMode` mentions
-- [ ] `docs/development.md`: adjust the snapshot per-suite breakdown for the renamed /
+- [x] `docs/development.md`: adjust the snapshot per-suite breakdown for the renamed /
       removed list snapshots
-- [ ] `README.md`: update the feature-overview line about grouping, if it mentions the picker
+- [x] `README.md`: update the feature-overview line about grouping, if it mentions the picker
       (screenshots are out of scope)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move plan to completed (deferred to orchestrator's final move-plan step)
 
 ## Post-Completion
 

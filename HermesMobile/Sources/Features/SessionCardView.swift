@@ -104,8 +104,8 @@ struct SessionCardView: View {
         Text(model)
           .lineLimit(1)
       }
-      if let messageCount = content.messageCount {
-        Text(messageCount)
+      if let messageCountText = content.messageCountText {
+        Text(messageCountText)
           .lineLimit(1)
       }
     }

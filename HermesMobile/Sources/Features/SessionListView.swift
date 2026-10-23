@@ -193,33 +193,33 @@ struct SessionListView: View {
   @ViewBuilder
   private var cronJobsSection: some View {
     cronSectionHeader
-    if store.cronSectionCollapsed {
-      EmptyView() // collapsed: header + badge only
-    } else if store.cronJobGroups.isEmpty {
-      // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
-      ForEach(store.cronSessions) { session in
-        cronRunRow(session)
-      }
-    } else {
-      ForEach(store.cronJobGroups) { group in
-        cronJobRow(group)
-        if store.expandedCronJobID == group.id {
-          if group.runs.isEmpty {
-            Text("No runs yet")
-              .font(.subheadline)
-              .foregroundStyle(.secondary)
-              .padding(.leading, 24)
-              .listRowSeparator(.hidden)
-          }
-          ForEach(group.runs) { run in
-            cronRunRow(run)
-              .padding(.leading, 24) // indented under the owning job
+    if !store.cronSectionCollapsed {
+      if store.cronJobGroups.isEmpty {
+        // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
+        ForEach(store.cronSessions) { session in
+          cronRunRow(session)
+        }
+      } else {
+        ForEach(store.cronJobGroups) { group in
+          cronJobRow(group)
+          if store.expandedCronJobID == group.id {
+            if group.runs.isEmpty {
+              Text("No runs yet")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 24)
+                .listRowSeparator(.hidden)
+            }
+            ForEach(group.runs) { run in
+              cronRunRow(run)
+                .padding(.leading, 24) // indented under the owning job
+            }
           }
         }
-      }
-      // Runs whose job no longer exists (deleted job, legacy id) — never hide output.
-      ForEach(store.unmatchedCronSessions) { session in
-        cronRunRow(session)
+        // Runs whose job no longer exists (deleted job, legacy id) — never hide output.
+        ForEach(store.unmatchedCronSessions) { session in
+          cronRunRow(session)
+        }
       }
     }
   }
@@ -228,7 +228,7 @@ struct SessionListView: View {
   /// unread badge (count of cron runs with unseen output — the desktop's `CRON JOBS 4`), so
   /// activity stays visible from the header even while the section is collapsed.
   private var cronSectionHeader: some View {
-    let isCollapsed = store.cronSectionCollapsed
+    let isExpanded = !store.cronSectionCollapsed
     return Button {
       store.send(.toggleCronSectionCollapsed, animation: reduceMotion ? nil : .snappy)
     } label: {
@@ -242,14 +242,12 @@ struct SessionListView: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
             .background(Color.hermesAccent, in: Capsule())
-            .accessibilityLabel("\(store.cronUnreadCount) unread cron runs")
         }
         Spacer()
-        Image(systemName: "chevron.down")
-          .font(.subheadline.weight(.semibold))
-          .foregroundStyle(.secondary)
-          .rotationEffect(.degrees(isCollapsed ? -90 : 0))
-          .accessibilityHidden(true)
+        Image(systemName: "chevron.right")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.tertiary)
+          .rotationEffect(.degrees(isExpanded ? 90 : 0))
       }
       .contentShape(Rectangle())
     }
@@ -257,8 +255,14 @@ struct SessionListView: View {
     .listRowSeparator(.hidden)
     .listRowBackground(Color.clear)
     .accessibilityAddTraits(.isHeader)
-    .accessibilityValue(isCollapsed ? "Collapsed" : "Expanded")
-    .accessibilityHint("Double-tap to show or hide cron jobs")
+    .accessibilityLabel(cronSectionAccessibilityLabel(isExpanded: isExpanded))
+  }
+
+  private func cronSectionAccessibilityLabel(isExpanded: Bool) -> String {
+    var parts = ["Cron Jobs"]
+    if store.cronUnreadCount > 0 { parts.append("\(store.cronUnreadCount) unread cron runs") }
+    parts.append(isExpanded ? "expanded" : "collapsed")
+    return parts.joined(separator: ", ")
   }
 
   /// One cron *job* row: state dot, title, next-run countdown (relative, from the same

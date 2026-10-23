@@ -13,20 +13,23 @@ public struct SessionCardContent: Equatable, Sendable {
   /// The raw server model id, shown verbatim like the chat's model chip.
   public let model: String?
   /// "N message(s)", or `nil` when the count is unknown or zero.
-  public let messageCount: String?
+  public let messageCountText: String?
 
   public init(session: Session, showsWorkspace: Bool = true) {
     workspace = showsWorkspace ? session.workspaceLabel : nil
     title = session.displayName
     preview = session.resolvedTitle == nil ? nil : session.resolvedPreview
     model = session.model
-    messageCount = session.messageCount.flatMap { count in
-      count > 0 ? (count == 1 ? "1 message" : "\(count) messages") : nil
-    }
+    messageCountText = Self.messageCountText(session.messageCount)
+  }
+
+  private static func messageCountText(_ count: Int?) -> String? {
+    guard let count, count > 0 else { return nil }
+    return count == 1 ? "1 message" : "\(count) messages"
   }
 
   /// Whether the footer line (model · message count) renders at all.
-  public var hasFooter: Bool { model != nil || messageCount != nil }
+  public var hasFooter: Bool { model != nil || messageCountText != nil }
 
   /// The card's one combined VoiceOver label, in visual order: workspace, title, preview,
   /// model, message count, age, then whichever state flags apply.
@@ -36,7 +39,7 @@ public struct SessionCardContent: Equatable, Sendable {
     isPinned: Bool,
     isActive: Bool
   ) -> String {
-    var parts = [workspace, title, preview, model, messageCount, age].compactMap { $0 }
+    var parts = [workspace, title, preview, model, messageCountText, age].compactMap { $0 }
     if isUnread { parts.append("Unread") }
     if isPinned { parts.append("Pinned") }
     if isActive { parts.append("Working") }

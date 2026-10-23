@@ -139,7 +139,7 @@ enum DemoMode {
     // last-active ages (hours before `now`) spread the unpinned rows across the Today /
     // Yesterday / Last week date sections under "Pinned".
     let rows: [(id: String, title: String, isActive: Bool, hoursAgo: Double)] = [
-      ("s0", "Plan a long weekend in Lisbon", false, 2_400.0 / 3_600),
+      ("s0", "Plan a long weekend in Lisbon", false, 40.0 / 60), // 40 min
       ("s1", "Summarize my unread newsletters", true, 2),
       ("s2", "Draft a thank-you note to Sarah", false, 5),
       ("s3", "Weekly meal plan & grocery list", false, 26),

@@ -66,18 +66,20 @@ public extension PreferencesClient {
     let pinnedKey = "hermes.pinned-session-ids"
     let swipeActionKey = "hermes.default-session-swipe-action"
     let cronSectionCollapsedKey = "hermes.cron-section-collapsed"
-    // Retired prefs, dropped once when the client is built so an upgrade leaves no orphaned
-    // default behind: the workspace/chronological grouping mode (the list is always
-    // date-sectioned now) and the cron-section hide toggle (superseded by
-    // `cronSectionCollapsedKey` — the section can only be collapsed). Not migrated.
-    defaults.removeObject(forKey: "hermes.session-grouping-mode")
-    defaults.removeObject(forKey: "hermes.show-cron-section")
     let selectedProfileKey = "hermes.selected-profile-id"
     let pushTokenKey = "hermes.push-device-token"
     let pushSnoozeCountKey = "hermes.push-prompt-snooze-count"
     let pushSnoozeUntilKey = "hermes.push-prompt-snooze-until"
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
+
+    // Retired prefs, dropped once when the client is built so an upgrade leaves no orphaned
+    // default behind: the workspace/chronological grouping mode (the list is always
+    // date-sectioned now) and the cron-section hide toggle (superseded by
+    // `cronSectionCollapsedKey` — the section can only be collapsed). Not migrated.
+    store.removeObject(forKey: "hermes.session-grouping-mode")
+    store.removeObject(forKey: "hermes.show-cron-section")
+
     return PreferencesClient(
       loadServerURL: { store.string(forKey: key) },
       saveServerURL: { store.set($0, forKey: key) },

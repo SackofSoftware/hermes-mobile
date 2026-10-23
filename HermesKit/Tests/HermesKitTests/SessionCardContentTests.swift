@@ -48,11 +48,11 @@ struct SessionCardContentTests {
     #expect(content.title == "matched keyword")
   }
 
-  @Test func messageCountIsInflectedAndHiddenWhenUnknownOrZero() {
-    #expect(SessionCardContent(session: Session(id: "s", messageCount: 1)).messageCount == "1 message")
-    #expect(SessionCardContent(session: Session(id: "s", messageCount: 12)).messageCount == "12 messages")
-    #expect(SessionCardContent(session: Session(id: "s", messageCount: 0)).messageCount == nil)
-    #expect(SessionCardContent(session: Session(id: "s")).messageCount == nil)
+  @Test func messageCountTextIsPluralizedAndHiddenWhenUnknownOrZero() {
+    #expect(SessionCardContent(session: Session(id: "s", messageCount: 1)).messageCountText == "1 message")
+    #expect(SessionCardContent(session: Session(id: "s", messageCount: 12)).messageCountText == "12 messages")
+    #expect(SessionCardContent(session: Session(id: "s", messageCount: 0)).messageCountText == nil)
+    #expect(SessionCardContent(session: Session(id: "s")).messageCountText == nil)
   }
 
   @Test func footerRendersWhenEitherModelOrCountIsPresent() {

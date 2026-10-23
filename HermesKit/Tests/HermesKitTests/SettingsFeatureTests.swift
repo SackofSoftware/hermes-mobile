@@ -16,6 +16,7 @@ struct SettingsFeatureTests {
     preferences.saveSeenCounts(["s1": 4])
     preferences.saveGroupingMode(.chronological)
     preferences.saveDefaultSessionSwipeAction(.delete)
+    preferences.saveCronSectionCollapsed(true)
     preferences.saveSelectedProfileID("staging")
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
@@ -34,7 +35,7 @@ struct SettingsFeatureTests {
     #expect(preferences.loadSeenCounts() == [:]) // unread state cleared too
     #expect(preferences.loadGroupingMode() == .workspace) // grouping pref reset on logout
     #expect(preferences.loadDefaultSessionSwipeAction() == .archive) // swipe pref reset on logout
-    #expect(preferences.loadShowCronSection() == true) // cron-section visibility reset on logout
+    #expect(preferences.loadCronSectionCollapsed() == false) // cron-section collapse reset on logout
     #expect(preferences.loadSelectedProfileID() == nil) // selected profile cleared on logout
   }
 

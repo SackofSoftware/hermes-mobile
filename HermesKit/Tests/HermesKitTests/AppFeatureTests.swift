@@ -1506,6 +1506,7 @@ struct AppFeatureTests {
     let sessionDeleted = LockIsolated(false)
     let urlCleared = LockIsolated(false)
     let swipeActionReset = LockIsolated(false)
+    let cronCollapseReset = LockIsolated(false)
     let store = TestStore(
       initialState: AppFeature.State(
         home: SessionListFeature.State(connection: cookieConnection),
@@ -1524,6 +1525,9 @@ struct AppFeatureTests {
       $0.preferences.saveDefaultSessionSwipeAction = { @Sendable action in
         if action == .default { swipeActionReset.setValue(true) }
       }
+      $0.preferences.saveCronSectionCollapsed = { @Sendable collapsed in
+        if !collapsed { cronCollapseReset.setValue(true) }
+      }
     }
     store.exhaustivity = .off
 
@@ -1537,6 +1541,7 @@ struct AppFeatureTests {
     #expect(sessionDeleted.value)
     #expect(urlCleared.value)
     #expect(swipeActionReset.value) // swipe-action pref reset on the quit logout too
+    #expect(cronCollapseReset.value) // cron-section collapse reset on the quit logout too
   }
 
   // MARK: Push cleanup on logout (Task C4)
@@ -3474,6 +3479,7 @@ struct AppFeatureTests {
     preferences.saveSelectedProfileID("work")
     preferences.saveGroupingMode(.chronological)
     preferences.saveDefaultSessionSwipeAction(.delete)
+    preferences.saveCronSectionCollapsed(true)
     preferences.savePushDeviceToken("cafef00d")
     let push = PushClient.inMemory()
 
@@ -3510,6 +3516,7 @@ struct AppFeatureTests {
     #expect(preferences.loadSelectedProfileID() == nil)
     #expect(preferences.loadGroupingMode() == .default)
     #expect(preferences.loadDefaultSessionSwipeAction() == .default) // swipe pref reset too
+    #expect(preferences.loadCronSectionCollapsed() == false) // cron collapse reset too
     #expect(preferences.loadPushDeviceToken() == nil)
     #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
     #expect(push.badgeCount == 0)

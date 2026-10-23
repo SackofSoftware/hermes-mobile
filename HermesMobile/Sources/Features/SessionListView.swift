@@ -162,9 +162,9 @@ struct SessionListView: View {
     }
     // Cron-scheduled sessions live in their own always-on section below the
     // interactive list, in both grouping modes (filtered out of pinned/groups/
-    // chronological by the reducer). Hidden when there are none, or when the
-    // user turned the section off in the organize menu.
-    if store.showCronSection, !store.cronSessions.isEmpty {
+    // chronological by the reducer). Hidden only when there are none; a collapsed
+    // section keeps its header (and unread badge).
+    if !store.cronSessions.isEmpty {
       cronJobsSection
     }
   }
@@ -189,7 +189,9 @@ struct SessionListView: View {
   @ViewBuilder
   private var cronJobsSection: some View {
     cronSectionHeader
-    if store.cronJobGroups.isEmpty {
+    if store.cronSectionCollapsed {
+      EmptyView() // collapsed: header + badge only
+    } else if store.cronJobGroups.isEmpty {
       // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
       ForEach(store.cronSessions) { session in
         row(session)
@@ -442,10 +444,10 @@ struct SessionListView: View {
       Divider()
 
       Toggle(isOn: Binding(
-        get: { store.showCronSection },
-        set: { store.send(.setShowCronSection($0)) }
+        get: { store.cronSectionCollapsed },
+        set: { if $0 != store.cronSectionCollapsed { store.send(.toggleCronSectionCollapsed) } }
       )) {
-        Label("Cron Jobs section", systemImage: "clock")
+        Label("Collapse Cron Jobs", systemImage: "clock")
       }
 
       Divider()

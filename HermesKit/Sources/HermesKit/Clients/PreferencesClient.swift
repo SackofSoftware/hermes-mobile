@@ -24,10 +24,11 @@ public struct PreferencesClient: Sendable {
   /// (archive vs permanent delete). Device-local UI pref; reset on logout.
   public var loadDefaultSessionSwipeAction: @Sendable () -> SessionSwipeAction = { .default }
   public var saveDefaultSessionSwipeAction: @Sendable (_ action: SessionSwipeAction) -> Void
-  /// Whether the session list shows the always-on "Cron Jobs" section. Device-local UI
-  /// pref; defaults to `true` (shown) so the section stays visible until the user opts out.
-  public var loadShowCronSection: @Sendable () -> Bool = { true }
-  public var saveShowCronSection: @Sendable (_ show: Bool) -> Void
+  /// Whether the session list's always-on "Cron Jobs" section is collapsed to its header
+  /// (the header and its unread badge stay visible either way). Device-local UI pref;
+  /// defaults to `false` (expanded); reset on logout.
+  public var loadCronSectionCollapsed: @Sendable () -> Bool = { false }
+  public var saveCronSectionCollapsed: @Sendable (_ collapsed: Bool) -> Void
   /// Currently selected Hermes profile name. Device-local — we never change the server's
   /// sticky active profile. Also carries the profiles capability verdict — read it through
   /// `SessionListFeature.State.persistedProfileName` / `persistedProfilesSupported`.
@@ -68,7 +69,10 @@ public extension PreferencesClient {
     let pinnedKey = "hermes.pinned-session-ids"
     let groupingKey = "hermes.session-grouping-mode"
     let swipeActionKey = "hermes.default-session-swipe-action"
-    let showCronSectionKey = "hermes.show-cron-section"
+    let cronSectionCollapsedKey = "hermes.cron-section-collapsed"
+    // Superseded by `cronSectionCollapsedKey` (the section can no longer be hidden, only
+    // collapsed); dropped on load so an upgrade leaves no orphaned default behind.
+    let legacyShowCronSectionKey = "hermes.show-cron-section"
     let selectedProfileKey = "hermes.selected-profile-id"
     let pushTokenKey = "hermes.push-device-token"
     let pushSnoozeCountKey = "hermes.push-prompt-snooze-count"
@@ -91,13 +95,13 @@ public extension PreferencesClient {
         store.string(forKey: swipeActionKey).flatMap(SessionSwipeAction.init(rawValue:)) ?? .default
       },
       saveDefaultSessionSwipeAction: { store.set($0.rawValue, forKey: swipeActionKey) },
-      loadShowCronSection: {
-        // Absent key (never toggled) means shown — the section is on by default.
-        store.object(forKey: showCronSectionKey) == nil
-          ? true
-          : store.bool(forKey: showCronSectionKey)
+      loadCronSectionCollapsed: {
+        // Removing an absent key is a no-op, so this clears the stale key exactly once.
+        store.removeObject(forKey: legacyShowCronSectionKey)
+        // Absent key (never toggled) reads `false` — the section is expanded by default.
+        return store.bool(forKey: cronSectionCollapsedKey)
       },
-      saveShowCronSection: { store.set($0, forKey: showCronSectionKey) },
+      saveCronSectionCollapsed: { store.set($0, forKey: cronSectionCollapsedKey) },
       loadSelectedProfileID: { store.string(forKey: selectedProfileKey) },
       saveSelectedProfileID: { store.set($0, forKey: selectedProfileKey) },
       clearSelectedProfileID: { store.removeObject(forKey: selectedProfileKey) },
@@ -128,7 +132,7 @@ public extension PreferencesClient {
     let pinned = LockIsolated<[String]>([])
     let grouping = LockIsolated<SessionGroupingMode>(.default)
     let swipeAction = LockIsolated<SessionSwipeAction>(.default)
-    let showCronSection = LockIsolated<Bool>(true)
+    let cronSectionCollapsed = LockIsolated<Bool>(false)
     let selectedProfile = LockIsolated<String?>(nil)
     let pushToken = LockIsolated<String?>(nil)
     let pushSnooze = LockIsolated<(count: Int, until: Date)?>(nil)
@@ -144,8 +148,8 @@ public extension PreferencesClient {
       saveGroupingMode: { grouping.setValue($0) },
       loadDefaultSessionSwipeAction: { swipeAction.value },
       saveDefaultSessionSwipeAction: { swipeAction.setValue($0) },
-      loadShowCronSection: { showCronSection.value },
-      saveShowCronSection: { showCronSection.setValue($0) },
+      loadCronSectionCollapsed: { cronSectionCollapsed.value },
+      saveCronSectionCollapsed: { cronSectionCollapsed.setValue($0) },
       loadSelectedProfileID: { selectedProfile.value },
       saveSelectedProfileID: { selectedProfile.setValue($0) },
       clearSelectedProfileID: { selectedProfile.setValue(nil) },

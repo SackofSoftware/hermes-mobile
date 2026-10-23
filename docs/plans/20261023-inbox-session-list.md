@@ -328,16 +328,16 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 - Modify: `HermesMobile/Sources/Features/SessionListView.swift` (minimal: keep compiling —
   bind the existing toggle to the new flag; the real header UI lands in task 6)
 
-- [ ] replace `loadShowCronSection`/`saveShowCronSection` with
+- [x] replace `loadShowCronSection`/`saveShowCronSection` with
       `loadCronSectionCollapsed`/`saveCronSectionCollapsed` (`hermes.cron-section-collapsed`,
       default `false`) in the interface, live, and `.inMemory()`; live load removes the stale
       `hermes.show-cron-section` key once
-- [ ] rename `State.showCronSection` → `cronSectionCollapsed`, replace `setShowCronSection`
+- [x] rename `State.showCronSection` → `cronSectionCollapsed`, replace `setShowCronSection`
       with `toggleCronSectionCollapsed` (flip + persist), load it in the `task` bootstrap
-- [ ] update all three logout recipes to `saveCronSectionCollapsed(false)`
-- [ ] update tests: toggle flips + persists, bootstrap loads `true`, each logout recipe resets
+- [x] update all three logout recipes to `saveCronSectionCollapsed(false)`
+- [x] update tests: toggle flips + persists, bootstrap loads `true`, each logout recipe resets
       to `false`; adjust existing cron-section tests to the new flag name
-- [ ] run `swift test` — must pass before task 4
+- [x] run `swift test` — must pass before task 4
 
 ### Task 4: Remove the grouping mode and expose `dateSections`
 

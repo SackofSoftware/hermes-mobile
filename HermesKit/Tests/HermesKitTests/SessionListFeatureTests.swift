@@ -2262,9 +2262,9 @@ struct SessionListFeatureTests {
     await store.send(.onDisappear)
   }
 
-  // MARK: - Cron section visibility
+  // MARK: - Cron section collapse
 
-  @Test func setShowCronSectionUpdatesStateAndPersists() async {
+  @Test func toggleCronSectionCollapsedFlipsStateAndPersists() async {
     let prefs = PreferencesClient.inMemory()
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()
@@ -2272,19 +2272,22 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
     }
 
-    #expect(store.state.showCronSection == true) // default: shown
-    await store.send(.setShowCronSection(false)) {
-      $0.showCronSection = false
+    #expect(store.state.cronSectionCollapsed == false) // default: expanded
+    await store.send(.toggleCronSectionCollapsed) {
+      $0.cronSectionCollapsed = true
     }
-    #expect(prefs.loadShowCronSection() == false) // persisted
+    #expect(prefs.loadCronSectionCollapsed() == true) // persisted
 
-    // Re-sending the same value is a no-op (no state change).
-    await store.send(.setShowCronSection(false))
+    // A second toggle flips back and persists that too.
+    await store.send(.toggleCronSectionCollapsed) {
+      $0.cronSectionCollapsed = false
+    }
+    #expect(prefs.loadCronSectionCollapsed() == false)
   }
 
-  @Test func loadSeedsShowCronSectionFromPreferences() async {
+  @Test func loadSeedsCronSectionCollapsedFromPreferences() async {
     let prefs = PreferencesClient.inMemory()
-    prefs.saveShowCronSection(false)
+    prefs.saveCronSectionCollapsed(true)
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()
     } withDependencies: {
@@ -2300,7 +2303,7 @@ struct SessionListFeatureTests {
     await store.send(.task) {
       $0.now = self.now
       $0.isLoading = true
-      $0.showCronSection = false // seeded from prefs on load
+      $0.cronSectionCollapsed = true // seeded from prefs on load
     }
     await store.receive(\.setupPush)
     await store.receive(\.pushPluginStatusLoaded)

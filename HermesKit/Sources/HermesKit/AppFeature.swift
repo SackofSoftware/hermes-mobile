@@ -393,7 +393,7 @@ public struct AppFeature {
         preferences.clearIdentityScopedPrefs()
         preferences.saveGroupingMode(.default)
         preferences.saveDefaultSessionSwipeAction(.default)
-        preferences.saveShowCronSection(true)
+        preferences.saveCronSectionCollapsed(false)
         state.connectionFailed = nil
         state.path = .init()
         state.liveChat = nil
@@ -760,7 +760,7 @@ public struct AppFeature {
         preferences.clearIdentityScopedPrefs()
         preferences.saveGroupingMode(.default)
         preferences.saveDefaultSessionSwipeAction(.default)
-        preferences.saveShowCronSection(true)
+        preferences.saveCronSectionCollapsed(false)
         state.reauth = nil
         state.path = .init()
         state.liveChat = nil

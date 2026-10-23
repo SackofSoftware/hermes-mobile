@@ -110,26 +110,38 @@ struct PreferencesClientTests {
     #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // unknown raw value → default
   }
 
-  @Test func inMemoryShowCronSectionRoundTripAndDefault() {
+  @Test func inMemoryCronSectionCollapsedRoundTripAndDefault() {
     let prefs = PreferencesClient.inMemory()
-    #expect(prefs.loadShowCronSection() == true) // default when unset: shown
+    #expect(prefs.loadCronSectionCollapsed() == false) // default when unset: expanded
 
-    prefs.saveShowCronSection(false)
-    #expect(prefs.loadShowCronSection() == false)
+    prefs.saveCronSectionCollapsed(true)
+    #expect(prefs.loadCronSectionCollapsed() == true)
 
-    prefs.saveShowCronSection(true)
-    #expect(prefs.loadShowCronSection() == true)
+    prefs.saveCronSectionCollapsed(false)
+    #expect(prefs.loadCronSectionCollapsed() == false)
   }
 
-  @Test func liveShowCronSectionBacksOntoProvidedDefaults() {
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.showcron")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.showcron")
+  @Test func liveCronSectionCollapsedBacksOntoProvidedDefaults() {
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.croncollapsed")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.croncollapsed")
     let prefs = PreferencesClient.live(defaults: suite)
 
-    #expect(prefs.loadShowCronSection() == true) // default when unset: shown
-    prefs.saveShowCronSection(false)
-    #expect(suite.bool(forKey: "hermes.show-cron-section") == false)
-    #expect(prefs.loadShowCronSection() == false)
+    #expect(prefs.loadCronSectionCollapsed() == false) // default when unset: expanded
+    prefs.saveCronSectionCollapsed(true)
+    #expect(suite.bool(forKey: "hermes.cron-section-collapsed") == true)
+    #expect(prefs.loadCronSectionCollapsed() == true)
+  }
+
+  @Test func liveCronSectionCollapsedLoadDropsStaleShowCronSectionKey() {
+    // A build that persisted the old hide pref leaves `hermes.show-cron-section` behind; the
+    // first load clears it and does NOT translate it — the section starts expanded.
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.croncollapsed.legacy")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.croncollapsed.legacy")
+    suite.set(false, forKey: "hermes.show-cron-section")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    #expect(prefs.loadCronSectionCollapsed() == false)
+    #expect(suite.object(forKey: "hermes.show-cron-section") == nil)
   }
 
   @Test func inMemorySelectedProfileRoundTripAndClear() {

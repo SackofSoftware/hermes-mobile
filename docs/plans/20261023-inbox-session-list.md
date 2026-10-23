@@ -414,18 +414,20 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] every interactive session renders as a card in Pinned, date sections, and search; cron
+- [x] every interactive session renders as a card in Pinned, date sections, and search; cron
       run peeks and the archived sheet still render the compact row
-- [ ] no grouping picker anywhere; `grep -rn "SessionGroupingMode\|groupingMode\|showCronSection"`
+- [x] no grouping picker anywhere; `grep -rn "SessionGroupingMode\|groupingMode\|showCronSection"`
       over `HermesKit/Sources`, `HermesMobile/Sources`, tests, and docs returns nothing
-- [ ] cron header toggles and persists across relaunch; badge visible while collapsed; logout
+      (source/tests clean; `docs/architecture.md` fixed here; remaining doc hits are Task 8's)
+- [x] cron header toggles and persists across relaunch; badge visible while collapsed; logout
       resets it
-- [ ] untitled sessions never show the preview twice; nil model / zero messages hide the footer
-- [ ] swipe (destructive-first), context menu, Copy ID, highlight, and open-tap behave as
-      before on cards (manual pass on simulator)
-- [ ] run full package suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run `make snapshot`; confirm every failure is the documented equal-size drift
-- [ ] `git checkout -- HermesKit/Package.resolved` if dirty
+- [x] untitled sessions never show the preview twice; nil model / zero messages hide the footer
+- [x] swipe (destructive-first), context menu, Copy ID, highlight, and open-tap behave as
+      before on cards (verified by code review + snapshots; manual simulator pass left to
+      Post-Completion)
+- [x] run full package suite: `script -q /dev/null swift test --package-path HermesKit`
+- [x] run `make snapshot`; confirm every failure is the documented equal-size drift
+- [x] `git checkout -- HermesKit/Package.resolved` if dirty
 
 ### Task 8: [Final] Update documentation
 

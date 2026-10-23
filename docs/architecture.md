@@ -129,8 +129,8 @@ a `testValue`/`.inMemory()` variant):
   server: on hydrate the server wins, cached rows are replaced wholesale (no merge/dedup), and
   the whole store is wiped on logout. `.inMemory()` test variant.
 - **`PreferencesClient`** — non-secret prefs: server URL (for auto-login), per-session
-  seen counts, client-side pinned session ids, the session-list grouping mode
-  (`SessionGroupingMode`), and the selected profile name (`hermes.selected-profile-id`). All
+  seen counts, client-side pinned session ids, the session-list cron-section collapse state
+  (`hermes.cron-section-collapsed`), and the selected profile name (`hermes.selected-profile-id`). All
   cleared/reset on logout.
 - **`PushClient`** — push notifications: `requestAuthorization`/`authorizationStatus`,
   device-token registration as an `AsyncStream<String>` (lowercase-hex, re-emits on OS token

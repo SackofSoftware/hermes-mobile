@@ -21,7 +21,8 @@ public struct SessionDateBucket: Equatable, Sendable {
   public let kind: Kind
   /// Stable section identity: `"today"` | `"yesterday"` | `"this-week"` | `"last-week"` |
   /// `"this-month"` | `"m-YYYY-M"` | `"my-YYYY-M"`. Month numbers are the calendar's
-  /// 1-based months (the desktop's are JS 0-based; the key is a local identity only).
+  /// 1-based months (the desktop's are JS 0-based; the key is a local identity only); a
+  /// leap month appends `L`, and an era other than today's appends `-e<era>`.
   public let key: String
   /// Section header text. The relative buckets use fixed strings ("Today" is the top
   /// label — the desktop says "Earlier today" only because its unlabelled head run sits
@@ -71,14 +72,18 @@ public struct SessionDateBucket: Equatable, Sendable {
       return SessionDateBucket(kind: .lastWeek, key: "last-week", label: "Last week")
     }
 
-    let day = calendar.dateComponents([.year, .month], from: nominal)
-    let today = calendar.dateComponents([.year, .month], from: todayNominal)
-    let sameYear = day.year == today.year
-    if sameYear, day.month == today.month {
+    // Interval comparisons, not raw year/month numbers: they respect eras (Japanese) and
+    // leap months (Chinese), which bare components would merge.
+    if calendar.isDate(nominal, equalTo: todayNominal, toGranularity: .month) {
       return SessionDateBucket(kind: .thisMonth, key: "this-month", label: "Earlier this month")
     }
+    let sameYear = calendar.isDate(nominal, equalTo: todayNominal, toGranularity: .year)
 
-    let yearMonth = "\(day.year ?? 0)-\(day.month ?? 0)"
+    let day = calendar.dateComponents([.era, .year, .month, .isLeapMonth], from: nominal)
+    let todayEra = calendar.component(.era, from: todayNominal)
+    let leap = day.isLeapMonth == true ? "L" : ""
+    let era = day.era == todayEra ? "" : "-e\(day.era ?? 0)"
+    let yearMonth = "\(day.year ?? 0)-\(day.month ?? 0)\(leap)\(era)"
     let month = Date.FormatStyle(
       locale: calendar.locale ?? .current, calendar: calendar, timeZone: calendar.timeZone
     ).month(.wide)

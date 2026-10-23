@@ -35,7 +35,7 @@ struct SessionListView: View {
     .listStyle(.plain)
     .listSectionSeparator(.hidden) // flat list — no section hairlines (row hairlines hidden per-row)
     .overlay {
-      if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
+      if store.showsEmptyPlaceholder {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
       }
     }
@@ -165,9 +165,9 @@ struct SessionListView: View {
     }
     // Cron-scheduled sessions live in their own always-on section below the
     // interactive list (filtered out of pinned and the date sections by the reducer).
-    // Hidden only when there are none; a collapsed section keeps its header (and
-    // unread badge).
-    if !store.cronSessions.isEmpty {
+    // Hidden only when there are no runs and no jobs; a collapsed section keeps its header
+    // (and unread badge).
+    if store.showsCronSection {
       cronJobsSection
     }
   }
@@ -260,7 +260,11 @@ struct SessionListView: View {
 
   private func cronSectionAccessibilityLabel(isExpanded: Bool) -> String {
     var parts = ["Cron Jobs"]
-    if store.cronUnreadCount > 0 { parts.append("\(store.cronUnreadCount) unread cron runs") }
+    switch store.cronUnreadCount {
+    case 0: break
+    case 1: parts.append("1 unread cron run")
+    case let count: parts.append("\(count) unread cron runs")
+    }
     parts.append(isExpanded ? "expanded" : "collapsed")
     return parts.joined(separator: ", ")
   }

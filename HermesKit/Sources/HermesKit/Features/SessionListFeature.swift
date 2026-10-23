@@ -299,6 +299,19 @@ public struct SessionListFeature {
       }
     }
 
+    /// Whether the non-search list renders the Cron Jobs section: any cron run, or any
+    /// fetched job — a job with no runs (in the fetched window) stays reachable for
+    /// Run now / Pause / Resume.
+    public var showsCronSection: Bool {
+      !cronSessions.isEmpty || !cronJobGroups.isEmpty
+    }
+
+    /// Whether the list shows the "No sessions" placeholder: nothing fetched and nothing
+    /// loading or failed — and, outside search, no Cron Jobs section to show instead.
+    public var showsEmptyPlaceholder: Bool {
+      sessions.isEmpty && !isLoading && loadError == nil && (isSearching || !showsCronSection)
+    }
+
     /// Cron sessions with unseen output — the section header's aggregate badge (the
     /// desktop's `CRON JOBS 4`), visible without scrolling into the section.
     public var cronUnreadCount: Int {

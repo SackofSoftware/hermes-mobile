@@ -101,7 +101,7 @@ chevron rotated -90° when collapsed and header trait + Collapsed/Expanded value
 VoiceOver. `cronSectionCollapsed` is a persisted device-local pref
 (`hermes.cron-section-collapsed`, default expanded) reset in all three logout recipes.
 Collapsing hides the job rows, peeks, and unmatched runs, but **the header and its
-`cronUnreadCount` badge are always visible** whenever cron sessions exist (the old hide toggle
+`cronUnreadCount` badge are always visible** whenever cron sessions or jobs exist (the old hide toggle
 also hid the badge).
 
 **The Cron Jobs section groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is

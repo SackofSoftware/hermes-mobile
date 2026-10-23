@@ -166,6 +166,63 @@ struct SessionDateBucketTests {
     #expect(bucket(2025, 2, 3).key == "my-2025-2")
   }
 
+  @Test func leapMonthsAreDistinctFromTheirNamesake() {
+    // Chinese 2025 has a leap 6th month (25 Jul – 22 Aug); 10 Jul is the regular 6th.
+    var chinese = Calendar(identifier: .chinese)
+    chinese.timeZone = TimeZone(identifier: "America/New_York")!
+    chinese.locale = Locale(identifier: "en_US")
+    chinese.firstWeekday = 2
+    let inLeapMonth = Self.date(2025, 8, 15, 12)  // Friday
+    let regular = SessionDateBucket.bucket(
+      for: Self.date(2025, 7, 10), now: inLeapMonth, calendar: chinese
+    )
+    let leap = SessionDateBucket.bucket(
+      for: Self.date(2025, 8, 1), now: inLeapMonth, calendar: chinese
+    )
+    #expect(regular.kind == .month)
+    #expect(leap.kind == .thisMonth)
+
+    let later = Self.date(2025, 9, 30, 12)
+    let regularLater = SessionDateBucket.bucket(
+      for: Self.date(2025, 7, 10), now: later, calendar: chinese
+    )
+    let leapLater = SessionDateBucket.bucket(
+      for: Self.date(2025, 8, 1), now: later, calendar: chinese
+    )
+    #expect(regularLater.kind == .month)
+    #expect(leapLater.kind == .month)
+    #expect(regularLater.key != leapLater.key)
+  }
+
+  @Test func erasAreDistinctEvenWithMatchingYearNumbers() {
+    // Japanese: June 1989 is Heisei 1, June 2019 is Reiwa 1 — same year and month numbers.
+    var japanese = Calendar(identifier: .japanese)
+    japanese.timeZone = TimeZone(identifier: "America/New_York")!
+    japanese.locale = Locale(identifier: "en_US")
+    let now = Self.date(2019, 6, 28, 12)
+    let heisei = SessionDateBucket.bucket(
+      for: Self.date(1989, 6, 1), now: now, calendar: japanese
+    )
+    let reiwa = SessionDateBucket.bucket(
+      for: Self.date(2019, 6, 1), now: now, calendar: japanese
+    )
+    #expect(heisei.kind == .monthYear)
+    #expect(reiwa.kind == .thisMonth)
+  }
+
+  @Test func otherErasTagTheirKey() {
+    // Now Reiwa 2 (2020): Heisei 2 (1990) and Showa 2 (1927) June must not share a key.
+    var japanese = Calendar(identifier: .japanese)
+    japanese.timeZone = TimeZone(identifier: "America/New_York")!
+    japanese.locale = Locale(identifier: "en_US")
+    let now = Self.date(2020, 6, 28, 12)
+    let heisei = SessionDateBucket.bucket(for: Self.date(1990, 6, 1), now: now, calendar: japanese)
+    let showa = SessionDateBucket.bucket(for: Self.date(1927, 6, 1), now: now, calendar: japanese)
+    #expect(heisei.kind == .monthYear)
+    #expect(showa.kind == .monthYear)
+    #expect(heisei.key != showa.key)
+  }
+
   // MARK: - Labels
 
   @Test func relativeBucketsUseFixedLabels() {

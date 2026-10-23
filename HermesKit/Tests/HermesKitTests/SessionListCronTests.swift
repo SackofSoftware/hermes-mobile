@@ -123,6 +123,50 @@ struct SessionListCronTests {
     #expect(noJobs.unmatchedCronSessions.isEmpty)
   }
 
+  @Test func jobsWithoutRunsKeepTheSectionAndSuppressTheEmptyPlaceholder() {
+    // No sessions at all (no runs in the fetched window), but the agent has a job: the
+    // section must stay so the job can still be run, paused, or resumed.
+    let jobsOnly = SessionListFeature.State(
+      connection: connection,
+      cronJobs: [CronJob(id: "job1", name: "Digest")]
+    )
+    #expect(jobsOnly.cronSessions.isEmpty)
+    #expect(jobsOnly.cronJobGroups.map(\.id) == ["job1"])
+    #expect(jobsOnly.showsCronSection)
+    #expect(!jobsOnly.showsEmptyPlaceholder)
+
+    // Search hides the cron section, so an empty result set shows the placeholder.
+    var searching = jobsOnly
+    searching.searchQuery = "digest"
+    #expect(searching.showsEmptyPlaceholder)
+
+    // Jobs fetched but the API is unsupported → no section, placeholder shows.
+    let unsupported = SessionListFeature.State(
+      connection: connection,
+      cronJobs: [CronJob(id: "job1")],
+      cronJobsSupported: false
+    )
+    #expect(!unsupported.showsCronSection)
+    #expect(unsupported.showsEmptyPlaceholder)
+
+    // Runs alone (flat fallback, no jobs) still show the section.
+    let runsOnly = SessionListFeature.State(
+      connection: connection,
+      sessions: [cronSession("job1", stamp: "20260702_090000")]
+    )
+    #expect(runsOnly.showsCronSection)
+    #expect(!runsOnly.showsEmptyPlaceholder)
+
+    // Nothing at all → placeholder, unless still loading or failed.
+    let empty = SessionListFeature.State(connection: connection)
+    #expect(!empty.showsCronSection)
+    #expect(empty.showsEmptyPlaceholder)
+    #expect(!SessionListFeature.State(connection: connection, isLoading: true).showsEmptyPlaceholder)
+    #expect(
+      !SessionListFeature.State(connection: connection, loadError: "boom").showsEmptyPlaceholder
+    )
+  }
+
   @Test func cronUnreadCountCountsOnlyUnreadCronSessions() {
     let state = SessionListFeature.State(
       connection: connection,

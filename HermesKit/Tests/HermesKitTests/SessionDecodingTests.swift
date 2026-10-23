@@ -7,7 +7,8 @@ import Testing
 /// Upholds "decode leniently, never crash": reasoning arrives under any of
 /// `reasoning` / `reasoning_content` / `reasoning_details`, and `reasoning_details` may be a
 /// provider-shaped non-string array — which must be tolerated (decoded via `try?`) without
-/// throwing, with `reasoningText` resolving to the string variants.
+/// throwing, with `reasoningText` resolving to the string variants. Also covers the
+/// `/api/sessions` row's optional `model` (`SessionListDTO`), which older agents omit.
 struct SessionDecodingTests {
   private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
     try JSONDecoder().decode(T.self, from: Data(json.utf8))
@@ -100,5 +101,32 @@ struct SessionDecodingTests {
     """
     let resultMessage = try decode(SessionMessage.self, result)
     #expect(resultMessage.toolCallID == "call_1")
+  }
+
+  // MARK: - Session list row `model` (inbox card footer)
+
+  @Test func listRowModelDecodesWhenPresent() throws {
+    let row = try decode(
+      SessionListDTO.self,
+      #"{ "id": "s1", "model": "anthropic/claude-sonnet-4.5", "message_count": 3 }"#
+    )
+    #expect(row.asSession.model == "anthropic/claude-sonnet-4.5")
+    #expect(row.asSession.messageCount == 3)
+  }
+
+  @Test func listRowModelIsNilWhenAbsent() throws {
+    // Older agents omit the key entirely; the row must still decode.
+    let row = try decode(SessionListDTO.self, #"{ "id": "s1" }"#)
+    #expect(row.asSession.model == nil)
+  }
+
+  @Test func listRowModelIsNilWhenEmpty() throws {
+    let row = try decode(SessionListDTO.self, #"{ "id": "s1", "model": "" }"#)
+    #expect(row.asSession.model == nil)
+  }
+
+  @Test func listRowModelIsNilWhenNull() throws {
+    let row = try decode(SessionListDTO.self, #"{ "id": "s1", "model": null }"#)
+    #expect(row.asSession.model == nil)
   }
 }

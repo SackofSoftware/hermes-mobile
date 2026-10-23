@@ -851,9 +851,10 @@ struct SessionListDTO: Decodable {
   let source: String?
   let parentSessionID: String?
   let lineageRootID: String?
+  let model: String?
 
   enum CodingKeys: String, CodingKey {
-    case id, title, preview, cwd, source
+    case id, title, preview, cwd, source, model
     case lastActive = "last_active"
     case startedAt = "started_at"
     case messageCount = "message_count"
@@ -878,7 +879,8 @@ struct SessionListDTO: Decodable {
       isActive: isActive,
       source: source,
       parentSessionID: parentSessionID?.trimmedNonEmpty,
-      lineageRootID: lineageRootID?.trimmedNonEmpty
+      lineageRootID: lineageRootID?.trimmedNonEmpty,
+      model: model?.nonEmpty
     )
   }
 }

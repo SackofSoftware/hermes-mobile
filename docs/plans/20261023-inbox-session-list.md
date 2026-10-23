@@ -309,10 +309,10 @@ snippet, so the keyword line comes for free. No `showsPreview` input.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesRESTClient.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/SessionDecodingTests.swift`
 
-- [ ] add `Session.model: String?` (+ init param, doc comment: raw server id, nil on older agents)
-- [ ] add `model` to `SessionListDTO` + `CodingKeys` and map `model?.nonEmpty` in `asSession`
-- [ ] write decode tests: present, absent (nil), empty string (nil), `null` (nil)
-- [ ] run `swift test` — must pass before task 3
+- [x] add `Session.model: String?` (+ init param, doc comment: raw server id, nil on older agents)
+- [x] add `model` to `SessionListDTO` + `CodingKeys` and map `model?.nonEmpty` in `asSession`
+- [x] write decode tests: present, absent (nil), empty string (nil), `null` (nil)
+- [x] run `swift test` — must pass before task 3
 
 ### Task 3: Replace the cron-section hide pref with a collapse pref
 

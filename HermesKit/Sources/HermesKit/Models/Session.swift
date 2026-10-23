@@ -39,6 +39,10 @@ public struct Session: Equatable, Sendable, Identifiable {
   /// `flattenSessionsWithBranches` so branches keep nesting under a compressed parent
   /// (desktop `byVisibleId` aliasing). `nil` for un-compressed sessions and old agents.
   public var lineageRootID: String?
+  /// The raw server model id (`model` on REST `GET /api/sessions`), shown verbatim in the
+  /// session card footer exactly as the chat's model chip shows it. `nil` on older agents
+  /// that omit the field (or send it blank).
+  public var model: String?
 
   public init(
     id: String,
@@ -52,7 +56,8 @@ public struct Session: Equatable, Sendable, Identifiable {
     isActive: Bool? = nil,
     source: String? = nil,
     parentSessionID: String? = nil,
-    lineageRootID: String? = nil
+    lineageRootID: String? = nil,
+    model: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -66,6 +71,7 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.source = source
     self.parentSessionID = parentSessionID
     self.lineageRootID = lineageRootID
+    self.model = model
   }
 
   /// Whether this is a cron-scheduled session — the single source of truth for the

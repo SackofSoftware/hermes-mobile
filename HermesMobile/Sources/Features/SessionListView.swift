@@ -18,6 +18,8 @@ struct SessionListView: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// Slides the selected-tab capsule between the bottom bar's tabs.
   @Namespace private var tabSelection
+  /// Keyboard focus for the search field, raised as soon as the field opens.
+  @FocusState private var isSearchFieldFocused: Bool
 
   var body: some View {
     List {
@@ -62,9 +64,14 @@ struct SessionListView: View {
     // header row instead. The pill needs the inline bar, so keep the nav title empty + inline.
     .navigationTitle("")
     .navigationBarTitleDisplayMode(.inline)
-    // Search sits under the nav bar (not the iOS 26 bottom field) so the bottom stays the
-    // tab bar + New chat, and only on the Sessions tab — cron runs aren't searched.
-    .modifier(SessionSearch(isEnabled: store.effectiveTab == .sessions, text: $store.searchQuery))
+    // Search is opened from the toolbar's search button (Sessions tab only): the field then
+    // replaces the nav bar row, so the bottom stays the tab bar + New chat.
+    .toolbar(store.isSearchPresented ? .hidden : .visible, for: .navigationBar)
+    .safeAreaInset(edge: .top) {
+      if store.isSearchPresented {
+        searchBar
+      }
+    }
     .refreshable { store.send(.pulledToRefresh) }
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
@@ -77,11 +84,19 @@ struct SessionListView: View {
           profilePill
         }
       }
-      ToolbarItem(placement: .topBarTrailing) {
+      // One trailing group, so iOS 26 draws Archive + Search in a single glass pill.
+      ToolbarItemGroup(placement: .topBarTrailing) {
         Button {
           store.send(.archivedButtonTapped)
         } label: {
           Label("Archived sessions", systemImage: "archivebox")
+        }
+        if store.effectiveTab == .sessions {
+          Button {
+            store.send(.searchButtonTapped, animation: reduceMotion ? nil : .snappy)
+          } label: {
+            Label("Search sessions", systemImage: "magnifyingglass")
+          }
         }
       }
     }
@@ -439,6 +454,44 @@ struct SessionListView: View {
   /// The bar's shared height: the tab pill and the New chat circle line up.
   private static let barHeight: CGFloat = 64
 
+  /// The open search field in place of the nav bar row: a glass capsule field (focused on
+  /// open) beside a round glass close button that hides it and clears the query.
+  private var searchBar: some View {
+    HStack(spacing: 12) {
+      HStack(spacing: 10) {
+        Image(systemName: "magnifyingglass")
+          .font(.body.weight(.semibold))
+          .foregroundStyle(.secondary)
+        TextField("Search sessions", text: $store.searchQuery)
+          .focused($isSearchFieldFocused)
+          .submitLabel(.search)
+          .autocorrectionDisabled()
+          .textInputAutocapitalization(.never)
+      }
+      .padding(.horizontal, 16)
+      .frame(height: Self.searchBarHeight)
+      .modifier(GlassBackground(shape: Capsule()))
+      Button {
+        isSearchFieldFocused = false
+        store.send(.searchCloseTapped, animation: reduceMotion ? nil : .snappy)
+      } label: {
+        Image(systemName: "xmark")
+          .font(.body.weight(.semibold))
+          .foregroundStyle(.primary)
+          .frame(width: Self.searchBarHeight, height: Self.searchBarHeight)
+          .contentShape(Circle())
+          .modifier(GlassBackground(shape: Circle(), isInteractive: true))
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Close search")
+    }
+    .padding(.horizontal)
+    .padding(.vertical, 6)
+    .onAppear { isSearchFieldFocused = true }
+  }
+
+  private static let searchBarHeight: CGFloat = 48
+
   private var tabPill: some View {
     HStack(spacing: 0) {
       tabButton(.sessions, title: "Sessions", systemImage: "text.bubble.fill")
@@ -658,26 +711,6 @@ struct SessionListView: View {
       Button("Pin", systemImage: "pin") {
         store.send(.pinSession(id: session.id), animation: .snappy)
       }
-    }
-  }
-}
-
-/// The Sessions tab's search field, pinned under the navigation bar so the bottom of the
-/// screen stays the tab bar + New chat (iOS 26 would otherwise move `.searchable` to the
-/// bottom). Absent on the Cron Jobs tab — cron runs aren't searched.
-private struct SessionSearch: ViewModifier {
-  let isEnabled: Bool
-  @Binding var text: String
-
-  func body(content: Content) -> some View {
-    if isEnabled {
-      content.searchable(
-        text: $text,
-        placement: .navigationBarDrawer(displayMode: .always),
-        prompt: "Search sessions"
-      )
-    } else {
-      content
     }
   }
 }

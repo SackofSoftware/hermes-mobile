@@ -8,10 +8,9 @@ Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The shor
 
 The list is the desktop's **Inbox style**, always on and the only list UI — there is no
 grouping pref or picker (the workspace/chronological `SessionGroupingMode` was removed; the
-card header names the workspace instead). The Sessions tab, top to bottom: the search field
-(pinned under the nav bar — `.navigationBarDrawer(displayMode: .always)`, Sessions tab only, so
-iOS 26 never moves it to the bottom), the "Sessions" header, a **Pinned** section (pin order),
-then the **update-date sections**. Cron runs live in the **Cron Jobs tab** (below). All of it
+card header names the workspace instead). The Sessions tab, top to bottom: the "Sessions"
+header, a **Pinned** section (pin order), then the **update-date sections**. Cron runs live in
+the **Cron Jobs tab** (below). All of it
 is display-only over the one `sessions` array. The list is a flat `.listStyle(.plain)` with no
 row or section separators, compact section headers (leading title + a hairline to the
 trailing edge, centred on the title; `defaultMinListHeaderHeight` 0, `listSectionSpacing(0)`,
@@ -23,10 +22,19 @@ the snapshot host) holds a glass `Sessions | Cron Jobs` tab pill on the leading 
 label; the selected tab on an inner capsule in the accent, slid by `matchedGeometryEffect`;
 the Cron Jobs tab carries the `cronUnreadCount` badge) and the round glass New chat button
 trailing (`GlassBackground`, material fallback below iOS 26). The pill shows only while
-`showsTabBar` holds — cron content exists (`hasCronContent`) and no search is active (search
-is a Sessions-only mode) — else the bar is just New chat. `selectedTab` is in-memory (a launch
+`showsTabBar` holds — cron content exists (`hasCronContent`), the search field is closed, and
+no query is active (search is a Sessions-only mode) — else the bar is just New chat.
+`selectedTab` is in-memory (a launch
 starts on Sessions); views render `effectiveTab`, which falls back to Sessions whenever the pill
 is hidden, so a poll or profile switch that drops every cron row never strands an empty tab.
+
+**Search is opened from the toolbar** (Sessions tab only): a search button sits beside Archive
+in one trailing `ToolbarItemGroup` (one glass pill on iOS 26). `searchButtonTapped` sets
+`isSearchPresented`, which hides the nav bar row (settings, profile pill, Archive) and shows a
+glass capsule field — focused on open — beside a round glass close button in a top
+`safeAreaInset`. `searchCloseTapped` hides it and clears the query, reloading the normal list
+at once when a query was live (the same immediate `load` a cleared query gets through the
+binding). Typing still drives the 300 ms debounced search via the `searchQuery` binding.
 
 **The load fetches two source-scoped slices, never one shared page** (desktop parity): the
 interactive list with `exclude_sources=cron`, then up to 50 cron runs with `source=cron`

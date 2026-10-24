@@ -690,6 +690,36 @@ final class SessionSnapshotTests: SnapshotTestCase {
 
   // MARK: Search results
 
+  /// The search button's open state with nothing typed yet: the nav bar row gives way to the
+  /// glass search field and the round close button, and the tab pill hides.
+  func testSessionList_searchOpen() {
+    let now = self.now
+    let (sessions, jobs, seen) = cronGroupedFixtures()
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            calendar: listCalendar,
+            seenCounts: seen,
+            isSearchPresented: true,
+            cronJobs: IdentifiedArray(uniqueElements: jobs)
+          )
+        ) {
+          SessionListFeature().ignoring(\.task)
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
+          $0.hermesREST.cronJobs = { _, _ in jobs }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    assertSnapshot(of: view, as: deviceImage())
+  }
+
   /// Search results are flat cards (no date sections). The rows mirror the search DTO's
   /// shape — no title or workspace, the match snippet as `preview` — so the snippet is
   /// promoted into the card's title slot and the header leaves the workspace out.
@@ -715,7 +745,8 @@ final class SessionSnapshotTests: SnapshotTestCase {
             sessions: IdentifiedArray(uniqueElements: sessions),
             searchQuery: "parser",
             now: now,
-            calendar: listCalendar
+            calendar: listCalendar,
+            isSearchPresented: true
           )
         ) {
           SessionListFeature().ignoring(\.task)

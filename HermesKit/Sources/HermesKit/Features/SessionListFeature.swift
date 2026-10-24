@@ -68,6 +68,9 @@ public struct SessionListFeature {
     /// The bottom bar's selected tab. In-memory only (a launch starts on Sessions); views
     /// read `effectiveTab`, which falls back to Sessions while there is no cron content.
     public var selectedTab: SessionListTab
+    /// Whether the Sessions tab's search field is open — opened from the toolbar's search
+    /// button, it replaces the nav bar row; closing clears the query.
+    public var isSearchPresented: Bool
     /// Ids whose rename PATCH is currently IN FLIGHT. Transient: added when the PATCH starts,
     /// removed on success/failure. While non-empty the poll skips (like `archivingIDs`) so a
     /// fetch landing mid-PATCH can't clobber the optimistic title with the server's old one.
@@ -166,6 +169,7 @@ public struct SessionListFeature {
       deleteSupported: Bool = true,
       defaultSwipeAction: SessionSwipeAction = .default,
       selectedTab: SessionListTab = .sessions,
+      isSearchPresented: Bool = false,
       renamingInFlightIDs: Set<String> = [],
       renamingID: Session.ID? = nil,
       renameDraft: String = "",
@@ -198,6 +202,7 @@ public struct SessionListFeature {
       self.deleteSupported = deleteSupported
       self.defaultSwipeAction = defaultSwipeAction
       self.selectedTab = selectedTab
+      self.isSearchPresented = isSearchPresented
       self.renamingInFlightIDs = renamingInFlightIDs
       self.renamingID = renamingID
       self.renameDraft = renameDraft
@@ -306,9 +311,10 @@ public struct SessionListFeature {
     }
 
     /// Whether the bottom bar shows the Sessions | Cron Jobs tabs: only with cron content,
-    /// and not while searching (search is a Sessions-only mode).
+    /// and not while the search field is open or a query is active (search is a
+    /// Sessions-only mode).
     public var showsTabBar: Bool {
-      hasCronContent && !isSearching
+      hasCronContent && !isSearchPresented && !isSearching
     }
 
     /// The tab the list actually renders: `selectedTab` while the tab bar shows, else
@@ -424,6 +430,10 @@ public struct SessionListFeature {
     case copiedIDToastExpired
     /// A bottom-bar tab was tapped.
     case selectTab(SessionListTab)
+    /// The toolbar's search button: open the search field.
+    case searchButtonTapped
+    /// The search field's close button: hide it and clear the query.
+    case searchCloseTapped
     case archiveButtonTapped(id: Session.ID)
     /// Archive RPC succeeded — clear the transient in-flight guard and cancel (or, when
     /// one is pending, restart — see `cancelOrRestartFetch`) any fetch that started
@@ -930,6 +940,19 @@ public struct SessionListFeature {
       case let .selectTab(tab):
         state.selectedTab = tab
         return .none
+
+      case .searchButtonTapped:
+        state.isSearchPresented = true
+        return .none
+
+      case .searchCloseTapped:
+        state.isSearchPresented = false
+        guard !state.searchQuery.isEmpty else { return .none }
+        // Leaving with a query: drop it and reload the normal list right away — the same
+        // immediate reload a cleared query gets through the binding.
+        let wasSearching = state.isSearching
+        state.searchQuery = ""
+        return wasSearching ? load(&state) : .none
 
       case let .archiveButtonTapped(id):
         state.confirmationDialog = ConfirmationDialogState {

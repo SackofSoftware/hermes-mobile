@@ -232,7 +232,7 @@ bullets below are the compressed rules.
   `groupEntriesByDate` (no grouping pref); `SessionCardView` on every interactive row,
   compact `SessionRowView` only for cron runs + the archived sheet; cron sessions sit in
   a job-grouped Cron Jobs TAB (bottom-bar pill only with cron content; views read
-  `effectiveTab`; unread badge on the tab; search is Sessions-only, at the top);
+  `effectiveTab`; unread badge on the tab; search is Sessions-only, opened from the toolbar);
   nesting via pure `flattenSessionsWithBranches` (orphans de-nest; search stays flat).
   Details: `docs/features/session-list.md`.
 - **Row affordances**: trailing swipe = destructive default FIRST (full-swipe target),

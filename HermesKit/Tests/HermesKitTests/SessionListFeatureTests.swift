@@ -2295,6 +2295,58 @@ struct SessionListFeatureTests {
     #expect(!state.showsTabBar, "search is a Sessions-only mode")
     #expect(state.effectiveTab == .sessions)
     #expect(state.selectedTab == .cron)
+
+    state.searchQuery = ""
+    state.isSearchPresented = true
+    #expect(!state.showsTabBar, "an open search field hides the tabs before any query")
+  }
+
+  // MARK: - Search field
+
+  @Test func searchButtonOpensTheFieldAndCloseWithoutAQueryJustHidesIt() async {
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    }
+
+    await store.send(.searchButtonTapped) {
+      $0.isSearchPresented = true
+    }
+    await store.send(.searchCloseTapped) {
+      $0.isSearchPresented = false
+    }
+  }
+
+  /// Closing with a live query clears it and reloads the normal list at once — the stale
+  /// search results must not linger until the next poll.
+  @Test func searchCloseWithAQueryClearsItAndReloadsTheList() async {
+    let fetched = LockIsolated<[SessionSourceFilter]>([])
+    let hit = Session(id: "hit", preview: "deploy")
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection, sessions: [hit], searchQuery: "deploy", isSearchPresented: true
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, source in
+        fetched.withValue { $0.append(source) }
+        return source == .interactive ? [Session(id: "s1", title: "Chat")] : []
+      }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.searchCloseTapped) {
+      $0.isSearchPresented = false
+      $0.searchQuery = ""
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.sessions = [Session(id: "s1", title: "Chat")]
+    }
+    #expect(fetched.value == [.interactive, .cron])
   }
 
   @Test func chronologicalSessionsAreRecencyOrderedAndExcludePinned() {

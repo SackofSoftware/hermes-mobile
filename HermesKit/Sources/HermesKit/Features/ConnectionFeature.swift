@@ -106,7 +106,7 @@ func performNativeOAuthLogin(
   }
   do {
     let probe = ServerConnection(baseURL: baseURL, auth: .bearer(minted))
-    _ = try await rest.sessions(probe, 1, 0, .recent)
+    _ = try await rest.sessions(probe, 1, 0, .recent, .all)
   } catch {
     // Cancellation is not a verdict on these credentials, and the store is SHARED: this
     // attempt was superseded (a second provider tap) or the whole screen is going away (a
@@ -484,7 +484,7 @@ public struct ConnectionFeature {
           let connection = ServerConnection(baseURL: url, token: state.token)
           return .run { [rest, keychain, preferences] send in
             do {
-              _ = try await rest.sessions(connection, 1, 0, .recent)
+              _ = try await rest.sessions(connection, 1, 0, .recent, .all)
             } catch {
               await send(.tokenValidationResponse(.failure(asRESTError(error))))
               return
@@ -513,7 +513,7 @@ public struct ConnectionFeature {
             keychain.activateCookieSession(cookieSession)
             let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
             do {
-              _ = try await rest.sessions(connection, 1, 0, .recent)
+              _ = try await rest.sessions(connection, 1, 0, .recent, .all)
             } catch {
               await send(.passwordLoginResponse(.failure(asRESTError(error))))
               return

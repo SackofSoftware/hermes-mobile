@@ -594,6 +594,11 @@ public struct SessionListFeature {
   /// How often the list auto-refreshes while visible, to keep `isActive` (working glow) fresh.
   private static let pollInterval: Duration = .seconds(10)
 
+  /// Rows per slice of a list load: interactive sessions, then cron runs (the desktop's
+  /// `CRON_SECTION_LIMIT`), fetched as independent source-scoped pages.
+  static let interactivePageSize = 50
+  static let cronPageSize = 50
+
   /// How long a copy confirmation (the "Session ID copied" toast) stays up before
   /// auto-dismissing. Same name/value in every feature that confirms a copy.
   static let copiedFeedbackDuration: Duration = .seconds(1.5)
@@ -1645,19 +1650,32 @@ private func fetchSessions(
   profile: String?
 ) async -> SessionListFeature.Action {
   let query = rawQuery.trimmingCharacters(in: .whitespaces)
-  do {
-    let sessions: [Session]
-    if !query.isEmpty {
-      sessions = try await rest.search(connection, query, profile)
-    } else if let profile {
-      sessions = try await profiles.sessions(connection, profile, .exclude, .recent, 50, 0)
-    } else {
-      sessions = try await rest.sessions(connection, 50, 0, .recent)
+  @Sendable func page(_ source: SessionSourceFilter, limit: Int) async throws -> [Session] {
+    if let profile {
+      return try await profiles.sessions(connection, profile, .exclude, .recent, limit, 0, source)
     }
-    return .sessionsResponse(.success(sessions))
+    return try await rest.sessions(connection, limit, 0, .recent, source)
+  }
+  do {
+    if !query.isEmpty {
+      return .sessionsResponse(.success(try await rest.search(connection, query, profile)))
+    }
+    // Two independent slices, like the desktop sidebar: cron runs are always the newest
+    // rows, so one shared page lets a busy job starve the interactive list.
+    let interactive = try await page(.interactive, limit: SessionListFeature.interactivePageSize)
+    let cron = try await page(.cron, limit: SessionListFeature.cronPageSize)
+    return .sessionsResponse(.success(mergeSessionSlices(interactive, cron)))
   } catch let error as RESTError {
     return .sessionsResponse(.failure(error))
   } catch {
     return .sessionsResponse(.failure(.unreachable))
   }
+}
+
+/// The interactive slice followed by every cron-slice row it doesn't already carry. An agent
+/// that ignores the source scoping returns the same unscoped page for both slices, which
+/// merges back to that one page.
+func mergeSessionSlices(_ interactive: [Session], _ cron: [Session]) -> [Session] {
+  let seen = Set(interactive.map(\.id))
+  return interactive + cron.filter { !seen.contains($0.id) }
 }

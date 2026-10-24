@@ -31,15 +31,16 @@ public struct HermesProfileClient: Sendable {
   public var rename: @Sendable (_ connection: ServerConnection, _ name: String, _ newName: String) async throws -> Void
   /// `DELETE /api/profiles/{name}`.
   public var delete: @Sendable (_ connection: ServerConnection, _ name: String) async throws -> Void
-  /// `GET /api/profiles/sessions?profile=&archived=&order=&limit=&offset=` →
-  /// `{ sessions, profile_totals }` (we use only `sessions`).
+  /// `GET /api/profiles/sessions?profile=&archived=&order=&limit=&offset=` (+ the
+  /// `SessionSourceFilter` scoping) → `{ sessions, profile_totals }` (we use only `sessions`).
   public var sessions: @Sendable (
     _ connection: ServerConnection,
     _ profile: String,
     _ archived: ProfileArchivedFilter,
     _ order: SessionOrder,
     _ limit: Int,
-    _ offset: Int
+    _ offset: Int,
+    _ source: SessionSourceFilter
   ) async throws -> [Session]
 }
 
@@ -83,14 +84,14 @@ public extension HermesProfileClient {
         let url = try makeURL(conn.baseURL, "/api/profiles/\(name)")
         try await send(url, method: "DELETE", body: nil, auth: authFor(conn), session: session)
       },
-      sessions: { conn, profile, archived, order, limit, offset in
+      sessions: { conn, profile, archived, order, limit, offset, source in
         let url = try makeURL(conn.baseURL, "/api/profiles/sessions", query: [
           .init(name: "profile", value: profile),
           .init(name: "archived", value: archived.rawValue),
           .init(name: "order", value: order.rawValue),
           .init(name: "limit", value: String(limit)),
           .init(name: "offset", value: String(offset)),
-        ])
+        ] + source.queryItems)
         let response: ProfileSessionsResponse = try await get(
           url, auth: authFor(conn), session: session
         )
@@ -126,7 +127,7 @@ public extension HermesProfileClient {
         store.withValue { $0.removeAll { $0.name == name } }
         souls.withValue { $0[name] = nil }
       },
-      sessions: { _, _, _, _, _, _ in [] }
+      sessions: { _, _, _, _, _, _, _ in [] }
     )
   }
 }

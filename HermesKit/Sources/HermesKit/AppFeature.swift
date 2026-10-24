@@ -331,7 +331,7 @@ public struct AppFeature {
             // Keychain persist hook, so a rotation during the probe is saved.
             Self.seedBearerStore(session, baseURL: url, keychain: keychain, store: bearerTokens)
             do {
-              _ = try await rest.sessions(connection, 1, 0, .recent)
+              _ = try await rest.sessions(connection, 1, 0, .recent, .all)
               await send(.autoConnectSucceeded(connection))
             } catch {
               // A dead refresh token surfaces here as `RESTError.unauthorized` (the store

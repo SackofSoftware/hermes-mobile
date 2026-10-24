@@ -57,9 +57,10 @@ enum DemoMode {
     // ready status frozen exactly as authored.
     deps.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
     // Session-list refresh + poll return the seeded sessions unchanged — both the unscoped
-    // (`rest.sessions`) and the profile-scoped (`profiles.sessions`) fetch paths.
-    deps.hermesREST.sessions = { _, _, _, _ in seededSessions }
-    deps.hermesProfiles.sessions = { _, _, _, _, _, _ in seededSessions }
+    // (`rest.sessions`) and the profile-scoped (`profiles.sessions`) fetch paths. Both
+    // source slices get the same page, which the list merges back to one copy.
+    deps.hermesREST.sessions = { _, _, _, _, _ in seededSessions }
+    deps.hermesProfiles.sessions = { _, _, _, _, _, _, _ in seededSessions }
     // The agent always exposes the default profile, so the "default" pill is always present.
     deps.hermesProfiles.list = { _ in [Profile(name: "default", isDefault: true)] }
     // Keep the grouped Cron Jobs section frozen on the seeded jobs across polls.

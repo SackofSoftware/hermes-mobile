@@ -201,7 +201,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [run] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [run] }
       $0.hermesREST.cronJobs = { @Sendable _, profile in
         requestedProfile.setValue(profile)
         return [CronJob(id: "job1", name: "Digest")]
@@ -224,6 +224,65 @@ struct SessionListCronTests {
     #expect(requestedProfile.value == "work")
   }
 
+  /// Cron runs are always the newest rows, so one shared page let a busy job crowd the
+  /// interactive list out of the window. The load fetches two source-scoped slices instead.
+  @Test func loadFetchesInteractiveAndCronRunsAsSeparateSlices() async {
+    let requested = LockIsolated<[SessionSourceFilter]>([])
+    let chat = Session(id: "chat", title: "Chat", updatedAt: now.addingTimeInterval(-3600))
+    let run = cronSession("job1", stamp: "20260702_090000")
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, limit, _, _, source in
+        requested.withValue { $0.append(source) }
+        #expect(limit == 50)
+        return source == .cron ? [run] : [chat]
+      }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pulledToRefresh)
+    await store.receive(\.sessionsResponse.success) {
+      $0.sessions = [chat, run]
+    }
+    #expect(requested.value == [.interactive, .cron])
+  }
+
+  @Test func failedCronSliceFailsTheLoadAndKeepsTheRows() async {
+    let existing = Session(id: "kept", title: "Kept")
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: [existing])
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, source in
+        if source == .cron { throw RESTError.unreachable }
+        return [Session(id: "fresh", title: "Fresh")]
+      }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pulledToRefresh)
+    await store.receive(\.sessionsResponse.failure) {
+      $0.loadError = RESTError.unreachable.message
+    }
+    #expect(store.state.sessions.map(\.id) == ["kept"])
+  }
+
+  @Test func mergeKeepsInteractiveOrderAndDropsRepeatedRows() {
+    let a = Session(id: "a"), b = Session(id: "b")
+    let run = cronSession("job1", stamp: "20260702_090000")
+    #expect(mergeSessionSlices([a, b], [run]).map(\.id) == ["a", "b", run.id])
+    // An agent that ignores the scoping returns the same page twice: it merges to one copy.
+    #expect(mergeSessionSlices([a, run], [a, run]).map(\.id) == ["a", run.id])
+  }
+
   @Test func notFoundDisablesCronJobsAndSkipsLaterFetches() async {
     let fetchCount = LockIsolated(0)
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
@@ -231,7 +290,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in
         fetchCount.withValue { $0 += 1 }
         throw RESTError.notFound
@@ -269,7 +328,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.unreachable }
     }
 
@@ -293,7 +352,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, profile in
         requestedProfile.setValue(profile)
         return []
@@ -317,7 +376,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", name: "Digest")] }
     }
 
@@ -342,7 +401,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.unreachable }
     }
 
@@ -389,7 +448,7 @@ struct SessionListCronTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.hermesREST.triggerCronJob = { @Sendable _, id, _ in triggered.setValue(id) }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", state: "running")] }
     }
 

@@ -77,7 +77,10 @@ public struct Session: Equatable, Sendable, Identifiable {
 
   /// Whether this is a cron-scheduled session — the single source of truth for the
   /// Cron Jobs list partition (mirrors the desktop's `source === "cron"` special-case).
-  public var isCron: Bool { source == "cron" }
+  public var isCron: Bool { source == Self.cronSource }
+
+  /// The `source` value of a cron-scheduled run.
+  public static let cronSource = "cron"
 
   /// A real, user-facing title: non-empty and not the server's `"Untitled"` placeholder
   /// (the agent sends that for auto-named/cron sessions before a real title exists).

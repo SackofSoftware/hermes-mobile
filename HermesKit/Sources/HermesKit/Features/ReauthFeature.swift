@@ -147,7 +147,7 @@ public struct ReauthFeature {
           let connection = ServerConnection(baseURL: url, token: state.token)
           return .run { [rest, keychain] send in
             do {
-              _ = try await rest.sessions(connection, 1, 0, .recent)
+              _ = try await rest.sessions(connection, 1, 0, .recent, .all)
             } catch {
               await send(.reauthResponse(.failure(asRESTError(error))))
               return
@@ -176,7 +176,7 @@ public struct ReauthFeature {
             keychain.activateCookieSession(cookieSession)
             let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
             do {
-              _ = try await rest.sessions(connection, 1, 0, .recent)
+              _ = try await rest.sessions(connection, 1, 0, .recent, .all)
             } catch {
               await send(.reauthResponse(.failure(asRESTError(error))))
               return

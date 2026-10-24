@@ -131,6 +131,17 @@ public struct AppFeature {
       layout == .regular ? currentViewingSessionID : nil
     }
 
+    /// Sessions whose list card shows the needs-input status dot: an approval push this
+    /// device hasn't opened yet, plus the live chat while an approval / clarify / secret card
+    /// is up. The list has no live events for other sessions, so this is what mobile knows.
+    public var needsInputSessionIDs: Set<String> {
+      var ids = pendingApprovalSessionIDs
+      if let chat = liveChat, chat.pendingInteraction != nil, let key = chat.sessionKey {
+        ids.insert(key)
+      }
+      return ids
+    }
+
     /// What the regular-width seat reseat (`reduceProfileReseat`) is watching: the list's
     /// scoped profile, whether the seat's composer input is still resolving, and the layout.
     /// The second member DEFERS rather than skips a reseat that would land mid-paste or

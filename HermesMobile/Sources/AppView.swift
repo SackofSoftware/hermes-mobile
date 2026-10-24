@@ -58,7 +58,11 @@ struct AppView: View {
             // `List(selection:)`: selection would become a second source of truth for which
             // session is open, racing the reducer-owned slot on push taps, archive refills,
             // and layout changes.
-            SessionListView(store: homeStore, highlightedSessionID: store.highlightedSessionID)
+            SessionListView(
+              store: homeStore,
+              highlightedSessionID: store.highlightedSessionID,
+              needsInputSessionIDs: store.needsInputSessionIDs
+            )
           } destination: { _ in
             // The path holds only thin session-key markers — the REAL chat state lives in
             // the app-level live-chat slot, so a running turn's socket survives pops.

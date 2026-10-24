@@ -20,8 +20,14 @@ struct SessionCardView: View {
   var isPinned: Bool = false
   /// Whether the agent is currently working this session — renders a brand-tinted glow.
   var isActive: Bool = false
+  /// An approval / clarify is waiting on the user (`AppFeature.State.needsInputSessionIDs`).
+  var needsInput: Bool = false
   /// `false` for search hits, which carry no `cwd`: the header leaves the workspace out.
   var showsWorkspace: Bool = true
+
+  private var status: SessionStatus {
+    SessionStatus(needsInput: needsInput, isWorking: isActive, isUnread: isUnread)
+  }
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// Drives the gentle opacity pulse of the active glow (held flat when reduce-motion is on).
@@ -35,7 +41,7 @@ struct SessionCardView: View {
 
   var body: some View {
     let content = SessionCardContent(session: session, showsWorkspace: showsWorkspace)
-    return VStack(alignment: .leading, spacing: 4) {
+    return VStack(alignment: .leading, spacing: 3) {
       header(content)
       Text(content.title)
         .font(.headline)
@@ -54,12 +60,9 @@ struct SessionCardView: View {
         footer(content)
       }
     }
-    .padding(.vertical, 4)
     .modifier(CardActiveGlow(isActive: isActive, reduceMotion: reduceMotion, pulsing: pulsing))
     .accessibilityElement(children: .combine)
-    .accessibilityLabel(
-      content.accessibilityLabel(age: age, isUnread: isUnread, isPinned: isPinned, isActive: isActive)
-    )
+    .accessibilityLabel(content.accessibilityLabel(age: age, status: status, isPinned: isPinned))
     .onAppear { updatePulsing() }
     // Drive the pulse off `isActive` too: when a poll flips it true on a card that's already
     // on screen (no re-onAppear), this starts the animation; flips to false stop it.
@@ -69,9 +72,7 @@ struct SessionCardView: View {
 
   private func header(_ content: SessionCardContent) -> some View {
     HStack(spacing: 6) {
-      if isUnread {
-        Circle().fill(Color.hermesAccent).frame(width: 8, height: 8)
-      }
+      SessionStatusDot(status: status)
       if let branchStem {
         Text(branchStem)
           .font(.caption.monospaced())
@@ -129,6 +130,33 @@ struct SessionCardView: View {
       withAnimation(.easeInOut(duration: 0.2)) {
         pulsing = false
       }
+    }
+  }
+}
+
+/// The card header's leading status dot — the desktop's `SessionStatusDot` palette: amber when
+/// the user has to act, the accent while a turn runs, green for finished-while-away, and a
+/// smaller faint dot when idle. Every card shows SOME mark in a fixed-width slot, so the
+/// header text keeps one left edge whatever the state. Visual only: the card's combined
+/// accessibility label speaks the status.
+private struct SessionStatusDot: View {
+  let status: SessionStatus
+
+  var body: some View {
+    Circle()
+      .fill(color)
+      .frame(width: diameter, height: diameter)
+      .frame(width: 8, height: 8)
+  }
+
+  private var diameter: CGFloat { status == .idle ? 5 : 8 }
+
+  private var color: Color {
+    switch status {
+    case .needsInput: .yellow
+    case .working: .hermesAccent
+    case .unread: .green
+    case .idle: Color.secondary.opacity(0.35)
     }
   }
 }

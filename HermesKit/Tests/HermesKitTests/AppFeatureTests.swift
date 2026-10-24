@@ -3645,6 +3645,22 @@ struct AppFeatureTests {
     #expect(state.highlightedSessionID == "s1", "the same state highlights in regular")
   }
 
+  /// The list's needs-input dot: unopened approval pushes, plus the live chat only while it
+  /// actually has an interaction card up.
+  @Test func needsInputCombinesApprovalPushesAndTheLiveChatsOpenCard() {
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    var state = AppFeature.State(
+      home: SessionListFeature.State(connection: connection),
+      liveChat: chat,
+      pendingApprovalSessionIDs: ["pushed"]
+    )
+    #expect(state.needsInputSessionIDs == ["pushed"], "an idle live chat needs nothing")
+
+    chat.present(.approval(ApprovalRequest(command: "rm -rf /tmp/x")))
+    state.liveChat = chat
+    #expect(state.needsInputSessionIDs == ["pushed", "s1"])
+  }
+
   /// compact → regular with a pushed marker: the path clears (the slot becomes the detail;
   /// a marker would render the chat twice) and the slot — socket, rows, everything — stays.
   @Test func layoutChangedToRegularClearsPathAndKeepsSlot() async {

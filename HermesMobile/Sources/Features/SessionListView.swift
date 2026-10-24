@@ -12,6 +12,9 @@ struct SessionListView: View {
   /// width) highlights nothing — the iPhone list is unchanged. Passed in by `AppView` from
   /// `AppFeature.State.currentViewingSessionID`; the list itself never tracks selection.
   var highlightedSessionID: String? = nil
+  /// Sessions whose card shows the needs-input status dot — `AppFeature.State
+  /// .needsInputSessionIDs`, passed in by `AppView` like the highlight.
+  var needsInputSessionIDs: Set<String> = []
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
@@ -34,6 +37,10 @@ struct SessionListView: View {
     }
     .listStyle(.plain)
     .listSectionSeparator(.hidden) // flat list — no section hairlines (row hairlines hidden per-row)
+    // Let the compact date headers size to their text instead of the plain list's tall default,
+    // and drop the built-in gap between sections: the header's own top inset separates them.
+    .environment(\.defaultMinListHeaderHeight, 0)
+    .listSectionSpacing(0)
     .overlay {
       if store.showsEmptyPlaceholder {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
@@ -148,19 +155,23 @@ struct SessionListView: View {
     // Pinned sessions float to the top — as cards too, so the column never mixes card and
     // one-line geometry (desktop parity).
     if !store.pinnedSessions.isEmpty {
-      Section("Pinned") {
+      Section {
         ForEach(store.pinnedEntries) { entry in
           row(entry)
         }
+      } header: {
+        sectionHeader("Pinned")
       }
     }
     // The last-active-ordered lane, split into date sections (Today, Yesterday, …);
     // branches nest under their parent with elbow stems and never split across a header.
     ForEach(store.dateSections) { section in
-      Section(section.label) {
+      Section {
         ForEach(section.entries) { entry in
           row(entry)
         }
+      } header: {
+        sectionHeader(section.label)
       }
     }
     // Cron-scheduled sessions live in their own always-on section below the
@@ -170,6 +181,14 @@ struct SessionListView: View {
     if store.showsCronSection {
       cronJobsSection
     }
+  }
+
+  /// A Pinned / date-section header: one compact secondary line hugging the cards below it.
+  private func sectionHeader(_ label: String) -> some View {
+    Text(label)
+      .font(.footnote.weight(.semibold))
+      .foregroundStyle(.secondary)
+      .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
   }
 
   /// Top-level content section header. The active profile is shown in the pill (the
@@ -474,10 +493,14 @@ struct SessionListView: View {
         isUnread: store.unreadSessionIDs.contains(session.id),
         isPinned: isPinned,
         isActive: session.isActive == true,
+        needsInput: needsInputSessionIDs.contains(session.id),
         showsWorkspace: showsWorkspace
       )
       .padding(.leading, branchStem == nil ? 0 : 16)
     }
+    // Tighter than the plain list's default row padding: the card's own line spacing already
+    // separates its parts, so the gap between cards stays small.
+    .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
   }
 
   /// A cron run (job peek, flat fallback, unmatched runs) as the compact one-line row — a

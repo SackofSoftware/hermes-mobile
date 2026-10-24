@@ -226,8 +226,9 @@ bullets below are the compressed rules.
   round-trip runs in the parent list (a presented sheet's effects die on dismissal).
   A destructive success restarts (not bare-cancels) a pending fetch; a failure after a
   profile switch drops the rollback re-insert. Details: `docs/features/session-list.md`.
-- **Date sections, inbox cards, cron jobs, and branch nesting are display-only** over
-  the one fetched array: always-on update-date sections via pure `SessionDateBucket` /
+- **Date sections, inbox cards, cron jobs, and branch nesting are display-only** over one
+  array fetched as TWO source slices (interactive + cron, never one shared page — cron runs
+  starve it): always-on update-date sections via pure `SessionDateBucket` /
   `groupEntriesByDate` (no grouping pref); `SessionCardView` on every interactive row,
   compact `SessionRowView` only for cron runs + the archived sheet; cron sessions sit in
   an always-on job-grouped section (capability-gated; collapse pref, badge stays);

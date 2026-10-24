@@ -63,22 +63,34 @@ struct SessionCardContentTests {
 
   // MARK: - Accessibility
 
-  @Test func accessibilityLabelReadsInVisualOrderThenFlags() {
+  @Test func accessibilityLabelReadsInVisualOrderThenStatusAndPin() {
     let content = SessionCardContent(session: Session(
       id: "s", title: "Fix the build", preview: "it fails on CI", cwd: "/w/app",
       messageCount: 4, model: "gpt-5"
     ))
     #expect(
-      content.accessibilityLabel(age: "2 hours ago", isUnread: true, isPinned: true, isActive: true)
-        == "app, Fix the build, it fails on CI, gpt-5, 4 messages, 2 hours ago, Unread, Pinned, Working"
+      content.accessibilityLabel(age: "2 hours ago", status: .working, isPinned: true)
+        == "app, Fix the build, it fails on CI, gpt-5, 4 messages, 2 hours ago, Working, Pinned"
     )
   }
 
   @Test func accessibilityLabelSkipsAbsentParts() {
     let content = SessionCardContent(session: Session(id: "s", preview: "snippet"), showsWorkspace: false)
-    #expect(
-      content.accessibilityLabel(age: nil, isUnread: false, isPinned: false, isActive: false)
-        == "snippet"
-    )
+    #expect(content.accessibilityLabel(age: nil, status: .idle, isPinned: false) == "snippet")
+  }
+
+  // MARK: - Status dot
+
+  @Test func statusResolvesNeedsInputOverWorkingOverUnread() {
+    #expect(SessionStatus(needsInput: true, isWorking: true, isUnread: true) == .needsInput)
+    #expect(SessionStatus(needsInput: false, isWorking: true, isUnread: true) == .working)
+    #expect(SessionStatus(needsInput: false, isWorking: false, isUnread: true) == .unread)
+    #expect(SessionStatus(needsInput: false, isWorking: false, isUnread: false) == .idle)
+  }
+
+  @Test func statusAccessibilityTextIsSilentWhenIdle() {
+    #expect(SessionStatus.needsInput.accessibilityText == "Needs input")
+    #expect(SessionStatus.unread.accessibilityText == "Unread")
+    #expect(SessionStatus.idle.accessibilityText == nil)
   }
 }

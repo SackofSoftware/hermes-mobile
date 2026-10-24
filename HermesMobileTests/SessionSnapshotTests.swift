@@ -158,6 +158,14 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now, isActive: true))
   }
 
+  /// A pending approval outranks the running turn: the status dot turns amber while the glow
+  /// still marks the turn as live.
+  func testSessionCard_needsInput() {
+    assertCardSnapshot(
+      SessionCardView(session: cardFixtureSession(), now: now, isActive: true, needsInput: true)
+    )
+  }
+
   /// Older agent (no `model`) and zero messages: the whole footer line is omitted, and a
   /// missing `cwd` reads "No workspace".
   func testSessionCard_noFooter() {

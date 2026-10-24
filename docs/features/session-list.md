@@ -10,10 +10,19 @@ The list is the desktop's **Inbox style**, always on and the only list UI — th
 grouping pref or picker (the workspace/chronological `SessionGroupingMode` was removed; the
 card header names the workspace instead). Layout, top to bottom: the "Sessions" header, a
 **Pinned** section (pin order), the **update-date sections**, then the Cron Jobs section. All
-of it is display-only over the one fetched `sessions` array (no fetch/order change). The list
-is a flat `.listStyle(.plain)` with no row or section separators; "New chat" is a bottom bar
-via **`.safeAreaInset(edge: .bottom)`** (a `.bottomBar` toolbar renders blank in the snapshot
-host).
+of it is display-only over the one `sessions` array. The list is a flat `.listStyle(.plain)`
+with no row or section separators, compact section headers (`defaultMinListHeaderHeight` 0,
+`listSectionSpacing(0)`, the header's own top inset as the only gap), and tighter card row
+insets than the plain default; "New chat" is a bottom bar via **`.safeAreaInset(edge:
+.bottom)`** (a `.bottomBar` toolbar renders blank in the snapshot host).
+
+**The load fetches two source-scoped slices, never one shared page** (desktop parity): the
+interactive list with `exclude_sources=cron`, then up to 50 cron runs with `source=cron`
+(`SessionSourceFilter`, both endpoints), merged by id into `sessions` (`mergeSessionSlices`).
+Cron runs are always the newest rows, so in one 50-row page a busy job crowded real
+conversations out of the window — the list showed a handful while desktop showed dozens. An
+agent that predates the parameters returns the same unscoped page twice, which merges back to
+that page. A failed cron slice fails the load like any other (banner, previous rows kept).
 
 **Bucketing is pure HermesKit** (`SessionDateBucket`, unit-tested on macOS), a port of desktop
 `calendarBucket` (`apps/desktop/src/lib/time.ts`). Every date is mapped to its **nominal day**
@@ -61,8 +70,8 @@ library `\.calendar` has no test value), so TestStores and snapshots pin it.
 — so one column never mixes card and one-line geometry (desktop parity). What a card shows is
 derived in HermesKit by `SessionCardContent` (unit-tested); the view only lays it out.
 Anatomy:
-1. **Header**: unread dot, the branch elbow stem (`└─`/`├─`) when nested, the workspace
-   label (`Session.workspaceLabel`: `cwd` last path component; a root path verbatim; else
+1. **Header**: the status dot (below), the branch elbow stem (`└─`/`├─`) when nested, the
+   workspace label (`Session.workspaceLabel`: `cwd` last path component; a root path verbatim; else
    "No workspace"), pin glyph, then the relative age on the trailing edge. Search passes
    `showsWorkspace: false` — a search hit carries no `cwd`, so the slot is left out rather
    than claim "No workspace".
@@ -78,8 +87,17 @@ Anatomy:
 Cards are natural-height (no min-height floor — see "Rows are natural-height" below), carry
 their own working glow (`CardActiveGlow`, separate pulse state from the row's), and expose one
 combined accessibility label (`SessionCardContent.accessibilityLabel`: workspace, title,
-preview, model, count, age, then Unread/Pinned/Working). Nested branch cards keep a 16pt
+preview, model, count, age, then the status and Pinned). Nested branch cards keep a 16pt
 leading indent on top of the header stem, so the whole card reads as belonging to the parent.
+
+**The status dot** mirrors desktop's `SessionStatusDot` for the states mobile can know, one
+state resolved by `SessionStatus` (needs-input over working over unread): **amber** when an
+approval / clarify waits on the user (`AppFeature.State.needsInputSessionIDs` — unopened
+approval pushes plus the live chat while its card is up, passed in by `AppView`), the
+**accent** while a turn runs, **green** for unread, and a smaller faint dot when idle, always
+in a fixed-width slot so header text keeps one left edge. Desktop's stalled / background /
+draft states need live events for every session and are not shown. The compact row's unread
+dot keeps the accent.
 
 **The compact `SessionRowView` stays only on dense surfaces**: cron run peeks, the flat cron
 fallback, unmatched cron runs (`cronRunRow(_:)`), and the archived sheet. Cards (`row(_:)`) and

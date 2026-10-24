@@ -80,53 +80,20 @@ struct PreferencesClientTests {
     #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // unknown raw value → default
   }
 
-  @Test func inMemoryCronSectionCollapsedRoundTripAndDefault() {
-    let prefs = PreferencesClient.inMemory()
-    #expect(prefs.loadCronSectionCollapsed() == false) // default when unset: expanded
-
-    prefs.saveCronSectionCollapsed(true)
-    #expect(prefs.loadCronSectionCollapsed() == true)
-
-    prefs.saveCronSectionCollapsed(false)
-    #expect(prefs.loadCronSectionCollapsed() == false)
-  }
-
-  @Test func liveCronSectionCollapsedBacksOntoProvidedDefaults() {
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.croncollapsed")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.croncollapsed")
+  @Test func liveClientDropsRetiredListPrefKeys() {
+    // The grouping mode and the cron-section hide / collapse toggles are retired (the list
+    // is always date-sectioned and cron runs have their own tab). A build that persisted any
+    // of them leaves the key behind; building the live client clears them, untranslated,
+    // and leaves the prefs that are still in use alone.
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.retired.list.prefs")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.retired.list.prefs")
+    let retired = ["hermes.session-grouping-mode", "hermes.show-cron-section", "hermes.cron-section-collapsed"]
+    for key in retired { suite.set(true, forKey: key) }
+    suite.set("delete", forKey: "hermes.default-session-swipe-action")
     let prefs = PreferencesClient.live(defaults: suite)
 
-    #expect(prefs.loadCronSectionCollapsed() == false) // default when unset: expanded
-    prefs.saveCronSectionCollapsed(true)
-    #expect(suite.bool(forKey: "hermes.cron-section-collapsed") == true)
-    #expect(prefs.loadCronSectionCollapsed() == true)
-  }
-
-  @Test func liveClientDropsStaleShowCronSectionKey() {
-    // A build that persisted the old hide pref leaves `hermes.show-cron-section` behind;
-    // building the live client clears it and does NOT translate it — the section starts
-    // expanded.
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.croncollapsed.legacy")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.croncollapsed.legacy")
-    suite.set(false, forKey: "hermes.show-cron-section")
-    let prefs = PreferencesClient.live(defaults: suite)
-
-    #expect(suite.object(forKey: "hermes.show-cron-section") == nil)
-    #expect(prefs.loadCronSectionCollapsed() == false)
-  }
-
-  @Test func liveClientDropsStaleGroupingModeKey() {
-    // The workspace/chronological grouping pref is retired (the list is always
-    // date-sectioned); a build that persisted it leaves the key behind, and building the
-    // live client clears it so an upgrade leaves no orphaned default.
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping.legacy")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping.legacy")
-    suite.set("chronological", forKey: "hermes.session-grouping-mode")
-    suite.set(true, forKey: "hermes.cron-section-collapsed")
-    let prefs = PreferencesClient.live(defaults: suite)
-
-    #expect(suite.object(forKey: "hermes.session-grouping-mode") == nil)
-    #expect(prefs.loadCronSectionCollapsed() == true) // the live pref is untouched
+    for key in retired { #expect(suite.object(forKey: key) == nil, "\(key) is cleared") }
+    #expect(prefs.loadDefaultSessionSwipeAction() == .delete)
   }
 
   @Test func inMemorySelectedProfileRoundTripAndClear() {

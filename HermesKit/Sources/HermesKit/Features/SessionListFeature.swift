@@ -1,7 +1,7 @@
 import ComposableArchitecture
 import Foundation
 
-/// A cron job with its run-history sessions — one row of the grouped Cron Jobs section.
+/// A cron job with its run-history sessions — one row of the grouped Cron Jobs tab.
 /// Built by `SessionListFeature.State.cronJobGroups`.
 public struct CronJobGroup: Equatable, Sendable, Identifiable {
   public var job: CronJob
@@ -65,10 +65,9 @@ public struct SessionListFeature {
     /// loaded with the other prefs. Views must read `effectiveSwipeAction`, which clamps
     /// this to `.archive` while the agent lacks the DELETE capability.
     public var defaultSwipeAction: SessionSwipeAction
-    /// Whether the always-on "Cron Jobs" section is collapsed to its header (the header and
-    /// its unread badge always render). Device-local UI pref, seeded from prefs on load;
-    /// toggled from the section header. Defaults to `false` (expanded).
-    public var cronSectionCollapsed: Bool
+    /// The bottom bar's selected tab. In-memory only (a launch starts on Sessions); views
+    /// read `effectiveTab`, which falls back to Sessions while there is no cron content.
+    public var selectedTab: SessionListTab
     /// Ids whose rename PATCH is currently IN FLIGHT. Transient: added when the PATCH starts,
     /// removed on success/failure. While non-empty the poll skips (like `archivingIDs`) so a
     /// fetch landing mid-PATCH can't clobber the optimistic title with the server's old one.
@@ -166,7 +165,7 @@ public struct SessionListFeature {
       deletingIDs: Set<String> = [],
       deleteSupported: Bool = true,
       defaultSwipeAction: SessionSwipeAction = .default,
-      cronSectionCollapsed: Bool = false,
+      selectedTab: SessionListTab = .sessions,
       renamingInFlightIDs: Set<String> = [],
       renamingID: Session.ID? = nil,
       renameDraft: String = "",
@@ -198,7 +197,7 @@ public struct SessionListFeature {
       self.deletingIDs = deletingIDs
       self.deleteSupported = deleteSupported
       self.defaultSwipeAction = defaultSwipeAction
-      self.cronSectionCollapsed = cronSectionCollapsed
+      self.selectedTab = selectedTab
       self.renamingInFlightIDs = renamingInFlightIDs
       self.renamingID = renamingID
       self.renameDraft = renameDraft
@@ -261,7 +260,7 @@ public struct SessionListFeature {
     /// section into a full history browser (mirrors the desktop sidebar's limit).
     public static let cronPeekLimit = 5
 
-    /// The Cron Jobs section grouped desktop-style: one entry per *job* (sorted soonest
+    /// The Cron Jobs tab grouped desktop-style: one entry per *job* (sorted soonest
     /// next-run first, no-next-run last, then title), each carrying its most recent *runs*
     /// (the cron sessions whose id-embedded job id matches, capped to `cronPeekLimit`).
     /// Empty when the agent lacks the jobs API or no jobs were fetched yet — the view then
@@ -299,22 +298,36 @@ public struct SessionListFeature {
       }
     }
 
-    /// Whether the non-search list renders the Cron Jobs section: any cron run, or any
-    /// fetched job — a job with no runs (in the fetched window) stays reachable for
-    /// Run now / Pause / Resume.
-    public var showsCronSection: Bool {
+    /// Whether there is cron content for the Cron Jobs tab: any cron run, or any fetched
+    /// job — a job with no runs (in the fetched window) stays reachable for Run now / Pause /
+    /// Resume.
+    public var hasCronContent: Bool {
       !cronSessions.isEmpty || !cronJobGroups.isEmpty
     }
 
-    /// Whether the list shows the "No sessions" placeholder: nothing fetched and nothing
-    /// loading or failed — and, outside search, no Cron Jobs section to show instead.
-    public var showsEmptyPlaceholder: Bool {
-      sessions.isEmpty && !isLoading && loadError == nil && (isSearching || !showsCronSection)
+    /// Whether the bottom bar shows the Sessions | Cron Jobs tabs: only with cron content,
+    /// and not while searching (search is a Sessions-only mode).
+    public var showsTabBar: Bool {
+      hasCronContent && !isSearching
     }
 
-    /// An empty non-search list with no jobs known yet: only the load's sequential cron
-    /// fetch can tell "No sessions" from a jobs-only Cron Jobs section, so `isLoading`
-    /// holds until that response lands.
+    /// The tab the list actually renders: `selectedTab` while the tab bar shows, else
+    /// Sessions — so a profile or poll that drops every cron row never strands an empty tab.
+    public var effectiveTab: SessionListTab {
+      showsTabBar ? selectedTab : .sessions
+    }
+
+    /// Whether the Sessions tab shows the "No sessions" placeholder: no search hit (or, outside
+    /// search, no interactive session — cron runs live in their own tab) and nothing loading
+    /// or failed.
+    public var showsEmptyPlaceholder: Bool {
+      effectiveTab == .sessions && !isLoading && loadError == nil
+        && (isSearching ? sessions.isEmpty : interactiveSessions.isEmpty)
+    }
+
+    /// An empty non-search list with no jobs known yet: the load's sequential cron fetch
+    /// decides whether a Cron Jobs tab appears, so `isLoading` holds until that response
+    /// lands and the list settles once (placeholder and tab bar together).
     var awaitsCronJobs: Bool {
       sessions.isEmpty && cronJobs.isEmpty && cronJobsSupported && !isSearching
     }
@@ -338,7 +351,7 @@ public struct SessionListFeature {
     }
 
     /// Pinned sessions resolved from `pinnedIDs`, in pin order; stale ids are dropped. Cron
-    /// sessions are excluded (they belong to the Cron Jobs section), even if pinned.
+    /// sessions are excluded (they belong to the Cron Jobs tab), even if pinned.
     public var pinnedSessions: [Session] {
       pinnedIDs.compactMap { id in sessions[id: id].flatMap { $0.isCron ? nil : $0 } }
     }
@@ -409,8 +422,8 @@ public struct SessionListFeature {
     case copyIDButtonTapped(id: Session.ID)
     /// The copy toast's dwell time elapsed — hide it.
     case copiedIDToastExpired
-    /// Collapse/expand the always-on "Cron Jobs" section and persist the choice.
-    case toggleCronSectionCollapsed
+    /// A bottom-bar tab was tapped.
+    case selectTab(SessionListTab)
     case archiveButtonTapped(id: Session.ID)
     /// Archive RPC succeeded — clear the transient in-flight guard and cancel (or, when
     /// one is pending, restart — see `cancelOrRestartFetch`) any fetch that started
@@ -914,10 +927,9 @@ public struct SessionListFeature {
         state.copiedIDToastToken = nil
         return .none
 
-      case .toggleCronSectionCollapsed:
-        state.cronSectionCollapsed.toggle()
-        let collapsed = state.cronSectionCollapsed
-        return .run { [preferences] _ in preferences.saveCronSectionCollapsed(collapsed) }
+      case let .selectTab(tab):
+        state.selectedTab = tab
+        return .none
 
       case let .archiveButtonTapped(id):
         state.confirmationDialog = ConfirmationDialogState {
@@ -1463,7 +1475,7 @@ public struct SessionListFeature {
   }
 
   /// Refresh "now" + the section calendar, clear errors, and reload the non-secret persisted
-  /// prefs (seen counts, pins, swipe action, cron collapse). Shared by `.task` and `load()`
+  /// prefs (seen counts, pins, swipe action). Shared by `.task` and `load()`
   /// — `.task` additionally reloads the selected profile before probing the profiles
   /// capability.
   private func reloadPrefs(_ state: inout State) {
@@ -1473,7 +1485,6 @@ public struct SessionListFeature {
     state.seenCounts = preferences.loadSeenCounts()
     state.pinnedIDs = preferences.loadPinnedIDs()
     state.defaultSwipeAction = preferences.loadDefaultSessionSwipeAction()
-    state.cronSectionCollapsed = preferences.loadCronSectionCollapsed()
   }
 
   /// Refresh "now", clear errors, reload persisted prefs, and fetch the session list

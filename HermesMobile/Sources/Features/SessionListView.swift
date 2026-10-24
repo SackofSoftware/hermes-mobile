@@ -16,6 +16,8 @@ struct SessionListView: View {
   /// .needsInputSessionIDs`, passed in by `AppView` like the highlight.
   var needsInputSessionIDs: Set<String> = []
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  /// Slides the selected-tab capsule between the bottom bar's tabs.
+  @Namespace private var tabSelection
 
   var body: some View {
     List {
@@ -24,15 +26,20 @@ struct SessionListView: View {
           .foregroundStyle(.red)
           .listRowSeparator(.hidden)
       }
-      if store.isSearching {
-        // Search results are flat cards. A hit carries only id, snippet (as `preview`) and
-        // start time: the untitled card promotes the snippet to its title, and the header
-        // leaves out the workspace it doesn't know.
-        ForEach(store.sessions) { session in
-          row(session, showsWorkspace: false)
+      switch store.effectiveTab {
+      case .sessions:
+        if store.isSearching {
+          // Search results are flat cards. A hit carries only id, snippet (as `preview`) and
+          // start time: the untitled card promotes the snippet to its title, and the header
+          // leaves out the workspace it doesn't know.
+          ForEach(store.sessions) { session in
+            row(session, showsWorkspace: false)
+          }
+        } else {
+          sessionListContent
         }
-      } else {
-        sessionListContent
+      case .cron:
+        cronTabContent
       }
     }
     .listStyle(.plain)
@@ -51,12 +58,13 @@ struct SessionListView: View {
     .overlay(alignment: .bottom) {
       CopiedToastView(token: store.copiedIDToastToken)
     }
-    // The profile pill is the centered (principal) title; "Sessions" is a list section
-    // header instead, alongside its sibling Cron Jobs section. The pill needs the inline
-    // bar, so keep the nav title empty + inline in both cases.
+    // The profile pill is the centered (principal) title; "Sessions" / "Cron Jobs" is a list
+    // header row instead. The pill needs the inline bar, so keep the nav title empty + inline.
     .navigationTitle("")
     .navigationBarTitleDisplayMode(.inline)
-    .searchable(text: $store.searchQuery, prompt: "Search sessions")
+    // Search sits under the nav bar (not the iOS 26 bottom field) so the bottom stays the
+    // tab bar + New chat, and only on the Sessions tab — cron runs aren't searched.
+    .modifier(SessionSearch(isEnabled: store.effectiveTab == .sessions, text: $store.searchQuery))
     .refreshable { store.send(.pulledToRefresh) }
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
@@ -77,11 +85,10 @@ struct SessionListView: View {
         }
       }
     }
-    // New chat lives at the bottom (Codex-style). A `safeAreaInset` keeps it in the
-    // normal view hierarchy so it sits above the home indicator — and, on iOS 26 where
-    // `.searchable` moves to the bottom, above the search field too.
+    // The bottom bar: the Sessions | Cron Jobs tabs (only with cron content) and New chat.
+    // A `safeAreaInset` keeps it in the normal view hierarchy, above the home indicator.
     .safeAreaInset(edge: .bottom) {
-      newChatBar
+      bottomBar
     }
     // `bottomActionSheet`, not `.confirmationDialog`: on iOS 26 the SwiftUI modifier
     // renders as a floating popover (dropping the title and Cancel) wherever it's
@@ -143,15 +150,14 @@ struct SessionListView: View {
     }
   }
 
-  /// The non-search list body: the "Sessions" header, the pinned section, the interactive
-  /// sessions split into update-date sections, then the always-on Cron Jobs section.
+  /// The Sessions tab's non-search body: the "Sessions" header, the pinned section, then the
+  /// interactive sessions split into update-date sections (cron runs live in their own tab).
   /// Extracted from `body` to keep the `List` builder within the compiler's type-check
   /// budget.
   @ViewBuilder
   private var sessionListContent: some View {
-    // Top-level "Sessions" section header; the Cron Jobs section below carries its own
-    // (collapse-button) header, both scoped to the active profile pill.
-    sessionsSectionHeader
+    // Top-level "Sessions" header, scoped to the active profile pill.
+    tabTitleHeader("Sessions")
     // Pinned sessions float to the top — as cards too, so the column never mixes card and
     // one-line geometry (desktop parity).
     if !store.pinnedSessions.isEmpty {
@@ -174,13 +180,6 @@ struct SessionListView: View {
         sectionHeader(section.label)
       }
     }
-    // Cron-scheduled sessions live in their own always-on section below the
-    // interactive list (filtered out of pinned and the date sections by the reducer).
-    // Hidden only when there are no runs and no jobs; a collapsed section keeps its header
-    // (and unread badge).
-    if store.showsCronSection {
-      cronJobsSection
-    }
   }
 
   /// A Pinned / date-section header: the title on the leading side and a hairline running to
@@ -198,101 +197,52 @@ struct SessionListView: View {
     .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
   }
 
-  /// Top-level content section header. The active profile is shown in the pill (the
-  /// centered nav title); this labels the sessions list as one section, with the Cron Jobs
-  /// section alongside it under the same profile.
-  private var sessionsSectionHeader: some View {
-    Text("Sessions")
+  /// A tab's top-level title row ("Sessions" / "Cron Jobs"). The active profile is shown in
+  /// the pill (the centered nav title); both tabs are scoped to it.
+  private func tabTitleHeader(_ title: String) -> some View {
+    Text(title)
       .font(.title2.weight(.bold))
       .listRowSeparator(.hidden)
       .listRowBackground(Color.clear)
       .accessibilityAddTraits(.isHeader)
   }
 
-  /// Always-on "Cron Jobs" section. When the agent exposes `/api/cron/jobs` the rows are
-  /// the *jobs* (state dot, next-run countdown, unread dot), desktop-style: tapping a job
-  /// expands a single-open inline peek of its recent *runs* (the compact `cronRunRow(_:)`
-  /// — a dense tree surface keeps the one-liner, like the desktop); a context menu offers
-  /// Run now / Pause / Resume. Older agents (or before the first jobs fetch) fall back to
-  /// the flat run list. The header is the collapse control and carries the aggregate unread
-  /// badge either way — collapsed hides everything below it.
+  /// The Cron Jobs tab. When the agent exposes `/api/cron/jobs` the rows are the *jobs*
+  /// (state dot, next-run countdown, unread dot), desktop-style: tapping a job expands a
+  /// single-open inline peek of its recent *runs* (the compact `cronRunRow(_:)` — a dense
+  /// tree surface keeps the one-liner, like the desktop); a context menu offers Run now /
+  /// Pause / Resume. Older agents (or before the first jobs fetch) fall back to the flat run
+  /// list. The tab's own badge carries the aggregate unread count.
   @ViewBuilder
-  private var cronJobsSection: some View {
-    cronSectionHeader
-    if !store.cronSectionCollapsed {
-      if store.cronJobGroups.isEmpty {
-        // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
-        ForEach(store.cronSessions) { session in
-          cronRunRow(session)
-        }
-      } else {
-        ForEach(store.cronJobGroups) { group in
-          cronJobRow(group)
-          if store.expandedCronJobID == group.id {
-            if group.runs.isEmpty {
-              Text("No runs yet")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 24)
-                .listRowSeparator(.hidden)
-            }
-            ForEach(group.runs) { run in
-              cronRunRow(run)
-                .padding(.leading, 24) // indented under the owning job
-            }
+  private var cronTabContent: some View {
+    tabTitleHeader("Cron Jobs")
+    if store.cronJobGroups.isEmpty {
+      // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
+      ForEach(store.cronSessions) { session in
+        cronRunRow(session)
+      }
+    } else {
+      ForEach(store.cronJobGroups) { group in
+        cronJobRow(group)
+        if store.expandedCronJobID == group.id {
+          if group.runs.isEmpty {
+            Text("No runs yet")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+              .padding(.leading, 24)
+              .listRowSeparator(.hidden)
+          }
+          ForEach(group.runs) { run in
+            cronRunRow(run)
+              .padding(.leading, 24) // indented under the owning job
           }
         }
-        // Runs whose job no longer exists (deleted job, legacy id) — never hide output.
-        ForEach(store.unmatchedCronSessions) { session in
-          cronRunRow(session)
-        }
+      }
+      // Runs whose job no longer exists (deleted job, legacy id) — never hide output.
+      ForEach(store.unmatchedCronSessions) { session in
+        cronRunRow(session)
       }
     }
-  }
-
-  /// "Cron Jobs" header — the section's persisted collapse control — with the aggregate
-  /// unread badge (count of cron runs with unseen output — the desktop's `CRON JOBS 4`), so
-  /// activity stays visible from the header even while the section is collapsed.
-  private var cronSectionHeader: some View {
-    let isExpanded = !store.cronSectionCollapsed
-    return Button {
-      store.send(.toggleCronSectionCollapsed, animation: reduceMotion ? nil : .snappy)
-    } label: {
-      HStack(spacing: 8) {
-        Label("Cron Jobs", systemImage: "clock")
-          .font(.title2.weight(.bold))
-        if store.cronUnreadCount > 0 {
-          Text("\(store.cronUnreadCount)")
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(Color.hermesAccent, in: Capsule())
-        }
-        Spacer()
-        Image(systemName: "chevron.right")
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(.tertiary)
-          .rotationEffect(.degrees(isExpanded ? 90 : 0))
-      }
-      .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
-    .listRowSeparator(.hidden)
-    .listRowBackground(Color.clear)
-    .accessibilityAddTraits(.isHeader)
-    .accessibilityLabel(cronSectionAccessibilityLabel(isExpanded: isExpanded))
-  }
-
-  private func cronSectionAccessibilityLabel(isExpanded: Bool) -> String {
-    var parts = ["Cron Jobs"]
-    switch store.cronUnreadCount {
-    case 0: break
-    case 1: parts.append("1 unread cron run")
-    case let count: parts.append("\(count) unread cron runs")
-    }
-    parts.append(isExpanded ? "expanded" : "collapsed")
-    return parts.joined(separator: ", ")
   }
 
   /// One cron *job* row: state dot, title, next-run countdown (relative, from the same
@@ -459,23 +409,98 @@ struct SessionListView: View {
   /// The bottom "new session" button — a trailing circular FAB in the Hermes accent
   /// (icon-only: it starts a new session, not a chat). Rendered via `safeAreaInset` so the
   /// list content scrolls clear of it.
-  private var newChatBar: some View {
-    HStack {
-      Spacer()
+  /// The bottom bar: a glass Sessions | Cron Jobs tab pill on the leading side (only while
+  /// there is cron content — `showsTabBar`) and the round glass New chat button trailing.
+  private var bottomBar: some View {
+    HStack(alignment: .center) {
+      if store.showsTabBar {
+        tabPill
+      }
+      Spacer(minLength: 0)
       Button {
         store.send(.newSessionButtonTapped)
       } label: {
         Image(systemName: "square.and.pencil")
           .font(.title2.weight(.semibold))
-          .foregroundStyle(.white)
-          .frame(width: 56, height: 56)
-          .background(Color.hermesAccent, in: Circle())
-          .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
+          .foregroundStyle(.primary)
+          .frame(width: Self.barHeight, height: Self.barHeight)
+          .contentShape(Circle())
+          .modifier(GlassBackground(
+            shape: Circle(), isInteractive: true, fallbackShadowRadius: 6, fallbackShadowY: 3
+          ))
       }
+      .buttonStyle(.plain)
       .accessibilityLabel("New session")
     }
     .padding(.horizontal)
     .padding(.vertical, 8)
+  }
+
+  /// The bar's shared height: the tab pill and the New chat circle line up.
+  private static let barHeight: CGFloat = 64
+
+  private var tabPill: some View {
+    HStack(spacing: 0) {
+      tabButton(.sessions, title: "Sessions", systemImage: "text.bubble.fill")
+      tabButton(.cron, title: "Cron Jobs", systemImage: "clock.fill", badge: store.cronUnreadCount)
+    }
+    .padding(4)
+    .frame(height: Self.barHeight)
+    .modifier(GlassBackground(shape: Capsule(), fallbackShadowRadius: 6, fallbackShadowY: 3))
+  }
+
+  /// One tab: icon over label, the selected one on an inner capsule in the accent color. The
+  /// Cron Jobs tab carries the aggregate unread-run badge (the desktop's `CRON JOBS 4`).
+  private func tabButton(
+    _ tab: SessionListTab,
+    title: String,
+    systemImage: String,
+    badge: Int = 0
+  ) -> some View {
+    let isSelected = store.effectiveTab == tab
+    return Button {
+      store.send(.selectTab(tab), animation: reduceMotion ? nil : .snappy)
+    } label: {
+      VStack(spacing: 2) {
+        Image(systemName: systemImage)
+          .font(.title3)
+          .overlay(alignment: .topTrailing) {
+            if badge > 0 {
+              Text("\(badge)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.hermesAccent, in: Capsule())
+                .offset(x: 12, y: -6)
+            }
+          }
+        Text(title)
+          .font(.caption.weight(.semibold))
+      }
+      .foregroundStyle(isSelected ? Color.hermesAccent : Color.primary)
+      .padding(.horizontal, 18)
+      .frame(maxHeight: .infinity)
+      .background {
+        if isSelected {
+          Capsule()
+            .fill(Color(.systemBackground).opacity(0.55))
+            .matchedGeometryEffect(id: "selectedTab", in: tabSelection)
+        }
+      }
+      .contentShape(Capsule())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(tabAccessibilityLabel(title: title, badge: badge))
+    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+  }
+
+  private func tabAccessibilityLabel(title: String, badge: Int) -> String {
+    switch badge {
+    case 0: title
+    case 1: "\(title), 1 unread cron run"
+    default: "\(title), \(badge) unread cron runs"
+    }
   }
 
   /// Stemmed-entry convenience: renders a lane's `SessionBranchEntry` — the card with the
@@ -633,6 +658,26 @@ struct SessionListView: View {
       Button("Pin", systemImage: "pin") {
         store.send(.pinSession(id: session.id), animation: .snappy)
       }
+    }
+  }
+}
+
+/// The Sessions tab's search field, pinned under the navigation bar so the bottom of the
+/// screen stays the tab bar + New chat (iOS 26 would otherwise move `.searchable` to the
+/// bottom). Absent on the Cron Jobs tab — cron runs aren't searched.
+private struct SessionSearch: ViewModifier {
+  let isEnabled: Bool
+  @Binding var text: String
+
+  func body(content: Content) -> some View {
+    if isEnabled {
+      content.searchable(
+        text: $text,
+        placement: .navigationBarDrawer(displayMode: .always),
+        prompt: "Search sessions"
+      )
+    } else {
+      content
     }
   }
 }

@@ -123,43 +123,48 @@ struct SessionListCronTests {
     #expect(noJobs.unmatchedCronSessions.isEmpty)
   }
 
-  @Test func jobsWithoutRunsKeepTheSectionAndSuppressTheEmptyPlaceholder() {
+  @Test func jobsWithoutRunsKeepTheCronTabAndThePlaceholderFollowsTheTab() {
     // No sessions at all (no runs in the fetched window), but the agent has a job: the
-    // section must stay so the job can still be run, paused, or resumed.
-    let jobsOnly = SessionListFeature.State(
+    // Cron Jobs tab must stay so the job can still be run, paused, or resumed. The Sessions
+    // tab has nothing interactive, so it shows "No sessions"; the Cron tab never does.
+    var jobsOnly = SessionListFeature.State(
       connection: connection,
       cronJobs: [CronJob(id: "job1", name: "Digest")]
     )
     #expect(jobsOnly.cronSessions.isEmpty)
     #expect(jobsOnly.cronJobGroups.map(\.id) == ["job1"])
-    #expect(jobsOnly.showsCronSection)
+    #expect(jobsOnly.hasCronContent)
+    #expect(jobsOnly.showsTabBar)
+    #expect(jobsOnly.showsEmptyPlaceholder)
+    jobsOnly.selectedTab = .cron
     #expect(!jobsOnly.showsEmptyPlaceholder)
 
-    // Search hides the cron section, so an empty result set shows the placeholder.
+    // Search is a Sessions-only mode: an empty result set shows the placeholder.
     var searching = jobsOnly
     searching.searchQuery = "digest"
     #expect(searching.showsEmptyPlaceholder)
 
-    // Jobs fetched but the API is unsupported → no section, placeholder shows.
+    // Jobs fetched but the API is unsupported → no Cron Jobs tab.
     let unsupported = SessionListFeature.State(
       connection: connection,
       cronJobs: [CronJob(id: "job1")],
       cronJobsSupported: false
     )
-    #expect(!unsupported.showsCronSection)
+    #expect(!unsupported.hasCronContent)
     #expect(unsupported.showsEmptyPlaceholder)
 
-    // Runs alone (flat fallback, no jobs) still show the section.
+    // Runs alone (flat fallback, no jobs) still make a Cron Jobs tab, and cron runs never
+    // count as Sessions-tab content.
     let runsOnly = SessionListFeature.State(
       connection: connection,
       sessions: [cronSession("job1", stamp: "20260702_090000")]
     )
-    #expect(runsOnly.showsCronSection)
-    #expect(!runsOnly.showsEmptyPlaceholder)
+    #expect(runsOnly.hasCronContent)
+    #expect(runsOnly.showsEmptyPlaceholder)
 
     // Nothing at all → placeholder, unless still loading or failed.
     let empty = SessionListFeature.State(connection: connection)
-    #expect(!empty.showsCronSection)
+    #expect(!empty.hasCronContent)
     #expect(empty.showsEmptyPlaceholder)
     #expect(!SessionListFeature.State(connection: connection, isLoading: true).showsEmptyPlaceholder)
     #expect(
@@ -370,7 +375,7 @@ struct SessionListCronTests {
     #expect(requestedProfile.value == nil)
   }
 
-  @Test func jobsOnlyLoadNeverFlashesTheEmptyPlaceholder() async {
+  @Test func jobsOnlyLoadSettlesOnceWithTheCronTab() async {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()
     } withDependencies: {
@@ -384,15 +389,17 @@ struct SessionListCronTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    // An empty list is still loading until the sequential cron fetch lands.
+    // An empty list is still loading until the sequential cron fetch lands, so neither the
+    // placeholder nor the tab bar appears ahead of the other.
     await store.receive(\.sessionsResponse.success)
     #expect(!store.state.showsEmptyPlaceholder)
+    #expect(!store.state.showsTabBar)
     await store.receive(\.cronJobsResponse.success) {
       $0.isLoading = false
       $0.cronJobs = [CronJob(id: "job1", name: "Digest")]
     }
-    #expect(store.state.showsCronSection)
-    #expect(!store.state.showsEmptyPlaceholder)
+    #expect(store.state.showsTabBar)
+    #expect(store.state.showsEmptyPlaceholder, "the Sessions tab really is empty")
   }
 
   @Test func emptyLoadWithTransientCronFailureSettlesOnThePlaceholder() async {

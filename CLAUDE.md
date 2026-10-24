@@ -210,7 +210,7 @@ bullets below are the compressed rules.
   anchor only; server wins on hydrate, persistence debounced (flushed on
   `.background`), wiped on logout; behind the client boundary (no reactive `@FetchAll`).
 - **Persistence**: secrets → `KeychainClient`; non-secret prefs (URL, seen counts,
-  pins, cron collapse, profile) → `PreferencesClient`. Clients over `@Shared` for test
+  pins, swipe default, profile) → `PreferencesClient`. Clients over `@Shared` for test
   isolation; both have `.inMemory()`. **Logout must clear every prefs entry.**
 - **Pins are device-local; archive, rename, and delete are server-side**, optimistic
   with rollback (list → REST `PATCH`/`DELETE`; chat rename → `session.title`).
@@ -231,7 +231,8 @@ bullets below are the compressed rules.
   starve it): always-on update-date sections via pure `SessionDateBucket` /
   `groupEntriesByDate` (no grouping pref); `SessionCardView` on every interactive row,
   compact `SessionRowView` only for cron runs + the archived sheet; cron sessions sit in
-  an always-on job-grouped section (capability-gated; collapse pref, badge stays);
+  a job-grouped Cron Jobs TAB (bottom-bar pill only with cron content; views read
+  `effectiveTab`; unread badge on the tab; search is Sessions-only, at the top);
   nesting via pure `flattenSessionsWithBranches` (orphans de-nest; search stays flat).
   Details: `docs/features/session-list.md`.
 - **Row affordances**: trailing swipe = destructive default FIRST (full-swipe target),

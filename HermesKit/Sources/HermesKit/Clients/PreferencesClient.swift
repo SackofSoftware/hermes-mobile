@@ -21,11 +21,6 @@ public struct PreferencesClient: Sendable {
   /// (archive vs permanent delete). Device-local UI pref; reset on logout.
   public var loadDefaultSessionSwipeAction: @Sendable () -> SessionSwipeAction = { .default }
   public var saveDefaultSessionSwipeAction: @Sendable (_ action: SessionSwipeAction) -> Void
-  /// Whether the session list's always-on "Cron Jobs" section is collapsed to its header
-  /// (the header and its unread badge stay visible either way). Device-local UI pref;
-  /// defaults to `false` (expanded); reset on logout.
-  public var loadCronSectionCollapsed: @Sendable () -> Bool = { false }
-  public var saveCronSectionCollapsed: @Sendable (_ collapsed: Bool) -> Void
   /// Currently selected Hermes profile name. Device-local — we never change the server's
   /// sticky active profile. Also carries the profiles capability verdict — read it through
   /// `SessionListFeature.State.persistedProfileName` / `persistedProfilesSupported`.
@@ -65,7 +60,6 @@ public extension PreferencesClient {
     let seenKey = "hermes.seen-message-counts"
     let pinnedKey = "hermes.pinned-session-ids"
     let swipeActionKey = "hermes.default-session-swipe-action"
-    let cronSectionCollapsedKey = "hermes.cron-section-collapsed"
     let selectedProfileKey = "hermes.selected-profile-id"
     let pushTokenKey = "hermes.push-device-token"
     let pushSnoozeCountKey = "hermes.push-prompt-snooze-count"
@@ -75,10 +69,11 @@ public extension PreferencesClient {
 
     // Retired prefs, dropped once when the client is built so an upgrade leaves no orphaned
     // default behind: the workspace/chronological grouping mode (the list is always
-    // date-sectioned now) and the cron-section hide toggle (superseded by
-    // `cronSectionCollapsedKey` — the section can only be collapsed). Not migrated.
-    store.removeObject(forKey: "hermes.session-grouping-mode")
-    store.removeObject(forKey: "hermes.show-cron-section")
+    // date-sectioned now) and the cron-section hide and collapse toggles (cron runs live in
+    // their own tab now). Not migrated.
+    for retired in ["hermes.session-grouping-mode", "hermes.show-cron-section", "hermes.cron-section-collapsed"] {
+      store.removeObject(forKey: retired)
+    }
 
     return PreferencesClient(
       loadServerURL: { store.string(forKey: key) },
@@ -92,9 +87,6 @@ public extension PreferencesClient {
         store.string(forKey: swipeActionKey).flatMap(SessionSwipeAction.init(rawValue:)) ?? .default
       },
       saveDefaultSessionSwipeAction: { store.set($0.rawValue, forKey: swipeActionKey) },
-      // Absent key (never toggled) reads `false` — the section is expanded by default.
-      loadCronSectionCollapsed: { store.bool(forKey: cronSectionCollapsedKey) },
-      saveCronSectionCollapsed: { store.set($0, forKey: cronSectionCollapsedKey) },
       loadSelectedProfileID: { store.string(forKey: selectedProfileKey) },
       saveSelectedProfileID: { store.set($0, forKey: selectedProfileKey) },
       clearSelectedProfileID: { store.removeObject(forKey: selectedProfileKey) },
@@ -124,7 +116,6 @@ public extension PreferencesClient {
     let seen = LockIsolated<[String: Int]>([:])
     let pinned = LockIsolated<[String]>([])
     let swipeAction = LockIsolated<SessionSwipeAction>(.default)
-    let cronSectionCollapsed = LockIsolated<Bool>(false)
     let selectedProfile = LockIsolated<String?>(nil)
     let pushToken = LockIsolated<String?>(nil)
     let pushSnooze = LockIsolated<(count: Int, until: Date)?>(nil)
@@ -138,8 +129,6 @@ public extension PreferencesClient {
       savePinnedIDs: { pinned.setValue($0) },
       loadDefaultSessionSwipeAction: { swipeAction.value },
       saveDefaultSessionSwipeAction: { swipeAction.setValue($0) },
-      loadCronSectionCollapsed: { cronSectionCollapsed.value },
-      saveCronSectionCollapsed: { cronSectionCollapsed.setValue($0) },
       loadSelectedProfileID: { selectedProfile.value },
       saveSelectedProfileID: { selectedProfile.setValue($0) },
       clearSelectedProfileID: { selectedProfile.setValue(nil) },

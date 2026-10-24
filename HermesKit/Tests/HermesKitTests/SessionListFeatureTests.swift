@@ -2260,58 +2260,41 @@ struct SessionListFeatureTests {
     #expect(sectionedIDs == state.chronologicalEntries.map(\.id))
   }
 
-  // MARK: - Cron section collapse
+  // MARK: - Bottom-bar tabs
 
-  @Test func toggleCronSectionCollapsedFlipsStateAndPersists() async {
-    let prefs = PreferencesClient.inMemory()
-    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+  @Test func selectTabSwitchesTheRenderedTab() async {
+    let run = Session(id: "cron_job1_20260702_090000", source: "cron")
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: [run])
+    ) {
       SessionListFeature()
-    } withDependencies: {
-      $0.preferences = prefs
     }
 
-    #expect(store.state.cronSectionCollapsed == false) // default: expanded
-    await store.send(.toggleCronSectionCollapsed) {
-      $0.cronSectionCollapsed = true
+    #expect(store.state.effectiveTab == .sessions) // a launch starts on Sessions
+    await store.send(.selectTab(.cron)) {
+      $0.selectedTab = .cron
     }
-    #expect(prefs.loadCronSectionCollapsed() == true) // persisted
-
-    // A second toggle flips back and persists that too.
-    await store.send(.toggleCronSectionCollapsed) {
-      $0.cronSectionCollapsed = false
+    #expect(store.state.effectiveTab == .cron)
+    await store.send(.selectTab(.sessions)) {
+      $0.selectedTab = .sessions
     }
-    #expect(prefs.loadCronSectionCollapsed() == false)
   }
 
-  @Test func loadSeedsCronSectionCollapsedFromPreferences() async {
-    let prefs = PreferencesClient.inMemory()
-    prefs.saveCronSectionCollapsed(true)
-    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
-      SessionListFeature()
-    } withDependencies: {
-      $0.date = .constant(now)
-      $0.continuousClock = TestClock()
-      $0.preferences = prefs
-      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
-      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
-      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
-    }
+  /// The Cron Jobs tab exists only with cron content and outside search: losing either
+  /// falls back to Sessions without forgetting the selection.
+  @Test func cronTabFallsBackToSessionsWithoutCronContentOrWhileSearching() {
+    var state = SessionListFeature.State(connection: connection, selectedTab: .cron)
+    #expect(!state.showsTabBar)
+    #expect(state.effectiveTab == .sessions, "no cron content: no Cron Jobs tab")
 
-    await store.send(.task) {
-      $0.now = self.now
-      $0.isLoading = true
-      $0.cronSectionCollapsed = true // seeded from prefs on load
-    }
-    await store.receive(\.setupPush)
-    await store.receive(\.pushPluginStatusLoaded)
-    await store.receive(\.profilesResponse.failure)
-    await store.receive(\.sessionsResponse.success)
-    await store.receive(\.cronJobsResponse.failure) {
-      $0.isLoading = false
-      $0.cronJobsSupported = false
-    }
-    await store.send(.onDisappear)
+    state.sessions = [Session(id: "cron_job1_20260702_090000", source: "cron")]
+    #expect(state.showsTabBar)
+    #expect(state.effectiveTab == .cron)
+
+    state.searchQuery = "deploy"
+    #expect(!state.showsTabBar, "search is a Sessions-only mode")
+    #expect(state.effectiveTab == .sessions)
+    #expect(state.selectedTab == .cron)
   }
 
   @Test func chronologicalSessionsAreRecencyOrderedAndExcludePinned() {

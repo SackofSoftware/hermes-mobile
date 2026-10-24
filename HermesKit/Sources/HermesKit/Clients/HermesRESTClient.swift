@@ -54,7 +54,7 @@ public enum SessionSourceFilter: Equatable, Sendable {
 
   /// The interactive list: everything but cron runs.
   public static let interactive = SessionSourceFilter.excluding([Session.cronSource])
-  /// The Cron Jobs section's runs.
+  /// The Cron Jobs tab's runs.
   public static let cron = SessionSourceFilter.only(Session.cronSource)
 
   var queryItems: [URLQueryItem] {

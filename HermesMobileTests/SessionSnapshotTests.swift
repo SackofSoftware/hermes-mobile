@@ -508,12 +508,12 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: highlightedListHost(), as: deviceImage(appearance: .light))
   }
 
-  // MARK: Cron Jobs section
+  // MARK: Bottom-bar tabs + Cron Jobs tab
 
-  /// A mix of interactive + cron sessions: the cron rows are pulled out into a dedicated
-  /// "Cron Jobs" section (Clock icon, expanded chevron) below the interactive date sections,
-  /// as compact one-line rows (flat fallback: no jobs fetched).
-  func testSessionList_cronSection() {
+  /// A mix of interactive + cron sessions on the Sessions tab: the cron rows stay out of the
+  /// date sections, and the bottom bar shows the Sessions | Cron Jobs tab pill (Sessions
+  /// selected) beside the New chat button.
+  func testSessionList_sessionsTabWithTabBar() {
     let now = self.now
     let mobile = "/Users/me/dev/hermes-mobile"
     // 3 interactive sessions in one workspace.
@@ -596,9 +596,9 @@ final class SessionSnapshotTests: SnapshotTestCase {
     return ([interactive] + backupRuns + [digestRun], jobs, seen)
   }
 
-  /// Grouped Cron Jobs section, collapsed: job rows with state dots (accent scheduled,
-  /// amber paused), the 7-hour countdown, the paused job's schedule line, the unread dot
-  /// on the backup job, and the header's aggregate unread badge.
+  /// The Cron Jobs tab, grouped: job rows with state dots (accent scheduled, amber paused),
+  /// the 7-hour countdown, the paused job's schedule line, the unread dot on the backup job,
+  /// and the tab's aggregate unread badge.
   func testSessionList_cronJobsGrouped() {
     let now = self.now
     let (sessions, jobs, seen) = cronGroupedFixtures()
@@ -611,6 +611,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             now: now,
             calendar: listCalendar,
             seenCounts: seen,
+            selectedTab: .cron,
             cronJobs: IdentifiedArray(uniqueElements: jobs)
           )
         ) {
@@ -641,6 +642,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             now: now,
             calendar: listCalendar,
             seenCounts: seen,
+            selectedTab: .cron,
             cronJobs: IdentifiedArray(uniqueElements: jobs),
             expandedCronJobID: "backup01"
           )
@@ -657,8 +659,8 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// Old agent (no `/api/cron/jobs` → `cronJobsSupported == false`): the section falls
-  /// back to today's flat run rows — but the unread badge still works (one unread run).
+  /// Old agent (no `/api/cron/jobs` → `cronJobsSupported == false`): the Cron Jobs tab falls
+  /// back to flat run rows — but the tab's unread badge still works (one unread run).
   func testSessionList_cronJobsFallbackFlatWithBadge() {
     let now = self.now
     let (sessions, _, seen) = cronGroupedFixtures()
@@ -671,42 +673,13 @@ final class SessionSnapshotTests: SnapshotTestCase {
             now: now,
             calendar: listCalendar,
             seenCounts: seen,
+            selectedTab: .cron,
             cronJobsSupported: false
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
           $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
-          $0.continuousClock = ImmediateClock()
-          $0.date = .constant(now)
-        }
-      )
-    }
-    assertSnapshot(of: view, as: deviceImage())
-  }
-
-  /// The Cron Jobs section collapsed from its header: the rotated chevron and the aggregate
-  /// unread badge stay visible, and the job rows (with their unread dot) are hidden.
-  func testSessionList_cronSectionCollapsed() {
-    let now = self.now
-    let (sessions, jobs, seen) = cronGroupedFixtures()
-    let view = NavigationStack {
-      SessionListView(
-        store: Store(
-          initialState: SessionListFeature.State(
-            connection: connection,
-            sessions: IdentifiedArray(uniqueElements: sessions),
-            now: now,
-            calendar: listCalendar,
-            seenCounts: seen,
-            cronSectionCollapsed: true,
-            cronJobs: IdentifiedArray(uniqueElements: jobs)
-          )
-        ) {
-          SessionListFeature().ignoring(\.task)
-        } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
-          $0.hermesREST.cronJobs = { _, _ in jobs }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }

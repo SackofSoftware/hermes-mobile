@@ -403,7 +403,6 @@ public struct AppFeature {
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
         preferences.saveDefaultSessionSwipeAction(.default)
-        preferences.saveCronSectionCollapsed(false)
         state.connectionFailed = nil
         state.path = .init()
         state.liveChat = nil
@@ -769,7 +768,6 @@ public struct AppFeature {
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
         preferences.saveDefaultSessionSwipeAction(.default)
-        preferences.saveCronSectionCollapsed(false)
         state.reauth = nil
         state.path = .init()
         state.liveChat = nil

@@ -8,14 +8,25 @@ Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The shor
 
 The list is the desktop's **Inbox style**, always on and the only list UI — there is no
 grouping pref or picker (the workspace/chronological `SessionGroupingMode` was removed; the
-card header names the workspace instead). Layout, top to bottom: the "Sessions" header, a
-**Pinned** section (pin order), the **update-date sections**, then the Cron Jobs section. All
-of it is display-only over the one `sessions` array. The list is a flat `.listStyle(.plain)`
-with no row or section separators, compact section headers (leading title + a hairline to the
+card header names the workspace instead). The Sessions tab, top to bottom: the search field
+(pinned under the nav bar — `.navigationBarDrawer(displayMode: .always)`, Sessions tab only, so
+iOS 26 never moves it to the bottom), the "Sessions" header, a **Pinned** section (pin order),
+then the **update-date sections**. Cron runs live in the **Cron Jobs tab** (below). All of it
+is display-only over the one `sessions` array. The list is a flat `.listStyle(.plain)` with no
+row or section separators, compact section headers (leading title + a hairline to the
 trailing edge, centred on the title; `defaultMinListHeaderHeight` 0, `listSectionSpacing(0)`,
-the header's own top inset as the only gap), and tighter card row
-insets than the plain default; "New chat" is a bottom bar via **`.safeAreaInset(edge:
-.bottom)`** (a `.bottomBar` toolbar renders blank in the snapshot host).
+the header's own top inset as the only gap), and tighter card row insets than the plain
+default.
+
+**The bottom bar** (`.safeAreaInset(edge: .bottom)` — a `.bottomBar` toolbar renders blank in
+the snapshot host) holds a glass `Sessions | Cron Jobs` tab pill on the leading side (icon over
+label; the selected tab on an inner capsule in the accent, slid by `matchedGeometryEffect`;
+the Cron Jobs tab carries the `cronUnreadCount` badge) and the round glass New chat button
+trailing (`GlassBackground`, material fallback below iOS 26). The pill shows only while
+`showsTabBar` holds — cron content exists (`hasCronContent`) and no search is active (search
+is a Sessions-only mode) — else the bar is just New chat. `selectedTab` is in-memory (a launch
+starts on Sessions); views render `effectiveTab`, which falls back to Sessions whenever the pill
+is hidden, so a poll or profile switch that drops every cron row never strands an empty tab.
 
 **The load fetches two source-scoped slices, never one shared page** (desktop parity): the
 interactive list with `exclude_sources=cron`, then up to 50 cron runs with `source=cron`
@@ -111,35 +122,25 @@ sheet backed by a server query (`?archived=only`, `ArchivedSessionsFeature`); re
 `archive(id, false)`; tap-to-open bubbles up the existing `openSession` delegate.
 
 **Stale prefs**: `PreferencesClient.live(defaults:)` removes the retired
-`hermes.session-grouping-mode` and `hermes.show-cron-section` keys once, when it is built (no
-migration — a previously hidden cron section comes back expanded).
+`hermes.session-grouping-mode`, `hermes.show-cron-section` and `hermes.cron-section-collapsed`
+keys once, when it is built (no migration — cron runs have their own tab now).
 
-## Cron sessions & the Cron Jobs section (#24)
+## Cron sessions & the Cron Jobs tab (#24)
 
 **Cron sessions** (`source == "cron"`, decoded onto `Session` via `SessionListDTO`) are pulled
-into an **always-on, separate "Cron Jobs" section**. The partition lives in the reducer's
-computed state (`cronSessions` vs the non-cron `interactiveSessions` that feeds
+into the **Cron Jobs tab**. The partition lives in the reducer's computed state
+(`cronSessions` vs the non-cron `interactiveSessions` that feeds
 `pinnedSessions`/`unpinnedSessions` → `chronologicalSessions` → `dateSections`), so cron rows
-never appear in Pinned or the date sections. Rendered with a `clock`-icon header below the
-interactive sections whenever `showsCronSection` holds (any cron run OR any fetched job, so a
-job with no runs in the fetched window stays reachable), and **not shown during search**
-(search stays flat). The "No sessions" placeholder follows `showsEmptyPlaceholder` (empty, not
-loading or failed, and searching or no cron section). An empty non-search list with no jobs
-known holds `isLoading` until the load's cron-jobs response lands (`awaitsCronJobs`), so a
-jobs-only profile never flashes "No sessions"; a transient cron failure there settles on the
-placeholder.
+never appear in Pinned or the date sections. The tab exists whenever `hasCronContent` holds
+(any cron run OR any fetched job, so a job with no runs in the fetched window stays
+reachable); it renders a "Cron Jobs" title row and the jobs, and is never searched. The "No
+sessions" placeholder follows `showsEmptyPlaceholder`: the Sessions tab with no search hit (or,
+outside search, no interactive session), not loading or failed. An empty non-search list with
+no jobs known holds `isLoading` until the load's cron-jobs response lands (`awaitsCronJobs`),
+so the placeholder and the tab pill appear together; a transient cron failure there settles on
+the placeholder.
 
-**The header is the section's collapse control**: a plain `Button` sending
-`toggleCronSectionCollapsed` (`.snappy`, no animation under reduce-motion), with the job rows'
-disclosure — a trailing `chevron.right` turned 90° when expanded — and, like the job rows, its
-state in one combined accessibility label ("Cron Jobs[, N unread cron runs], expanded" /
-"collapsed"; "1 unread cron run" singular; header trait, no hint). `cronSectionCollapsed` is a
-persisted device-local pref (`hermes.cron-section-collapsed`, default expanded) reset in all
-three logout recipes. Collapsing hides the job rows, peeks, and unmatched runs, but **the
-header and its `cronUnreadCount` badge are always visible** (the old hide toggle also hid the
-badge).
-
-**The Cron Jobs section groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
+**The Cron Jobs tab groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
 fetched sequentially INSIDE the session-load effect (after `.sessionsResponse`, same CancelID —
 deterministic TestStore order, no racy merge); a run session binds to its job via the
 id-embedded prefix (`cron_{job_id}_{ts}` → `CronJob.jobID(fromSessionID:)`) — upstream has a
@@ -153,7 +154,7 @@ trigger, jobs-only for pause/resume; **no optimistic job-state mutation**). Tap 
 inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the compact
 `cronRunRow(_:)`; runs matching no fetched job render flat below (`unmatchedCronSessions` —
 never hide output).
-The header carries the aggregate `cronUnreadCount` badge; cron sessions use the same shared
+The tab carries the aggregate `cronUnreadCount` badge; cron sessions use the same shared
 server-backed unread state as interactive rows (with the legacy device-local `seenCounts`
 fallback below). **Capability-gated**: a 404 flips
 `cronJobsSupported` off → flat run list, fetch skipped thereafter; transient failures keep the

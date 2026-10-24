@@ -1506,7 +1506,6 @@ struct AppFeatureTests {
     let sessionDeleted = LockIsolated(false)
     let urlCleared = LockIsolated(false)
     let swipeActionReset = LockIsolated(false)
-    let cronCollapseReset = LockIsolated(false)
     let store = TestStore(
       initialState: AppFeature.State(
         home: SessionListFeature.State(connection: cookieConnection),
@@ -1525,9 +1524,6 @@ struct AppFeatureTests {
       $0.preferences.saveDefaultSessionSwipeAction = { @Sendable action in
         if action == .default { swipeActionReset.setValue(true) }
       }
-      $0.preferences.saveCronSectionCollapsed = { @Sendable collapsed in
-        if !collapsed { cronCollapseReset.setValue(true) }
-      }
     }
     store.exhaustivity = .off
 
@@ -1541,7 +1537,6 @@ struct AppFeatureTests {
     #expect(sessionDeleted.value)
     #expect(urlCleared.value)
     #expect(swipeActionReset.value) // swipe-action pref reset on the quit logout too
-    #expect(cronCollapseReset.value) // cron-section collapse reset on the quit logout too
   }
 
   // MARK: Push cleanup on logout (Task C4)
@@ -3467,7 +3462,7 @@ struct AppFeatureTests {
   }
 
   /// "Log Out" from the retry screen runs the logout recipe — keychain session, server URL,
-  /// identity-scoped prefs, cron collapse, badge, push registration — and lands on a FRESH
+  /// identity-scoped prefs, swipe default, badge, push registration — and lands on a FRESH
   /// (nothing prefilled) onboarding.
   @Test func logoutFromRetryScreenClearsEverythingAndShowsFreshOnboarding() async {
     let sessionDeleted = LockIsolated(false)
@@ -3478,7 +3473,6 @@ struct AppFeatureTests {
     preferences.saveSeenCounts(["s-pinned": 3])
     preferences.saveSelectedProfileID("work")
     preferences.saveDefaultSessionSwipeAction(.delete)
-    preferences.saveCronSectionCollapsed(true)
     preferences.savePushDeviceToken("cafef00d")
     let push = PushClient.inMemory()
 
@@ -3514,7 +3508,6 @@ struct AppFeatureTests {
     #expect(preferences.loadSeenCounts().isEmpty)
     #expect(preferences.loadSelectedProfileID() == nil)
     #expect(preferences.loadDefaultSessionSwipeAction() == .default) // swipe pref reset too
-    #expect(preferences.loadCronSectionCollapsed() == false) // cron collapse reset too
     #expect(preferences.loadPushDeviceToken() == nil)
     #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
     #expect(push.badgeCount == 0)

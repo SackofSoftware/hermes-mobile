@@ -183,12 +183,19 @@ struct SessionListView: View {
     }
   }
 
-  /// A Pinned / date-section header: one compact secondary line hugging the cards below it.
+  /// A Pinned / date-section header: the title on the leading side and a hairline running to
+  /// the trailing edge, centred on the title, hugging the cards below it.
   private func sectionHeader(_ label: String) -> some View {
-    Text(label)
-      .font(.footnote.weight(.semibold))
-      .foregroundStyle(.secondary)
-      .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
+    HStack(spacing: 8) {
+      Text(label)
+        .font(.footnote.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .fixedSize()
+      Rectangle()
+        .fill(Color.secondary.opacity(0.3))
+        .frame(height: 1)
+    }
+    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
   }
 
   /// Top-level content section header. The active profile is shown in the pill (the

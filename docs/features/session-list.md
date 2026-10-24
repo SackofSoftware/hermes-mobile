@@ -11,8 +11,9 @@ grouping pref or picker (the workspace/chronological `SessionGroupingMode` was r
 card header names the workspace instead). Layout, top to bottom: the "Sessions" header, a
 **Pinned** section (pin order), the **update-date sections**, then the Cron Jobs section. All
 of it is display-only over the one `sessions` array. The list is a flat `.listStyle(.plain)`
-with no row or section separators, compact section headers (`defaultMinListHeaderHeight` 0,
-`listSectionSpacing(0)`, the header's own top inset as the only gap), and tighter card row
+with no row or section separators, compact section headers (leading title + a hairline to the
+trailing edge, centred on the title; `defaultMinListHeaderHeight` 0, `listSectionSpacing(0)`,
+the header's own top inset as the only gap), and tighter card row
 insets than the plain default; "New chat" is a bottom bar via **`.safeAreaInset(edge:
 .bottom)`** (a `.bottomBar` toolbar renders blank in the snapshot host).
 

@@ -560,6 +560,132 @@ struct ChatInteractionTests {
     #expect(ApprovalRequest(patternKeys: ["rm"]).offersSessionApproval)
   }
 
+  // MARK: Legacy payloads end to end — the wire stays byte-identical to `d97e621`
+
+  /// Decodes a legacy `<type>` event frame (the ≤ v2026.9.11 wire), feeds it to the reducer,
+  /// answers it with `answer(event)`, and returns every frame the app sent. The expected params
+  /// in the tests below are `d97e621`'s construction spelled out: a legacy payload never reaches
+  /// the v7 queue or `request.answer`, and its `*.respond` matches byte for byte.
+  private func legacyWire(
+    _ type: String, _ payload: String, answer: (GatewayEvent) -> ChatFeature.Action
+  ) async throws -> [JSONValue] {
+    let frame = try InboundFrame(data: Data(
+      #"{"jsonrpc":"2.0","method":"event","params":{"type":"\#(type)","session_id":"live","payload":\#(payload)}}"#.utf8
+    ))
+    guard case let .event(_, event) = frame else {
+      Issue.record("expected a \(type) event, got \(frame)")
+      return []
+    }
+    let sent = LockIsolated<[JSONValue]>([])
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.withValue { $0.append(.object(["method": .string(method), "params": params])) }
+        return .object(["resolved": .number(1)])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+    await store.send(.gatewayEvent(event))
+    #expect(store.state.serverRequests.isEmpty)
+    #expect(store.state.pendingInteraction != nil)
+    await store.send(answer(event))
+    await store.finish()
+    #expect(store.state.pendingInteraction == nil) // legacy answers stay optimistic
+    return sent.value
+  }
+
+  /// Agents before upstream v2026.8.16 send no `request_id`: the FIFO
+  /// `{session_id, choice, all}`, `all` passed through as the toggle stood.
+  @Test(arguments: [(true, false), (true, true), (false, false), (false, true)])
+  func legacyApprovalWithoutRequestIDKeepsTheFIFOWire(approve: Bool, all: Bool) async throws {
+    let sent = try await legacyWire(
+      "approval.request",
+      #"{"command":"rm -rf /tmp/x","description":"Delete /tmp/x","pattern_key":"rm","pattern_keys":["rm"]}"#
+    ) { _ in .respondToApproval(approve: approve, all: all) }
+    #expect(sent == [.object([
+      "method": .string("approval.respond"),
+      "params": .object([
+        "session_id": .string("live"),
+        "choice": .string(approve ? (all ? "session" : "once") : "deny"),
+        "all": .bool(all),
+      ]),
+    ])])
+  }
+
+  /// v2026.8.16–v2026.9.11 events carry the queue's `request_id`, and their `approval.respond`
+  /// resolves exactly that entry (`request_id` wins over `resolve_all` upstream): the bound
+  /// wire, `all: false`, the choice narrowed to the offered set.
+  @Test(arguments: [
+    (#"["once","session","always","deny"]"#, true, false, "once"),
+    (#"["once","session","always","deny"]"#, true, true, "session"),
+    (#"["once","session","always","deny"]"#, false, true, "deny"),
+    (#"["once","deny"]"#, true, true, "once"),
+  ])
+  func legacyApprovalWithRequestIDIsBoundToThatEntry(
+    choices: String, approve: Bool, all: Bool, choice: String
+  ) async throws {
+    let sent = try await legacyWire(
+      "approval.request", #"{"request_id":"approval-7","command":"rm foo","choices":\#(choices)}"#
+    ) { _ in .respondToApproval(approve: approve, all: all) }
+    #expect(sent == [.object([
+      "method": .string("approval.respond"),
+      "params": .object([
+        "session_id": .string("live"),
+        "request_id": .string("approval-7"),
+        "choice": .string(choice),
+        "all": .bool(false),
+      ]),
+    ])])
+  }
+
+  /// The legacy clarify answers exactly as the old card sent them, through the new form: a
+  /// tapped choice as its raw text, typed text trimmed.
+  @Test(arguments: [
+    (#"{"request_id":"c1","question":"Which file?","choices":["a.txt (Recommended)","b.txt"]}"#,
+     "a.txt (Recommended)", "c1", "a.txt (Recommended)"),
+    (#"{"request_id":"c2","question":"Name?"}"#, "  notes/today.md \n", "c2", "notes/today.md"),
+  ])
+  func legacyClarifyAnsweredFromTheFormKeepsItsWire(
+    payload: String, input: String, requestID: String, wireAnswer: String
+  ) async throws {
+    let sent = try await legacyWire("clarify.request", payload) { event in
+      guard case let .clarifyRequest(request) = event, let question = request.questions.first else {
+        Issue.record("expected a legacy clarify, got \(event)")
+        return .skipClarify
+      }
+      var draft = ClarifyDraft()
+      if question.isFreeText {
+        draft.setText(input, for: question)
+      } else {
+        draft.toggle(input, in: question)
+      }
+      return .submitClarify(answers: draft.answers(for: request))
+    }
+    #expect(sent == [.object([
+      "method": .string("clarify.respond"),
+      "params": .object([
+        "session_id": .string("live"), "request_id": .string(requestID), "answer": .string(wireAnswer),
+      ]),
+    ])])
+  }
+
+  /// `sudo.respond` answers under `password`, `secret.respond` under `value` — as before.
+  @Test(arguments: [
+    ("sudo.request", #"{"request_id":"r5"}"#, "sudo.respond", "r5", "password"),
+    ("secret.request", #"{"request_id":"r4","prompt":"API key?"}"#, "secret.respond", "r4", "value"),
+  ])
+  func legacySecretPayloadKeepsItsWire(
+    type: String, payload: String, method: String, requestID: String, valueKey: String
+  ) async throws {
+    let sent = try await legacyWire(type, payload) { _ in .respondToSecret(value: "hunter2/✓") }
+    #expect(sent == [.object([
+      "method": .string(method),
+      "params": .object([
+        "session_id": .string("live"), "request_id": .string(requestID), valueKey: .string("hunter2/✓"),
+      ]),
+    ])])
+  }
+
   // MARK: Model / reasoning picker (Task 7)
 
   private func sampleOptions() -> ModelOptions {

@@ -889,30 +889,48 @@ the same reconcile when it lands.
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview: every rendered kind works on v7 (approval, clarify
+- [x] verify all requirements from Overview: every rendered kind works on v7 (approval, clarify
       in all three shapes, sudo, secret), queueing, `expired`, cancel, turn-end clearing,
-      replay, push-tap, the decline matrix, choice narrowing
-- [ ] verify legacy wire byte-identity: the pre-change `clarify.respond` / `sudo.respond` /
-      `secret.respond` / `approval.respond` fixtures still pass for legacy payloads
-- [ ] ➕ settle the base's `request_id` branch in `respondToApproval`: a legacy-event approval
+      replay, push-tap, the decline matrix, choice narrowing (each mapped to its covering tests
+      in the progress log; no gap found in behaviour)
+- [x] verify legacy wire byte-identity: the pre-change `clarify.respond` / `sudo.respond` /
+      `secret.respond` / `approval.respond` fixtures still pass for legacy payloads (the
+      `d97e621` key-by-key tests are untouched; added end-to-end tests that decode each legacy
+      event frame and assert the whole sent frame equals `d97e621`'s construction —
+      `ChatInteractionTests` `legacyApprovalWithoutRequestIDKeepsTheFIFOWire`,
+      `legacyApprovalWithRequestIDIsBoundToThatEntry`, `legacyClarifyAnsweredFromTheFormKeepsItsWire`
+      (through `ClarifyDraft`, so the old card's trim is covered), `legacySecretPayloadKeepsItsWire`)
+- [x] ➕ settle the base's `request_id` branch in `respondToApproval`: a legacy-event approval
       carrying `request_id` (no srq id) now sends `{session_id, request_id, choice, all:false}`
       instead of today's `{session_id, choice, all}`. Check upstream (`git show
       <tag>:tui_gateway/…`) for any `approval.request` event that carries `request_id` and
       whether its `approval.respond` accepts it; if none does, the branch is dead — drop it (and
       `requestBoundApproval*` tests) or document it in `docs/features/approvals.md`. (Task 1
-      could not check: the worktree rules forbid touching the sibling clone)
-- [ ] verify edge cases: a cancel for a queued (not presented) request; a replay that reorders;
+      could not check: the worktree rules forbid touching the sibling clone) (verified via the
+      GitHub API on `NousResearch/hermes-agent`: from v2026.8.16 through v2026.9.11 every
+      gateway approval entry gets `request_id` (`approval_gateway_wait.py` `setdefault`), the
+      `approval.request` event payload is that entry, and `approval.respond` forwards
+      `request_id` to `resolve_gateway_approval`, where it wins over `resolve_all`; v2026.8.13
+      and older carry none and keep the FIFO wire. The branch is live and correct — kept, and
+      documented in `docs/features/approvals.md`)
+- [x] verify edge cases: a cancel for a queued (not presented) request; a replay that reorders;
       every question skipped; a `running == false` snapshot with an open request; a window-owned
-      request on a backend without `declines_not_shown`
-- [ ] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run `make snapshot`; judge failures by render size (baseline drift is known)
-- [ ] manual pass against a live v0.21.7+ agent: approve after a socket drop; two parallel
+      request on a backend without `declines_not_shown` (all covered; added
+      `ClarifyFeatureTests.everyQuestionSkippedSendsNullForEachNotCancelAll`)
+- [x] run full test suite: `script -q /dev/null swift test --package-path HermesKit` (via
+      `make test`: 1613 tests in 70 suites passed, 1 known issue)
+- [x] run `make snapshot`; judge failures by render size (baseline drift is known) (37 failures,
+      all 37 at identical render size = known drift; every prompt-card snapshot and both card
+      layout suites pass; `make generate` + `make build` OK)
+- [x] manual pass against a live v0.21.7+ agent: approve after a socket drop; two parallel
       approvals; a clarify with several questions incl. multi-select and Other; skip; sudo; kill
       the socket mid-clarify and re-open — the card returns with locks; desktop and phone on one
       session — a clarify answered on desktop shows "Already handled elsewhere" when answered on
       the phone, and the phone never takes a desktop preview/terminal read or vault prompt
-- [ ] manual pass against a v2026.9.24 agent (intermediate clarify shape, no 4404) and a
-      v2026.9.11 agent (legacy) if one is available
+      (skipped - not automatable; handed to the user)
+- [x] manual pass against a v2026.9.24 agent (intermediate clarify shape, no 4404) and a
+      v2026.9.11 agent (legacy) if one is available (skipped - not automatable; handed to the
+      user)
 
 ### Task 10: [Final] Update documentation
 

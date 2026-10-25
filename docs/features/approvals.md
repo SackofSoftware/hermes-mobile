@@ -27,6 +27,11 @@ answers through `request.answer {id, result: {choice}}`. The server returns `sta
 was handled and `status: "expired"` when another client already handled or the request timed out;
 the latter patches the optimistic status row to **"Already handled elsewhere"**. Older event-based
 approvals continue to use `approval.respond` and its `{"resolved": n}` result for compatibility.
+An `approval.request` event that carries the queue's `request_id` (upstream v2026.8.16 through
+v2026.9.11) answers `{session_id, request_id, choice, all: false}`: the server resolves exactly
+that queue entry and ignores `all` when a `request_id` is present, so the card the user saw is the
+one resolved (FIFO would hit the oldest entry, while the legacy card shows the newest). An event
+without one (older agents, the push-tap recovered card) keeps the FIFO `{session_id, choice, all}`.
 RPC failures surface through `errorBanner` (no swallowed `try?`).
 
 Once the phone advertises server requests, a phone-only session may receive unsupported prompt kinds

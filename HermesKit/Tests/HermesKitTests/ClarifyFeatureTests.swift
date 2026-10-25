@@ -293,6 +293,24 @@ struct ClarifyFeatureTests {
     #expect(sent == .object(["id": .string("srq-c"), "result": .object([:])]))
   }
 
+  /// Skipping every question one by one is a complete form, and it is NOT the card's Skip:
+  /// each question goes out as `null` (skipped), never the cancel-all `{}`.
+  @Test func everyQuestionSkippedSendsNullForEachNotCancelAll() async {
+    var request = batch
+    request.questions = Array(batch.questions.prefix(3))
+    var draft = ClarifyDraft()
+    for question in request.questions { draft.toggleSkip(question) }
+    #expect(draft.isComplete(for: request))
+    let sent = await answer(
+      request, with: .submitClarify(answers: draft.answers(for: request)),
+      echo: "Framework?: Skipped\nTargets?: Skipped\nLanguage?: Skipped"
+    )
+    #expect(sent == .object([
+      "id": .string("srq-c"),
+      "result": .object(["answers": .object(["q0": .null, "q1": .null, "q2": .null])]),
+    ]))
+  }
+
   /// The intermediate (v2026.9.14–.24) single request answers `{answer}`, skip `{answer: ""}`.
   @Test func singleAnswerShapeSendsAnswerAndSkip() async {
     let request = ClarifyRequest(requestID: nil, question: "Proceed?", choices: ["Yes (Recommended)", "No"])

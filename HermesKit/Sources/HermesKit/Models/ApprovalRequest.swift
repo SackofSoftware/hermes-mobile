@@ -11,11 +11,9 @@ import Foundation
 /// be *equal* (an agent retrying the same command), which is exactly the pair a value-derived
 /// id cannot tell apart.
 public struct ApprovalRequest: Equatable, Sendable, Decodable {
-  /// Exact server-side approval identity on newer gateways. Nil on older gateways.
+  /// Exact server-side approval identity on newer gateways (the approval queue id — NOT the
+  /// `srq-…` transport id, which lives on `PendingServerRequest`). Nil on older gateways.
   public var requestID: String?
-  /// JSON-RPC request id when this approval arrived as a server→client request.
-  /// This is transport metadata, not part of the approval payload.
-  public var serverRequestID: String?
   /// The server-advertised choices. Empty means an older gateway with the legacy choice set.
   public var choices: [String]
   /// The command awaiting approval (shown verbatim in the card).
@@ -38,7 +36,6 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
 
   public init(
     requestID: String? = nil,
-    serverRequestID: String? = nil,
     command: String? = nil,
     detail: String? = nil,
     patternKey: String? = nil,
@@ -46,7 +43,6 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
     choices: [String] = []
   ) {
     self.requestID = requestID
-    self.serverRequestID = serverRequestID
     self.command = command
     self.detail = detail
     self.patternKey = patternKey
@@ -57,7 +53,6 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
   public init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     requestID = try c.decodeIfPresent(String.self, forKey: .requestID)
-    serverRequestID = nil
     choices = try c.decodeIfPresent([String].self, forKey: .choices) ?? []
     command = try c.decodeIfPresent(String.self, forKey: .command)
     detail = try c.decodeIfPresent(String.self, forKey: .detail)
@@ -76,6 +71,13 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
     choices.isEmpty || choices.contains("once")
   }
 
+  /// Whether there is anything to show: a non-blank command or description, the only fields
+  /// the card renders (a danger pattern is never shown). A v7 server request without either
+  /// does not decode (`PendingServerRequest`), never presented as a blind card.
+  public var hasContent: Bool {
+    command?.trimmedNonEmpty != nil || detail?.trimmedNonEmpty != nil
+  }
+
   /// Whether the card may offer the session-wide "Approve all in this session"
   /// escalation (`choice: "session"`, which persists the matched danger pattern for the
   /// rest of the session). A recovered request carries no command or pattern, so it never
@@ -84,33 +86,5 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
     (command?.isEmpty == false || patternKey?.isEmpty == false || !patternKeys.isEmpty)
       && allowsOnce
       && allowsSessionChoice
-  }
-}
-
-/// Payload for a `clarify.request` event. `choices` is empty when the agent expects
-/// free-text. Responded to via `clarify.respond`.
-/// Shape not yet verified against a live request — to confirm in M2 (Task 10).
-public struct ClarifyRequest: Equatable, Sendable, Decodable {
-  public var requestID: String
-  public var question: String
-  public var choices: [String]
-
-  enum CodingKeys: String, CodingKey {
-    case requestID = "request_id"
-    case question
-    case choices
-  }
-
-  public init(requestID: String, question: String, choices: [String] = []) {
-    self.requestID = requestID
-    self.question = question
-    self.choices = choices
-  }
-
-  public init(from decoder: Decoder) throws {
-    let c = try decoder.container(keyedBy: CodingKeys.self)
-    requestID = try c.decode(String.self, forKey: .requestID)
-    question = try c.decodeIfPresent(String.self, forKey: .question) ?? ""
-    choices = try c.decodeIfPresent([String].self, forKey: .choices) ?? []
   }
 }

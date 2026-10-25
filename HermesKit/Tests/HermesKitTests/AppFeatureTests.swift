@@ -2541,6 +2541,79 @@ struct AppFeatureTests {
     await store.send(.liveChat(.teardown))
   }
 
+  /// The same on-screen approval tap against a v7 agent (`desktop_contract >= 7`): the
+  /// consuming hydrate's `open_requests` replay restores the REAL card (command and srq id),
+  /// never the generic recovered one; an empty replay raises nothing at all.
+  @Test(arguments: [true, false])
+  func approvalTapOnV7HydratesTheReplayedCard(replayHoldsApproval: Bool) async {
+    let push = PushClient.inMemory()
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    chat.liveSessionID = "live1"
+    chat.status = .ready
+    chat.hasRequestedSession = true
+    chat.hasStarted = true
+    let approvalParams: JSONValue = .object([
+      "session_id": .string("live1"), "request_id": .string("ab12"),
+      "command": .string("rm -rf build"), "description": .string("Removes the build dir"),
+      "pattern_key": .string("rm_rf"),
+      "choices": .array([.string("once"), .string("session"), .string("always"), .string("deny")]),
+    ])
+    let openRequests: JSONValue = replayHoldsApproval
+      ? .array([.object([
+          "id": .string("srq-1a2b3c4d5e6f"), "method": .string("approval"), "params": approvalParams,
+        ])])
+      : .array([])
+
+    let store = TestStore(
+      initialState: AppFeature.State(
+        home: SessionListFeature.State(connection: connection),
+        path: StackState([ChatScreen.State(sessionKey: "s1")]),
+        liveChat: chat
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.push = push.client
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, _ in
+        guard method == "session.resume" else { return .object([:]) }
+        return .object([
+          "session_id": .string("live1"),
+          "stored_session_id": .string("s1"),
+          "messages": .array([]),
+          "running": .bool(true),
+          "info": .object(["model": .string("claude-opus-4-8"), "desktop_contract": .string("8")]),
+          "open_requests": openRequests,
+        ])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.pushTapped(PushTap(sessionID: "s1", type: "approval"))) {
+      $0.liveChat?.expectsPendingApproval = true
+      $0.pendingApprovalSessionIDs = []
+    }
+    await store.receive(\.liveChat.foreground)
+    await store.skipReceivedActions()
+    #expect(store.state.liveChat?.expectsPendingApproval == false)
+    if replayHoldsApproval {
+      #expect(store.state.liveChat?.presentedServerRequest?.id == "srq-1a2b3c4d5e6f")
+      guard case let .approval(request) = store.state.liveChat?.pendingInteraction else {
+        Issue.record("expected the replayed approval card"); return
+      }
+      #expect(request.command == "rm -rf build")
+      #expect(request != ChatFeature.recoveredApprovalRequest)
+    } else {
+      #expect(store.state.liveChat?.pendingInteraction == nil)
+    }
+    #expect(store.state.path.count == 1)
+
+    await store.send(.liveChat(.teardown))
+  }
+
   /// A non-approval tap for the on-screen session must NOT arm the recovery hint — recovery
   /// is approval-typed taps only.
   @Test func nonApprovalOnScreenTapSetsNoRecoveryHint() async {
@@ -2673,7 +2746,8 @@ struct AppFeatureTests {
     // Approve the recovered card: the respond is session-queue-scoped (session_id + choice
     // + all, NO request_id — the synthetic card never had one, by design), and the server's
     // `resolved: 1` keeps the optimistic "Approved" row (no error, no re-patch).
-    await store.send(.liveChat(.respondToApproval(approve: true, all: false)))
+    let cardToken = store.state.liveChat?.pendingInteractionToken ?? 0
+    await store.send(.liveChat(.respondToApproval(token: cardToken, approve: true, all: false)))
     await store.finish()
     let params = respondParams.value
     #expect(params?["session_id"] == .string("live1"))

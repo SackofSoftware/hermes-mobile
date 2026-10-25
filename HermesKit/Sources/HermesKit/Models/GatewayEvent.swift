@@ -18,15 +18,24 @@ public enum GatewayEvent: Equatable, Sendable {
     args: JSONValue?, resultText: String?, inlineDiff: String?, durationS: Double?
   )
   case approvalRequest(ApprovalRequest)
-  /// A server→client approval, answered by `request.answer` using the request metadata
-  /// attached to the payload. This is distinct from a legacy `approval.request` notification.
-  case approvalServerRequest(ApprovalRequest)
+  /// A rendered v7 server→client request (`{"id":"srq-…","method":…}`), decoded by the
+  /// gateway client and answered through `request.answer {id, result}`. Distinct from the
+  /// legacy `*.request` notifications. Never carries an answer value.
+  case serverRequest(PendingServerRequest)
+  /// `request.cancel`: the server withdrew an open server request (timeout, interrupt, …).
+  case requestCancel(RequestCancel)
   case clarifyRequest(ClarifyRequest)
   case sudoRequest(SecretPrompt)
   case secretRequest(SecretPrompt)
   case error(message: String)
   /// Local protocol-operation failure, not a turn-ending agent error.
   case serverRequestFailed(message: String)
+  /// Synthetic (client-side, never on the wire): this connection's `client.capabilities`
+  /// advertisement failed (anything but `-32601`), so the server will not route prompts
+  /// to the phone until the next connect re-advertises. Yielded at most once per
+  /// connection and always AFTER that connection's `.ready` — the reducer keeps it standing
+  /// across the ready/hydrate banner clears. Not a turn-ending error.
+  case serverRequestsUnavailable(message: String)
   /// Live-only event from the agent's background self-improvement review
   /// (`review.summary`, issue #47), emitted to the session's own transport (not a
   /// global broadcast). Never written to session history, so a hydrate
@@ -84,13 +93,18 @@ public enum GatewayEvent: Equatable, Sendable {
       if let req = p.decoded(ApprovalRequest.self) { self = .approvalRequest(req) }
       else { self = .unknown(type: type, raw: p) }
     case "clarify.request":
-      if let req = p.decoded(ClarifyRequest.self) { self = .clarifyRequest(req) }
+      if let req = ClarifyRequest(legacyEvent: p) { self = .clarifyRequest(req) }
       else { self = .unknown(type: type, raw: p) }
+    // The legacy events stay `request_id`-bound (`sudo.respond` / `secret.respond` need it),
+    // exactly as before `SecretPrompt.requestID` became optional for the v7 requests.
     case "sudo.request":
-      if let req = p.decoded(SecretPrompt.self) { self = .sudoRequest(req) }
+      if let req = p.decoded(SecretPrompt.self), req.requestID != nil { self = .sudoRequest(req) }
       else { self = .unknown(type: type, raw: p) }
     case "secret.request":
-      if let req = p.decoded(SecretPrompt.self) { self = .secretRequest(req) }
+      if let req = p.decoded(SecretPrompt.self), req.requestID != nil { self = .secretRequest(req) }
+      else { self = .unknown(type: type, raw: p) }
+    case "request.cancel":
+      if let cancel = p.decoded(RequestCancel.self) { self = .requestCancel(cancel) }
       else { self = .unknown(type: type, raw: p) }
     case "error":
       self = .error(message: p["message"]?.stringValue ?? "")
@@ -268,17 +282,24 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
   /// `applyActivate`'s runtime info so `/title x` updates the open chat's nav title
   /// immediately. Normal hydrates intentionally leave the title untouched (#36).
   public var title: String?
+  /// The server's prompt-wire generation (`desktop_contract`): `>= 7` speaks server→client
+  /// requests (v7), 6 is the legacy `*.request` / `*.respond` wire (≤ v2026.9.11). Upstream
+  /// types it `int | str | None`, so it is decoded by hand — an Int, or a String that parses
+  /// as one, else nil. It must NEVER throw: `ActivateResponse` decodes `info` with `try?`,
+  /// so a throw here would drop the model/usage fields along with it.
+  public var desktopContract: Int?
 
   enum CodingKeys: String, CodingKey {
     case model, running, version, cwd, usage, title
     case reasoningEffort = "reasoning_effort"
     case profileName = "profile_name"
+    case desktopContract = "desktop_contract"
   }
 
   public init(
     model: String? = nil, reasoningEffort: String? = nil, running: Bool? = nil,
     version: String? = nil, cwd: String? = nil, profileName: String? = nil, usage: Usage? = nil,
-    title: String? = nil
+    title: String? = nil, desktopContract: Int? = nil
   ) {
     self.model = model
     self.reasoningEffort = reasoningEffort
@@ -288,22 +309,80 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
     self.profileName = profileName
     self.usage = usage
     self.title = title
+    self.desktopContract = desktopContract
+  }
+
+  /// Hand-written only for `desktopContract`'s lenient decode; every other field keeps the
+  /// synthesized semantics (absent → nil, wrong type → throw).
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    model = try c.decodeIfPresent(String.self, forKey: .model)
+    reasoningEffort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    running = try c.decodeIfPresent(Bool.self, forKey: .running)
+    version = try c.decodeIfPresent(String.self, forKey: .version)
+    cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+    profileName = try c.decodeIfPresent(String.self, forKey: .profileName)
+    usage = try c.decodeIfPresent(Usage.self, forKey: .usage)
+    title = try c.decodeIfPresent(String.self, forKey: .title)
+    desktopContract = Self.lenientContract(c)
+  }
+
+  private static func lenientContract(_ c: KeyedDecodingContainer<CodingKeys>) -> Int? {
+    if let value = try? c.decodeIfPresent(Int.self, forKey: .desktopContract) { return value }
+    if let text = try? c.decodeIfPresent(String.self, forKey: .desktopContract) {
+      return text.trimmedNonEmpty.flatMap { Int($0) }
+    }
+    return nil
   }
 }
 
-/// Payload for `sudo.request` / `secret.request`. Shape not yet verified against a
-/// live request — to confirm in M2 (Tasks 9–10).
+/// Payload of a sudo / secret prompt: the legacy `sudo.request` / `secret.request` events
+/// (keyed by `request_id`, answered through `sudo.respond` / `secret.respond`) and the v7
+/// `sudo` / `secret` server requests (no `request_id` — the `srq-…` id on
+/// `PendingServerRequest` identifies them; answered through `request.answer {value}`).
+///
+/// Holds the PROMPT only — never the typed value, which goes straight from the card to the
+/// answer RPC and is never stored, logged or echoed.
 public struct SecretPrompt: Equatable, Sendable, Decodable {
-  public var requestID: String
+  /// Legacy event id (`request_id`); `nil` on a v7 server request.
+  public var requestID: String?
   public var prompt: String?
+  /// v7 `sudo`, v2026.9.21+: the command needing the password (redacted server-side).
+  public var command: String?
+  /// v7 `secret`: the environment variable the value is stored under (`env_var`).
+  public var envVar: String?
 
   enum CodingKeys: String, CodingKey {
     case requestID = "request_id"
     case prompt
+    case command
+    case envVar = "env_var"
   }
 
-  public init(requestID: String, prompt: String? = nil) {
+  public init(requestID: String? = nil, prompt: String? = nil, command: String? = nil, envVar: String? = nil) {
     self.requestID = requestID
     self.prompt = prompt
+    self.command = command
+    self.envVar = envVar
+  }
+
+  /// Whether a `secret` request names anything to enter (a non-blank `prompt` or `env_var`).
+  /// A v7 `secret` without either would render a blind "Secret required" field, so it
+  /// does not decode (`PendingServerRequest`). Not applied to `sudo`: its v2026.9.14 params are
+  /// legitimately empty (the card says "Password required").
+  var namesASecret: Bool {
+    [prompt, envVar].contains { $0?.trimmedNonEmpty != nil }
+  }
+
+  /// The prompt text the card shows, `nil` when blank.
+  public var displayPrompt: String? { prompt?.trimmedNonEmpty }
+
+  /// The card's detail line, `nil` when the request carries none: the sudo `command`
+  /// (`$ command`) or the secret's `env_var` (`Saved as ENV_VAR`).
+  public func displayDetail(for kind: SecretKind) -> String? {
+    switch kind {
+    case .sudo: command?.trimmedNonEmpty.map { "$ \($0)" }
+    case .secret: envVar?.trimmedNonEmpty.map { "Saved as \($0)" }
+    }
   }
 }

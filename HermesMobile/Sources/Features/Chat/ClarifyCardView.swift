@@ -1,105 +1,191 @@
 import HermesKit
 import SwiftUI
 
-/// Pinned card shown when the agent needs input mid-turn. Three shapes share it:
-/// - `clarify.request` with choices → tappable options
-/// - `clarify.request` with no choices → free-text field
-/// - `sudo.request` / `secret.request` → secure-entry field
+/// Pinned card shown when the agent asks the user a question mid-turn — every clarify form the
+/// desktop renders, in the approval card's shape: a rigid one-line title and a **pinned action
+/// row** over ONE bounded, scrollable region (``BoundedHeightLayout``), never plain stacked
+/// content. The region holds everything unbounded — up to five questions of server-controlled
+/// text, four choices each, an "Other" row per question — so a squeezed fixed region (keyboard
+/// up, accessibility sizes) is absorbed by the viewport and Skip / Submit stay on screen (#65's
+/// lesson, `docs/features/approvals.md`).
+///
+/// The form comes from the question count and kind:
+/// - **one single-select question** — a tap on a choice submits it at once;
+/// - **one multi-select question** — checkmark rows, submitted with Submit;
+/// - **one free-text question** — a text field, sent with Send;
+/// - **several questions** — one section per question (choices select instead of submitting,
+///   each section can be skipped), confirmed with Confirm once every question has an answer or
+///   a skip.
+///
+/// Every question with choices also gets an "Other" free-text row (the upstream tool schema
+/// tells the model the UI adds one) — except on a legacy `clarify.request`, which keeps
+/// today's form. The recommended choice shows a badge and is never preselected. Skip is on
+/// every form. Questions the server already locked (a replayed batch) render read-only from
+/// the store; the view's `@State` holds only the user's edits to the rest (``ClarifyDraft``,
+/// whose rules are unit-tested in HermesKit), and the card is keyed on
+/// `pendingInteractionToken` at the call site, so a replacement card never inherits them.
 struct ClarifyCardView: View {
-  enum Mode: Equatable {
-    case clarify(ClarifyRequest)
-    case secret(ChatFeature.State.PendingInteraction.SecretKind, SecretPrompt)
+  let request: ClarifyRequest
+  /// Called with the answers keyed by qid (`""` for a single legacy/intermediate question).
+  let onSubmit: ([String: ClarifyAnswer]) -> Void
+  /// Skips the whole card.
+  let onSkip: () -> Void
+
+  @State private var draft: ClarifyDraft
+
+  /// `draft` seeds the edits (snapshots render a form mid-answer); the app passes none.
+  init(
+    request: ClarifyRequest,
+    draft: ClarifyDraft = ClarifyDraft(),
+    onSubmit: @escaping ([String: ClarifyAnswer]) -> Void,
+    onSkip: @escaping () -> Void
+  ) {
+    self.request = request
+    self.onSubmit = onSubmit
+    self.onSkip = onSkip
+    _draft = State(initialValue: draft)
   }
-
-  let mode: Mode
-  /// Called with the chosen option / typed text / secret value.
-  let onSubmit: (String) -> Void
-
-  @State private var text = ""
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      Label(title, systemImage: icon)
+      // Rigid and clamped, as on the approval card: every rigid point is one the region loses.
+      Label("Clarification needed", systemImage: "questionmark.circle")
         .font(.subheadline.weight(.semibold))
+        .lineLimit(1)
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
 
-      if !prompt.isEmpty {
-        Text(prompt)
-          .font(.callout)
-          .textSelection(.enabled)
-          .frame(maxWidth: .infinity, alignment: .leading)
-      }
+      scrollableContent
 
-      switch mode {
-      case let .clarify(request) where !request.choices.isEmpty:
-        VStack(spacing: 8) {
-          ForEach(request.choices, id: \.self) { choice in
-            Button { onSubmit(choice) } label: {
-              Text(choice).frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.bordered)
-          }
+      // Outside the scroll on purpose: whatever the region is squeezed to, the way out (Skip)
+      // and the way forward (Submit / Send / Confirm) stay on screen and tappable.
+      HStack(spacing: 12) {
+        Button(action: onSkip) {
+          Text("Skip").frame(maxWidth: .infinity)
         }
-      default:
-        inputField
+        .buttonStyle(.bordered)
+        if let submitTitle = request.submitTitle {
+          Button { onSubmit(draft.answers(for: request)) } label: {
+            Text(submitTitle).frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.borderedProminent)
+          .disabled(!draft.isComplete(for: request))
+        }
       }
     }
-    .padding()
-    .background(Color(uiColor: .tertiarySystemBackground), in: .rect(cornerRadius: 14))
-    .overlay(RoundedRectangle(cornerRadius: 14).stroke(.blue.opacity(0.5)))
-    .padding(.horizontal)
+    .promptCardChrome(tint: .blue)
   }
 
-  private var inputField: some View {
-    HStack(spacing: 12) {
-      Group {
-        if isSecure {
-          SecureField("Enter value", text: $text)
-        } else {
-          TextField("Type a reply", text: $text, axis: .vertical)
+  /// The questions, in a ``BoundedScrollRegion``. The transcript reserve applies only to the
+  /// multi-question card — the one `ChatView` gives layout priority
+  /// (`isCompressibleCardPending`).
+  private var scrollableContent: some View {
+    BoundedScrollRegion(
+      spacing: request.isMultiQuestion ? 18 : 10,
+      reserve: request.isMultiQuestion ? PromptCardMetrics.transcriptReserve : 0
+    ) {
+      ForEach(Array(request.questions.enumerated()), id: \.offset) { _, question in
+        questionSection(question)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func questionSection(_ question: ClarifyQuestion) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(question.question)
+        .font(request.isMultiQuestion ? .callout.weight(.medium) : .callout)
+        .textSelection(.enabled)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+      if let locked = request.lockedDisplayText(for: question) {
+        Label(locked, systemImage: "checkmark.circle.fill")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      } else if question.isFreeText {
+        TextField("Type a reply", text: textBinding(question), axis: .vertical)
+          .textFieldStyle(.roundedBorder)
+      } else {
+        ForEach(question.choices, id: \.self) { choice in
+          choiceRow(choice, in: question)
+        }
+        if request.offersOtherRow {
+          otherRow(question)
         }
       }
+
+      if request.isMultiQuestion, !request.isLocked(question) {
+        let skipped = draft.isSkipped(question)
+        Button { draft.toggleSkip(question) } label: {
+          Label("Skip this question", systemImage: skipped ? "checkmark.circle.fill" : "circle")
+            .font(.footnote)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .accessibilityAddTraits(skipped ? .isSelected : [])
+      }
+    }
+  }
+
+  /// One choice. On the one-question single-select form a tap submits it (the bare label is
+  /// derived in the reducer — the raw choice goes up); everywhere else it selects, shown by a
+  /// radio (single) or checkbox (multi) mark.
+  private func choiceRow(_ choice: String, in question: ClarifyQuestion) -> some View {
+    let split = ClarifyChoice.split(choice)
+    let selected = draft.isPicked(choice, in: question)
+    return Button {
+      if request.submitsOnTap {
+        onSubmit([question.answerKey: .choices([choice])])
+      } else {
+        draft.toggle(choice, in: question)
+      }
+    } label: {
+      HStack(spacing: 8) {
+        if !request.submitsOnTap {
+          Image(systemName: selectionIcon(selected: selected, multiSelect: question.multiSelect))
+        }
+        Text(split.label)
+          .fixedSize(horizontal: false, vertical: true)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        if split.isRecommended {
+          Text("Recommended")
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.blue.opacity(0.18), in: Capsule())
+        }
+      }
+    }
+    .buttonStyle(.bordered)
+    .accessibilityAddTraits(selected ? .isSelected : [])
+  }
+
+  /// The "Other" free-text row: typing makes the typed text the answer (clearing any pick).
+  private func otherRow(_ question: ClarifyQuestion) -> some View {
+    TextField("Other…", text: textBinding(question))
       .textFieldStyle(.roundedBorder)
       .submitLabel(.send)
-      .onSubmit(submit)
-
-      Button(action: submit) {
-        Image(systemName: "paperplane.fill")
+      .onSubmit {
+        if draft.sendsOnReturn(for: request) {
+          onSubmit(draft.answers(for: request))
+        }
       }
-      .buttonStyle(.borderedProminent)
-      .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-    }
   }
 
-  private func submit() {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return }
-    onSubmit(trimmed)
-    text = ""
+  private func textBinding(_ question: ClarifyQuestion) -> Binding<String> {
+    Binding(
+      get: { draft.text(for: question) },
+      set: { draft.setText($0, for: question) }
+    )
   }
 
-  private var isSecure: Bool {
-    if case .secret = mode { return true }
-    return false
-  }
-
-  private var title: String {
-    switch mode {
-    case .clarify: return "Clarification needed"
-    case let .secret(kind, _): return kind == .sudo ? "Password required" : "Secret required"
-    }
-  }
-
-  private var icon: String {
-    switch mode {
-    case .clarify: return "questionmark.circle"
-    case .secret: return "key.fill"
-    }
-  }
-
-  private var prompt: String {
-    switch mode {
-    case let .clarify(request): return request.question
-    case let .secret(_, prompt): return prompt.prompt ?? ""
+  private func selectionIcon(selected: Bool, multiSelect: Bool) -> String {
+    switch (multiSelect, selected) {
+    case (true, true): "checkmark.square.fill"
+    case (true, false): "square"
+    case (false, true): "checkmark.circle.fill"
+    case (false, false): "circle"
     }
   }
 }

@@ -18,10 +18,10 @@ they do today.
   skipped — instantly, with no card. On v2026.9.14 itself the frames arrive, the app drops them,
   and the agent waits out the deadline. Today's `clarify.respond` / `sudo.respond` /
   `secret.respond` calls hit `-32601` on v7 and are swallowed by `try?`.
-- **Base: PR #116, first commit (`702f983`, "Support server-request approval prompts").** A
-  contributor PR already carries the v7 wire layer and approval presentation. It lands, narrowed
-  to the wire layer (see "Base" below), as the foundation of this plan. Queueing, cancel,
-  replay and every other kind are built here, generalized from the start.
+- **Base: PR #116, merged as `e8fb410` ("Support server-request approval prompts").** A
+  contributor PR carried the v7 wire layer and approval presentation; it is on `main` (see
+  "Base" below for what landed) and is the foundation of this plan. Queueing, cancel, replay
+  and every other kind are built here, generalized from the start.
 - **Benefit.** Prompts work again on current agents. The card the user answers is the request
   the server resolves, and an answer that arrives too late says so ("Already handled
   elsewhere"). A reconnect or push-tap restores the real card (command, question, locked batch
@@ -29,17 +29,17 @@ they do today.
   The phone never widens the server's choice set and never steals a prompt meant for a desktop
   sharing the session.
 - **Integration.** Everything rides the existing `pendingInteraction` / `present(_:)` /
-  `pendingInteractionToken` contract and the single `hydrate` → `applyActivate` funnel. The base
-  PR's inbound `.serverRequest` frame is generalized from approval to every prompt kind. No
-  `AppFeature` routing changes.
+  `pendingInteractionToken` contract and the single `hydrate` → `applyActivate` funnel. The
+  base's `InboundFrame.serverRequest` routing is generalized from approval to every prompt kind.
+  No `AppFeature` routing changes.
 
 Sibling issues split out of #96: #98 (event replay) and #99 (native Projects). Out of scope
 here. Multi-slot fan-out stays #90.
 
 **Release gate.** The base makes the phone advertise, so the server starts routing every prompt
 to it. Until Tasks 3–6 land, the phone stays silent on clarify/sudo/secret (see the decline
-rule), and a phone-only agent waits out those deadlines (clarify up to 3600 s). Do not ship a
-TestFlight build that contains the base without Tasks 3–6.
+rule), and a phone-only agent waits out those deadlines (clarify up to 3600 s). `main` has
+carried the base since `e8fb410`: do not ship a TestFlight build from `main` without Tasks 3–6.
 
 ## Context (from discovery)
 
@@ -147,35 +147,64 @@ frame). With no client attached (the backgrounded-socket case the push targets) 
 waits in `open_requests`, so the resume after a tap restores the exact card. Plugin-side
 behaviour unverified.
 
-**Base: PR #116 first commit (`702f983`), narrowed to the wire layer.** As of today it delivers
-`InboundFrame.serverRequest(id:method:params:)`, `HermesGatewayClient.respond(id:result:)`, a
-fire-and-forget `client.capabilities` after `.ready`, `ApprovalRequest.requestID` /
-`serverRequestID` / `choices` / `allowsSessionChoice` / `allowsOnce`, Approve and the session
-toggle hidden when the server withheld them, `GatewayEvent.approvalServerRequest` →
-`present(.approval)`, and an approval answer by response frame `{choice, all:false}`. What #116
-must still fix before it merges (follow-up comment on the PR):
-- every outbound frame through `JSONRPCRequest.wireEncoder` (drop the private encoder);
-- no `try?` on the advertisement or on sends;
-- the decline rule below instead of `-32601` for everything else (it steals desktop prompts);
-- answer approvals with `request.answer` and show "Already handled elsewhere" on `expired`
-  (restores the `resolved: 0` contract in `docs/features/approvals.md`);
-- a malformed approval is answered `{choice:"deny"}`, never left hanging;
-- reducer tests for present, answer, `expired`, and the decline rule.
-Queueing, `request.cancel`, `open_requests` replay and the other kinds are NOT asked of #116;
-they are Tasks 3–8 here. If #116 is not revised by 2026-10-26, take over `702f983` and do the
-fixes in Task 1.
+**Base: PR #116, merged as squash commit `e8fb410` (2026-10-25).** Verified in Task 1 against
+the code. It delivers:
+- `InboundFrame.serverRequest(id:method:params:)` (string `id` + `method`, classified before
+  int-id responses).
+- `GatewayConnection` (`HermesGatewayClient.swift`): `handle(frame:)` presents a decodable
+  `approval` synchronously (`presentApproval` sets `ApprovalRequest.serverRequestID` and yields
+  `GatewayEvent.approvalServerRequest`); anything else goes to `handleServerRequest` in a `Task`
+  (never awaited inside the receive loop). Decline rule: 4404 (`"Not shown on this client"`,
+  encoded by `wireEncoder`) only for the five window-owned methods and only once the
+  advertisement returned `declines_not_shown: true`; every other method gets nothing; a
+  malformed approval (params `null`, non-object, wrong types, missing) is denied through
+  `send("request.answer", {id, result:{choice:"deny"}})`. There is no raw-response
+  `respond(id:result:)` API.
+- Advertisement: `startAdvertisement()` on the `gateway.ready` frame launches a `Task`
+  (`retryAdvertisement`) and `.ready` is yielded at once, NOT after the advertisement. Success
+  stores `declinesNotShown`; `-32601` stops silently (`advertisementUnsupported`); any other
+  failure retries with 2 s → 30 s backoff for the connection's life and yields one
+  `GatewayEvent.serverRequestFailed` banner per connection ("Couldn’t enable approval
+  requests: …").
+- `GatewayEvent.serverRequestFailed(message:)` — a local, non-turn-ending failure (advertisement,
+  decline send, automatic deny): sets `errorBanner`, leaves `isSending` alone.
+- `ApprovalRequest.requestID` (`request_id`, the queue id), `serverRequestID` (set by the
+  client, never decoded), `choices`, `allowsSessionChoice` / `allowsOnce` (empty `choices` =
+  permissive). `offersSessionApproval` now also requires `allowsOnce && allowsSessionChoice`.
+  `ApprovalCardView` hides Approve when `!allowsOnce`.
+- `ChatFeature`: `.approvalServerRequest` → `present(.approval)` + clear the push-tap hint.
+  `respondToApproval` ignores Approve when `!allowsOnce`, narrows `session` → `once` when
+  `!allowsSessionChoice`, and with a `serverRequestID` sends `request.answer {id,
+  result:{choice}}`: `ok` → nothing, `expired` → `approvalRespondResult(resolved: 0)` ("Already
+  handled elsewhere"), anything else or a throw → banner. The card is cleared and the
+  "Approved"/"Denied" row appended optimistically before the RPC. Legacy `approval.respond`:
+  unchanged without `request_id`; with one (and no srq id) it sends `{session_id, request_id,
+  choice, all:false}`.
+- Tests: `ServerRequestTests` (decline matrix, malformed deny, retry, wire order, failures),
+  `ChatInteractionTests` (answer per status, deny/session choice, `request_id` legacy params),
+  `JSONRPCTests`, `GatewayEventDecodingTests`, `HermesGatewayClientTests`. No snapshot.
+- Docs: server-request paragraphs in `docs/features/approvals.md` and `docs/architecture.md`
+  (`CLAUDE.md` untouched).
 
-**App today (`main`)**
-- `HermesKit/Sources/HermesKit/Models/ApprovalRequest.swift` — `ApprovalRequest`,
-  `ClarifyRequest` (`requestID`, `question`, `choices`).
+Every fix the plan asked of #116 landed (`wireEncoder` on every outbound frame, no `try?` on the
+advertisement or sends, the three-way decline rule, `request.answer` + `expired`, deny on a
+malformed approval, reducer tests). The gaps against this plan's design are the ➕ items in
+Tasks 2, 3, 7, 9 and 10; interim risks are the ⚠️ notes in Tasks 2, 3 and 8.
+
+**App today (`main`, including the base)**
+- `HermesKit/Sources/HermesKit/Models/ApprovalRequest.swift` — `ApprovalRequest` (with the
+  base's `requestID` / `serverRequestID` / `choices`), `ClarifyRequest` (`requestID`,
+  `question`, `choices`).
 - `HermesKit/Sources/HermesKit/Models/GatewayEvent.swift` — `.approvalRequest` /
-  `.clarifyRequest` / `.sudoRequest(SecretPrompt)` / `.secretRequest(SecretPrompt)`;
+  `.approvalServerRequest` / `.serverRequestFailed` / `.clarifyRequest` /
+  `.sudoRequest(SecretPrompt)` / `.secretRequest(SecretPrompt)`;
   `SecretPrompt` requires `request_id` (v7 sudo/secret params carry none); `SessionInfo`
   (synthesized `Decodable`, `:253-286`).
 - `HermesKit/Sources/HermesKit/Models/GatewayLogEntry.swift` — exhaustive name/summary switches.
 - `HermesKit/Sources/HermesKit/Models/JSONRPC.swift` — `InboundFrame`, `JSONRPCRequest.wireEncoder`.
-- `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift` — connection actor; frames are
-  handled on the actor's receive loop.
+- `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift` — connection actor
+  (`GatewayConnection`); frames are handled on the actor's receive loop; the base's
+  `handleServerRequest` / `presentApproval` / advertisement retry live here.
 - `HermesKit/Sources/HermesKit/Models/Session.swift` — `ActivateResponse` (`messages`, `info`,
   `running`, `inflight`; `try? decodeIfPresent(SessionInfo…)` at `:185` drops the whole `info`
   if any field throws).
@@ -189,7 +218,8 @@ fixes in Task 1.
   `ClarifyCardView.swift` (clarify card — single-select list or free-text field, rigid — and the
   secret card), wired in `ChatView.pendingCard`.
 - Tests: `GatewayEventDecodingTests`, `SessionDecodingTests`, `JSONRPCTests`,
-  `HermesGatewayClientTests`, `ChatInteractionTests`, `ClarifyFeatureTests`, `HydrateTests`,
+  `HermesGatewayClientTests`, `ServerRequestTests` (base), `ChatInteractionTests`,
+  `ClarifyFeatureTests`, `HydrateTests`,
   `AppFeatureTests` (push-tap recovery); `ChatSnapshotTests` and `ApprovalCardLayoutTests` in
   `HermesMobileTests`.
 
@@ -254,7 +284,8 @@ fixes in Task 1.
    appends. A replayed arrival with a known id updates in place through one sanctioned helper,
    `State.refreshPresented(_:)` (same srq id only, no token bump) — the single documented
    exception to "never assign `pendingInteraction`". Answering, `expired`, or a matching
-   `request.cancel` removes the entry and presents the next one.
+   `request.cancel` removes the entry and presents the next one. Card answers carry the card's
+   token; one whose token is no longer `pendingInteractionToken` is dropped.
 2. **Answers go through `request.answer`, in the request's own shape.** `request.answer {id,
    result}` is an ordinary RPC (`gateway.send`): `wireEncoder`, the 30 s timeout and a surfaced
    error come for free, and `status: "expired"` tells the phone another surface answered first.
@@ -266,8 +297,9 @@ fixes in Task 1.
    when the backend advertised `declines_not_shown`, otherwise nothing. Unrendered prompts
    (`vault.*`, `setup_choose`, `display.install.sudo`): nothing — a desktop sharing the session
    answers; a phone-only agent waits out that prompt's deadline (120–300 s). A rendered kind whose
-   params fail to decode: that kind's own skip (`{choice:"deny"}`, `{}`, `{value:""}`), so the
-   agent is never left hanging.
+   params are not an object (no client can render them): that kind's own skip
+   (`{choice:"deny"}`, `{}`, `{value:""}`). Object params the phone cannot decode (a newer desktop
+   may render them): no answer, a `.serverRequestFailed` banner.
 4. **Cards end when the request ends.** `request.cancel` removes the matching entry (a `timeout`
    on the presented card appends a "Timed out" status row). Turn end (`message.complete`,
    `.error`) clears the queue — the generalization of `clearStaleApproval`. A hydrate never
@@ -285,7 +317,9 @@ fixes in Task 1.
    or a text field; every question with choices also gets an "Other" text row. Several
    questions: sections over one `BoundedHeightLayout` region with a pinned Confirm/Skip row.
    Recommended shows a badge, never a preselection; Skip on every form. On legacy servers the
-   single-select and free-text forms work as today; the new forms are v7-only.
+   single-select and free-text forms work as today; a legacy batch (`questions` + `request_id`,
+   keyed by `isBatch`) sends one `clarify.respond {question_id}` per question, and Skip is one
+   question-less empty respond.
 8. **Sudo and secret move to the new channel.** `SecretPrompt` stops requiring `request_id`
    (the srq id identifies a v7 prompt) and gains the sudo `command` and secret `env_var`. The
    legacy `sudo.respond` / `secret.respond` path stays for legacy servers, with its `try?`
@@ -320,15 +354,21 @@ Key decisions:
 /// Moved out of `ChatFeature.State.PendingInteraction` so models don't depend on the feature.
 public enum SecretKind: Equatable, Sendable { case sudo, secret }
 
+/// Also moved out of the feature (`ChatFeature.State.PendingInteraction` is a typealias).
+public enum PendingInteraction: Equatable, Sendable {
+  case approval(ApprovalRequest)
+  case clarify(ClarifyRequest)
+  case secret(SecretKind, SecretPrompt)
+}
+
+/// The rendered methods; owns each kind's skip result and banner wording.
+public enum PromptMethod: String, CaseIterable, Sendable { case approval, clarify, sudo, secret }
+
 /// One open v7 prompt. `id` is the `srq-…` request id — the only place it is stored.
 public struct PendingServerRequest: Equatable, Sendable, Identifiable {
   public var id: String
-  public var kind: Kind
-  public enum Kind: Equatable, Sendable {
-    case approval(ApprovalRequest)
-    case clarify(ClarifyRequest)
-    case secret(SecretKind, SecretPrompt)
-  }
+  public var kind: PendingInteraction
+  public var method: PromptMethod { … }   // derived from kind
 }
 
 public struct ClarifyQuestion: Equatable, Sendable {
@@ -339,13 +379,14 @@ public struct ClarifyQuestion: Equatable, Sendable {
   public var isFreeText: Bool { choices.isEmpty }
 }
 
-public struct ClarifyRequest: Equatable, Sendable, Decodable {
+public struct ClarifyRequest: Equatable, Sendable {   // init?(serverRequestParams:) / init?(legacyEvent:)
   public var requestID: String?                // legacy event id; nil on v7
   public var questions: [ClarifyQuestion]      // >= 1 after decoding
   public var lockedAnswers: [String: String?]  // replayed `answers`, keyed by qid; nil = skipped
   public var answerShape: AnswerShape
   public enum AnswerShape: Equatable, Sendable { case answers, singleAnswer, legacyRespond }
   public var isMultiQuestion: Bool { questions.count > 1 }   // layout only
+  public var isBatch: Bool { questions.first?.qid != nil }   // legacy wire shape
   // convenience for the single form (keeps existing call sites/tests)
   public init(requestID: String?, question: String, choices: [String] = [], multiSelect: Bool = false)
 }
@@ -376,13 +417,16 @@ public struct OpenRequest: Equatable, Sendable, Decodable {
 }
 ```
 
-The base's `ApprovalRequest.serverRequestID` is removed once the queue exists (the id lives on
-`PendingServerRequest` only).
+The base's `ApprovalRequest.serverRequestID` (set in `GatewayConnection.presentApproval`) is
+removed once the queue exists (the id lives on `PendingServerRequest` only). `requestID`,
+`choices`, `allowsOnce` and `allowsSessionChoice` stay as merged.
 
-Decoding rules: `ApprovalRequest` stays fully lenient. `ClarifyRequest` picks its shape from the
-payload: `questions` (each entry needs `qid` + `question`) → `.answers`; a top-level `question`
-from a server request → `.singleAnswer`; the legacy event (with `request_id`) → `.legacyRespond`.
-No usable question → decode failure. `multi_select` defaults `false`; `choices: null` → `[]`.
+Decoding rules: `ApprovalRequest` stays lenient, but a v7 approval needs `hasContent` (a
+non-blank command or description) to render. `ClarifyRequest`'s source decides the wire:
+`init?(serverRequestParams:)` → `.answers` for a `questions` list (each entry needs `qid` +
+`question`), else `.singleAnswer` for a top-level `question`; `init?(legacyEvent:)` (needs
+`request_id`) → `.legacyRespond`, a `questions` list being the legacy batch. No usable question →
+nil. `multi_select` defaults `false`; `choices: null` → `[]`.
 Unknown keys are ignored.
 
 `ActivateResponse` adds `openRequests: [OpenRequest]` (`"open_requests"`, default `[]`).
@@ -390,20 +434,36 @@ Unknown keys are ignored.
 String that parses as an Int, else nil — it must never throw, because a throw drops the whole
 `info`. `GatewayEvent` gains `.serverRequest(PendingServerRequest)` (replacing the base's
 `.approvalServerRequest`) and `.requestCancel(RequestCancel)` (`"request.cancel"`), each with a
-`GatewayLogEntry` name and a summary that never includes a secret value.
+`GatewayLogEntry` name and a summary that never includes a secret value. The base's
+`.serverRequestFailed(message:)` stays as the local, non-turn-ending failure event for
+advertisement, decline and automatic-skip sends.
 
 ### Client (`HermesGatewayClient`)
 
 - Inbound `.serverRequest`: `approval` / `clarify` / `sudo` / `secret` decode into
-  `GatewayEvent.serverRequest`. A rendered method whose params fail to decode gets that kind's
-  skip as a response frame. Window-owned methods get a 4404 error frame when
-  `declinesNotShown`, else nothing. Every other method gets nothing.
+  `GatewayEvent.serverRequest`, yielded synchronously from `handle(frame:)` as the base does for
+  approval (a following turn terminal must not overtake the card). A rendered method whose
+  params are not an object gets that kind's skip (`PendingServerRequest.malformedSkip`) through
+  `request.answer` from a `Task` (a failure → `.serverRequestFailed`); undecodable object params
+  get no answer, only a `.serverRequestFailed` banner. Window-owned methods get
+  a 4404 error frame when `declinesNotShown`, else nothing. Every other method gets nothing.
 - Advertisement: when the `gateway.ready` frame arrives, the actor starts a `Task` that sends
   `client.capabilities {server_requests: true}` and awaits the result with a 5 s cap, stores
   `declinesNotShown`, and only then yields `.ready` (awaiting inside the receive loop would
   deadlock — the response arrives through that loop). `-32601` means "no advertisement on this
   backend"; a timeout or other failure is logged through the gateway log; every outcome still
-  yields `.ready`. Events arriving during the window are yielded as usual.
+  yields `.ready`. Events arriving during the window are yielded as usual. The base already
+  starts the `Task` on `gateway.ready` but yields `.ready` immediately and retries failures in
+  the background (see "Base"); Task 2 reconciles the two.
+  **As built (Task 2):** one attempt per connection, no background retry (the next connect
+  re-advertises). The `.ready` gate (`readyGateOpen`, `advertisementReadyCap` = 5 s) opens on
+  the attempt settling or the cap, whichever is first; a capped attempt keeps running under the
+  30 s request budget and its late outcome still counts. A failure other than `-32601` yields
+  `GatewayEvent.serverRequestsUnavailable(message:)` ("Couldn’t enable approvals and other
+  prompts: …") strictly AFTER `.ready`; the reducer stores it in
+  `State.serverRequestsUnavailable`, which `.ready` resets and `applyActivate`'s stale-banner
+  clear restores (`errorBanner = serverRequestsUnavailable`), so the banner outlives the
+  hydrate that follows. Like every stream event it is mirrored into the gateway log.
 - Every outbound frame — declines and skip responses included — is encoded by
   `JSONRPCRequest.wireEncoder`. Answers go through `send("request.answer", …)`.
 
@@ -424,15 +484,29 @@ Actions:
   id is known; present when it became the head.
 - `.gatewayEvent(.requestCancel(c))` — remove the matching entry; if it was presented, present
   the next or clear; `reason == "timeout"` on the presented card appends a "Timed out" row.
-- `respondToApproval(approve:all:)` — builds `{choice}`; legacy path unchanged.
+- Every card action below also carries `token:` (stale tokens are dropped).
+- `respondToApproval(approve:all:)` — builds `{choice}` (the base's narrowing kept); legacy
+  `approval.respond` path as merged. The v7 outcome moves from the base's
+  `approvalRespondResult(resolved: 0)` overload to `serverRequestAnswered`.
 - `submitClarify(answers: [String: String?])` — keyed by qid (a single legacy/intermediate
   question uses the key `""`); the reducer builds the wire shape from `answerShape`.
+  **As built (Task 5):** `submitClarify(answers: [String: ClarifyAnswer])` with
+  `ClarifyAnswer = .choices([raw]) | .other(text) | .skipped` (in `ClarifyRequest.swift`), so
+  the marker stripping and the multi-select JSON-array string stay in HermesKit; a legacy
+  answer keeps the raw choice (byte-identical wire). Locks win over the card's answers.
 - `skipClarify` — v7 `.answers`: `{}`; `.singleAnswer`: `{answer:""}`; legacy: today's empty
   `clarify.respond`.
 - `respondToSecret(value:)` — v7 `{value}`; legacy `sudo.respond` / `secret.respond`.
+  **As built (Task 6):** plus `skipSecret` (v7 `{value:""}`, legacy an empty respond), both
+  through one `answerSecret`; echo rows "Password/Secret submitted" / "… skipped".
 - `serverRequestAnswered(id:, Result<AnswerStatus, GatewayError>)` — `.ok` → remove + next;
   `.expired` → remove + "Already handled elsewhere" row + next; failure → `errorBanner`, card
   stays. Legacy clarify/secret failures surface the same way instead of `try?`.
+  **As built (Task 3):** `serverRequestAnswered(id:echo:_:)` — `AnswerEcho {kind, text,
+  failureBanner}` carries the `ok` row and the failure banner, so each kind sets its own copy;
+  no optimistic row on v7. `answeringServerRequestID` ignores a second answer while one is in
+  flight. `State.presentedServerRequest` (= the queue head while a card stands) is how answers
+  find their srq id; `presentNextServerRequest()` raises the next head or dismisses.
 
 Answer building per kind (all v7 answers are `request.answer {id, result: …}`):
 ```
@@ -441,6 +515,8 @@ clarify .answers       → {answers: {q0: "A", q1: "[\"B\",\"C\"]", q2: "typed o
                           cancel → {}
 clarify .singleAnswer  → {answer: "A"}                  skip → {answer: ""}
 clarify .legacyRespond → clarify.respond {session_id, request_id, answer}   (today's wire)
+  legacy batch         → one clarify.respond {…, question_id, answer} per question
+                          skip → one question-less empty respond
 sudo / secret v7       → {value: "…"}                   skip → {value: ""}
 sudo / secret legacy   → sudo.respond / secret.respond   (today's wire)
 ```
@@ -463,8 +539,8 @@ the same reconcile when it lands.
 
 ### Views (`HermesMobile`)
 
-- `ApprovalCardView`: toggle on `offersSessionApproval && allowsSessionChoice`, Approve hidden
-  when `!allowsOnce` (from the base).
+- `ApprovalCardView`: toggle on `offersSessionApproval` (the base folded `allowsOnce &&
+  allowsSessionChoice` into it), Approve hidden when `!allowsOnce` (from the base).
 - `ClarifyCardView` rebuilt around one `BoundedHeightLayout` region (moved to its own
   `BoundedHeightLayout.swift`; pure move) with a pinned action row. Single question:
   single-select rows (tap submits), multi-select checkmark rows + Submit, free-text field +
@@ -476,8 +552,8 @@ the same reconcile when it lands.
   view `@State` holds only the user's edits to unlocked questions, keyed on
   `pendingInteractionToken` through the existing `.id`, so a refreshed replay shows new locks
   and a replacement card never inherits selections.
-- Secret card (in `ClarifyCardView.swift`): shows the sudo `command` / secret `env_var` when
-  present.
+- Secret card (`SecretCardView.swift`): shows the sudo `command` / secret `env_var` when
+  present, in the shared `BoundedScrollRegion` (metrics in `PromptCardMetrics`).
 
 ### Wire examples (test fixtures)
 
@@ -496,7 +572,7 @@ the same reconcile when it lands.
 // server request: sudo (v2026.9.21+)
 {"jsonrpc":"2.0","id":"srq-bbbbbbbbbbbb","method":"sudo","params":{"session_id":"live","command":"apt install …"}}
 // decline, window-owned method, backend with declines_not_shown
-{"jsonrpc":"2.0","id":"srq-cccccccccccc","error":{"code":4404,"message":"not shown on this client"}}
+{"jsonrpc":"2.0","id":"srq-cccccccccccc","error":{"code":4404,"message":"Not shown on this client"}}
 // request.cancel
 {"jsonrpc":"2.0","method":"event","params":{"type":"request.cancel","session_id":"live","seq":123,"payload":{"id":"srq-1a2b3c4d5e6f","method":"approval","reason":"timeout"}}}
 // session.resume extras (live reattach)
@@ -508,18 +584,19 @@ the same reconcile when it lands.
 ### Task 1: Reconcile with the merged base
 
 **Files:**
-- Read: the merged PR #116 server-requests commit(s)
+- Read: the merged PR #116 squash commit `e8fb410`
 - Modify: this plan (names, anything the base delivered differently)
 
-- [ ] confirm the base delivered the items listed under "Base" — in particular `wireEncoder`
+- [x] confirm the base delivered the items listed under "Base" — in particular `wireEncoder`
       for every frame, no `try?`, the three-way decline rule (no 4404 outside the window-owned
       set, nothing on backends without `declines_not_shown`), `request.answer` with `expired`
-      handling, deny on a malformed approval, reducer tests
-- [ ] list every gap as a ➕ item in the matching task below; rename types in this plan to the
+      handling, deny on a malformed approval, reducer tests (all present; see "Base")
+- [x] list every gap as a ➕ item in the matching task below; rename types in this plan to the
       merged names
-- [ ] if #116 was not revised by 2026-10-26: take over `702f983` on a branch and close those gaps
-      here, with tests
-- [ ] run the full suite on `main` — must be green before Task 2
+- [x] if #116 was not revised by 2026-10-26: take over `702f983` on a branch and close those gaps
+      here, with tests (n/a — #116 revised and merged as `e8fb410`)
+- [x] run the full suite on `main` — must be green before Task 2 (run on this branch = `main`
+      + plan edits: 1509 tests in 68 suites passed, 1 known issue)
 
 ### Task 2: Wire-generation signal and advertisement ordering
 
@@ -530,27 +607,57 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`, `SessionDecodingTests.swift`, `GatewayEventDecodingTests.swift`, `ServerRequestTests.swift`
 
-- [ ] decode `desktop_contract` leniently (Int, numeric String, else nil — never throws) and
-      `open_requests` (default `[]`)
-- [ ] advertisement in a `Task` started on the `gateway.ready` frame, 5 s cap, store
+- [x] decode `desktop_contract` leniently (Int, numeric String, else nil — never throws) and
+      `open_requests` (default `[]`) (`SessionInfo` got a hand-written decoder that keeps the
+      other fields' synthesized semantics; `open_requests` decodes per entry — a malformed entry
+      is dropped, a non-array is `[]`; `OpenRequest` lives next to `ActivateResponse` in
+      `Session.swift`, so Task 3 no longer adds it)
+- [x] advertisement in a `Task` started on the `gateway.ready` frame, 5 s cap, store
       `declinesNotShown`, then yield `.ready`; `-32601`, timeout and other failures still reach
-      ready, the latter two logged
-- [ ] record `desktopContract` per slot from `applyActivate` and `session.info`
-- [ ] write tests: `desktop_contract` as `7`, `"8"`, `"x"`, absent — and a string value leaves the
+      ready, the latter two logged (the base already starts the `Task` and stores
+      `declinesNotShown`; what changes is holding `.ready` until it settles or the cap fires)
+      (a capped attempt keeps running; its late failure — the 30 s request timeout included —
+      surfaces through `.serverRequestsUnavailable`, which the gateway log mirrors; the cap
+      itself logs nothing)
+- [x] record `desktopContract` per slot from `applyActivate` and `session.info` (a hydrate's
+      `info` is a full snapshot and overwrites; a partial `session.info` writes only when present)
+- [x] write tests: `desktop_contract` as `7`, `"8"`, `"x"`, absent — and a string value leaves the
       model/usage fields of `info` intact; `open_requests` present/absent/malformed; the
       advertisement precedes `session.resume` on the wire; a hung advertisement still reaches
       ready after the cap; events in the window are not lost; `declinesNotShown` stored
-- [ ] ➕ rewrite #116's `unknownAdvertisementMethodIsSilentAndNotRetried` (`ServerRequestTests`):
+- [x] ➕ rewrite #116's `unknownAdvertisementMethodIsSilentAndNotRetried` (`ServerRequestTests`):
       it calls `advertiseServerRequestsIfNeeded()` directly, so the retry loop (started only on
       `ready`) never runs, the clock advance is a no-op, and `events` is never read — it passes
       on the pre-fix `e6736df`. Drive it through an injected `ready` frame and assert one
       `client.capabilities` frame and no `.serverRequestFailed`
-- [ ] ➕ if #116's retry loop survives this task: test that a non-`-32601` failure (`busy`)
+- [x] ➕ if #116's retry loop survives this task: test that a non-`-32601` failure (`busy`)
       keeps retrying but surfaces once per connection (`advertisementFailureReported` is
-      uncovered)
-- [ ] ➕ drop the redundant `advertisementUnsupported` flag in `GatewayConnection` — the same
-      branch sets `advertisedServerRequests = true`, which already stops the retry
-- [ ] run tests - must pass before next task
+      uncovered) (n/a — the retry loop is gone; `advertisementFailureSurfacesAfterReadyAndIsNotRetried`
+      covers the single attempt instead)
+- [x] ➕ drop the redundant `advertisementUnsupported` flag in `GatewayConnection` — the same
+      branch sets `advertisedServerRequests = true`, which already stops the retry (gone, along
+      with `advertisedServerRequests` / `advertisingServerRequests` /
+      `advertisementFailureReported`; one `advertisementStarted` flag remains)
+- [x] ➕ decide whether #116's background retry (`startAdvertisement` → `retryAdvertisement`,
+      2 s → 30 s for the connection's life) survives behind the awaited first attempt. The
+      Technical Details design has none (the next connect is the retry); if it stays, describe it
+      there and keep the item above about `advertisementFailureReported` (dropped: one attempt per
+      connection, matching Technical Details and the no-automatic-retries preference)
+- [x] ➕ make the advertisement failure visible: the base's `.serverRequestFailed` banner lands
+      just after `.ready` and is wiped by `applyActivate`'s `errorBanner = nil` when the hydrate
+      answers later; once `.ready` waits on the advertisement, the `.ready` handler's own clear
+      wipes it too. Pick banner (CLAUDE.md "surface RPC failures") or gateway log (Technical
+      Details), make it survive the ready/hydrate clears, and test that (banner, and the gateway
+      log via the stream mirror: new `GatewayEvent.serverRequestsUnavailable` yielded after
+      `.ready`, kept in `State.serverRequestsUnavailable`, restored by the hydrate clear, reset by
+      the next `.ready`)
+- [x] ➕ reword the failure copy "Couldn’t enable approval requests" to cover every prompt kind
+      (clarify/sudo/secret ride the same advertisement after Tasks 5–6) ("Couldn’t enable
+      approvals and other prompts: …")
+- ⚠️ (resolved in Task 2) until this task lands, `.ready` (and so `session.resume`) does not
+      wait for the advertisement: a prompt raised before the server processed it is refused
+      while the phone is the only client
+- [x] run tests - must pass before next task (1519 tests in 68 suites passed, 1 known issue)
 
 ### Task 3: One queue for every rendered server request
 
@@ -561,23 +668,63 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift`
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (queue, `refreshPresented`,
   the exhaustive event list)
-- Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `HermesGatewayClientTests.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `HermesGatewayClientTests.swift`, `ServerRequestTests.swift`
 
-- [ ] add `PendingServerRequest`, `SecretKind` (moved), `RequestCancel`, `OpenRequest`; replace
-      the base's approval event with `.serverRequest`; drop `ApprovalRequest.serverRequestID`
-- [ ] `serverRequests` queue with `present(_:)` for a new head and `refreshPresented(_:)` for a
+- [x] add `PendingServerRequest`, `SecretKind` (moved), `RequestCancel` (`OpenRequest` already
+      landed in Task 2, in `Session.swift`); replace
+      `GatewayEvent.approvalServerRequest` (the case, its `GatewayLogEntry` name/summary, the
+      reducer case, the non-transcript list entry) with `.serverRequest`; drop
+      `ApprovalRequest.serverRequestID` (set in `GatewayConnection.presentApproval`)
+      (`PendingServerRequest.init?(id:method:params:)` is the one rendered-method decoder and
+      `malformedSkip(for:)` the per-kind skip — Tasks 5/6 extend both; `windowOwnedMethods` lives
+      there too; `ClarifyCardView.Mode` now names the top-level `SecretKind`)
+- [x] `serverRequests` queue with `present(_:)` for a new head and `refreshPresented(_:)` for a
       known id; approval answers through `request.answer` → `serverRequestAnswered`
-- [ ] `request.cancel`: remove the entry, present the next, "Timed out" row for a presented
+      (invariant: while the queue is non-empty its head IS the presented card —
+      `State.presentedServerRequest`; `presentNextServerRequest()` raises the next head;
+      `answeringServerRequestID` guards a second tap while an answer is in flight; the outcome
+      action carries an `AnswerEcho` — row kind/text on `ok`, banner on failure)
+- [x] `request.cancel`: remove the entry, present the next, "Timed out" row for a presented
       `timeout`
-- [ ] turn end (`message.complete`, `.error`) clears the queue — generalize `clearStaleApproval`
-- [ ] decline matrix in the client (window-owned × `declinesNotShown`; unrendered prompts silent;
-      malformed rendered kind → its skip)
-- [ ] write tests: two approvals queue and present in order; answering the head presents the next
+- [x] turn end (`message.complete`, `.error`) clears the queue — generalize `clearStaleApproval`
+      (now `clearStalePrompts`; still also called by `applyActivate` on `running == false`
+      until Task 8 — see the ⚠️ there)
+- [x] decline matrix in the client (window-owned × `declinesNotShown`; unrendered prompts silent;
+      malformed rendered kind → its skip) (`handleServerRequest` is now private and synchronous
+      on the receive loop; only the sends run in a `Task`)
+- [x] write tests: two approvals queue and present in order; answering the head presents the next
       with a new token; `expired` removes with "Already handled elsewhere"; an RPC failure keeps
       the card with a banner; a replayed id refreshes without a token bump; cancel of the head /
       of a queued entry / of an unknown id; turn end clears; the decline matrix including
       `vault.code` getting nothing on every backend
-- [ ] run tests - must pass before next task
+- [x] ➕ keep the card on a failed answer: the base clears `pendingInteraction` and appends the
+      "Approved"/"Denied" row BEFORE `request.answer`, so a throw or malformed status leaves a
+      banner, no card, and a request still open server-side. Remove only on `ok`/`expired`; on
+      failure keep the card and drop or patch the optimistic row. Rewrite the base's
+      `serverApprovalAnswer` test (it asserts the card is gone on failure) (no optimistic row on
+      v7: the row is appended on the acknowledgement; the legacy `approval.respond` path keeps
+      its optimistic row)
+- [x] ➕ test the base's `!approve || request.allowsOnce` guard in `respondToApproval`: Approve
+      on a card whose `choices` lack `once` sends nothing and keeps the card (uncovered)
+- [x] ➕ drive the decline-matrix tests through injected frames: the base's
+      `declinesOnlyWindowBridges` / `automaticSendFailureDoesNotEndTurn` call
+      `handleServerRequest` directly, so `handle(frame:)`'s routing of non-approval methods is
+      untested (only approval frames are injected end to end)
+- ⚠️ (resolved in Task 3) approval params that decode but carry no `command`/`description`
+      (`{}`, `session_id` only) present a content-less card that looks like the push-tap
+      recovered card instead of being denied as malformed — now malformed
+      (`ApprovalRequest.hasContent`: command, description or a danger pattern) and denied
+- ⚠️ a `choices` list with `session` but no `once` renders Deny only (Approve hidden, the toggle
+      needs `allowsOnce`); upstream always offers `once` alongside `session`, so accepted
+- ⚠️ the base ignores `params.session_id` (as the client already drops events' `session_id`);
+      fine while one socket serves one session (multi-slot is #90)
+- ⚠️ (resolved in Task 3) until this task lands, a second server approval overwrites the
+      presented one and the first stays open server-side until its deadline
+- ⚠️ clarify/sudo/secret server requests stay silent (unrendered, no skip) until Tasks 5–6
+      add them to `PendingServerRequest`; the decline-matrix test lists them as silent
+      (clarify resolved in Task 5, sudo/secret in Task 6)
+- [x] run tests - must pass before next task (1531 tests in 68 suites passed, 1 known issue;
+      app target builds; `make snapshot` 40 failures, all at identical render size = known drift)
 
 ### Task 4: `ClarifyRequest` questions model and all three shapes
 
@@ -587,16 +734,24 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Tests/HermesKitTests/GatewayEventDecodingTests.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ClarifyChoiceTests.swift`
 
-- [ ] create `ClarifyRequest.swift` with `ClarifyQuestion`, `ClarifyRequest` (`questions`,
+- [x] create `ClarifyRequest.swift` with `ClarifyQuestion`, `ClarifyRequest` (`questions`,
       `lockedAnswers`, `answerShape`, `isMultiQuestion`, the single-form convenience init) and the
-      shape-detecting decoder
-- [ ] add `ClarifyChoice.split(_:)` (case-insensitive `(recommended)` suffix, trimmed)
-- [ ] write decoding tests: v0.21.6 single-select and free-text single questions (one-entry
+      shape-detecting decoder (detection order: usable `questions` → `.answers`; `request_id` →
+      `.legacyRespond`, decoded as before; top-level non-blank `question` → `.singleAnswer`. An
+      unusable `questions` entry is dropped, the rest render; a non-string lock is ignored;
+      `multiSelect` is forced `false` on a free-text question, as upstream normalizes. The
+      `clarify.request` event only accepts the `.legacyRespond` shape. `question` / `choices`
+      stay as first-question accessors so the single card and the log summary are untouched
+      until Task 7)
+- [x] add `ClarifyChoice.split(_:)` (case-insensitive `(recommended)` suffix, trimmed) (a choice
+      that is only the marker keeps it as its label — never an empty row)
+- [x] write decoding tests: v0.21.6 single-select and free-text single questions (one-entry
       `questions`, `isMultiQuestion == false`), three mixed questions, replayed `answers`
       including a `null`, intermediate single with and without `multi_select`, intermediate
       batch, legacy event (unchanged), no usable question → failure
-- [ ] write `ClarifyChoice.split` tests: suffix present / absent / mixed case / lone choice
-- [ ] run tests - must pass before next task
+- [x] write `ClarifyChoice.split` tests: suffix present / absent / mixed case / lone choice
+- [x] run tests - must pass before next task (1554 tests in 69 suites passed, 1 known issue;
+      app target builds; `make snapshot` 40 failures, all at identical render size = known drift)
 
 ### Task 5: Clarify over server requests
 
@@ -605,17 +760,31 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ClarifyFeatureTests.swift`
 
-- [ ] route `clarify` server requests into the queue; a malformed one gets `{}`
-- [ ] `submitClarify(answers:)` / `skipClarify` build the result per `answerShape` (table in
+- [x] route `clarify` server requests into the queue; a malformed one gets `{}`
+      (`PendingServerRequest.init?` accepts only the two v7 shapes: a stray `request_id` is
+      re-modelled as `.singleAnswer`, or malformed when no question is left)
+- [x] `submitClarify(answers:)` / `skipClarify` build the result per `answerShape` (table in
       Technical Details); bare choice text; Other answers as typed; replayed locks included
-- [ ] legacy `respondToClarify`: replace `try?` with surfaced failure (banner, echo row patched
-      to "Failed to send")
-- [ ] write tests: each shape's exact `request.answer` params; multi-select JSON-array string;
+      (answers are typed `[String: ClarifyAnswer]` — `.choices([raw])` / `.other(text)` /
+      `.skipped` — so the reducer, not the view, strips the marker and builds the JSON-array
+      string; locks win over the card's answers; a question missing from the map is `null`)
+- [x] legacy `respondToClarify`: replace `try?` with surfaced failure (banner, echo row patched
+      to "Failed to send") (`respondToClarify(answer:)` is now a thin forwarder to the shared
+      `answerClarify` for the first question — a raw offered choice → `.choices`, else
+      `.other` — so today's single card also answers v7 requests until Task 7 rewires it;
+      the failure is `legacyRespondFailed(rowID:banner:)`, reusable by Task 6)
+- [x] write tests: each shape's exact `request.answer` params; multi-select JSON-array string;
       an Other answer on a single-select and on a multi-select question; a skipped question sends
       `null`; cancel-all `{}`; intermediate skip `{answer:""}`; `expired`; a failed answer keeps
       the card and banners; legacy wire byte-identical to today's fixture; legacy failure
-      surfaces
-- [ ] run tests - must pass before next task
+      surfaces (`ClarifyFeatureTests`; plus `ServerRequestTests`: an injected clarify frame is
+      queued ahead of the turn terminal, malformed clarify → `{}`, a failed automatic `{}`
+      banners without ending the turn; the decline matrix no longer lists `clarify` as silent)
+- ⚠️ the intermediate (v2026.9.14–.24) batch typed its answers `dict[str,str]`; a skipped
+      question there still goes out as `null` (the app cannot tell that batch from the v0.21.6+
+      shape). Accepted: those releases are superseded
+- [x] run tests - must pass before next task (1567 tests in 69 suites passed, 1 known issue;
+      no view or app-used API changed, so no app build / snapshot run)
 
 ### Task 6: Sudo and secret over server requests
 
@@ -627,16 +796,32 @@ the same reconcile when it lands.
 - Modify: `HermesMobile/Sources/Features/Chat/ClarifyCardView.swift` (secret card: command / env var line)
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `GatewayEventDecodingTests.swift`
 
-- [ ] `SecretPrompt.requestID` optional; add `command`, `envVar`
-- [ ] route `sudo` / `secret` server requests into the queue; answer `{value}`, skip
-      `{value:""}`; a malformed one gets `{value:""}`
-- [ ] legacy `sudo.respond` / `secret.respond` unchanged on the wire; `try?` replaced by
-      surfaced failure
-- [ ] the value never reaches the transcript, the gateway log, or a push (privacy rule)
-- [ ] write tests: v7 sudo with and without `command`, secret with `env_var`; answer and skip
+- [x] `SecretPrompt.requestID` optional; add `command`, `envVar` (the legacy `sudo.request` /
+      `secret.request` events still require `request_id` — without one they stay `.unknown`,
+      as before)
+- [x] route `sudo` / `secret` server requests into the queue; answer `{value}`, skip
+      `{value:""}`; a malformed one gets `{value:""}` (new `skipSecret` action + a Skip button
+      on the secret card; a `secret` naming neither `prompt` nor `env_var` counts as malformed
+      — a blind field — while an empty `sudo` renders, since v2026.9.14 sends no `command`; a
+      stray `request_id` is dropped. The card shows the sudo `command` / secret `env_var` line)
+- [x] legacy `sudo.respond` / `secret.respond` unchanged on the wire; `try?` replaced by
+      surfaced failure (shared `answerSecret`; a throw → `legacyRespondFailed`, row patched to
+      "Failed to send", banner "Failed to send the password." / "… the secret."; a legacy skip
+      sends the same respond with an empty value)
+- [x] the value never reaches the transcript, the gateway log, or a push (privacy rule) (echo
+      rows/banners are fixed copy; the log mirrors inbound events only, whose summary shows the
+      prompt/command/env var; the app sends no pushes)
+- [x] write tests: v7 sudo with and without `command`, secret with `env_var`; answer and skip
       params; the gateway log entry omits the value; legacy wire unchanged; legacy failure
-      surfaces
-- [ ] run tests - must pass before next task
+      surfaces (`GatewayEventDecodingTests`, `ClarifyFeatureTests` — next to the existing
+      secret tests, not `ChatInteractionTests` — and `ServerRequestTests`: injected sudo/secret
+      frames queue ahead of the terminal, malformed → `{value:""}`, a failed automatic skip
+      banners without ending the turn; the decline matrix no longer lists sudo/secret as silent.
+      Snapshots: `testSudoCard_command`, `testSecretCard_envVar`; `testSecretCard_secure`
+      re-recorded for the Skip button)
+- [x] run tests - must pass before next task (1581 tests in 69 suites passed, 1 known issue;
+      app target builds; `make snapshot` 39 failures, all at identical render size = known
+      drift — one fewer than before because `testSecretCard_secure` was re-recorded)
 
 ### Task 7: `ClarifyCardView` forms over a bounded region
 
@@ -650,22 +835,38 @@ the same reconcile when it lands.
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift`
 - Create: `HermesMobileTests/ClarifyCardLayoutTests.swift`
 
-- [ ] move `BoundedHeightLayout` to its own file; keep its doc comments and measured
+- [x] move `BoundedHeightLayout` to its own file; keep its doc comments and measured
       derivations; `tuist generate` so the new file is picked up
-- [ ] rebuild `ClarifyCardView` per Technical Details (layout by question count, Other row,
+- [x] rebuild `ClarifyCardView` per Technical Details (layout by question count, Other row,
       Skip everywhere, recommended badge, store-driven locks, Confirm gating, no preselection)
-- [ ] `ChatView.pendingCard`: wire `submitClarify` / `skipClarify`; extend `.layoutPriority(1)`
-      to `store.isCompressibleCardPending` with the rationale updated
-- [ ] add snapshots: `testClarifyCard_multiSelect`, `testClarifyCard_multiQuestion`,
+      (the form rules live in HermesKit as `ClarifyDraft` — picks vs Other text exclusive,
+      radio/checkbox, per-question skip, `answers(for:)` / `isComplete(for:)` — plus
+      `ClarifyRequest.isLocked` / `lockedDisplayText` (shared with the transcript echo) and
+      `ClarifyQuestion.answerKey`. The region reuses the approval card's cap, floor, fade and
+      reserve (reserve only on the multi-question card). The secret card is split out as
+      `SecretCardView` in the same file, unchanged in rendering. The Other row is v7-only (a
+      legacy `clarify.request` keeps today's choices-only form plus Skip). The now-unused
+      `respondToClarify` forwarder is removed; its tests send `submitClarify`)
+- [x] `ChatView.pendingCard`: wire `submitClarify` / `skipClarify`; extend `.layoutPriority(1)`
+      to `store.isCompressibleCardPending` with the rationale updated (replaces
+      `isApprovalPending`: approval or multi-question clarify)
+- [x] add snapshots: `testClarifyCard_multiSelect`, `testClarifyCard_multiQuestion`,
       `testClarifyCard_recommendedBadge`, `testClarifyCard_lockedAnswers`,
-      `testClarifyCard_otherRow`, `testApprovalCard_noSessionChoice` if the base did not add it
-      (`make snapshot` twice each; pinned width + height since the region scrolls)
-- [ ] add `ClarifyCardLayoutTests`: hosted `ChatView` at the shortest keyboard-up window with
+      `testClarifyCard_otherRow`, `testApprovalCard_noSessionChoice` (the base added no
+      snapshot) (`make snapshot` twice each; pinned width + height since the region scrolls)
+      (`testClarifyCard_choices` / `_freeText` re-recorded for the new form; `ClarifyCardView`
+      takes an optional seeded `ClarifyDraft` so a snapshot can render a form mid-answer)
+- [x] ➕ add `testApprovalCard_denyOnly` (`choices: ["deny"]`): the base hides Approve when
+      `!allowsOnce`, and no snapshot covers the one-button row
+- [x] add `ClarifyCardLayoutTests`: hosted `ChatView` at the shortest keyboard-up window with
       five questions — Confirm/Skip frames inside the window, region
       `contentSize.height > bounds.height`; a single-question card still hugs its content
-- [ ] run HermesKit tests and `make snapshot` — no new failures; any failure with a different
+      (plus: at 393×516 the five-question region outranks the transcript, which keeps ≥ 40pt)
+- [x] run HermesKit tests and `make snapshot` — no new failures; any failure with a different
       render size from its baseline is a regression (equal size with a small residual is the
-      known drift)
+      known drift) (1595 tests in 70 suites passed, 1 known issue; app builds; `make snapshot`
+      37 failures, all at identical render size = known drift — two fewer than before because
+      `testClarifyCard_choices` / `_freeText` were re-recorded; both layout suites pass)
 
 ### Task 8: Reconnect replay and push-tap recovery
 
@@ -674,53 +875,104 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift` (existing recovery tests)
 
-- [ ] implement the `applyActivate` ordering in Technical Details: on v7 always reconcile with
+- [x] implement the `applyActivate` ordering in Technical Details: on v7 always reconcile with
       `openRequests` (absence is authoritative, same-id refresh, locks shown); legacy clears on
-      `!running` as today
-- [ ] v7 push-tap: an armed hint is consumed by the replay; no approval in the replay → no card;
+      `!running` as today (`reconcileServerRequests`; v7 = `desktop_contract >= 7` OR a
+      non-empty `open_requests`. Kept ids hold their queue place — a reordering replay never
+      swaps the card under the user — new ids append in replay order; unrendered or malformed
+      entries are not queued and the reducer sends nothing for them; a dropped id releases a
+      stale `answeringServerRequestID`; a standing non-server card is replaced by the head or
+      dismissed by an empty replay)
+- [x] v7 push-tap: an armed hint is consumed by the replay; no approval in the replay → no card;
       legacy keeps the generic recovered card exactly as today
-- [ ] write tests: `open_requests` with an approval and a clarify presents the approval then the
+- [x] write tests: `open_requests` with an approval and a clarify presents the approval then the
       clarify; re-hydrate with the same ids keeps the token; an unlisted presented card is
       cleared; `running == false` with a non-empty `open_requests` keeps the card;
       `running == false` with none clears; v7 hint + approval in the replay → the real card, no
       generic card; v7 hint + empty replay → nothing; legacy hint → generic card (existing
-      `AppFeatureTests` cases still pass)
-- [ ] run tests - must pass before next task
+      `AppFeatureTests` cases still pass) (`HydrateTests` "Server-request replay" section, plus
+      a reordering replay, unrendered/malformed entries skipped, contract-less `open_requests`
+      counted as v7, a clarify-only replay under the hint; `AppFeatureTests`
+      `approvalTapOnV7HydratesTheReplayedCard` drives the on-screen tap end to end through a
+      JSON `session.resume` with `desktop_contract: "8"`)
+- ⚠️ (resolved in Task 8) until this task lands, the base's `applyActivate` still runs
+      `clearStaleApproval` on `running == false`, which also drops a live server-request
+      approval card (#83319) and leaves the request open server-side
+- ⚠️ a server request raised between the server building the resume snapshot and the client
+      applying it is dropped by the reconcile (absence is authoritative, as on desktop); it
+      comes back on the next hydrate or answers through another client. Accepted
+- [x] run tests - must pass before next task (1608 tests in 70 suites passed, 1 known issue; no
+      view or app-used API changed, so no app build / snapshot run)
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview: every rendered kind works on v7 (approval, clarify
+- [x] verify all requirements from Overview: every rendered kind works on v7 (approval, clarify
       in all three shapes, sudo, secret), queueing, `expired`, cancel, turn-end clearing,
-      replay, push-tap, the decline matrix, choice narrowing
-- [ ] verify legacy wire byte-identity: the pre-change `clarify.respond` / `sudo.respond` /
-      `secret.respond` / `approval.respond` fixtures still pass for legacy payloads
-- [ ] verify edge cases: a cancel for a queued (not presented) request; a replay that reorders;
+      replay, push-tap, the decline matrix, choice narrowing (each mapped to its covering tests
+      in the progress log; no gap found in behaviour)
+- [x] verify legacy wire byte-identity: the pre-change `clarify.respond` / `sudo.respond` /
+      `secret.respond` / `approval.respond` fixtures still pass for legacy payloads (the
+      `d97e621` key-by-key tests are untouched; added end-to-end tests that decode each legacy
+      event frame and assert the whole sent frame equals `d97e621`'s construction —
+      `ChatInteractionTests` `legacyApprovalWithoutRequestIDKeepsTheFIFOWire`,
+      `legacyApprovalWithRequestIDIsBoundToThatEntry`, `legacyClarifyAnsweredFromTheFormKeepsItsWire`
+      (through `ClarifyDraft`, so the old card's trim is covered), `legacySecretPayloadKeepsItsWire`)
+- [x] ➕ settle the base's `request_id` branch in `respondToApproval`: a legacy-event approval
+      carrying `request_id` (no srq id) now sends `{session_id, request_id, choice, all:false}`
+      instead of today's `{session_id, choice, all}`. Check upstream (`git show
+      <tag>:tui_gateway/…`) for any `approval.request` event that carries `request_id` and
+      whether its `approval.respond` accepts it; if none does, the branch is dead — drop it (and
+      `requestBoundApproval*` tests) or document it in `docs/features/approvals.md`. (Task 1
+      could not check: the worktree rules forbid touching the sibling clone) (verified via the
+      GitHub API on `NousResearch/hermes-agent`: from v2026.8.16 through v2026.9.11 every
+      gateway approval entry gets `request_id` (`approval_gateway_wait.py` `setdefault`), the
+      `approval.request` event payload is that entry, and `approval.respond` forwards
+      `request_id` to `resolve_gateway_approval`, where it wins over `resolve_all`; v2026.8.13
+      and older carry none and keep the FIFO wire. The branch is live and correct — kept, and
+      documented in `docs/features/approvals.md`)
+- [x] verify edge cases: a cancel for a queued (not presented) request; a replay that reorders;
       every question skipped; a `running == false` snapshot with an open request; a window-owned
-      request on a backend without `declines_not_shown`
-- [ ] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] run `make snapshot`; judge failures by render size (baseline drift is known)
-- [ ] manual pass against a live v0.21.7+ agent: approve after a socket drop; two parallel
+      request on a backend without `declines_not_shown` (all covered; added
+      `ClarifyFeatureTests.everyQuestionSkippedSendsNullForEachNotCancelAll`)
+- [x] run full test suite: `script -q /dev/null swift test --package-path HermesKit` (via
+      `make test`: 1613 tests in 70 suites passed, 1 known issue)
+- [x] run `make snapshot`; judge failures by render size (baseline drift is known) (37 failures,
+      all 37 at identical render size = known drift; every prompt-card snapshot and both card
+      layout suites pass; `make generate` + `make build` OK)
+- [x] manual pass against a live v0.21.7+ agent: approve after a socket drop; two parallel
       approvals; a clarify with several questions incl. multi-select and Other; skip; sudo; kill
       the socket mid-clarify and re-open — the card returns with locks; desktop and phone on one
       session — a clarify answered on desktop shows "Already handled elsewhere" when answered on
       the phone, and the phone never takes a desktop preview/terminal read or vault prompt
-- [ ] manual pass against a v2026.9.24 agent (intermediate clarify shape, no 4404) and a
-      v2026.9.11 agent (legacy) if one is available
+      (NOT done — handed to the user; see Post-Completion)
+- [x] manual pass against a v2026.9.24 agent (intermediate clarify shape, no 4404) and a
+      v2026.9.11 agent (legacy) if one is available (NOT done — handed to the user; see
+      Post-Completion)
 
 ### Task 10: [Final] Update documentation
 
-- [ ] `docs/features/approvals.md`: rewrite around server requests (queue, `request.answer` and
+- [x] `docs/features/approvals.md`: rewrite around server requests (queue, `request.answer` and
       `expired`, cancel, turn-end clearing, replay, the decline matrix, answer shapes) and
       push-tap recovery on v7 vs legacy; replace the "ClarifyCardView is rigid" sentence
-- [ ] `docs/features/push-notifications.md`: point the tap-recovery paragraph at the replay
-- [ ] `docs/architecture.md`: the server→client request flow, `client.capabilities` ordering,
-      `open_requests` in "Session re-hydration", `desktop_contract` as the wire signal
-- [ ] `CLAUDE.md` approval/clarify bullet: server requests, one queue, `refreshPresented` as the
-      one exception to `present(_:)`, the decline matrix, narrow-never-widen, legacy kept
-- [ ] `README.md` feature list: multi-select, multi-question and Other in clarify; compatibility
+      (the sentence was already gone after Task 7; the doc now also covers advertisement,
+      clarify shapes/forms, sudo/secret and a short "clarify card shares the region" section)
+- [x] ➕ rewrite, don't append to, #116's doc text: `docs/features/approvals.md` (~:24-47, the
+      "unsupported prompt kinds are left alone" point is stated twice; "phone-only agent waits"
+      becomes false for clarify/sudo/secret) and `docs/architecture.md` (~:92-100, "advertises
+      when the gateway receives `ready`" — update for the Task 2 ordering)
+- [x] `docs/features/push-notifications.md`: point the tap-recovery paragraph at the replay
+- [x] `docs/architecture.md`: the server→client request flow, `client.capabilities` ordering,
+      `open_requests` in "Session re-hydration", `desktop_contract` as the wire signal (new
+      "Server→client requests" subsection under Wire protocol)
+- [x] `CLAUDE.md` approval/clarify bullet: server requests, one queue, `refreshPresented` as the
+      one exception to `present(_:)`, the decline matrix, narrow-never-widen, legacy kept (plus
+      `open_requests` in the hydration bullet and the stale `BoundedHeightLayout` path in Gotchas)
+- [x] `README.md` feature list: multi-select, multi-question and Other in clarify; compatibility
       note (both the v7 and the legacy wire are supported)
-- [ ] comment on #97 with what shipped, the v7 floor, and what legacy agents still get
-- [ ] move this plan to `docs/plans/completed/`
+- [x] comment on #97 with what shipped, the v7 floor, and what legacy agents still get (NOT
+      done — handed to the user; see Post-Completion)
+- [x] move this plan to `docs/plans/completed/` (deferred to the exec orchestrator's completion
+      step)
 
 ## Post-Completion
 
@@ -730,8 +982,11 @@ the same reconcile when it lands.
   for the approval card.
 - Reconnect mid-clarify with two answers locked on the desktop, then open the phone: the two
   show ✓, the rest are editable, Confirm sends all.
+- Task 9's manual pass against a live v0.21.7+ agent (the scenario list is in Task 9).
+- Task 9's manual pass against a v2026.9.24 agent and a v2026.9.11 agent, if available.
 
 **External**
+- Comment on #97: what shipped, the v7 floor, and what legacy agents still get.
 - `session.info` with `running` true→false as an extra clearing trigger (desktop #86577, for a
   lost `message.complete`), minding desktop's #83319 rule that a live request keeps its card.
 - The resume `status: "waiting"` could drive a "needs input" indicator in the session list —

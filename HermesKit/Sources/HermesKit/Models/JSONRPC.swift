@@ -136,8 +136,8 @@ public struct JSONRPCRequest: Encodable, Equatable, Sendable {
 public enum InboundFrame: Equatable, Sendable {
   /// A server-pushed event notification: `{method:"event", params:{type, session_id, payload}}`.
   case event(sessionID: String?, GatewayEvent)
-  /// A server→client request. Server request ids are strings (`srq-…`); approval requests
-  /// are answered through `request.answer {id, result}`.
+  /// A server→client request. Server request ids are strings (`srq-…`); rendered prompts are
+  /// answered through `request.answer {id, result}` (see `PendingServerRequest`).
   case serverRequest(id: String, method: String, params: JSONValue)
   /// A successful response to a request we sent: `{id, result}`.
   case response(id: Int, result: JSONValue)

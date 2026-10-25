@@ -18,27 +18,30 @@ struct ChatView: View {
           CopiedToastView(token: store.copiedIDToastToken)
         }
       footer
-      // A standing *approval* outranks the greedy transcript for the fixed region's height.
-      // Without it a `VStack` offers each child `remaining / remainingCount` in flexibility
-      // order, so the card — less flexible than the transcript — is offered roughly *half*
-      // of what is left and its scrollable region collapses onto its floor with the keyboard
-      // up: measured at the floor on every iPhone, i.e. the two-line window #65 was filed
-      // about. With the priority the card is offered the whole remainder first; it hands a
-      // tap target's worth back (`BoundedHeightLayout.reserve`) so the transcript — the
-      // context for the decision — is not starved to 0pt. Applied here rather than inside
-      // `pendingCard`'s `switch`: a trait written inside a `@ViewBuilder` branch does not
-      // reach the enclosing stack (measured — the region stayed on its floor).
+      // A standing approval or multi-question clarify outranks the greedy transcript for the
+      // fixed region's height. Without it a `VStack` offers each child
+      // `remaining / remainingCount` in flexibility order, so the card — less flexible than
+      // the transcript — is offered roughly *half* of what is left and its scrollable region
+      // collapses onto its floor with the keyboard up: measured at the floor on every iPhone,
+      // i.e. the two-line window #65 was filed about. With the priority the card is offered
+      // the whole remainder first; it hands a tap target's worth back
+      // (`BoundedHeightLayout.reserve`) so the transcript — the context for the decision — is
+      // not starved to 0pt. Applied here rather than inside `pendingCard`'s `switch`: a trait
+      // written inside a `@ViewBuilder` branch does not reach the enclosing stack (measured —
+      // the region stayed on its floor).
       //
-      // Scoped to `.approval` because only that card is compressible: `ClarifyCardView` is
-      // plain stacked content with rigid choice buttons, so priority would only take room
-      // from the transcript (measured: 160pt → 13pt with a long question) without giving the
-      // card anything it can use. Every card gets a fresh identity per presentation — a
-      // replacement that does not pass through `nil` (a queued approval, a second secret
-      // prompt) must not inherit the previous one's `@State`: its scroll offset, its
-      // "Approve all" toggle, or — worst — a typed sudo password.
+      // Scoped by `isCompressibleCardPending`: the approval card and the multi-question
+      // clarify card (up to five sections) are the bounded, scrollable cards tall enough to
+      // need the room. A one-question clarify and the secret card are short forms whose
+      // region hugs them, so priority there would only take room from the
+      // transcript (measured on the old rigid clarify card: 160pt → 13pt with a long
+      // question) without giving the card anything it uses. Every card gets a fresh identity
+      // per presentation — a replacement that does not pass through `nil` (a queued request, a
+      // second secret prompt) must not inherit the previous one's `@State`: its scroll offset,
+      // its "Approve all" toggle, its clarify selections, or — worst — a typed sudo password.
       pendingCard
         .id(store.pendingInteractionToken)
-        .layoutPriority(store.isApprovalPending ? 1 : 0)
+        .layoutPriority(store.isCompressibleCardPending ? 1 : 0)
       queuedPromptsPanel
       suggestionPanel
       Divider()
@@ -328,6 +331,7 @@ struct ChatView: View {
 
   @ViewBuilder
   private var pendingCard: some View {
+    let token = store.pendingInteractionToken
     switch store.pendingInteraction {
     case let .approval(request):
       // The per-presentation identity that keeps this card's `@State` (scroll offset,
@@ -335,17 +339,22 @@ struct ChatView: View {
       // `VStack` call site, so it covers the clarify/secret branches too — see there.
       ApprovalCardView(
         request: request,
-        onApprove: { all in store.send(.respondToApproval(approve: true, all: all)) },
-        onDeny: { store.send(.respondToApproval(approve: false, all: false)) }
+        onApprove: { all in store.send(.respondToApproval(token: token, approve: true, all: all)) },
+        onDeny: { store.send(.respondToApproval(token: token, approve: false, all: false)) }
       )
     case let .clarify(request):
-      ClarifyCardView(mode: .clarify(request)) { answer in
-        store.send(.respondToClarify(answer: answer))
-      }
+      ClarifyCardView(
+        request: request,
+        onSubmit: { answers in store.send(.submitClarify(token: token, answers: answers)) },
+        onSkip: { store.send(.skipClarify(token: token)) }
+      )
     case let .secret(kind, prompt):
-      ClarifyCardView(mode: .secret(kind, prompt)) { value in
-        store.send(.respondToSecret(value: value))
-      }
+      SecretCardView(
+        kind: kind,
+        prompt: prompt,
+        onSubmit: { value in store.send(.respondToSecret(token: token, value: value)) },
+        onSkip: { store.send(.skipSecret(token: token)) }
+      )
     case .none:
       EmptyView()
     }

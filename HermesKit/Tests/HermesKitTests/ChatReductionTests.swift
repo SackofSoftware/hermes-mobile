@@ -2299,7 +2299,7 @@ struct ChatReductionTests {
 
     // Double hydrate of the same running turn: the hint was consumed on the first pass,
     // so after the user answers the card a re-hydrate must NOT re-synthesize it.
-    await store.send(.respondToApproval(approve: true, all: false))
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false))
     #expect(store.state.pendingInteraction == nil)
     await store.send(.activateResult(.success(activateResponse(running: true))))
     #expect(store.state.pendingInteraction == nil)

@@ -72,13 +72,17 @@ public struct ChatFeature {
     /// *cannot* assign one without the token). Assigning `nil` to dismiss is fine — a card
     /// that is gone has no identity to keep.
     public internal(set) var pendingInteraction: PendingInteraction?
-    /// Is the standing card an *approval*? The only card `ChatView` gives layout priority
-    /// over the transcript — it is the one built to absorb the squeeze (a bounded, scrollable
-    /// region), so priority buys it readable command lines; the clarify/secret card is rigid
-    /// stacked content and priority would only take room from the transcript.
-    public var isApprovalPending: Bool {
-      if case .approval = pendingInteraction { return true }
-      return false
+    /// Does the standing card earn layout priority over the transcript? `ChatView` gives it to
+    /// the cards built to absorb the squeeze AND tall enough to need it: an approval (its
+    /// command) and a multi-question clarify (up to five sections) — priority buys their
+    /// bounded region readable lines. A single-question clarify and the secret card hug a
+    /// short form, so priority there would only take room from the transcript.
+    public var isCompressibleCardPending: Bool {
+      switch pendingInteraction {
+      case .approval: return true
+      case let .clarify(request): return request.isMultiQuestion
+      case .secret, .none: return false
+      }
     }
     /// Monotonic count of blocking requests *presented* — bumped by ``present(_:)`` every
     /// time a card is raised, never reset. The view uses it as the card's identity so a
@@ -97,15 +101,52 @@ public struct ChatFeature {
       pendingInteraction = interaction
       pendingInteractionToken &+= 1
     }
+    /// Open v7 server requests (`PendingServerRequest`), oldest first — the `open_requests`
+    /// order. **While non-empty, its head IS the presented card** (raised through
+    /// ``present(_:)``); the rest wait their turn. A new arrival appends; answering it,
+    /// `expired`, a matching `request.cancel` or turn end removes it, and the next head is
+    /// presented with a fresh token. Every v7 hydrate reconciles it with the server's
+    /// `open_requests` (absence is authoritative, whatever `running` says). Per slot,
+    /// unpersisted.
+    public internal(set) var serverRequests: IdentifiedArrayOf<PendingServerRequest>
+    /// The srq id whose `request.answer` is in flight. The card stays up until the server
+    /// confirms (`ok` / `expired`) so a failed answer leaves it answerable; this guards a
+    /// second tap meanwhile from sending a second answer.
+    var answeringServerRequestID: String?
+    /// The server request behind the presented card, if the card is one (`nil` for a legacy
+    /// `*.request` card or the push-tap recovered approval).
+    public var presentedServerRequest: PendingServerRequest? {
+      pendingInteraction == nil ? nil : serverRequests.first
+    }
+    /// Replace the presented card's payload with a re-delivered copy of the SAME server
+    /// request (same srq id) WITHOUT bumping ``pendingInteractionToken`` — the card keeps its
+    /// `@State` (scroll offset, typed text, selections). **The one sanctioned exception to
+    /// "raise a card through ``present(_:)``"**: it never raises a different card, so the
+    /// token's identity contract holds. A no-op for any other id.
+    mutating func refreshPresented(_ request: PendingServerRequest) {
+      guard presentedServerRequest?.id == request.id else { return }
+      pendingInteraction = request.kind
+    }
+    /// After the presented head left the queue: raise the new head (fresh token) or dismiss.
+    mutating func presentNextServerRequest() {
+      if let head = serverRequests.first {
+        present(head.kind)
+      } else {
+        pendingInteraction = nil
+      }
+    }
     /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
-    /// #30: an `approval.request` that fired while the socket was down is gone — the
-    /// server does not re-surface pending approvals on `session.resume`). Set by
+    /// #30: on a legacy agent an `approval.request` that fired while the socket was down is
+    /// gone — `session.resume` does not re-surface it; v7 replays it in `open_requests`). Set by
     /// `AppFeature` when an approval-typed push tap puts this session's chat on screen;
-    /// consumed (reset to `false`) by the next hydrate, which synthesizes a generic
-    /// command-less approval card when the turn is still `running` and no real blocking
-    /// request arrived over the socket. Transient: deliberately NOT persisted in
+    /// consumed (reset to `false`) by the next hydrate. On a legacy server that hydrate
+    /// synthesizes a generic command-less approval card when the turn is still `running` and
+    /// no real blocking request arrived over the socket; on v7 the hydrate's `open_requests`
+    /// replay restores the real card instead, and an empty replay means nothing to recover
+    /// (no card). Transient: deliberately NOT persisted in
     /// `ChatSnapshotClient` (a snapshot repaint must never resurrect a card), and cleared
-    /// by a real `.approvalRequest` (the real event wins — no later re-synthesis).
+    /// by a real approval (`.approvalRequest` or a v7 `.serverRequest`), by answering one, and
+    /// at turn end (the real event wins — no later re-synthesis).
     public var expectsPendingApproval: Bool
     /// The tool/skill row whose detail sheet is open, if any (Task 4).
     public var presentedTool: ChatRow?
@@ -493,6 +534,18 @@ public struct ChatFeature {
     /// per-slot lifetime, unpersisted. Only `showsEmptyHero` reads it: "the transcript is
     /// empty because the server said so" vs "empty because history hasn't arrived yet".
     var hasHydrated: Bool
+    /// The server's prompt-wire generation (`info.desktop_contract`; `>= 7` = server→client
+    /// requests, 6 = the legacy `*.request` / `*.respond` wire). Recorded from every hydrate
+    /// (`applyActivate`) and from `session.info` events that carry it. Receiving needs no
+    /// gate (the two wires never coexist on one server); this is for proactive choices only
+    /// (push-tap recovery, legacy clearing). Per-slot, unpersisted.
+    var desktopContract: Int?
+    /// This connection's `client.capabilities` failure (`.serverRequestsUnavailable`): the
+    /// server won't route prompts to the phone until the next connect. The ready/hydrate
+    /// "stale connection banner" clears restore it instead of wiping it, so the notice
+    /// outlives the hydrate that lands right after it. Reset by `.ready` (a new socket
+    /// re-advertises; the client yields its failure only after that `.ready`).
+    var serverRequestsUnavailable: String?
 
     public enum Status: Equatable, Sendable {
       case connecting
@@ -500,14 +553,9 @@ public struct ChatFeature {
       case reconnecting
     }
 
-    /// A blocking interactive request the agent is waiting on.
-    public enum PendingInteraction: Equatable, Sendable {
-      case approval(ApprovalRequest)
-      case clarify(ClarifyRequest)        // wired in Task 10
-      case secret(SecretKind, SecretPrompt) // wired in Task 10
-
-      public enum SecretKind: Equatable, Sendable { case sudo, secret }
-    }
+    /// A blocking interactive request the agent is waiting on (the models-layer enum, shared
+    /// with `PendingServerRequest`).
+    public typealias PendingInteraction = HermesKit.PendingInteraction
 
     public init(
       connection: ServerConnection,
@@ -542,8 +590,12 @@ public struct ChatFeature {
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
       self.hasHydrated = false
+      self.desktopContract = nil
+      self.serverRequestsUnavailable = nil
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
+      self.serverRequests = []
+      self.answeringServerRequestID = nil
       self.expectsPendingApproval = false
       self.presentedTool = nil
       self.model = nil
@@ -761,14 +813,38 @@ public struct ChatFeature {
     /// (already over, or lost on a reconnecting socket). Safe to send any time; every
     /// precondition is re-checked in `drainQueueIfReady`.
     case maybeDrainQueue
-    case respondToApproval(approve: Bool, all: Bool)
-    /// Outcome of `approval.respond` (legacy) or `request.answer` (server requests).
-    /// `resolved == 0` also represents `request.answer {status: "expired"}` and patches
-    /// the optimistic row to "Already handled elsewhere". `nil` surfaces a send failure.
-    /// Successful answers need no action: the optimistic row is already correct.
+    /// The card answers (`respondToApproval`, `submitClarify`, `skipClarify`,
+    /// `respondToSecret`, `skipSecret`) carry the `pendingInteractionToken` of the card that
+    /// sent them; one whose token is not the presented card's is dropped, so a tap reduced
+    /// after a cancel or hydrate replaced the card never answers its successor.
+    case respondToApproval(token: Int, approve: Bool, all: Bool)
+    /// Outcome of the LEGACY `approval.respond`. `resolved == 0` patches the optimistic row
+    /// to "Already handled elsewhere"; `nil` surfaces a send failure. Successful answers
+    /// need no action: the optimistic row is already correct.
     case approvalRespondResult(rowID: ChatRow.ID, resolved: Int?)
-    case respondToClarify(answer: String)
-    case respondToSecret(value: String)
+    /// Outcome of a v7 `request.answer {id, result}`: `.ok` → the entry leaves the queue
+    /// with the `echo` row; `.expired` → it leaves with "Already handled elsewhere"; a
+    /// failure → `errorBanner`, and the card stays (the request is still open server-side).
+    case serverRequestAnswered(id: String, echo: AnswerEcho, Result<AnswerStatus, GatewayError>)
+    /// Answer the presented clarify card, keyed by qid (`""` for the `nil`-qid question of
+    /// the intermediate / legacy single forms). The reducer builds the wire shape from the
+    /// request's `answerShape`: v7 → `request.answer` (`{answers}` or `{answer}`), legacy →
+    /// `clarify.respond`. A question missing from `answers` (and not locked) is skipped;
+    /// replayed locks are re-sent with the final set and win over `answers`.
+    case submitClarify(token: Int, answers: [String: ClarifyAnswer])
+    /// Skip the whole clarify card: v0.21.6+ `{}` (cancel all), intermediate single
+    /// `{answer: ""}`, legacy an empty `clarify.respond`.
+    case skipClarify(token: Int)
+    /// A legacy `*.respond` send threw: patch its optimistic echo row to "Failed to send"
+    /// and banner (the card is already gone — the legacy path is optimistic).
+    case legacyRespondFailed(rowID: ChatRow.ID, banner: String)
+    /// Answer the presented sudo / secret card with the typed value: v7 →
+    /// `request.answer {value}`; legacy → `sudo.respond {password}` / `secret.respond
+    /// {value}`. The value is never stored, logged or echoed into the transcript.
+    case respondToSecret(token: Int, value: String)
+    /// Skip the presented sudo / secret card: v7 `{value: ""}`; legacy the same respond with
+    /// an empty value.
+    case skipSecret(token: Int)
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
     case copyFeedbackExpired(token: String)
@@ -930,6 +1006,20 @@ public struct ChatFeature {
           self.seed = seed
         }
       }
+    }
+  }
+
+  /// What an answered server request leaves behind: the transcript status row appended on
+  /// `ok` (never a secret value), and the banner shown when the answer fails to send.
+  public struct AnswerEcho: Equatable, Sendable {
+    public var kind: String
+    public var text: String
+    public var failureBanner: String
+
+    public init(kind: String, text: String, failureBanner: String) {
+      self.kind = kind
+      self.text = text
+      self.failureBanner = failureBanner
     }
   }
 
@@ -1393,20 +1483,13 @@ public struct ChatFeature {
       case .maybeDrainQueue:
         return drainQueueIfReady(into: &state)
 
-      case let .respondToApproval(approve, all):
-        guard case let .approval(request) = state.pendingInteraction,
-              let sessionID = state.liveSessionID,
+      case let .respondToApproval(token, approve, all):
+        // Narrow, never widen: Approve needs `once` in the server's choice set, and
+        // "approve all" falls back to `once` when `session` is not offered.
+        guard token == state.pendingInteractionToken,
+              let interaction = state.pendingInteraction, case let .approval(request) = interaction,
               !approve || request.allowsOnce
         else { return .none }
-        state.pendingInteraction = nil
-        // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
-        // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
-        // not make a later, unrelated hydrate synthesize a phantom card.
-        state.expectsPendingApproval = false
-        let rowID = uuid()
-        state.transcript.append(
-          ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
-        )
         // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
         // just this command; "session" persists the pattern for the rest of the session.
         // Newer gateways require request-bound responses and ignore `all` when a
@@ -1414,6 +1497,27 @@ public struct ChatFeature {
         let effectiveChoice = approve
           ? (all && request.allowsSessionChoice ? "session" : "once")
           : "deny"
+        // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
+        // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
+        // not make a later, unrelated hydrate synthesize a phantom card.
+        state.expectsPendingApproval = false
+        // v7 server request: `request.answer`, and the card stays until the server
+        // acknowledges — only `ok` / `expired` remove it (`serverRequestAnswered`).
+        if let pending = state.presentedServerRequest {
+          return answerServerRequest(
+            pending,
+            result: .object(["choice": .string(effectiveChoice)]),
+            echoText: approve ? "Approved" : "Denied",
+            failureBanner: Self.approvalFailureBanner,
+            state: &state
+          )
+        }
+        guard let sessionID = state.liveSessionID else { return .none }
+        state.pendingInteraction = nil
+        let rowID = uuid()
+        state.transcript.append(
+          ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: approve ? "Approved" : "Denied"))
+        )
         let params: JSONValue
         if let requestID = request.requestID {
           params = .object([
@@ -1432,33 +1536,48 @@ public struct ChatFeature {
         }
         return .run { [gateway] send in
           do {
-            if let serverRequestID = request.serverRequestID {
-              let result = try await gateway.send("request.answer", .object([
-                "id": .string(serverRequestID),
-                "result": .object(["choice": .string(effectiveChoice)]),
-              ]))
-              switch result["status"]?.stringValue {
-              case "ok": break
-              case "expired":
-                await send(.approvalRespondResult(rowID: rowID, resolved: 0))
-              default:
-                throw GatewayError.server("Malformed request.answer result")
-              }
-            } else {
-              let result = try await gateway.send("approval.respond", params)
-              // The server answers `{"resolved": n}` — the count of queue entries this
-              // respond resolved. `0` means the queue was already empty (handled on another
-              // client, or a recovered-card blind respond after the fact), so the optimistic
-              // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
-              // treated as success — decode leniently, only actionable outcomes feed back.
-              if result["resolved"]?.intValue == 0 {
-                await send(.approvalRespondResult(rowID: rowID, resolved: 0))
-              }
+            let result = try await gateway.send("approval.respond", params)
+            // The server answers `{"resolved": n}` — the count of queue entries this
+            // respond resolved. `0` means the queue was already empty (handled on another
+            // client, or a recovered-card blind respond after the fact), so the optimistic
+            // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
+            // treated as success — decode leniently, only actionable outcomes feed back.
+            if result["resolved"]?.intValue == 0 {
+              await send(.approvalRespondResult(rowID: rowID, resolved: 0))
             }
           } catch {
             await send(.approvalRespondResult(rowID: rowID, resolved: nil))
           }
         }
+
+      case let .serverRequestAnswered(id, echo, result):
+        if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
+        // A settled answer for the presented card takes down an earlier attempt's failure
+        // banner (never another one, and never from a card already gone — the banner may be
+        // the presented card's own).
+        if case .success = result, state.presentedServerRequest?.id == id,
+           state.errorBanner == echo.failureBanner {
+          state.errorBanner = nil
+        }
+        switch result {
+        case .success(.ok):
+          state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: echo.text)))
+          removeServerRequest(id: id, into: &state)
+        case .success(.expired):
+          // Another surface answered first (or it timed out): say so, never a false
+          // "Approved"/"Denied".
+          state.transcript.append(
+            ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: "Already handled elsewhere"))
+          )
+          removeServerRequest(id: id, into: &state)
+        case .failure:
+          // The request is still open server-side, so the card stays answerable.
+          state.errorBanner = echo.failureBanner
+          return .none
+        }
+        // A card raised on an idle turn (a stopped snapshot's open request) was holding the
+        // #66 queue back; its leaving is an idle edge.
+        return drainQueueIfReady(into: &state)
 
       case let .approvalRespondResult(rowID, resolved):
         switch resolved {
@@ -1467,11 +1586,14 @@ public struct ChatFeature {
           // handled elsewhere. Patch the optimistic status row honestly; the next hydrate
           // replaces it wholesale with deterministic ids anyway (server wins), and a row
           // already replaced by such a hydrate is a silent nil-lookup no-op.
-          state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
+          if case let .status(kind, _) = state.transcript[id: rowID]?.kind {
+            state.transcript[id: rowID]?.kind = .status(kind: kind, text: "Already handled elsewhere")
+          }
         case .none:
           // The RPC threw — the card is already dismissed, so surface the failure instead
-          // of silently swallowing it (never a false "Approved").
-          state.errorBanner = "Failed to send the approval response."
+          // of silently swallowing it. The optimistic row stands: whether the answer reached
+          // the server is unknowable here, and the banner is the signal.
+          state.errorBanner = Self.approvalFailureBanner
         default:
           // Defensive only: the effect never feeds back a resolved >= 1 (the optimistic
           // "Approved"/"Denied" row is already correct, no action needed).
@@ -1479,46 +1601,29 @@ public struct ChatFeature {
         }
         return .none
 
-      case let .respondToClarify(answer):
-        guard case let .clarify(request) = state.pendingInteraction,
-              let sessionID = state.liveSessionID
-        else { return .none }
-        state.pendingInteraction = nil
-        // Echo the answer so the transcript records what was chosen/typed.
-        state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "clarify", text: answer))
-        )
-        let requestID = request.requestID
-        return .run { [gateway] _ in
-          _ = try? await gateway.send("clarify.respond", .object([
-            "session_id": .string(sessionID),
-            "request_id": .string(requestID),
-            "answer": .string(answer),
-          ]))
-        }
+      case let .submitClarify(token, answers):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerClarify(answers, into: &state)
 
-      case let .respondToSecret(value):
-        guard case let .secret(kind, prompt) = state.pendingInteraction,
-              let sessionID = state.liveSessionID
-        else { return .none }
-        state.pendingInteraction = nil
-        // Never echo the secret value into the transcript.
-        let label = kind == .sudo ? "Password submitted" : "Secret submitted"
-        state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "secret", text: label))
-        )
-        // Method + value key differ per kind (verified against tui_gateway/server.py):
-        // sudo.respond → "password", secret.respond → "value".
-        let method = kind == .sudo ? "sudo.respond" : "secret.respond"
-        let valueKey = kind == .sudo ? "password" : "value"
-        let requestID = prompt.requestID
-        return .run { [gateway] _ in
-          _ = try? await gateway.send(method, .object([
-            "session_id": .string(sessionID),
-            "request_id": .string(requestID),
-            valueKey: .string(value),
-          ]))
+      case let .skipClarify(token):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerClarify(nil, into: &state)
+
+      case let .legacyRespondFailed(rowID, banner):
+        // The optimistic echo row must stop claiming an answer the server never got.
+        if case let .status(kind, _) = state.transcript[id: rowID]?.kind {
+          state.transcript[id: rowID]?.kind = .status(kind: kind, text: "Failed to send")
         }
+        state.errorBanner = banner
+        return .none
+
+      case let .respondToSecret(token, value):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerSecret(value, into: &state)
+
+      case let .skipSecret(token):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerSecret(nil, into: &state)
 
       case let .copyRow(id):
         guard let text = state.transcript[id: id]?.copyText, !text.isEmpty else { return .none }
@@ -2186,7 +2291,10 @@ public struct ChatFeature {
       state.reconnectAttempt = 0
       // The socket is (re)connected — clear any stale connection banner (e.g. a "Connection
       // lost." left over from a lock/unlock drop) so it doesn't linger after we reconnect.
+      // A new socket also re-advertises, so the previous one's advertisement failure goes
+      // too (this connection's own failure, if any, is yielded after this `.ready`).
       state.errorBanner = nil
+      state.serverRequestsUnavailable = nil
       guard !state.hasRequestedSession else { return .none }
       state.hasRequestedSession = true
       // An unpersisted branch (#34) attaches to its already-live session by LIVE id —
@@ -2274,9 +2382,10 @@ public struct ChatFeature {
       // A turn can never legitimately COMPLETE with an approval still queued (the server
       // blocks on the queue), so a standing approval card here is stale — most visibly a
       // push-tap-recovered card (#30 workaround) whose approval was answered on another
-      // client, letting the turn run to completion. Drop it (and the armed hint) so the
-      // finished chat isn't stuck behind a phantom card locking the composer.
-      clearStaleApproval(into: &state)
+      // client, letting the turn run to completion. Drop it, every queued server request
+      // (one answered by another client's response frame gets no `request.cancel`) and the
+      // armed hint, so the finished chat isn't stuck behind a phantom card.
+      clearStalePrompts(into: &state)
       // A stale draining entry here means the start event was lost/reordered — the turn
       // demonstrably ran, so the entry is consumed either way (never re-queued).
       clearDrainingEntry(into: &state)
@@ -2347,13 +2456,21 @@ public struct ChatFeature {
       state.errorBanner = message
       return .none
 
+    case let .serverRequestsUnavailable(message):
+      // Surfaced like any RPC failure, and kept standing for this connection so the
+      // hydrate's stale-banner clear (which lands right after) restores it. No turn ends.
+      state.serverRequestsUnavailable = message
+      state.errorBanner = message
+      return .none
+
     case let .error(message):
       state.errorBanner = message
       state.isSending = false
       freezeThinking(into: &state)
       // Same staleness rule as `message.complete`: an errored turn is over, so any
-      // standing approval card (real or recovered) and the recovery hint are moot.
-      clearStaleApproval(into: &state)
+      // standing approval card (real or recovered), the server request queue and the
+      // recovery hint are moot.
+      clearStalePrompts(into: &state)
       // The errored turn consumed any draining entry (#66) — it ran; never re-queue it.
       clearDrainingEntry(into: &state)
       // An error PARKS the queue rather than draining it (#66): auto-firing the next entry
@@ -2384,10 +2501,31 @@ public struct ChatFeature {
         .send(.delegate(.sessionExpired))
       )
 
-    case let .approvalServerRequest(request):
-      state.present(.approval(request))
-      state.expectsPendingApproval = false
+    case let .serverRequest(request):
+      // A real approval moots the push-tap recovery hint, as the legacy event does.
+      if case .approval = request.kind { state.expectsPendingApproval = false }
+      if state.serverRequests[id: request.id] != nil {
+        // Re-delivered (a replay): refresh in place — no token bump, the card keeps its state.
+        state.serverRequests[id: request.id] = request
+        state.refreshPresented(request)
+      } else {
+        state.serverRequests.append(request)
+        // A new head is raised; anything else waits behind the presented card.
+        if state.serverRequests.count == 1 {
+          state.presentNextServerRequest()
+        }
+      }
       return .none
+
+    case let .requestCancel(cancel):
+      guard let entry = state.serverRequests[id: cancel.id] else { return .none }
+      if state.presentedServerRequest?.id == cancel.id, cancel.reason == "timeout" {
+        state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: entry.kind.statusKind, text: "Timed out")))
+      }
+      removeServerRequest(id: cancel.id, into: &state)
+      // A card raised on an idle turn (a stopped snapshot's open request) was holding the
+      // #66 queue back; its leaving is an idle edge.
+      return drainQueueIfReady(into: &state)
 
     case let .approvalRequest(request):
       // Nice-to-have skipped: the thinking timer keeps running while a blocking card is the
@@ -2416,6 +2554,7 @@ public struct ChatFeature {
       if let model = info.model?.nonEmpty { state.model = model }
       if let effort = info.reasoningEffort?.nonEmpty { state.reasoningEffort = effort }
       if let u = info.usage { state.usage = u }
+      if let contract = info.desktopContract { state.desktopContract = contract }
       confirmConfigKeys(info, into: &state)
       return .none
 
@@ -2467,18 +2606,273 @@ public struct ChatFeature {
     }
   }
 
-  /// Drop a standing approval card + the push-tap recovery hint when the turn is known
-  /// to be over (turn-end events, or a hydrate reporting `running == false`). The server
-  /// never ends a turn with an approval still queued, so a card outliving its turn is
-  /// stale by definition — answered on another client (the mainline recovered-card
-  /// false-positive path, #30 workaround) or timed out. Scoped to `.approval` only:
-  /// clarify/secret are request-id-keyed and out of this workaround's scope. NOT called
-  /// on socket drop (`finalizeInFlight`) — the turn may still be running server-side.
-  private func clearStaleApproval(into state: inout State) {
-    if case .approval = state.pendingInteraction {
+  /// Drop every stale prompt + the push-tap recovery hint when the turn is known to be over
+  /// (turn-end events, or a LEGACY hydrate reporting `running == false` — a v7 hydrate
+  /// reconciles with `open_requests` instead, see `reconcileServerRequests`): the whole v7 server
+  /// request queue (desktop clears its prompts at turn end too — `request.cancel` is not sent
+  /// when another client answered by response frame), and a standing legacy approval card.
+  /// The server never ends a turn with an approval still queued, so a card outliving its
+  /// turn is stale by definition — answered on another client (the mainline recovered-card
+  /// false-positive path, #30 workaround) or timed out. Legacy clarify/secret cards are
+  /// request-id-keyed and stay as they were. NOT called on socket drop (`finalizeInFlight`)
+  /// — the turn may still be running server-side.
+  private func clearStalePrompts(into state: inout State) {
+    if state.presentedServerRequest != nil {
+      state.pendingInteraction = nil
+    } else if case .approval = state.pendingInteraction {
       state.pendingInteraction = nil
     }
+    state.serverRequests.removeAll()
+    state.answeringServerRequestID = nil
     state.expectsPendingApproval = false
+  }
+
+  /// Whether a hydrate came from a v7 (server→client request) server: `desktop_contract >= 7`,
+  /// or — positive evidence on its own — a non-empty `open_requests` (only v7 servers send
+  /// it). Never a version string.
+  static func isServerRequestWire(contract: Int?, response: ActivateResponse) -> Bool {
+    (contract ?? 0) >= 7 || !response.openRequests.isEmpty
+  }
+
+  /// Reconcile the server-request queue with a hydrate's `open_requests` (v7). Absence is
+  /// authoritative: an id the replay does not list is dropped (answered elsewhere, timed out,
+  /// or its turn ended). A listed id already queued keeps its place and takes the replayed
+  /// params (fresh batch-clarify locks); a new id is appended in replay (oldest-first) order.
+  /// Entries the app does not render — or whose params do not decode — are not queued and get
+  /// no answer: the reducer never answers on its own. A request raised while no client was
+  /// attached never reached the live path either, so it waits out its deadline unless another
+  /// client answers it (accepted, `docs/features/approvals.md`).
+  /// The head is presented with a fresh token unless the same srq id is already up, in which
+  /// case it is refreshed in place (``State/refreshPresented(_:)`` — no token bump, the card
+  /// keeps its scroll offset and edits). A standing non-server card (a legacy or push-tap
+  /// recovered card) is replaced by the head, or dismissed when the replay holds nothing.
+  private func reconcileServerRequests(with openRequests: [OpenRequest], into state: inout State) {
+    let previouslyPresentedID = state.presentedServerRequest?.id
+    var replay = IdentifiedArrayOf<PendingServerRequest>()
+    for entry in openRequests where replay[id: entry.id] == nil {
+      if let request = PendingServerRequest(id: entry.id, method: entry.method, params: entry.params) {
+        replay.append(request)
+      }
+    }
+    var reconciled = IdentifiedArrayOf<PendingServerRequest>()
+    for kept in state.serverRequests {
+      if let refreshed = replay[id: kept.id] { reconciled.append(refreshed) }
+    }
+    for new in replay where reconciled[id: new.id] == nil {
+      reconciled.append(new)
+    }
+    state.serverRequests = reconciled
+    if let answering = state.answeringServerRequestID, reconciled[id: answering] == nil {
+      state.answeringServerRequestID = nil
+    }
+    guard let head = reconciled.first else {
+      state.pendingInteraction = nil
+      return
+    }
+    if head.id == previouslyPresentedID {
+      state.refreshPresented(head)
+    } else {
+      state.present(head.kind)
+    }
+  }
+
+  /// Remove one server request from the queue; when it was the presented card, raise the
+  /// next head with a fresh token (or dismiss). A no-op for an unknown id.
+  private func removeServerRequest(id: String, into state: inout State) {
+    let wasPresented = state.presentedServerRequest?.id == id
+    guard state.serverRequests.remove(id: id) != nil else { return }
+    if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
+    if wasPresented { state.presentNextServerRequest() }
+  }
+
+  /// Send `request.answer {id, result}` for a presented server request. Plain `gateway.send`
+  /// (so `wireEncoder`, the 30 s budget and a surfaced error come for free); the outcome
+  /// feeds `serverRequestAnswered` with an echo built here, so a late acknowledgement (the
+  /// card already gone) still knows its row kind. A status other than `ok` / `expired` is a
+  /// failure. A no-op while an answer is already in flight.
+  private func answerServerRequest(
+    _ pending: PendingServerRequest, result: JSONValue, echoText: String, failureBanner: String,
+    state: inout State
+  ) -> Effect<Action> {
+    guard state.answeringServerRequestID == nil else { return .none }
+    let id = pending.id
+    let echo = AnswerEcho(kind: pending.kind.statusKind, text: echoText, failureBanner: failureBanner)
+    state.answeringServerRequestID = id
+    return .run { [gateway] send in
+      let outcome: Result<AnswerStatus, GatewayError>
+      do {
+        let response = try await gateway.send("request.answer", .object(["id": .string(id), "result": result]))
+        outcome = .success(try AnswerStatus(response: response))
+      } catch {
+        outcome = .failure((error as? GatewayError) ?? .server(error.localizedDescription))
+      }
+      await send(.serverRequestAnswered(id: id, echo: echo, outcome))
+    }
+  }
+
+  static let approvalFailureBanner = "Failed to send the approval response."
+
+  static let clarifyFailureBanner = "Failed to send the clarify response."
+
+  static func secretFailureBanner(_ kind: SecretKind) -> String {
+    kind == .sudo ? "Failed to send the password." : "Failed to send the secret."
+  }
+
+  /// Answer (or, with `value == nil`, skip) the presented sudo / secret card:
+  /// - v7 (a queued server request) → `request.answer {id, result: {value}}` (skip:
+  ///   `{value: ""}`); the card stays until the server acknowledges (`serverRequestAnswered`);
+  /// - legacy event → today's `sudo.respond {session_id, request_id, password}` /
+  ///   `secret.respond {session_id, request_id, value}` (skip: an empty value), optimistic: the
+  ///   card goes and the echo row is appended at once; a throw patches that row to "Failed to
+  ///   send" and banners (`legacyRespondFailed`).
+  ///
+  /// Privacy: the value only ever travels in the answer RPC's params. The echo row, the
+  /// banner and the `AnswerEcho` carry fixed copy, never the value.
+  private func answerSecret(_ value: String?, into state: inout State) -> Effect<Action> {
+    guard let interaction = state.pendingInteraction, case let .secret(kind, prompt) = interaction
+    else { return .none }
+    let echoText = switch (kind, value) {
+    case (.sudo, .some): "Password submitted"
+    case (.secret, .some): "Secret submitted"
+    case (.sudo, .none): "Password skipped"
+    case (.secret, .none): "Secret skipped"
+    }
+    let banner = Self.secretFailureBanner(kind)
+    if let pending = state.presentedServerRequest {
+      return answerServerRequest(
+        pending,
+        result: .object(["value": .string(value ?? "")]),
+        echoText: echoText,
+        failureBanner: banner,
+        state: &state
+      )
+    }
+    guard let requestID = prompt.requestID, let sessionID = state.liveSessionID else { return .none }
+    state.pendingInteraction = nil
+    let rowID = uuid()
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: echoText)))
+    // Method + value key differ per kind (verified against tui_gateway/server.py):
+    // sudo.respond → "password", secret.respond → "value".
+    let method = kind == .sudo ? "sudo.respond" : "secret.respond"
+    let params: JSONValue = .object([
+      "session_id": .string(sessionID),
+      "request_id": .string(requestID),
+      (kind == .sudo ? "password" : "value"): .string(value ?? ""),
+    ])
+    return .run { [gateway] send in
+      do {
+        _ = try await gateway.send(method, params)
+      } catch {
+        await send(.legacyRespondFailed(rowID: rowID, banner: banner))
+      }
+    }
+  }
+
+  /// Answer (or, with `answers == nil`, skip) the presented clarify card in the shape the
+  /// request arrived in:
+  /// - v7 (the card is a queued server request) → `request.answer {id, result}`; the card
+  ///   stays until the server acknowledges (`serverRequestAnswered`): `.answers` →
+  ///   `{answers: {qid: text|null}}`, skip `{}`; `.singleAnswer` → `{answer}`, skip
+  ///   `{answer: ""}`;
+  /// - legacy event → `clarify.respond` (``legacyClarifyRespondParams(_:_:sessionID:)``),
+  ///   optimistic: the card goes and the echo row is appended at once; a throw patches that
+  ///   row to "Failed to send" and banners (`legacyRespondFailed`).
+  private func answerClarify(_ answers: [String: ClarifyAnswer]?, into state: inout State) -> Effect<Action> {
+    guard let interaction = state.pendingInteraction, case let .clarify(request) = interaction
+    else { return .none }
+    let echoText = Self.clarifyEchoText(request, answers)
+    if let pending = state.presentedServerRequest {
+      return answerServerRequest(
+        pending,
+        result: Self.clarifyResult(request, answers),
+        echoText: echoText,
+        failureBanner: Self.clarifyFailureBanner,
+        state: &state
+      )
+    }
+    guard request.answerShape == .legacyRespond, let sessionID = state.liveSessionID else { return .none }
+    state.pendingInteraction = nil
+    let rowID = uuid()
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: echoText)))
+    let calls = Self.legacyClarifyRespondParams(request, answers, sessionID: sessionID)
+    return .run { [gateway] send in
+      do {
+        // Sequential, as desktop sends a legacy batch: the LAST lock resolves the tool, so
+        // every earlier one must already have landed.
+        for params in calls {
+          _ = try await gateway.send("clarify.respond", params)
+        }
+      } catch {
+        await send(.legacyRespondFailed(rowID: rowID, banner: Self.clarifyFailureBanner))
+      }
+    }
+  }
+
+  /// The legacy `clarify.respond` params for an answer (`nil` = skip the card):
+  /// - the single form (top-level `question`) → one `{session_id, request_id, answer}` with
+  ///   the raw choice text, exactly as the app always sent it (legacy wire byte-identity); a
+  ///   skip is `answer: ""`;
+  /// - a legacy batch (``ClarifyRequest/isBatch``, whatever its length) → one
+  ///   `{…, question_id, answer}` per question, in order (desktop's
+  ///   per-question locks: the bare label, a multi-select's JSON-array string, `""` for a
+  ///   skipped question); skipping the card is the question-less `answer: ""` (cancel-all).
+  static func legacyClarifyRespondParams(
+    _ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?, sessionID: String
+  ) -> [JSONValue] {
+    func params(_ extra: [String: JSONValue]) -> JSONValue {
+      .object(extra.merging([
+        "session_id": .string(sessionID), "request_id": .string(request.requestID ?? ""),
+      ]) { current, _ in current })
+    }
+    guard let answers, request.isBatch else {
+      return [params(["answer": .string(singleWireText(request, answers, stripsRecommended: false))])]
+    }
+    return request.questions.map { question in
+      params([
+        "question_id": .string(question.answerKey),
+        "answer": .string((answers[question.answerKey] ?? .skipped).wireText(for: question) ?? ""),
+      ])
+    }
+  }
+
+  /// The v7 `request.answer` result for a clarify request (`nil` answers = skip all).
+  /// Only the v7 shapes reach here — a legacy card has no server request behind it.
+  static func clarifyResult(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> JSONValue {
+    guard request.answerShape == .answers else {
+      return .object(["answer": .string(singleWireText(request, answers, stripsRecommended: true))])
+    }
+    guard let answers else { return .object([:]) } // cancel all
+    var map: [String: JSONValue] = [:]
+    for (qid, locked) in request.lockedAnswers {
+      map[qid] = locked.map(JSONValue.string) ?? .null
+    }
+    for question in request.questions {
+      guard let qid = question.qid, !request.lockedAnswers.keys.contains(qid) else { continue }
+      map[qid] = (answers[qid] ?? .skipped).wireText(for: question).map(JSONValue.string) ?? .null
+    }
+    return .object(["answers": .object(map)])
+  }
+
+  /// The one answer of a single-form request (`""` for a skip).
+  private static func singleWireText(
+    _ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?, stripsRecommended: Bool
+  ) -> String {
+    guard let question = request.questions.first,
+          let answer = answers?[question.answerKey]
+    else { return "" }
+    return answer.wireText(for: question, stripsRecommended: stripsRecommended) ?? ""
+  }
+
+  /// The transcript echo for a clarify answer: the answer itself for one question, one
+  /// `question: answer` line per question for several (locks included), "Skipped" for a skip.
+  static func clarifyEchoText(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> String {
+    guard let answers else { return "Skipped" }
+    func display(_ question: ClarifyQuestion) -> String {
+      request.lockedDisplayText(for: question)
+        ?? (answers[question.answerKey] ?? .skipped).displayText
+    }
+    guard request.isMultiQuestion else { return request.questions.first.map(display) ?? "" }
+    return request.questions.map { "\($0.question): \(display($0))" }.joined(separator: "\n")
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the
@@ -2774,12 +3168,15 @@ public struct ChatFeature {
     state.hydrateRetriedAfterTimeout = false // hydrate landed: the timeout-retry budget resets
     state.hasReplayedBranchSeed = false // and so does the branch seed-replay budget (#34)
     state.hasHydrated = true // the transcript below is now server-authoritative (#80 hero gate)
-    // A successful hydrate means we're connected — clear any stale connection banner.
-    state.errorBanner = nil
+    // A successful hydrate means we're connected — clear any stale connection banner, but
+    // keep this connection's standing advertisement failure up (it is not stale).
+    state.errorBanner = state.serverRequestsUnavailable
 
     // Runtime info: model / reasoning / usage straight from the response (fixes the blank
     // model + context-0 bugs on re-open).
     if let info = response.info {
+      // The hydrate's `info` is a full snapshot, so its contract (or its absence) wins.
+      state.desktopContract = info.desktopContract
       var target = RuntimeInfoTarget(
         model: state.model, reasoningEffort: state.reasoningEffort, usage: state.usage
       )
@@ -2798,27 +3195,38 @@ public struct ChatFeature {
     let running = response.running ?? false
     state.isSending = running || state.slashExecInFlight
 
-    // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
-    // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
-    // the single synthesis point. Synthesize the generic card only when the authoritative
-    // `running` says the agent is still blocked AND the socket didn't already deliver a
-    // real blocking request. Not running → the approval resolved/denied/timed out while
-    // we were detached → drop silently (no phantom card). Consuming the hint first means
-    // a double hydrate of the same running turn can't synthesize twice.
-    if state.expectsPendingApproval {
+    if Self.isServerRequestWire(contract: state.desktopContract, response: response) {
+      // v7: the server's `open_requests` is the authoritative list of open prompts, whatever
+      // `running` says — a `running == false` snapshot can still have a bridge parked on an
+      // open request (desktop #83319), and a finished turn simply lists none. An armed
+      // push-tap hint is consumed: the replay IS the recovered card (the real one), and a
+      // replay without an approval means there is nothing to recover — no generic card.
       state.expectsPendingApproval = false
-      if running, state.pendingInteraction == nil {
-        state.present(.approval(Self.recoveredApprovalRequest))
+      reconcileServerRequests(with: response.openRequests, into: &state)
+    } else {
+      // Legacy (`desktop_contract < 7`): today's behaviour, byte for byte.
+      // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
+      // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
+      // the single synthesis point. Synthesize the generic card only when the authoritative
+      // `running` says the agent is still blocked AND the socket didn't already deliver a
+      // real blocking request. Not running → the approval resolved/denied/timed out while
+      // we were detached → drop silently (no phantom card). Consuming the hint first means
+      // a double hydrate of the same running turn can't synthesize twice.
+      if state.expectsPendingApproval {
+        state.expectsPendingApproval = false
+        if running, state.pendingInteraction == nil {
+          state.present(.approval(Self.recoveredApprovalRequest))
+        }
       }
-    }
-    // The inverse staleness rule: the authoritative "not running" means no approval can
-    // be pending server-side (the server never ends a turn with one queued), so a card
-    // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
-    // answered on another client while the socket was down and the turn ended — must be
-    // dropped, or it would sit over a finished transcript locking the composer. (The
-    // helper's hint-clear is a no-op here: the block above already consumed it.)
-    if !running {
-      clearStaleApproval(into: &state)
+      // The inverse staleness rule: the authoritative "not running" means no approval can
+      // be pending server-side (the server never ends a turn with one queued), so a card
+      // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
+      // answered on another client while the socket was down and the turn ended — must be
+      // dropped, or it would sit over a finished transcript locking the composer. (The
+      // helper's hint-clear is a no-op here: the block above already consumed it.)
+      if !running {
+        clearStalePrompts(into: &state)
+      }
     }
 
     // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the
@@ -3511,8 +3919,8 @@ public struct ChatFeature {
       // Blank text is dropped by the fold with zero state change — don't schedule a
       // pointless snapshot write for it.
       return Self.hasRenderableReviewText(text)
-    case .ready, .error, .serverRequestFailed, .authExpired, .approvalRequest, .approvalServerRequest, .clarifyRequest,
-         .sudoRequest, .secretRequest, .unknown:
+    case .ready, .error, .serverRequestFailed, .serverRequestsUnavailable, .authExpired, .approvalRequest,
+         .serverRequest, .requestCancel, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
       return false
     }
   }

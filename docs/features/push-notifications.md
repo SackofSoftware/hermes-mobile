@@ -2,8 +2,16 @@
 
 Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The short rules live in
 `CLAUDE.md` → "Push notifications"; this doc is the full contract. Architecture detail:
-`docs/architecture.md` → Push notifications. Push-tap **approval recovery** lives in
-`docs/features/approvals.md`. Design history: `docs/plans/completed/`.
+`docs/architecture.md` → Push notifications. Design history: `docs/plans/completed/`.
+
+**Push-tap recovery.** A prompt push carries no content, so the card comes from the server
+after the tap. On a v7 agent the tap's hydrate restores the exact card from the `session.resume`
+`open_requests` replay: the real command, a clarify with its answered questions locked, a sudo
+or secret prompt. A request with no client attached waits in `open_requests`, which is exactly
+the backgrounded-socket case a push targets. Only a legacy agent (v2026.9.11 and older) gets the
+generic recovered approval card. Both paths, and the one-shot `expectsPendingApproval` hint they
+consume: `docs/features/approvals.md` → "Push-tap approval recovery". The plugin's behaviour on
+v7 agents is unverified.
 
 ## Three artifacts, three repos
 

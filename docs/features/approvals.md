@@ -227,7 +227,7 @@ from the v0.21.6+ shape, so a skipped question there still goes out as `null`.
 
 `SecretPrompt` carries the `prompt`, the sudo `command` (v2026.9.21+, redacted server-side) and
 the secret's `env_var` (`envVar`); `requestID` is set only on the legacy event. `SecretCardView`
-(in `ClarifyCardView.swift`) scrolls the prompt and the command or env var line in the shared
+scrolls the prompt and the command or env var line in the shared
 region over a pinned row of the secure field, Skip (`skipSecret`) and send; the value goes out as
 typed (no trimming). Answer and skip both go through `answerSecret`. **The value never leaves the answer RPC's params**: the echo rows ("Password
 submitted", "Secret skipped", …), the banners and the gateway log carry fixed copy or the prompt,

@@ -330,7 +330,7 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
   private static func lenientContract(_ c: KeyedDecodingContainer<CodingKeys>) -> Int? {
     if let value = try? c.decodeIfPresent(Int.self, forKey: .desktopContract) { return value }
     if let text = try? c.decodeIfPresent(String.self, forKey: .desktopContract) {
-      return Int(text.trimmingCharacters(in: .whitespaces))
+      return text.trimmedNonEmpty.flatMap { Int($0) }
     }
     return nil
   }
@@ -367,10 +367,22 @@ public struct SecretPrompt: Equatable, Sendable, Decodable {
   }
 
   /// Whether a `secret` request names anything to enter (a non-blank `prompt` or `env_var`).
-  /// A v7 `secret` without either would render a blind "Secret required" field, so it is
+  /// A v7 `secret` without either would render a blind "Secret required" field, so it
   /// does not decode (`PendingServerRequest`). Not applied to `sudo`: its v2026.9.14 params are
   /// legitimately empty (the card says "Password required").
   var namesASecret: Bool {
-    [prompt, envVar].contains { !($0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
+    [prompt, envVar].contains { $0?.trimmedNonEmpty != nil }
+  }
+
+  /// The prompt text the card shows, `nil` when blank.
+  public var displayPrompt: String? { prompt?.trimmedNonEmpty }
+
+  /// The card's detail line, `nil` when the request carries none: the sudo `command`
+  /// (`$ command`) or the secret's `env_var` (`Saved as ENV_VAR`).
+  public func displayDetail(for kind: SecretKind) -> String? {
+    switch kind {
+    case .sudo: command?.trimmedNonEmpty.map { "$ \($0)" }
+    case .secret: envVar?.trimmedNonEmpty.map { "Saved as \($0)" }
+    }
   }
 }

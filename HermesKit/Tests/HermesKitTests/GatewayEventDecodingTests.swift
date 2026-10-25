@@ -154,7 +154,7 @@ import Testing
       params: .object(["session_id": .string("live"), "description": .string("Delete build")])
     )
     #expect(approval == PendingServerRequest(id: "srq-1", kind: .approval(ApprovalRequest(detail: "Delete build"))))
-    #expect(approval?.method == "approval")
+    #expect(approval?.method == .approval)
     #expect(PendingServerRequest(id: "srq-2", method: "approval", params: .object(["session_id": .string("live")])) == nil)
     #expect(PendingServerRequest(id: "srq-3", method: "approval", params: .null) == nil)
     #expect(PendingServerRequest(id: "srq-4", method: "vault.code", params: .object([:])) == nil)
@@ -163,7 +163,7 @@ import Testing
     #expect(PendingServerRequest.malformedSkip(for: "approval", params: .object(["session_id": .string("live")])) == nil)
     #expect(PendingServerRequest.malformedSkip(for: "vault.code", params: .null) == nil)
     #expect(PendingServerRequest.malformedSkip(for: "tour", params: .null) == nil)
-    #expect(PendingServerRequest.renderedMethods == ["approval", "clarify", "sudo", "secret"])
+    #expect(Set(PromptMethod.allCases.map(\.rawValue)) == ["approval", "clarify", "sudo", "secret"])
   }
 
   /// A danger pattern alone is content: an approval carrying only `pattern_key` or
@@ -190,6 +190,8 @@ import Testing
     let cancel = GatewayLogEntry(id: 1, event: .requestCancel(RequestCancel(id: "srq-1", method: "approval", reason: "timeout")))
     #expect(cancel.type == "request.cancel")
     #expect(cancel.summary == "approval timeout srq-1")
+    let bareCancel = GatewayLogEntry(id: 2, event: .requestCancel(RequestCancel(id: "srq-1")))
+    #expect(bareCancel.summary == "srq-1")
   }
 
   @Test func approvalRequestWithoutRequestIDStillDecodes() throws {
@@ -413,7 +415,7 @@ import Testing
     #expect(withCommand == PendingServerRequest(
       id: "srq-bbbbbbbbbbbb", kind: .secret(.sudo, SecretPrompt(command: "apt install ripgrep"))
     ))
-    #expect(withCommand?.method == "sudo")
+    #expect(withCommand?.method == .sudo)
 
     let empty = PendingServerRequest(id: "srq-e", method: "sudo", params: .object(["session_id": .string("live")]))
     #expect(empty == PendingServerRequest(id: "srq-e", kind: .secret(.sudo, SecretPrompt())))
@@ -432,10 +434,27 @@ import Testing
     #expect(request == PendingServerRequest(id: "srq-sec", kind: .secret(.secret, SecretPrompt(
       prompt: "Weather API key", envVar: "OPENWEATHER_API_KEY"
     ))))
-    #expect(request?.method == "secret")
+    #expect(request?.method == .secret)
     // Either field alone names the secret.
     #expect(PendingServerRequest(id: "a", method: "secret", params: .object(["env_var": .string("K")])) != nil)
     #expect(PendingServerRequest(id: "b", method: "secret", params: .object(["prompt": .string("Key?")])) != nil)
+  }
+
+  /// The secret card's text: the prompt and the kind's detail line (sudo `command`, secret
+  /// `env_var`), each trimmed and `nil` when blank; the other kind's field is never shown.
+  @Test func secretPromptDisplayText() {
+    let prompt = SecretPrompt(prompt: " Key? ", command: " apt install ripgrep\n", envVar: "OPENWEATHER_API_KEY")
+    #expect(prompt.displayPrompt == "Key?")
+    #expect(prompt.displayDetail(for: .sudo) == "$ apt install ripgrep")
+    #expect(prompt.displayDetail(for: .secret) == "Saved as OPENWEATHER_API_KEY")
+
+    let blank = SecretPrompt(prompt: "  ", command: "\n", envVar: "")
+    #expect(blank.displayPrompt == nil)
+    #expect(blank.displayDetail(for: .sudo) == nil)
+    #expect(blank.displayDetail(for: .secret) == nil)
+    #expect(SecretPrompt().displayPrompt == nil)
+    #expect(SecretPrompt(command: "ls").displayDetail(for: .secret) == nil)
+    #expect(SecretPrompt(envVar: "K").displayDetail(for: .sudo) == nil)
   }
 
   /// Malformed sudo / secret params (wrong types, not an object, a secret naming nothing)

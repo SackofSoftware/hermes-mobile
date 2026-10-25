@@ -316,7 +316,7 @@ struct ChatInteractionTests {
     }
 
     let echo = ChatFeature.AnswerEcho(kind: "approval", text: "Approved", failureBanner: "Failed to send the approval response.")
-    let outcome: Result<ChatFeature.AnswerStatus, GatewayError> = switch late {
+    let outcome: Result<AnswerStatus, GatewayError> = switch late {
     case "ok": .success(.ok)
     case "expired": .success(.expired)
     default: .failure(.timedOut(method: "request.answer"))

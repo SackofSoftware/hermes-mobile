@@ -151,7 +151,7 @@ public struct ClarifyRequest: Equatable, Sendable {
         lockedAnswers: Self.lockedAnswers(payload["answers"]),
         answerShape: .answers
       )
-    } else if let question = payload["question"]?.stringValue, !Self.isBlank(question) {
+    } else if let question = payload["question"]?.stringValue, question.trimmedNonEmpty != nil {
       self.init(
         requestID: nil,
         question: question,
@@ -188,7 +188,7 @@ public struct ClarifyRequest: Equatable, Sendable {
 
   private static func batchQuestion(_ entry: JSONValue) -> ClarifyQuestion? {
     guard let qid = entry["qid"]?.stringValue, !qid.isEmpty,
-          let question = entry["question"]?.stringValue, !isBlank(question)
+          let question = entry["question"]?.stringValue, question.trimmedNonEmpty != nil
     else { return nil }
     return ClarifyQuestion(
       qid: qid,
@@ -215,10 +215,6 @@ public struct ClarifyRequest: Equatable, Sendable {
       }
     }
     return locked
-  }
-
-  private static func isBlank(_ text: String) -> Bool {
-    text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 }
 
@@ -323,7 +319,7 @@ public struct ClarifyDraft: Equatable, Sendable {
   public mutating func setText(_ text: String, for question: ClarifyQuestion) {
     let key = question.answerKey
     typed[key] = text
-    guard !Self.trimmed(text).isEmpty else { return }
+    guard text.trimmedNonEmpty != nil else { return }
     picked[key] = nil
     skipped.remove(key)
   }
@@ -341,8 +337,7 @@ public struct ClarifyDraft: Equatable, Sendable {
   public func answer(for question: ClarifyQuestion) -> ClarifyAnswer? {
     let key = question.answerKey
     if skipped.contains(key) { return .skipped }
-    let text = Self.trimmed(typed[key] ?? "")
-    if !text.isEmpty { return .other(text) }
+    if let text = typed[key]?.trimmedNonEmpty { return .other(text) }
     if let picks = picked[key], !picks.isEmpty { return .choices(picks) }
     return nil
   }
@@ -366,10 +361,6 @@ public struct ClarifyDraft: Equatable, Sendable {
   /// card needs (one question) and that answer is there.
   public func sendsOnReturn(for request: ClarifyRequest) -> Bool {
     !request.isMultiQuestion && isComplete(for: request)
-  }
-
-  private static func trimmed(_ text: String) -> String {
-    text.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 }
 

@@ -46,7 +46,7 @@ final class ClarifyCardLayoutTests: XCTestCase {
       "five questions must scroll inside the region, not be cut or push the card out"
     )
     XCTAssertGreaterThanOrEqual(
-      region.bounds.height, ApprovalCardView.contentMinHeight - 1,
+      region.bounds.height, PromptCardMetrics.contentMinHeight - 1,
       "…and the region must keep its floor's worth of readable questions"
     )
 
@@ -109,7 +109,7 @@ final class ClarifyCardLayoutTests: XCTestCase {
       "a short form hugs its content — no blank band, nothing hidden"
     )
     XCTAssertLessThan(
-      region.bounds.height, ApprovalCardView.contentMaxHeightBase,
+      region.bounds.height, PromptCardMetrics.contentMaxHeightBase,
       "sanity: the content is under the cap, so hugging is what is being measured"
     )
   }

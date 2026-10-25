@@ -26,7 +26,7 @@ import SwiftUI
 ///    detail above it, a 1000-char `detail` pushed the command *entirely* below the fold at
 ///    first paint (measured: no command pixels in the viewport at all on a 393×516 keyboard-up
 ///    window), and on the shortest screen the title + a two-line detail alone filled the whole
-///    floor (88pt when that was measured; ``contentMinHeight`` is 96 now) — the user was asked
+///    floor (88pt when that was measured; ``PromptCardMetrics/contentMinHeight`` is 96 now) — the user was asked
 ///    to approve a command they could not see.
 /// 3. **The toggle's state is mirrored on the Approve button** (``approveTitle(all:)``). The
 ///    toggle itself has to live inside the scroll (rule 1), so with a long command it sits
@@ -40,76 +40,10 @@ struct ApprovalCardView: View {
 
   @State private var approveAll = false
 
-  /// Unscaled base for the region's cap (``BoundedScrollRegion`` scales it with Dynamic Type,
-  /// `@ScaledMetric(relativeTo: .callout)`, so a larger text size keeps roughly the same *line
-  /// count* visible, then clamps it to ``contentMaxHeightCeiling``): about a dozen monospaced
-  /// `.callout` command lines plus the detail and the session toggle under them — enough for
-  /// the shell commands agents actually ask about.
-  static let contentMaxHeightBase: CGFloat = 320
-
-  /// Hard ceiling on the scaled cap. `@ScaledMetric(relativeTo: .callout)` runs to roughly
-  /// 3.3× at `.accessibility5`, i.e. a ~1050pt region — taller than any iPhone screen, let
-  /// alone the fixed region one has left with the keyboard up.
-  ///
-  /// **Derived, not typed** (the `MarkdownTableView.columnMaxWidthCeiling` convention): three
-  /// fifths of ``TranscriptLayout/shortestLayoutHeight``, so on the shortest screen this app
-  /// can render at the remaining two fifths are always left for the pinned button row, the
-  /// composer and a slice of transcript. Effective cap: 320pt through roughly `.accessibility1`,
-  /// then flat at 340pt.
-  ///
-  /// It only binds in a *roomy* container. In a tight one ``BoundedHeightLayout`` yields to
-  /// whatever the region offers regardless, so the ceiling is a guard against a runaway
-  /// `@ScaledMetric`, never the thing that keeps the buttons on screen.
-  static let contentMaxHeightCeiling: CGFloat = TranscriptLayout.shortestLayoutHeight * 0.6
-
-  /// The region never compresses below this under a `VStack` squeeze (or below its own
-  /// content, whichever is smaller — a one-line recovered card is never padded out to it).
-  ///
-  /// **Derived from what the user must be able to read, not chosen by taste**: on the shortest
-  /// screen with the keyboard up the region lands exactly here, and there the *command* has to
-  /// show three full `.callout` lines **at `.large`** outside the bottom ramp —
-  /// ``commandPadding`` (8) + 3 × 20.9 + ``bottomFadeHeight`` (24) ≈ 95, rounded to 96. That
-  /// arithmetic only works because the command is the FIRST thing in the scroll: with the
-  /// title and the detail above it, the same region showed about half a line of command
-  /// (measured — no command pixels above the ramp at all with a long detail).
-  ///
-  /// Deliberately *not* scaled, so **the three-line contract is a `.large` one and degrades
-  /// with Dynamic Type**: the readable band is a constant 64pt (96 − a 24pt ramp − 8pt of block
-  /// padding), which is ~3.1 `.callout` lines at `.large`, ~1.3 at AX3 and under one at AX5
-  /// (`ApprovalCardLayoutTests.testTheFloorsReadableBandDegradesWithDynamicType` pins those
-  /// numbers off the real font metrics). Scaling it is not an option and not merely a taste
-  /// call: three AX5 lines are ~210pt, and reserving that on a 320×352 keyboard-up region is
-  /// measurably what pushes Deny/Approve — the safety-critical half — off the screen. A floor
-  /// small enough to keep the answer reachable everywhere is the trade, and one the *cap* (not
-  /// the floor) undoes as soon as there is any room: this binds only in the tightest
-  /// configuration there is.
-  static let contentMinHeight: CGFloat = 96
-
-  /// Tallest the bottom ramp that signals "there is more below" is allowed to be.
-  static let bottomFadeHeight: CGFloat = 24
-
-  /// Padding inside the command's tinted block. Internal rather than private so the measured
+  /// Padding inside the command's tinted block — part of the derivation of
+  /// ``PromptCardMetrics/contentMinHeight``. Internal rather than private so the measured
   /// "how many command lines are legible" tests can discount it.
   static let commandPadding: CGFloat = 8
-
-  /// Points of the fixed region the content region hands back, so the transcript — the context
-  /// for the approve/deny decision — is not starved to nothing.
-  ///
-  /// `ChatView` gives the card `.layoutPriority(1)` (without it the region collapses onto its
-  /// floor with the keyboard up), and a priority-1 child is offered *everything* the other
-  /// children do not strictly need: the greedy transcript's minimum is zero, so the card took
-  /// the whole region and the transcript was measured at **0pt** on every phone.
-  ///
-  /// **Absolute, not a fraction.** A proportional reserve (this was `0.75` of the offer) cuts
-  /// the region even when the content had room to fit: at an offer of 320 with 320pt of content
-  /// it handed back 80pt — about four command lines — that nothing else had asked for, on the
-  /// one surface whose rule is "the user must be able to read what they are approving". An
-  /// absolute reserve can only ever spend room the card does not want: the content hugs itself
-  /// whenever it fits under `offer − reserve`, and past that it gives back this much and no
-  /// more. One 44pt tap target's worth, the HIG minimum — enough that the conversation behind
-  /// the card is a row rather than a sliver, small enough to be invisible when the card is
-  /// short. The floor still outranks it, so the shortest screen gives the card what it needs.
-  static let transcriptReserve: CGFloat = 44
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -146,7 +80,7 @@ struct ApprovalCardView: View {
 
   /// Everything the user has to read before answering, in a ``BoundedScrollRegion``: it asks
   /// for its natural height while that fits under the cap and for the cap past it, and yields
-  /// to a shorter proposal down to ``contentMinHeight``.
+  /// to a shorter proposal down to ``PromptCardMetrics/contentMinHeight``.
   ///
   /// - **Order is load-bearing**: command, then detail, then toggle. The command is the thing
   ///   being approved, the viewport's first screenful is the only thing guaranteed to be read,
@@ -168,7 +102,7 @@ struct ApprovalCardView: View {
   ///   keyboard comes and goes; the layout instead keeps one variant and bounds it, which is
   ///   also what makes the height assertable (`ApprovalCardLayoutTests`).
   private var scrollableContent: some View {
-    BoundedScrollRegion(reserve: Self.transcriptReserve) {
+    BoundedScrollRegion(reserve: PromptCardMetrics.transcriptReserve) {
       if let command = request.command, !command.isEmpty {
         commandText(command)
           .textSelection(.enabled)
@@ -214,65 +148,5 @@ struct ApprovalCardView: View {
   /// command is long). Pure so the mirroring is assertable without rendering the card.
   static func approveTitle(all: Bool) -> String {
     all ? "Approve all" : "Approve"
-  }
-
-  /// What the bottom ramp looks like right now. Both halves come from **live scroll
-  /// geometry** — whether anything is still hidden below the viewport, and how tall the ramp
-  /// may be at the viewport's current height — rather than from the content's measured
-  /// height: a measurement-derived flag would be true for the region's whole lifetime, so its
-  /// last line would sit permanently inside the ramp and never be readable — the opposite of
-  /// what #65 asks for. Mirrors `MarkdownTableView`'s trailing fade (#59).
-  struct FadeState: Equatable {
-    /// Is there still content below what the viewport shows?
-    var isFaded: Bool = false
-    /// How tall the ramp may be — see ``fadeRampHeight(viewportHeight:)``.
-    var rampHeight: CGFloat = 0
-  }
-
-  /// Pure scroll-geometry rule behind the bottom fade: is there content below what the
-  /// viewport shows? (Kept out of the view so it is unit-testable — the flag itself is
-  /// private `@State`.) The 1pt slack absorbs fractional layout.
-  ///
-  /// Takes the whole `visibleRect` — the framework's own answer to "which part of the content
-  /// is on screen" — rather than `contentOffset.y + containerSize.height`, mirroring
-  /// `MarkdownTableView.hasTrailingOverflow`. Going false at the scroll end is the point: the
-  /// last line of the command must be readable, not permanently ramped to transparent.
-  static func hasBottomOverflow(visibleRect: CGRect, contentHeight: CGFloat) -> Bool {
-    visibleRect.maxY < contentHeight - 1
-  }
-
-  /// The ramp is a **fraction** of the viewport, capped at ``bottomFadeHeight``.
-  ///
-  /// A constant 24pt ramp is fine against `MarkdownTableView`'s trailing edge, whose viewport
-  /// is always at least a screen wide — but this region compresses, and against a squeezed
-  /// one a fixed ramp would tint most of what is left toward transparent: a hint would have
-  /// eaten the content it was hinting about, on the one surface where the user must be able
-  /// to read what they are approving. A quarter leaves three quarters of any viewport, at any
-  /// size, fully opaque.
-  static func fadeRampHeight(viewportHeight: CGFloat) -> CGFloat {
-    max(0, min(bottomFadeHeight, viewportHeight / 4))
-  }
-
-  /// The overflow hint, as `.mask` content: opaque everywhere except a `rampHeight` ramp at
-  /// the bottom, and opaque there too when nothing is hidden below.
-  ///
-  /// Same rationale as `MarkdownTableView`'s trailing fade (#59): iOS only flashes the
-  /// scroll indicator while a drag is in flight, so without the ramp a scrollable card
-  /// looks exactly like the clipped one #65 reported. Applied unconditionally (an `if`
-  /// would rebuild the `ScrollView` and throw away the user's scroll offset the moment the
-  /// state flipped — which, driven by scroll geometry, is every time they reach the end);
-  /// when nothing overflows the mask is fully opaque, i.e. a no-op. Vertical, so unlike
-  /// #59's horizontal fade there is no layout-direction mirroring to handle.
-  @ViewBuilder
-  static func bottomFadeMask(_ fade: FadeState) -> some View {
-    VStack(spacing: 0) {
-      Rectangle().fill(Color.black)
-      LinearGradient(
-        colors: [.black, .black.opacity(fade.isFaded ? 0 : 1)],
-        startPoint: .top,
-        endPoint: .bottom
-      )
-      .frame(height: fade.rampHeight)
-    }
   }
 }

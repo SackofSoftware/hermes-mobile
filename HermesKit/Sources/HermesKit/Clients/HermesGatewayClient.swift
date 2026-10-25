@@ -437,38 +437,25 @@ actor GatewayConnection {
   private func handleServerRequest(id: String, method: String, params: JSONValue) {
     if let request = PendingServerRequest(id: id, method: method, params: params) {
       events.yield(.serverRequest(request))
-    } else if let skip = PendingServerRequest.malformedSkip(for: method, params: params) {
-      Task { await answerMalformed(id: id, method: method, result: skip) }
-    } else if PendingServerRequest.renderedMethods.contains(method) {
-      events.yield(.serverRequestFailed(message: Self.unreadablePromptMessage(method)))
+    } else if let prompt = PromptMethod(rawValue: method) {
+      if let skip = PendingServerRequest.malformedSkip(for: method, params: params) {
+        Task { await answerMalformed(id: id, prompt: prompt, result: skip) }
+      } else {
+        events.yield(.serverRequestFailed(message: prompt.unreadableMessage))
+      }
     } else if declinesNotShown, PendingServerRequest.windowOwnedMethods.contains(method) {
       Task { await declineNotShown(id: id) }
     }
   }
 
-  /// The banner for a rendered prompt the phone cannot read (left unanswered on purpose).
-  static func unreadablePromptMessage(_ method: String) -> String {
-    let prompt = switch method {
-    case "approval": "an approval request"
-    case "clarify": "a question"
-    case "sudo": "a password request"
-    default: "a secret request"
-    }
-    return "Couldn’t show \(prompt) from the agent. Answer it on another device, or stop the turn."
-  }
-
-  private func answerMalformed(id: String, method: String, result skip: JSONValue) async {
+  private func answerMalformed(id: String, prompt: PromptMethod, result skip: JSONValue) async {
     do {
       let result = try await send(method: "request.answer", params: .object([
         "id": .string(id), "result": skip,
       ]))
-      guard ["ok", "expired"].contains(result["status"]?.stringValue ?? "") else {
-        throw GatewayError.server("Malformed request.answer result")
-      }
+      _ = try AnswerStatus(response: result)
     } catch {
-      let context = method == "approval"
-        ? "Couldn’t deny a malformed approval" : "Couldn’t skip a malformed \(method) prompt"
-      reportFailure(context, error: error)
+      reportFailure(prompt.skipFailureContext, error: error)
     }
   }
 

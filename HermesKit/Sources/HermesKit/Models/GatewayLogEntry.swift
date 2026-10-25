@@ -36,7 +36,7 @@ public extension GatewayEvent {
     case .toolStart: return "tool.start"
     case .toolComplete: return "tool.complete"
     case .approvalRequest: return "approval.request"
-    case let .serverRequest(request): return request.method
+    case let .serverRequest(request): return request.method.rawValue
     case .requestCancel: return "request.cancel"
     case .clarifyRequest: return "clarify.request"
     case .sudoRequest: return "sudo.request"
@@ -76,7 +76,7 @@ public extension GatewayEvent {
       case let .secret(_, p): return p.prompt ?? p.command ?? p.envVar ?? request.id
       }
     case let .requestCancel(cancel):
-      return [cancel.method, cancel.reason].compactMap { $0 }.joined(separator: " ") + " \(cancel.id)"
+      return ([cancel.method, cancel.reason].compactMap { $0 } + [cancel.id]).joined(separator: " ")
     case let .clarifyRequest(req): return req.question
     case let .sudoRequest(p), let .secretRequest(p): return p.prompt ?? p.requestID ?? ""
     case let .error(message), let .serverRequestFailed(message), let .serverRequestsUnavailable(message):

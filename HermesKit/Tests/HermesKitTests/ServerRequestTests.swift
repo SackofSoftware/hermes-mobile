@@ -262,25 +262,25 @@ struct ServerRequestTests {
   /// (no deny, no cancel for everyone) and never presented; the phone banners instead,
   /// without ending the turn.
   @Test(arguments: [
-    ("approval", JSONValue.object(["session_id": .string("live")])),
-    ("approval", .object(["command": .number(9)])),
-    ("approval", .object(["choices": .string("once")])),
-    ("clarify", .object(["session_id": .string("live")])),
-    ("clarify", .object(["question": .string("  ")])),
-    ("clarify", .object(["request_id": .string("r1")])),
-    ("clarify", .object(["prompts": .array([.object(["id": .string("q0"), "text": .string("New shape?")])])])),
-    ("sudo", .object(["command": .number(1)])),
-    ("secret", .object(["session_id": .string("live")])),
+    (PromptMethod.approval, JSONValue.object(["session_id": .string("live")])),
+    (.approval, .object(["command": .number(9)])),
+    (.approval, .object(["choices": .string("once")])),
+    (.clarify, .object(["session_id": .string("live")])),
+    (.clarify, .object(["question": .string("  ")])),
+    (.clarify, .object(["request_id": .string("r1")])),
+    (.clarify, .object(["prompts": .array([.object(["id": .string("q0"), "text": .string("New shape?")])])])),
+    (.sudo, .object(["command": .number(1)])),
+    (.secret, .object(["session_id": .string("live")])),
   ])
-  func undecodableObjectParamsAreLeftUnansweredWithABanner(method: String, payload: JSONValue) async throws {
+  func undecodableObjectParamsAreLeftUnansweredWithABanner(method: PromptMethod, payload: JSONValue) async throws {
     let transport = FakeTransport()
     let client = HermesGatewayClient.make { _ in transport }
     let events = client.connect(url, .token("t"))
     var iterator = events.makeAsyncIterator()
-    transport.inject(serverRequestFrame(id: "srq/new", method: method, params: payload))
+    transport.inject(serverRequestFrame(id: "srq/new", method: method.rawValue, params: payload))
     transport.inject(probe("probe.after"))
     let banner = try #require(await iterator.next())
-    #expect(banner == .serverRequestFailed(message: GatewayConnection.unreadablePromptMessage(method)))
+    #expect(banner == .serverRequestFailed(message: method.unreadableMessage))
     #expect(await iterator.next() == .unknown(type: "probe.after", raw: .object([:])))
     for _ in 0..<200 { await Task.yield() } // a stray automatic answer would land meanwhile
     #expect(transport.sent.isEmpty)
@@ -290,16 +290,16 @@ struct ServerRequestTests {
     initial.isSending = true
     let store = TestStore(initialState: initial) { ChatFeature() }
     await store.send(.gatewayEvent(banner)) {
-      $0.errorBanner = GatewayConnection.unreadablePromptMessage(method)
+      $0.errorBanner = method.unreadableMessage
     }
   }
 
   @Test func unreadablePromptMessageNamesEachKind() {
-    #expect(GatewayConnection.unreadablePromptMessage("approval")
+    #expect(PromptMethod.approval.unreadableMessage
       == "Couldn’t show an approval request from the agent. Answer it on another device, or stop the turn.")
-    #expect(GatewayConnection.unreadablePromptMessage("clarify").hasPrefix("Couldn’t show a question from the agent."))
-    #expect(GatewayConnection.unreadablePromptMessage("sudo").hasPrefix("Couldn’t show a password request"))
-    #expect(GatewayConnection.unreadablePromptMessage("secret").hasPrefix("Couldn’t show a secret request"))
+    #expect(PromptMethod.clarify.unreadableMessage.hasPrefix("Couldn’t show a question from the agent."))
+    #expect(PromptMethod.sudo.unreadableMessage.hasPrefix("Couldn’t show a password request"))
+    #expect(PromptMethod.secret.unreadableMessage.hasPrefix("Couldn’t show a secret request"))
   }
 
   /// A failed advertisement opens the ready gate first and only then surfaces, so the

@@ -1004,10 +1004,6 @@ public struct ChatFeature {
     }
   }
 
-  /// `request.answer`'s acknowledgement: `ok` = this answer resolved the request;
-  /// `expired` = it was no longer open (another surface answered first, or it timed out).
-  public enum AnswerStatus: Equatable, Sendable { case ok, expired }
-
   /// What an answered server request leaves behind: the transcript status row appended on
   /// `ok` (never a secret value), and the banner shown when the answer fails to send.
   public struct AnswerEcho: Equatable, Sendable {
@@ -1485,7 +1481,7 @@ public struct ChatFeature {
       case let .respondToApproval(approve, all):
         // Narrow, never widen: Approve needs `once` in the server's choice set, and
         // "approve all" falls back to `once` when `session` is not offered.
-        guard case let .approval(request) = state.pendingInteraction,
+        guard let interaction = state.pendingInteraction, case let .approval(request) = interaction,
               !approve || request.allowsOnce
         else { return .none }
         // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
@@ -1495,29 +1491,26 @@ public struct ChatFeature {
         let effectiveChoice = approve
           ? (all && request.allowsSessionChoice ? "session" : "once")
           : "deny"
+        // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
+        // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
+        // not make a later, unrelated hydrate synthesize a phantom card.
+        state.expectsPendingApproval = false
         // v7 server request: `request.answer`, and the card stays until the server
         // acknowledges — only `ok` / `expired` remove it (`serverRequestAnswered`).
         if let pending = state.presentedServerRequest {
-          guard state.answeringServerRequestID == nil else { return .none }
-          // Answering ANY approval moots the push-tap recovery hint (#30 workaround).
-          state.expectsPendingApproval = false
           return answerServerRequest(
             pending,
             result: .object(["choice": .string(effectiveChoice)]),
             echoText: approve ? "Approved" : "Denied",
-            failureBanner: "Failed to send the approval response.",
+            failureBanner: Self.approvalFailureBanner,
             state: &state
           )
         }
         guard let sessionID = state.liveSessionID else { return .none }
         state.pendingInteraction = nil
-        // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
-        // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
-        // not make a later, unrelated hydrate synthesize a phantom card.
-        state.expectsPendingApproval = false
         let rowID = uuid()
         state.transcript.append(
-          ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
+          ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: approve ? "Approved" : "Denied"))
         )
         let params: JSONValue
         if let requestID = request.requestID {
@@ -1580,12 +1573,14 @@ public struct ChatFeature {
           // handled elsewhere. Patch the optimistic status row honestly; the next hydrate
           // replaces it wholesale with deterministic ids anyway (server wins), and a row
           // already replaced by such a hydrate is a silent nil-lookup no-op.
-          state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
+          if case let .status(kind, _) = state.transcript[id: rowID]?.kind {
+            state.transcript[id: rowID]?.kind = .status(kind: kind, text: "Already handled elsewhere")
+          }
         case .none:
           // The RPC threw — the card is already dismissed, so surface the failure instead
           // of silently swallowing it. The optimistic row stands: whether the answer reached
           // the server is unknowable here, and the banner is the signal.
-          state.errorBanner = "Failed to send the approval response."
+          state.errorBanner = Self.approvalFailureBanner
         default:
           // Defensive only: the effect never feeds back a resolved >= 1 (the optimistic
           // "Approved"/"Denied" row is already correct, no action needed).
@@ -2677,11 +2672,12 @@ public struct ChatFeature {
   /// (so `wireEncoder`, the 30 s budget and a surfaced error come for free); the outcome
   /// feeds `serverRequestAnswered` with an echo built here, so a late acknowledgement (the
   /// card already gone) still knows its row kind. A status other than `ok` / `expired` is a
-  /// failure.
+  /// failure. A no-op while an answer is already in flight.
   private func answerServerRequest(
     _ pending: PendingServerRequest, result: JSONValue, echoText: String, failureBanner: String,
     state: inout State
   ) -> Effect<Action> {
+    guard state.answeringServerRequestID == nil else { return .none }
     let id = pending.id
     let echo = AnswerEcho(kind: pending.kind.statusKind, text: echoText, failureBanner: failureBanner)
     state.answeringServerRequestID = id
@@ -2689,17 +2685,15 @@ public struct ChatFeature {
       let outcome: Result<AnswerStatus, GatewayError>
       do {
         let response = try await gateway.send("request.answer", .object(["id": .string(id), "result": result]))
-        switch response["status"]?.stringValue {
-        case "ok": outcome = .success(.ok)
-        case "expired": outcome = .success(.expired)
-        default: outcome = .failure(.server("Malformed request.answer result"))
-        }
+        outcome = .success(try AnswerStatus(response: response))
       } catch {
         outcome = .failure((error as? GatewayError) ?? .server(error.localizedDescription))
       }
       await send(.serverRequestAnswered(id: id, echo: echo, outcome))
     }
   }
+
+  static let approvalFailureBanner = "Failed to send the approval response."
 
   static let clarifyFailureBanner = "Failed to send the clarify response."
 
@@ -2718,7 +2712,8 @@ public struct ChatFeature {
   /// Privacy: the value only ever travels in the answer RPC's params. The echo row, the
   /// banner and the `AnswerEcho` carry fixed copy, never the value.
   private func answerSecret(_ value: String?, into state: inout State) -> Effect<Action> {
-    guard case let .secret(kind, prompt) = state.pendingInteraction else { return .none }
+    guard let interaction = state.pendingInteraction, case let .secret(kind, prompt) = interaction
+    else { return .none }
     let echoText = switch (kind, value) {
     case (.sudo, .some): "Password submitted"
     case (.secret, .some): "Secret submitted"
@@ -2727,7 +2722,6 @@ public struct ChatFeature {
     }
     let banner = Self.secretFailureBanner(kind)
     if let pending = state.presentedServerRequest {
-      guard state.answeringServerRequestID == nil else { return .none }
       return answerServerRequest(
         pending,
         result: .object(["value": .string(value ?? "")]),
@@ -2739,7 +2733,7 @@ public struct ChatFeature {
     guard let requestID = prompt.requestID, let sessionID = state.liveSessionID else { return .none }
     state.pendingInteraction = nil
     let rowID = uuid()
-    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: "secret", text: echoText)))
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: echoText)))
     // Method + value key differ per kind (verified against tui_gateway/server.py):
     // sudo.respond → "password", secret.respond → "value".
     let method = kind == .sudo ? "sudo.respond" : "secret.respond"
@@ -2767,10 +2761,10 @@ public struct ChatFeature {
   ///   optimistic: the card goes and the echo row is appended at once; a throw patches that
   ///   row to "Failed to send" and banners (`legacyRespondFailed`).
   private func answerClarify(_ answers: [String: ClarifyAnswer]?, into state: inout State) -> Effect<Action> {
-    guard case let .clarify(request) = state.pendingInteraction else { return .none }
+    guard let interaction = state.pendingInteraction, case let .clarify(request) = interaction
+    else { return .none }
     let echoText = Self.clarifyEchoText(request, answers)
     if let pending = state.presentedServerRequest {
-      guard state.answeringServerRequestID == nil else { return .none }
       return answerServerRequest(
         pending,
         result: Self.clarifyResult(request, answers),
@@ -2782,7 +2776,7 @@ public struct ChatFeature {
     guard request.answerShape == .legacyRespond, let sessionID = state.liveSessionID else { return .none }
     state.pendingInteraction = nil
     let rowID = uuid()
-    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: "clarify", text: echoText)))
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: echoText)))
     let calls = Self.legacyClarifyRespondParams(request, answers, sessionID: sessionID)
     return .run { [gateway] send in
       do {

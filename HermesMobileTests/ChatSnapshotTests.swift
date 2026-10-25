@@ -653,7 +653,8 @@ final class ChatSnapshotTests: SnapshotTestCase {
       onSubmit: { _ in },
       onSkip: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 200)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 
@@ -665,7 +666,8 @@ final class ChatSnapshotTests: SnapshotTestCase {
       onSubmit: { _ in },
       onSkip: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 200)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 
@@ -692,7 +694,8 @@ final class ChatSnapshotTests: SnapshotTestCase {
       onSubmit: { _ in },
       onSkip: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 200)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 

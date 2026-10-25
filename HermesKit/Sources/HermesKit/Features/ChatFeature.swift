@@ -136,8 +136,8 @@ public struct ChatFeature {
       }
     }
     /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
-    /// #30: an `approval.request` that fired while the socket was down is gone — the
-    /// server does not re-surface pending approvals on `session.resume`). Set by
+    /// #30: on a legacy agent an `approval.request` that fired while the socket was down is
+    /// gone — `session.resume` does not re-surface it; v7 replays it in `open_requests`). Set by
     /// `AppFeature` when an approval-typed push tap puts this session's chat on screen;
     /// consumed (reset to `false`) by the next hydrate. On a legacy server that hydrate
     /// synthesizes a generic command-less approval card when the turn is still `running` and
@@ -145,7 +145,8 @@ public struct ChatFeature {
     /// replay restores the real card instead, and an empty replay means nothing to recover
     /// (no card). Transient: deliberately NOT persisted in
     /// `ChatSnapshotClient` (a snapshot repaint must never resurrect a card), and cleared
-    /// by a real `.approvalRequest` (the real event wins — no later re-synthesis).
+    /// by a real approval (`.approvalRequest` or a v7 `.serverRequest`), by answering one, and
+    /// at turn end (the real event wins — no later re-synthesis).
     public var expectsPendingApproval: Bool
     /// The tool/skill row whose detail sheet is open, if any (Task 4).
     public var presentedTool: ChatRow?

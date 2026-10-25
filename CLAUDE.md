@@ -55,9 +55,9 @@ bullets below are the compressed rules.
 - **Hydration is server-authoritative** via one `hydrate(sessionID)` funnel
   (open/foreground/cold-launch → `.ready` → hydrate): call `session.resume` (NOT
   `session.activate` — live-only, 404s stored sessions) and apply `info` / `running` /
-  `inflight` / `open_requests` (v7 prompt replay, whatever `running` says) from the
-  response — rebuild rows wholesale, server wins, never merge; seed
-  the streaming row from `inflight`. Exception (#26): a foreground re-hydrate of a
+  `inflight` from the response — rebuild rows wholesale, server wins, never merge; seed
+  the streaming row from `inflight`. `open_requests` (v7 prompt replay) is reconciled, not
+  rebuilt: absence authoritative, whatever `running` says. Exception (#26): a foreground re-hydrate of a
   still-RUNNING turn preserves the client's live thinking + tool rows (server `inflight`
   carries no reasoning/tools); a completed turn still replaces wholesale. Details:
   `docs/architecture.md`.
@@ -170,8 +170,10 @@ bullets below are the compressed rules.
   **Raise cards through `State.present(_:)`** (token-keyed) — `refreshPresented(_:)` (same srq
   id, no token bump) is the ONE exception. 4404 only window-owned bridges; never answer any
   other unrendered prompt; narrow the server's choices, never widen. Cards are a pinned row
-  over ONE `BoundedHeightLayout` region. Queue, replay, decline matrix, clarify forms, layout,
-  push-tap recovery: `docs/features/approvals.md`.
+  over ONE `BoundedHeightLayout` region. `GatewayConnection` holds `.ready` until the
+  per-socket `client.capabilities` advertisement settles (5 s cap, no retry); its `-32601` is
+  NOT a `*Supported` verdict (`docs/architecture.md`). Queue, replay, decline matrix, clarify
+  forms, layout, push-tap recovery: `docs/features/approvals.md`.
 - **Context-usage pill**: display derives from `Usage` helpers in HermesKit (thresholds
   mirror the Hermes TUI, unit-tested); severity→color and popover are local `@State`.
 

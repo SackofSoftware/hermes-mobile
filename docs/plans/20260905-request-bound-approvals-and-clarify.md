@@ -284,7 +284,8 @@ Tasks 2, 3, 7, 9 and 10; interim risks are the ⚠️ notes in Tasks 2, 3 and 8.
    appends. A replayed arrival with a known id updates in place through one sanctioned helper,
    `State.refreshPresented(_:)` (same srq id only, no token bump) — the single documented
    exception to "never assign `pendingInteraction`". Answering, `expired`, or a matching
-   `request.cancel` removes the entry and presents the next one.
+   `request.cancel` removes the entry and presents the next one. Card answers carry the card's
+   token; one whose token is no longer `pendingInteractionToken` is dropped.
 2. **Answers go through `request.answer`, in the request's own shape.** `request.answer {id,
    result}` is an ordinary RPC (`gateway.send`): `wireEncoder`, the 30 s timeout and a surfaced
    error come for free, and `status: "expired"` tells the phone another surface answered first.
@@ -296,8 +297,9 @@ Tasks 2, 3, 7, 9 and 10; interim risks are the ⚠️ notes in Tasks 2, 3 and 8.
    when the backend advertised `declines_not_shown`, otherwise nothing. Unrendered prompts
    (`vault.*`, `setup_choose`, `display.install.sudo`): nothing — a desktop sharing the session
    answers; a phone-only agent waits out that prompt's deadline (120–300 s). A rendered kind whose
-   params fail to decode: that kind's own skip (`{choice:"deny"}`, `{}`, `{value:""}`), so the
-   agent is never left hanging.
+   params are not an object (no client can render them): that kind's own skip
+   (`{choice:"deny"}`, `{}`, `{value:""}`). Object params the phone cannot decode (a newer desktop
+   may render them): no answer, a `.serverRequestFailed` banner.
 4. **Cards end when the request ends.** `request.cancel` removes the matching entry (a `timeout`
    on the presented card appends a "Timed out" status row). Turn end (`message.complete`,
    `.error`) clears the queue — the generalization of `clearStaleApproval`. A hydrate never
@@ -315,7 +317,9 @@ Tasks 2, 3, 7, 9 and 10; interim risks are the ⚠️ notes in Tasks 2, 3 and 8.
    or a text field; every question with choices also gets an "Other" text row. Several
    questions: sections over one `BoundedHeightLayout` region with a pinned Confirm/Skip row.
    Recommended shows a badge, never a preselection; Skip on every form. On legacy servers the
-   single-select and free-text forms work as today; the new forms are v7-only.
+   single-select and free-text forms work as today; a legacy batch (`questions` + `request_id`,
+   keyed by `isBatch`) sends one `clarify.respond {question_id}` per question, and Skip is one
+   question-less empty respond.
 8. **Sudo and secret move to the new channel.** `SecretPrompt` stops requiring `request_id`
    (the srq id identifies a v7 prompt) and gains the sudo `command` and secret `env_var`. The
    legacy `sudo.respond` / `secret.respond` path stays for legacy servers, with its `try?`
@@ -350,15 +354,21 @@ Key decisions:
 /// Moved out of `ChatFeature.State.PendingInteraction` so models don't depend on the feature.
 public enum SecretKind: Equatable, Sendable { case sudo, secret }
 
+/// Also moved out of the feature (`ChatFeature.State.PendingInteraction` is a typealias).
+public enum PendingInteraction: Equatable, Sendable {
+  case approval(ApprovalRequest)
+  case clarify(ClarifyRequest)
+  case secret(SecretKind, SecretPrompt)
+}
+
+/// The rendered methods; owns each kind's skip result and banner wording.
+public enum PromptMethod: String, CaseIterable, Sendable { case approval, clarify, sudo, secret }
+
 /// One open v7 prompt. `id` is the `srq-…` request id — the only place it is stored.
 public struct PendingServerRequest: Equatable, Sendable, Identifiable {
   public var id: String
-  public var kind: Kind
-  public enum Kind: Equatable, Sendable {
-    case approval(ApprovalRequest)
-    case clarify(ClarifyRequest)
-    case secret(SecretKind, SecretPrompt)
-  }
+  public var kind: PendingInteraction
+  public var method: PromptMethod { … }   // derived from kind
 }
 
 public struct ClarifyQuestion: Equatable, Sendable {
@@ -369,13 +379,14 @@ public struct ClarifyQuestion: Equatable, Sendable {
   public var isFreeText: Bool { choices.isEmpty }
 }
 
-public struct ClarifyRequest: Equatable, Sendable, Decodable {
+public struct ClarifyRequest: Equatable, Sendable {   // init?(serverRequestParams:) / init?(legacyEvent:)
   public var requestID: String?                // legacy event id; nil on v7
   public var questions: [ClarifyQuestion]      // >= 1 after decoding
   public var lockedAnswers: [String: String?]  // replayed `answers`, keyed by qid; nil = skipped
   public var answerShape: AnswerShape
   public enum AnswerShape: Equatable, Sendable { case answers, singleAnswer, legacyRespond }
   public var isMultiQuestion: Bool { questions.count > 1 }   // layout only
+  public var isBatch: Bool { questions.first?.qid != nil }   // legacy wire shape
   // convenience for the single form (keeps existing call sites/tests)
   public init(requestID: String?, question: String, choices: [String] = [], multiSelect: Bool = false)
 }
@@ -410,10 +421,12 @@ The base's `ApprovalRequest.serverRequestID` (set in `GatewayConnection.presentA
 removed once the queue exists (the id lives on `PendingServerRequest` only). `requestID`,
 `choices`, `allowsOnce` and `allowsSessionChoice` stay as merged.
 
-Decoding rules: `ApprovalRequest` stays fully lenient. `ClarifyRequest` picks its shape from the
-payload: `questions` (each entry needs `qid` + `question`) → `.answers`; a top-level `question`
-from a server request → `.singleAnswer`; the legacy event (with `request_id`) → `.legacyRespond`.
-No usable question → decode failure. `multi_select` defaults `false`; `choices: null` → `[]`.
+Decoding rules: `ApprovalRequest` stays lenient, but a v7 approval needs `hasContent` (a
+non-blank command or description) to render. `ClarifyRequest`'s source decides the wire:
+`init?(serverRequestParams:)` → `.answers` for a `questions` list (each entry needs `qid` +
+`question`), else `.singleAnswer` for a top-level `question`; `init?(legacyEvent:)` (needs
+`request_id`) → `.legacyRespond`, a `questions` list being the legacy batch. No usable question →
+nil. `multi_select` defaults `false`; `choices: null` → `[]`.
 Unknown keys are ignored.
 
 `ActivateResponse` adds `openRequests: [OpenRequest]` (`"open_requests"`, default `[]`).
@@ -430,8 +443,9 @@ advertisement, decline and automatic-skip sends.
 - Inbound `.serverRequest`: `approval` / `clarify` / `sudo` / `secret` decode into
   `GatewayEvent.serverRequest`, yielded synchronously from `handle(frame:)` as the base does for
   approval (a following turn terminal must not overtake the card). A rendered method whose
-  params fail to decode gets that kind's skip through `request.answer` from a `Task` (the
-  base's malformed-approval path; a failure → `.serverRequestFailed`). Window-owned methods get
+  params are not an object gets that kind's skip (`PendingServerRequest.malformedSkip`) through
+  `request.answer` from a `Task` (a failure → `.serverRequestFailed`); undecodable object params
+  get no answer, only a `.serverRequestFailed` banner. Window-owned methods get
   a 4404 error frame when `declinesNotShown`, else nothing. Every other method gets nothing.
 - Advertisement: when the `gateway.ready` frame arrives, the actor starts a `Task` that sends
   `client.capabilities {server_requests: true}` and awaits the result with a 5 s cap, stores
@@ -470,6 +484,7 @@ Actions:
   id is known; present when it became the head.
 - `.gatewayEvent(.requestCancel(c))` — remove the matching entry; if it was presented, present
   the next or clear; `reason == "timeout"` on the presented card appends a "Timed out" row.
+- Every card action below also carries `token:` (stale tokens are dropped).
 - `respondToApproval(approve:all:)` — builds `{choice}` (the base's narrowing kept); legacy
   `approval.respond` path as merged. The v7 outcome moves from the base's
   `approvalRespondResult(resolved: 0)` overload to `serverRequestAnswered`.
@@ -500,6 +515,8 @@ clarify .answers       → {answers: {q0: "A", q1: "[\"B\",\"C\"]", q2: "typed o
                           cancel → {}
 clarify .singleAnswer  → {answer: "A"}                  skip → {answer: ""}
 clarify .legacyRespond → clarify.respond {session_id, request_id, answer}   (today's wire)
+  legacy batch         → one clarify.respond {…, question_id, answer} per question
+                          skip → one question-less empty respond
 sudo / secret v7       → {value: "…"}                   skip → {value: ""}
 sudo / secret legacy   → sudo.respond / secret.respond   (today's wire)
 ```
@@ -535,8 +552,8 @@ the same reconcile when it lands.
   view `@State` holds only the user's edits to unlocked questions, keyed on
   `pendingInteractionToken` through the existing `.id`, so a refreshed replay shows new locks
   and a replacement card never inherits selections.
-- Secret card (in `ClarifyCardView.swift`): shows the sudo `command` / secret `env_var` when
-  present.
+- Secret card (`SecretCardView.swift`): shows the sudo `command` / secret `env_var` when
+  present, in the shared `BoundedScrollRegion` (metrics in `PromptCardMetrics`).
 
 ### Wire examples (test fixtures)
 
@@ -927,10 +944,10 @@ the same reconcile when it lands.
       the socket mid-clarify and re-open — the card returns with locks; desktop and phone on one
       session — a clarify answered on desktop shows "Already handled elsewhere" when answered on
       the phone, and the phone never takes a desktop preview/terminal read or vault prompt
-      (skipped - not automatable; handed to the user)
+      (NOT done — handed to the user; see Post-Completion)
 - [x] manual pass against a v2026.9.24 agent (intermediate clarify shape, no 4404) and a
-      v2026.9.11 agent (legacy) if one is available (skipped - not automatable; handed to the
-      user)
+      v2026.9.11 agent (legacy) if one is available (NOT done — handed to the user; see
+      Post-Completion)
 
 ### Task 10: [Final] Update documentation
 
@@ -952,8 +969,8 @@ the same reconcile when it lands.
       `open_requests` in the hydration bullet and the stale `BoundedHeightLayout` path in Gotchas)
 - [x] `README.md` feature list: multi-select, multi-question and Other in clarify; compatibility
       note (both the v7 and the legacy wire are supported)
-- [x] comment on #97 with what shipped, the v7 floor, and what legacy agents still get (drafted,
-      posting deferred to the user)
+- [x] comment on #97 with what shipped, the v7 floor, and what legacy agents still get (NOT
+      done — handed to the user; see Post-Completion)
 - [x] move this plan to `docs/plans/completed/` (deferred to the exec orchestrator's completion
       step)
 
@@ -965,8 +982,11 @@ the same reconcile when it lands.
   for the approval card.
 - Reconnect mid-clarify with two answers locked on the desktop, then open the phone: the two
   show ✓, the rest are editable, Confirm sends all.
+- Task 9's manual pass against a live v0.21.7+ agent (the scenario list is in Task 9).
+- Task 9's manual pass against a v2026.9.24 agent and a v2026.9.11 agent, if available.
 
 **External**
+- Comment on #97: what shipped, the v7 floor, and what legacy agents still get.
 - `session.info` with `running` true→false as an extra clearing trigger (desktop #86577, for a
   lost `message.complete`), minding desktop's #83319 rule that a live request keeps its card.
 - The resume `status: "waiting"` could drive a "needs input" indicator in the session list —

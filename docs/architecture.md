@@ -306,9 +306,9 @@ window-owned bridges like `terminal.read`) as a JSON-RPC request from the server
 before) send `*.request` events answered by `*.respond` RPCs; the app keeps that legacy path
 unchanged.
 
-- **Wire signal.** `info.desktop_contract` (in the `session.resume` / `session.create` `info`
-  and in `session.info` events; an Int or a numeric String) is `>= 7` on v7 and 6 on
-  v2026.9.11. `ChatFeature.State.desktopContract` records it per slot. A hydrate counts as v7
+- **Wire signal.** `info.desktop_contract` (an Int or a numeric String) is `>= 7` on v7 and 6
+  on v2026.9.11. `ChatFeature.State.desktopContract` records it per slot from the hydrate's
+  `session.resume` `info` and from `session.info` events. A hydrate counts as v7
   when the contract is `>= 7` or `open_requests` is non-empty. Receiving needs no gate (one
   server never speaks both wires); the signal only drives the hydrate's choice between the
   replay and the legacy clearing rules. A `-32601` on `client.capabilities` does NOT mean

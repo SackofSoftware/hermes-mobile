@@ -11,11 +11,9 @@ import Foundation
 /// be *equal* (an agent retrying the same command), which is exactly the pair a value-derived
 /// id cannot tell apart.
 public struct ApprovalRequest: Equatable, Sendable, Decodable {
-  /// Exact server-side approval identity on newer gateways. Nil on older gateways.
+  /// Exact server-side approval identity on newer gateways (the approval queue id — NOT the
+  /// `srq-…` transport id, which lives on `PendingServerRequest`). Nil on older gateways.
   public var requestID: String?
-  /// JSON-RPC request id when this approval arrived as a server→client request.
-  /// This is transport metadata, not part of the approval payload.
-  public var serverRequestID: String?
   /// The server-advertised choices. Empty means an older gateway with the legacy choice set.
   public var choices: [String]
   /// The command awaiting approval (shown verbatim in the card).
@@ -38,7 +36,6 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
 
   public init(
     requestID: String? = nil,
-    serverRequestID: String? = nil,
     command: String? = nil,
     detail: String? = nil,
     patternKey: String? = nil,
@@ -46,7 +43,6 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
     choices: [String] = []
   ) {
     self.requestID = requestID
-    self.serverRequestID = serverRequestID
     self.command = command
     self.detail = detail
     self.patternKey = patternKey
@@ -57,7 +53,6 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
   public init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     requestID = try c.decodeIfPresent(String.self, forKey: .requestID)
-    serverRequestID = nil
     choices = try c.decodeIfPresent([String].self, forKey: .choices) ?? []
     command = try c.decodeIfPresent(String.self, forKey: .command)
     detail = try c.decodeIfPresent(String.self, forKey: .detail)
@@ -74,6 +69,14 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
   /// Whether the server permits approving only this command.
   public var allowsOnce: Bool {
     choices.isEmpty || choices.contains("once")
+  }
+
+  /// Whether there is anything to show: a command, a description, or a danger pattern. A v7
+  /// server request without any of them is treated as malformed (denied), never presented
+  /// as a blind card.
+  public var hasContent: Bool {
+    command?.isEmpty == false || detail?.isEmpty == false
+      || patternKey?.isEmpty == false || !patternKeys.isEmpty
   }
 
   /// Whether the card may offer the session-wide "Approve all in this session"

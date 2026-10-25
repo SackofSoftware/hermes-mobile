@@ -8,7 +8,7 @@ import SwiftUI
 struct ClarifyCardView: View {
   enum Mode: Equatable {
     case clarify(ClarifyRequest)
-    case secret(ChatFeature.State.PendingInteraction.SecretKind, SecretPrompt)
+    case secret(SecretKind, SecretPrompt)
   }
 
   let mode: Mode

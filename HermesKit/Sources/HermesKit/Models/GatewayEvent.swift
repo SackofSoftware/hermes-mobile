@@ -18,9 +18,12 @@ public enum GatewayEvent: Equatable, Sendable {
     args: JSONValue?, resultText: String?, inlineDiff: String?, durationS: Double?
   )
   case approvalRequest(ApprovalRequest)
-  /// A server→client approval, answered by `request.answer` using the request metadata
-  /// attached to the payload. This is distinct from a legacy `approval.request` notification.
-  case approvalServerRequest(ApprovalRequest)
+  /// A rendered v7 server→client request (`{"id":"srq-…","method":…}`), decoded by the
+  /// gateway client and answered through `request.answer {id, result}`. Distinct from the
+  /// legacy `*.request` notifications. Never carries an answer value.
+  case serverRequest(PendingServerRequest)
+  /// `request.cancel`: the server withdrew an open server request (timeout, interrupt, …).
+  case requestCancel(RequestCancel)
   case clarifyRequest(ClarifyRequest)
   case sudoRequest(SecretPrompt)
   case secretRequest(SecretPrompt)
@@ -97,6 +100,9 @@ public enum GatewayEvent: Equatable, Sendable {
       else { self = .unknown(type: type, raw: p) }
     case "secret.request":
       if let req = p.decoded(SecretPrompt.self) { self = .secretRequest(req) }
+      else { self = .unknown(type: type, raw: p) }
+    case "request.cancel":
+      if let cancel = p.decoded(RequestCancel.self) { self = .requestCancel(cancel) }
       else { self = .unknown(type: type, raw: p) }
     case "error":
       self = .error(message: p["message"]?.stringValue ?? "")

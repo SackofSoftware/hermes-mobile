@@ -417,46 +417,58 @@ actor GatewayConnection {
     finish(error: .disconnected)
   }
 
-  /// Only window-owned bridges may decline, and only after positive server support.
-  /// Other unrendered prompts must remain available to another attached client.
-  func handleServerRequest(id: String, method: String, params: JSONValue) async {
-    guard !isFinished else { return }
-    guard method == "approval" else {
-      guard declinesNotShown,
-            ["terminal.read", "preview.read", "window.read", "preview.act", "tour"].contains(method)
-      else { return }
-      let frame: JSONValue = .object([
-        "jsonrpc": .string("2.0"), "id": .string(id),
-        "error": .object([
-          "code": .number(4404), "message": .string("Not shown on this client"),
-        ]),
-      ])
-      do {
-        let data = try JSONRPCRequest.wireEncoder.encode(frame)
-        try await transport.send(String(decoding: data, as: UTF8.self))
-      } catch {
-        reportFailure("Couldn’t decline a window request", error: error)
-      }
-      return
+  /// Route one server→client request, synchronously on the receive loop — the decline
+  /// matrix:
+  /// - a rendered method (`PendingServerRequest`) is yielded as `.serverRequest` at once, so
+  ///   a turn terminal read right after it cannot overtake the card;
+  /// - a rendered method whose params are malformed gets that kind's skip through
+  ///   `request.answer`, so the agent is never left hanging;
+  /// - a window-owned bridge gets the non-settling 4404, and only once the advertisement
+  ///   acknowledged `declines_not_shown`;
+  /// - anything else gets nothing — another attached client may answer it, and an error
+  ///   would settle it (or, on a vault prompt, feed a refusal string to the password manager).
+  /// Every send runs in a `Task`: an RPC awaited here would deadlock, since its
+  /// acknowledgement arrives through this same loop.
+  private func handleServerRequest(id: String, method: String, params: JSONValue) {
+    if let request = PendingServerRequest(id: id, method: method, params: params) {
+      events.yield(.serverRequest(request))
+    } else if let skip = PendingServerRequest.malformedSkip(for: method) {
+      Task { await answerMalformed(id: id, method: method, result: skip) }
+    } else if declinesNotShown, PendingServerRequest.windowOwnedMethods.contains(method) {
+      Task { await declineNotShown(id: id) }
     }
-    if presentApproval(id: id, params: params) { return }
+  }
+
+  private func answerMalformed(id: String, method: String, result skip: JSONValue) async {
     do {
       let result = try await send(method: "request.answer", params: .object([
-        "id": .string(id), "result": .object(["choice": .string("deny")]),
+        "id": .string(id), "result": skip,
       ]))
       guard ["ok", "expired"].contains(result["status"]?.stringValue ?? "") else {
         throw GatewayError.server("Malformed request.answer result")
       }
     } catch {
-      reportFailure("Couldn’t deny a malformed approval", error: error)
+      let context = method == "approval"
+        ? "Couldn’t deny a malformed approval" : "Couldn’t skip a malformed \(method) prompt"
+      reportFailure(context, error: error)
     }
   }
 
-  private func presentApproval(id: String, params: JSONValue) -> Bool {
-    guard var request = params.decoded(ApprovalRequest.self) else { return false }
-    request.serverRequestID = id
-    events.yield(.approvalServerRequest(request))
-    return true
+  private func declineNotShown(id: String) async {
+    guard !isFinished else { return }
+    let frame: JSONValue = .object([
+      "jsonrpc": .string("2.0"), "id": .string(id),
+      "error": .object([
+        "code": .number(4404), "message": .string("Not shown on this client"),
+      ]),
+    ])
+    do {
+      // `wireEncoder`, like every outbound frame (no `\/` escaping).
+      let data = try JSONRPCRequest.wireEncoder.encode(frame)
+      try await transport.send(String(decoding: data, as: UTF8.self))
+    } catch {
+      reportFailure("Couldn’t decline a window request", error: error)
+    }
   }
 
   /// The connection's single `client.capabilities {server_requests: true}` attempt. Opens
@@ -525,10 +537,7 @@ actor GatewayConnection {
       if case .ready = event { return receivedReady() }
       events.yield(event)
     case let .serverRequest(id, method, params):
-      // Present synchronously so a following turn terminal cannot overtake the card.
-      if method == "approval", presentApproval(id: id, params: params) { return }
-      // Never await an RPC inside the receive loop: its acknowledgement arrives here too.
-      Task { await handleServerRequest(id: id, method: method, params: params) }
+      handleServerRequest(id: id, method: method, params: params)
     case let .response(id, result):
       cancelTimeout(id)
       pending.removeValue(forKey: id)?.resume(returning: result)

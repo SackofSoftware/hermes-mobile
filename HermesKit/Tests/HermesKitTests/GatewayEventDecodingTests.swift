@@ -129,6 +129,50 @@ import Testing
     #expect(!request.offersSessionApproval)
   }
 
+  @Test func requestCancelDecodes() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"request.cancel","session_id":"live","seq":123,"payload":{"id":"srq-1a2b3c4d5e6f","method":"approval","reason":"timeout"}}}"#)
+    #expect(f == .event(sessionID: "live", .requestCancel(RequestCancel(
+      id: "srq-1a2b3c4d5e6f", method: "approval", reason: "timeout"
+    ))))
+    let bare = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"request.cancel","payload":{"id":"srq-x"}}}"#)
+    #expect(bare == .event(sessionID: nil, .requestCancel(RequestCancel(id: "srq-x"))))
+  }
+
+  @Test func requestCancelWithoutIDIsUnknown() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"request.cancel","payload":{"reason":"timeout"}}}"#)
+    guard case .event(_, .unknown(type: "request.cancel", _)) = f else {
+      Issue.record("expected .unknown, got \(f)"); return
+    }
+  }
+
+  /// Rendered server requests decode into the queue entry; content-less or malformed
+  /// approval params and unrendered methods do not (the client skips / declines / ignores).
+  @Test func pendingServerRequestDecoding() {
+    let approval = PendingServerRequest(
+      id: "srq-1", method: "approval",
+      params: .object(["session_id": .string("live"), "description": .string("Delete build")])
+    )
+    #expect(approval == PendingServerRequest(id: "srq-1", kind: .approval(ApprovalRequest(detail: "Delete build"))))
+    #expect(approval?.method == "approval")
+    #expect(PendingServerRequest(id: "srq-2", method: "approval", params: .object(["session_id": .string("live")])) == nil)
+    #expect(PendingServerRequest(id: "srq-3", method: "approval", params: .null) == nil)
+    #expect(PendingServerRequest(id: "srq-4", method: "vault.code", params: .object([:])) == nil)
+    #expect(PendingServerRequest.malformedSkip(for: "approval") == .object(["choice": .string("deny")]))
+    #expect(PendingServerRequest.malformedSkip(for: "vault.code") == nil)
+    #expect(PendingServerRequest.malformedSkip(for: "tour") == nil)
+  }
+
+  @Test func serverRequestLogEntryNamesTheMethod() {
+    let entry = GatewayLogEntry(id: 0, event: .serverRequest(PendingServerRequest(
+      id: "srq-1", kind: .approval(ApprovalRequest(command: "rm foo"))
+    )))
+    #expect(entry.type == "approval")
+    #expect(entry.summary == "rm foo")
+    let cancel = GatewayLogEntry(id: 1, event: .requestCancel(RequestCancel(id: "srq-1", method: "approval", reason: "timeout")))
+    #expect(cancel.type == "request.cancel")
+    #expect(cancel.summary == "approval timeout srq-1")
+  }
+
   @Test func approvalRequestWithoutRequestIDStillDecodes() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s","payload":{"command":"rm foo"}}}"#)
     guard case .event(_, .approvalRequest) = f else {

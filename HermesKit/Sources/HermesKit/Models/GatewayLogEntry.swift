@@ -36,7 +36,8 @@ public extension GatewayEvent {
     case .toolStart: return "tool.start"
     case .toolComplete: return "tool.complete"
     case .approvalRequest: return "approval.request"
-    case .approvalServerRequest: return "approval"
+    case let .serverRequest(request): return request.method
+    case .requestCancel: return "request.cancel"
     case .clarifyRequest: return "clarify.request"
     case .sudoRequest: return "sudo.request"
     case .secretRequest: return "secret.request"
@@ -67,7 +68,15 @@ public extension GatewayEvent {
       let d = durationS.map { String(format: " (%.1fs)", $0) } ?? ""
       return (name ?? "") + d
     case let .approvalRequest(req): return req.command ?? req.detail ?? "approval"
-    case let .approvalServerRequest(req): return req.command ?? req.detail ?? "approval"
+    // Prompt payloads only — a server request never carries an answer (or secret) value.
+    case let .serverRequest(request):
+      switch request.kind {
+      case let .approval(req): return req.command ?? req.detail ?? request.id
+      case let .clarify(req): return req.question
+      case let .secret(_, p): return p.prompt ?? request.id
+      }
+    case let .requestCancel(cancel):
+      return [cancel.method, cancel.reason].compactMap { $0 }.joined(separator: " ") + " \(cancel.id)"
     case let .clarifyRequest(req): return req.question
     case let .sudoRequest(p): return p.prompt ?? p.requestID
     case let .secretRequest(p): return p.prompt ?? p.requestID

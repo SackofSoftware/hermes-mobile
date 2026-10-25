@@ -97,6 +97,38 @@ public struct ChatFeature {
       pendingInteraction = interaction
       pendingInteractionToken &+= 1
     }
+    /// Open v7 server requests (`PendingServerRequest`), oldest first — the `open_requests`
+    /// order. **While non-empty, its head IS the presented card** (raised through
+    /// ``present(_:)``); the rest wait their turn. A new arrival appends; answering it,
+    /// `expired`, a matching `request.cancel` or turn end removes it, and the next head is
+    /// presented with a fresh token. Per slot, unpersisted.
+    public internal(set) var serverRequests: IdentifiedArrayOf<PendingServerRequest>
+    /// The srq id whose `request.answer` is in flight. The card stays up until the server
+    /// confirms (`ok` / `expired`) so a failed answer leaves it answerable; this guards a
+    /// second tap meanwhile from sending a second answer.
+    var answeringServerRequestID: String?
+    /// The server request behind the presented card, if the card is one (`nil` for a legacy
+    /// `*.request` card or the push-tap recovered approval).
+    public var presentedServerRequest: PendingServerRequest? {
+      pendingInteraction == nil ? nil : serverRequests.first
+    }
+    /// Replace the presented card's payload with a re-delivered copy of the SAME server
+    /// request (same srq id) WITHOUT bumping ``pendingInteractionToken`` — the card keeps its
+    /// `@State` (scroll offset, typed text, selections). **The one sanctioned exception to
+    /// "raise a card through ``present(_:)``"**: it never raises a different card, so the
+    /// token's identity contract holds. A no-op for any other id.
+    mutating func refreshPresented(_ request: PendingServerRequest) {
+      guard presentedServerRequest?.id == request.id else { return }
+      pendingInteraction = request.interaction
+    }
+    /// After the presented head left the queue: raise the new head (fresh token) or dismiss.
+    mutating func presentNextServerRequest() {
+      if let head = serverRequests.first {
+        present(head.interaction)
+      } else {
+        pendingInteraction = nil
+      }
+    }
     /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
     /// #30: an `approval.request` that fired while the socket was down is gone — the
     /// server does not re-surface pending approvals on `session.resume`). Set by
@@ -515,10 +547,8 @@ public struct ChatFeature {
     /// A blocking interactive request the agent is waiting on.
     public enum PendingInteraction: Equatable, Sendable {
       case approval(ApprovalRequest)
-      case clarify(ClarifyRequest)        // wired in Task 10
-      case secret(SecretKind, SecretPrompt) // wired in Task 10
-
-      public enum SecretKind: Equatable, Sendable { case sudo, secret }
+      case clarify(ClarifyRequest)
+      case secret(SecretKind, SecretPrompt)
     }
 
     public init(
@@ -558,6 +588,8 @@ public struct ChatFeature {
       self.serverRequestsUnavailable = nil
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
+      self.serverRequests = []
+      self.answeringServerRequestID = nil
       self.expectsPendingApproval = false
       self.presentedTool = nil
       self.model = nil
@@ -776,11 +808,14 @@ public struct ChatFeature {
     /// precondition is re-checked in `drainQueueIfReady`.
     case maybeDrainQueue
     case respondToApproval(approve: Bool, all: Bool)
-    /// Outcome of `approval.respond` (legacy) or `request.answer` (server requests).
-    /// `resolved == 0` also represents `request.answer {status: "expired"}` and patches
-    /// the optimistic row to "Already handled elsewhere". `nil` surfaces a send failure.
-    /// Successful answers need no action: the optimistic row is already correct.
+    /// Outcome of the LEGACY `approval.respond`. `resolved == 0` patches the optimistic row
+    /// to "Already handled elsewhere"; `nil` surfaces a send failure. Successful answers
+    /// need no action: the optimistic row is already correct.
     case approvalRespondResult(rowID: ChatRow.ID, resolved: Int?)
+    /// Outcome of a v7 `request.answer {id, result}`: `.ok` → the entry leaves the queue
+    /// with the `echo` row; `.expired` → it leaves with "Already handled elsewhere"; a
+    /// failure → `errorBanner`, and the card stays (the request is still open server-side).
+    case serverRequestAnswered(id: String, echo: AnswerEcho, Result<AnswerStatus, GatewayError>)
     case respondToClarify(answer: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
@@ -944,6 +979,24 @@ public struct ChatFeature {
           self.seed = seed
         }
       }
+    }
+  }
+
+  /// `request.answer`'s acknowledgement: `ok` = this answer resolved the request;
+  /// `expired` = it was no longer open (another surface answered first, or it timed out).
+  public enum AnswerStatus: Equatable, Sendable { case ok, expired }
+
+  /// What an answered server request leaves behind: the transcript status row appended on
+  /// `ok` (never a secret value), and the banner shown when the answer fails to send.
+  public struct AnswerEcho: Equatable, Sendable {
+    public var kind: String
+    public var text: String
+    public var failureBanner: String
+
+    public init(kind: String, text: String, failureBanner: String) {
+      self.kind = kind
+      self.text = text
+      self.failureBanner = failureBanner
     }
   }
 
@@ -1408,10 +1461,35 @@ public struct ChatFeature {
         return drainQueueIfReady(into: &state)
 
       case let .respondToApproval(approve, all):
+        // Narrow, never widen: Approve needs `once` in the server's choice set, and
+        // "approve all" falls back to `once` when `session` is not offered.
         guard case let .approval(request) = state.pendingInteraction,
-              let sessionID = state.liveSessionID,
               !approve || request.allowsOnce
         else { return .none }
+        // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
+        // just this command; "session" persists the pattern for the rest of the session.
+        // Newer gateways require request-bound responses and ignore `all` when a
+        // request id is present. Older gateways retain the session FIFO wire shape.
+        let effectiveChoice = approve
+          ? (all && request.allowsSessionChoice ? "session" : "once")
+          : "deny"
+        // v7 server request: `request.answer`, and the card stays until the server
+        // acknowledges — only `ok` / `expired` remove it (`serverRequestAnswered`).
+        if let pending = state.presentedServerRequest {
+          guard state.answeringServerRequestID == nil else { return .none }
+          // Answering ANY approval moots the push-tap recovery hint (#30 workaround).
+          state.expectsPendingApproval = false
+          return answerServerRequest(
+            pending.id,
+            result: .object(["choice": .string(effectiveChoice)]),
+            echo: AnswerEcho(
+              kind: "approval", text: approve ? "Approved" : "Denied",
+              failureBanner: "Failed to send the approval response."
+            ),
+            state: &state
+          )
+        }
+        guard let sessionID = state.liveSessionID else { return .none }
         state.pendingInteraction = nil
         // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
         // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
@@ -1421,13 +1499,6 @@ public struct ChatFeature {
         state.transcript.append(
           ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
         )
-        // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
-        // just this command; "session" persists the pattern for the rest of the session.
-        // Newer gateways require request-bound responses and ignore `all` when a
-        // request id is present. Older gateways retain the session FIFO wire shape.
-        let effectiveChoice = approve
-          ? (all && request.allowsSessionChoice ? "session" : "once")
-          : "deny"
         let params: JSONValue
         if let requestID = request.requestID {
           params = .object([
@@ -1446,33 +1517,38 @@ public struct ChatFeature {
         }
         return .run { [gateway] send in
           do {
-            if let serverRequestID = request.serverRequestID {
-              let result = try await gateway.send("request.answer", .object([
-                "id": .string(serverRequestID),
-                "result": .object(["choice": .string(effectiveChoice)]),
-              ]))
-              switch result["status"]?.stringValue {
-              case "ok": break
-              case "expired":
-                await send(.approvalRespondResult(rowID: rowID, resolved: 0))
-              default:
-                throw GatewayError.server("Malformed request.answer result")
-              }
-            } else {
-              let result = try await gateway.send("approval.respond", params)
-              // The server answers `{"resolved": n}` — the count of queue entries this
-              // respond resolved. `0` means the queue was already empty (handled on another
-              // client, or a recovered-card blind respond after the fact), so the optimistic
-              // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
-              // treated as success — decode leniently, only actionable outcomes feed back.
-              if result["resolved"]?.intValue == 0 {
-                await send(.approvalRespondResult(rowID: rowID, resolved: 0))
-              }
+            let result = try await gateway.send("approval.respond", params)
+            // The server answers `{"resolved": n}` — the count of queue entries this
+            // respond resolved. `0` means the queue was already empty (handled on another
+            // client, or a recovered-card blind respond after the fact), so the optimistic
+            // row must stop claiming "Approved"/"Denied". A missing key (older agent) is
+            // treated as success — decode leniently, only actionable outcomes feed back.
+            if result["resolved"]?.intValue == 0 {
+              await send(.approvalRespondResult(rowID: rowID, resolved: 0))
             }
           } catch {
             await send(.approvalRespondResult(rowID: rowID, resolved: nil))
           }
         }
+
+      case let .serverRequestAnswered(id, echo, result):
+        if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
+        switch result {
+        case .success(.ok):
+          state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: echo.text)))
+          removeServerRequest(id: id, into: &state)
+        case .success(.expired):
+          // Another surface answered first (or it timed out): say so, never a false
+          // "Approved"/"Denied".
+          state.transcript.append(
+            ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: "Already handled elsewhere"))
+          )
+          removeServerRequest(id: id, into: &state)
+        case .failure:
+          // The request is still open server-side, so the card stays answerable.
+          state.errorBanner = echo.failureBanner
+        }
+        return .none
 
       case let .approvalRespondResult(rowID, resolved):
         switch resolved {
@@ -2291,9 +2367,10 @@ public struct ChatFeature {
       // A turn can never legitimately COMPLETE with an approval still queued (the server
       // blocks on the queue), so a standing approval card here is stale — most visibly a
       // push-tap-recovered card (#30 workaround) whose approval was answered on another
-      // client, letting the turn run to completion. Drop it (and the armed hint) so the
-      // finished chat isn't stuck behind a phantom card locking the composer.
-      clearStaleApproval(into: &state)
+      // client, letting the turn run to completion. Drop it, every queued server request
+      // (one answered by another client's response frame gets no `request.cancel`) and the
+      // armed hint, so the finished chat isn't stuck behind a phantom card.
+      clearStalePrompts(into: &state)
       // A stale draining entry here means the start event was lost/reordered — the turn
       // demonstrably ran, so the entry is consumed either way (never re-queued).
       clearDrainingEntry(into: &state)
@@ -2376,8 +2453,9 @@ public struct ChatFeature {
       state.isSending = false
       freezeThinking(into: &state)
       // Same staleness rule as `message.complete`: an errored turn is over, so any
-      // standing approval card (real or recovered) and the recovery hint are moot.
-      clearStaleApproval(into: &state)
+      // standing approval card (real or recovered), the server request queue and the
+      // recovery hint are moot.
+      clearStalePrompts(into: &state)
       // The errored turn consumed any draining entry (#66) — it ran; never re-queue it.
       clearDrainingEntry(into: &state)
       // An error PARKS the queue rather than draining it (#66): auto-firing the next entry
@@ -2408,9 +2486,29 @@ public struct ChatFeature {
         .send(.delegate(.sessionExpired))
       )
 
-    case let .approvalServerRequest(request):
-      state.present(.approval(request))
-      state.expectsPendingApproval = false
+    case let .serverRequest(request):
+      // A real approval moots the push-tap recovery hint, as the legacy event does.
+      if case .approval = request.kind { state.expectsPendingApproval = false }
+      if state.serverRequests[id: request.id] != nil {
+        // Re-delivered (a replay): refresh in place — no token bump, the card keeps its state.
+        state.serverRequests[id: request.id] = request
+        state.refreshPresented(request)
+      } else {
+        state.serverRequests.append(request)
+        // A new head (or a queue whose head somehow is not up) is raised; anything else
+        // waits behind the presented card.
+        if state.serverRequests.count == 1 || state.pendingInteraction == nil {
+          state.presentNextServerRequest()
+        }
+      }
+      return .none
+
+    case let .requestCancel(cancel):
+      guard let entry = state.serverRequests[id: cancel.id] else { return .none }
+      if state.presentedServerRequest?.id == cancel.id, cancel.reason == "timeout" {
+        state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: entry.statusKind, text: "Timed out")))
+      }
+      removeServerRequest(id: cancel.id, into: &state)
       return .none
 
     case let .approvalRequest(request):
@@ -2492,18 +2590,56 @@ public struct ChatFeature {
     }
   }
 
-  /// Drop a standing approval card + the push-tap recovery hint when the turn is known
-  /// to be over (turn-end events, or a hydrate reporting `running == false`). The server
-  /// never ends a turn with an approval still queued, so a card outliving its turn is
-  /// stale by definition — answered on another client (the mainline recovered-card
-  /// false-positive path, #30 workaround) or timed out. Scoped to `.approval` only:
-  /// clarify/secret are request-id-keyed and out of this workaround's scope. NOT called
-  /// on socket drop (`finalizeInFlight`) — the turn may still be running server-side.
-  private func clearStaleApproval(into state: inout State) {
-    if case .approval = state.pendingInteraction {
+  /// Drop every stale prompt + the push-tap recovery hint when the turn is known to be over
+  /// (turn-end events, or a hydrate reporting `running == false`): the whole v7 server
+  /// request queue (desktop clears its prompts at turn end too — `request.cancel` is not sent
+  /// when another client answered by response frame), and a standing legacy approval card.
+  /// The server never ends a turn with an approval still queued, so a card outliving its
+  /// turn is stale by definition — answered on another client (the mainline recovered-card
+  /// false-positive path, #30 workaround) or timed out. Legacy clarify/secret cards are
+  /// request-id-keyed and stay as they were. NOT called on socket drop (`finalizeInFlight`)
+  /// — the turn may still be running server-side.
+  private func clearStalePrompts(into state: inout State) {
+    if state.presentedServerRequest != nil {
+      state.pendingInteraction = nil
+    } else if case .approval = state.pendingInteraction {
       state.pendingInteraction = nil
     }
+    state.serverRequests.removeAll()
+    state.answeringServerRequestID = nil
     state.expectsPendingApproval = false
+  }
+
+  /// Remove one server request from the queue; when it was the presented card, raise the
+  /// next head with a fresh token (or dismiss). A no-op for an unknown id.
+  private func removeServerRequest(id: String, into state: inout State) {
+    let wasPresented = state.presentedServerRequest?.id == id
+    guard state.serverRequests.remove(id: id) != nil else { return }
+    if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
+    if wasPresented { state.presentNextServerRequest() }
+  }
+
+  /// Send `request.answer {id, result}` for a presented server request. Plain `gateway.send`
+  /// (so `wireEncoder`, the 30 s budget and a surfaced error come for free); the outcome
+  /// feeds `serverRequestAnswered`. A status other than `ok` / `expired` is a failure.
+  private func answerServerRequest(
+    _ id: String, result: JSONValue, echo: AnswerEcho, state: inout State
+  ) -> Effect<Action> {
+    state.answeringServerRequestID = id
+    return .run { [gateway] send in
+      let outcome: Result<AnswerStatus, GatewayError>
+      do {
+        let response = try await gateway.send("request.answer", .object(["id": .string(id), "result": result]))
+        switch response["status"]?.stringValue {
+        case "ok": outcome = .success(.ok)
+        case "expired": outcome = .success(.expired)
+        default: outcome = .failure(.server("Malformed request.answer result"))
+        }
+      } catch {
+        outcome = .failure((error as? GatewayError) ?? .server(error.localizedDescription))
+      }
+      await send(.serverRequestAnswered(id: id, echo: echo, outcome))
+    }
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the
@@ -2846,7 +2982,7 @@ public struct ChatFeature {
     // dropped, or it would sit over a finished transcript locking the composer. (The
     // helper's hint-clear is a no-op here: the block above already consumed it.)
     if !running {
-      clearStaleApproval(into: &state)
+      clearStalePrompts(into: &state)
     }
 
     // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the
@@ -3540,7 +3676,7 @@ public struct ChatFeature {
       // pointless snapshot write for it.
       return Self.hasRenderableReviewText(text)
     case .ready, .error, .serverRequestFailed, .serverRequestsUnavailable, .authExpired, .approvalRequest,
-         .approvalServerRequest, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
+         .serverRequest, .requestCancel, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
       return false
     }
   }
@@ -4236,5 +4372,25 @@ private func uploadAttachment(
       "name": .string(attachment.filename),
     ]))
     return result["ref_text"]?.stringValue
+  }
+}
+
+extension PendingServerRequest {
+  /// The card this request presents.
+  var interaction: ChatFeature.State.PendingInteraction {
+    switch kind {
+    case let .approval(request): .approval(request)
+    case let .clarify(request): .clarify(request)
+    case let .secret(secretKind, prompt): .secret(secretKind, prompt)
+    }
+  }
+
+  /// The transcript status-row kind for this request's outcome rows.
+  var statusKind: String {
+    switch kind {
+    case .approval: "approval"
+    case .clarify: "clarify"
+    case .secret: "secret"
+    }
   }
 }

@@ -99,14 +99,10 @@ private func requestID(_ frame: String) -> Int? {
     // `.ready` is held until the `client.capabilities` acknowledgement (queued behind the
     // approval frame) arrives; the approval itself is yielded as soon as it is read.
     let event = await iterator.next()
-    #expect(event == .approvalServerRequest(
-      ApprovalRequest(
-        requestID: "approval-7",
-        serverRequestID: "srq-abc123",
-        command: "rm foo",
-        choices: ["once", "deny"]
-      )
-    ))
+    #expect(event == .serverRequest(PendingServerRequest(
+      id: "srq-abc123",
+      kind: .approval(ApprovalRequest(requestID: "approval-7", command: "rm foo", choices: ["once", "deny"]))
+    )))
     #expect(await iterator.next() == .ready)
 
     let result = try await client.send("request.answer", .object([

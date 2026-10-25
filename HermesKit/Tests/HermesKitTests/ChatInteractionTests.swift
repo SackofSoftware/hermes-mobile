@@ -18,6 +18,23 @@ struct ChatInteractionTests {
     return state
   }
 
+  // MARK: v7 server requests: one queue, `request.answer`, cancel, turn end
+
+  private func serverApproval(_ id: String, command: String = "rm foo", choices: [String] = ["once", "deny"]) -> PendingServerRequest {
+    PendingServerRequest(id: id, kind: .approval(ApprovalRequest(command: command, choices: choices)))
+  }
+
+  /// A slot already showing `requests`' head, the way `.gatewayEvent(.serverRequest)` leaves it.
+  private func queuedState(_ requests: [PendingServerRequest]) -> ChatFeature.State {
+    var state = readyState()
+    for request in requests { state.serverRequests.append(request) }
+    state.presentNextServerRequest()
+    return state
+  }
+
+  /// The card stays up while `request.answer` is in flight and leaves only on the server's
+  /// acknowledgement: `ok` → the "Approved" row; `expired` → "Already handled elsewhere";
+  /// a throw or an unknown status → a banner and the SAME card (same token), still answerable.
   @Test(arguments: ["ok", "expired", "failure", "malformed"])
   func serverApprovalAnswer(status: String) async {
     let sent = LockIsolated<JSONValue?>(nil)
@@ -31,25 +48,34 @@ struct ChatInteractionTests {
         return .object(["status": .string(status)])
       }
     }
-    var serverApproval = ApprovalRequest(command: "rm foo", choices: ["once", "deny"])
-    serverApproval.serverRequestID = "srq/7"
-    await store.send(.gatewayEvent(.approvalServerRequest(serverApproval))) {
-      $0.present(.approval(serverApproval))
+    let request = serverApproval("srq/7")
+    await store.send(.gatewayEvent(.serverRequest(request))) {
+      $0.serverRequests = [request]
+      $0.present(request.interaction)
       $0.expectsPendingApproval = false
     }
     #expect(!store.state.canSend)
     await store.send(.respondToApproval(approve: true, all: true)) {
-      $0.pendingInteraction = nil
-      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
+      $0.answeringServerRequestID = "srq/7" // the card stays until the server acknowledges
     }
-    if status == "expired" {
-      await store.receive(\.approvalRespondResult) {
-        $0.transcript[id: self.uuid(0)]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
-      }
-    } else if status != "ok" {
-      await store.receive(\.approvalRespondResult) {
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      switch status {
+      case "ok":
+        $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
+        $0.serverRequests = []
+        $0.pendingInteraction = nil
+      case "expired":
+        $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Already handled elsewhere"))]
+        $0.serverRequests = []
+        $0.pendingInteraction = nil
+      default:
         $0.errorBanner = "Failed to send the approval response."
       }
+    }
+    if status == "failure" || status == "malformed" {
+      #expect(store.state.pendingInteractionToken == 1) // the same card, not a re-raise
+      #expect(!store.state.canSend)
     }
     await store.finish()
     #expect(sent.value == .object([
@@ -61,10 +87,7 @@ struct ChatInteractionTests {
   @Test(arguments: [false, true])
   func serverApprovalDenyOrSessionChoice(approve: Bool) async {
     let sent = LockIsolated<JSONValue?>(nil)
-    var initial = readyState()
-    initial.present(.approval(ApprovalRequest(
-      serverRequestID: "srq-choice", command: "rm foo", choices: ["once", "session", "deny"]
-    )))
+    let initial = queuedState([serverApproval("srq-choice", choices: ["once", "session", "deny"])])
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { method, params in
@@ -74,13 +97,198 @@ struct ChatInteractionTests {
       }
     }
     await store.send(.respondToApproval(approve: approve, all: true)) {
+      $0.answeringServerRequestID = "srq-choice"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.serverRequests = []
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))]
     }
-    await store.finish()
     #expect(sent.value == .object([
       "id": .string("srq-choice"), "result": .object(["choice": .string(approve ? "session" : "deny")]),
     ]))
+  }
+
+  /// Narrow, never widen: Approve on a card whose `choices` lack `once` sends nothing and
+  /// keeps the card — v7 and legacy alike (the default test gateway fails on any send).
+  @Test(arguments: [true, false])
+  func approveIsIgnoredWhenOnceIsNotOffered(serverBound: Bool) async {
+    let denyOnly = ApprovalRequest(requestID: "q1", command: "rm foo", choices: ["deny"])
+    var initial = readyState()
+    if serverBound {
+      initial = queuedState([PendingServerRequest(id: "srq-deny", kind: .approval(denyOnly))])
+    } else {
+      initial.present(.approval(denyOnly))
+    }
+    let store = TestStore(initialState: initial) { ChatFeature() }
+    await store.send(.respondToApproval(approve: true, all: false))
+    await store.send(.respondToApproval(approve: true, all: true))
+  }
+
+  /// Two parallel approvals queue: the head is presented, the second waits, and answering
+  /// the head raises the second with a NEW token (fresh card state).
+  @Test func twoApprovalsQueueAndPresentInOrder() async {
+    let sent = LockIsolated<[JSONValue]>([])
+    let store = TestStore(initialState: readyState()) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { _, params in
+        sent.withValue { $0.append(params) }
+        return .object(["status": .string("ok")])
+      }
+    }
+    let first = serverApproval("srq-1", command: "rm a")
+    let second = serverApproval("srq-2", command: "rm b")
+    await store.send(.gatewayEvent(.serverRequest(first))) {
+      $0.serverRequests = [first]
+      $0.present(first.interaction)
+    }
+    await store.send(.gatewayEvent(.serverRequest(second))) {
+      $0.serverRequests = [first, second] // queued behind the presented card, not raised
+    }
+    #expect(store.state.pendingInteraction == first.interaction)
+    await store.send(.respondToApproval(approve: true, all: false)) {
+      $0.answeringServerRequestID = "srq-1"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
+      $0.serverRequests = [second]
+      $0.present(second.interaction)
+    }
+    #expect(store.state.pendingInteractionToken == 2)
+    await store.send(.respondToApproval(approve: false, all: false)) {
+      $0.answeringServerRequestID = "srq-2"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript.append(ChatRow(id: self.uuid(1), kind: .status(kind: "approval", text: "Denied")))
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+    #expect(sent.value.map { $0["id"]?.stringValue } == ["srq-1", "srq-2"])
+  }
+
+  /// A second tap while the first `request.answer` is in flight sends nothing more.
+  @Test func secondTapWhileAnsweringSendsOnce() async {
+    let calls = LockIsolated(0)
+    let (gate, release) = AsyncStream<Void>.makeStream()
+    let store = TestStore(initialState: queuedState([serverApproval("srq-1")])) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { _, _ in
+        calls.withValue { $0 += 1 }
+        for await _ in gate { break }
+        return .object(["status": .string("ok")])
+      }
+    }
+    await store.send(.respondToApproval(approve: true, all: false)) {
+      $0.answeringServerRequestID = "srq-1"
+    }
+    await store.send(.respondToApproval(approve: false, all: false)) // ignored: one in flight
+    release.yield(())
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+    #expect(calls.value == 1)
+  }
+
+  /// A re-delivered request (same srq id) refreshes in place through `refreshPresented` —
+  /// no token bump, so the card keeps its state; a re-delivered QUEUED entry updates
+  /// without being raised.
+  @Test func replayedIDRefreshesWithoutTokenBump() async {
+    let first = serverApproval("srq-1", command: "rm a")
+    let second = serverApproval("srq-2", command: "rm b")
+    let store = TestStore(initialState: queuedState([first, second])) { ChatFeature() }
+    let refreshedFirst = serverApproval("srq-1", command: "rm a --verbose")
+    await store.send(.gatewayEvent(.serverRequest(refreshedFirst))) {
+      $0.serverRequests[id: "srq-1"] = refreshedFirst
+      $0.pendingInteraction = refreshedFirst.interaction
+    }
+    let refreshedSecond = serverApproval("srq-2", command: "rm b --verbose")
+    await store.send(.gatewayEvent(.serverRequest(refreshedSecond))) {
+      $0.serverRequests[id: "srq-2"] = refreshedSecond
+    }
+    #expect(store.state.pendingInteractionToken == 1)
+  }
+
+  /// `request.cancel` for the presented head raises the next (a `timeout` leaves a
+  /// "Timed out" row); for a queued entry it drops silently; for an unknown id it is a no-op.
+  @Test func requestCancelRemovesTheMatchingEntry() async {
+    let first = serverApproval("srq-1", command: "rm a")
+    let second = serverApproval("srq-2", command: "rm b")
+    let third = serverApproval("srq-3", command: "rm c")
+    let store = TestStore(initialState: queuedState([first, second, third])) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-unknown", reason: "timeout"))))
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-2", method: "approval", reason: "timeout")))) {
+      $0.serverRequests = [first, third] // queued, not presented: no row, card unchanged
+    }
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-1", method: "approval", reason: "timeout")))) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Timed out"))]
+      $0.serverRequests = [third]
+      $0.present(third.interaction)
+    }
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-3", method: "approval", reason: "interrupted")))) {
+      $0.serverRequests = []
+      $0.pendingInteraction = nil // not a timeout: no row
+    }
+  }
+
+  /// A cancel for the request whose answer is in flight drops it; the late
+  /// acknowledgement then only records the outcome row.
+  @Test func cancelWhileAnsweringThenLateAcknowledgement() async {
+    let store = TestStore(initialState: queuedState([serverApproval("srq-1")])) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-1", reason: "resolved")))) {
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+    await store.send(.serverRequestAnswered(
+      id: "srq-1", echo: .init(kind: "approval", text: "Approved", failureBanner: "x"), .success(.expired)
+    )) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Already handled elsewhere"))]
+    }
+  }
+
+  /// Turn end clears the whole queue (another client's response-frame answer sends no
+  /// `request.cancel`), on `message.complete` and on `error` alike.
+  @Test(arguments: [true, false])
+  func turnEndClearsTheServerRequestQueue(completes: Bool) async {
+    var initial = queuedState([serverApproval("srq-1"), serverApproval("srq-2")])
+    initial.status = .ready
+    initial.isSending = true
+    initial.answeringServerRequestID = "srq-1"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+    await store.send(.gatewayEvent(completes ? .messageComplete(text: "", usage: nil) : .error(message: "boom")))
+    #expect(store.state.serverRequests.isEmpty)
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.answeringServerRequestID == nil)
+    await store.send(.teardown)
+  }
+
+  /// A server request arriving over a legacy card (e.g. the push-tap recovered approval)
+  /// replaces it, as the real legacy event does.
+  @Test func serverRequestReplacesTheRecoveredCard() async {
+    var initial = readyState()
+    initial.present(.approval(ChatFeature.recoveredApprovalRequest))
+    let store = TestStore(initialState: initial) { ChatFeature() }
+    let request = serverApproval("srq-1")
+    await store.send(.gatewayEvent(.serverRequest(request))) {
+      $0.serverRequests = [request]
+      $0.present(request.interaction)
+    }
+    #expect(store.state.presentedServerRequest == request)
   }
 
   @Test func approvalRequestPinsCardAndBlocksComposer() async {

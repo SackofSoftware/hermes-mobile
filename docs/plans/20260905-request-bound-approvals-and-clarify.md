@@ -481,6 +481,11 @@ Actions:
 - `serverRequestAnswered(id:, Result<AnswerStatus, GatewayError>)` — `.ok` → remove + next;
   `.expired` → remove + "Already handled elsewhere" row + next; failure → `errorBanner`, card
   stays. Legacy clarify/secret failures surface the same way instead of `try?`.
+  **As built (Task 3):** `serverRequestAnswered(id:echo:_:)` — `AnswerEcho {kind, text,
+  failureBanner}` carries the `ok` row and the failure banner, so each kind sets its own copy;
+  no optimistic row on v7. `answeringServerRequestID` ignores a second answer while one is in
+  flight. `State.presentedServerRequest` (= the queue head while a card stands) is how answers
+  find their srq id; `presentNextServerRequest()` raises the next head or dismisses.
 
 Answer building per kind (all v7 answers are `request.answer {id, result: …}`):
 ```
@@ -642,44 +647,60 @@ the same reconcile when it lands.
   the exhaustive event list)
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `HermesGatewayClientTests.swift`, `ServerRequestTests.swift`
 
-- [ ] add `PendingServerRequest`, `SecretKind` (moved), `RequestCancel` (`OpenRequest` already
+- [x] add `PendingServerRequest`, `SecretKind` (moved), `RequestCancel` (`OpenRequest` already
       landed in Task 2, in `Session.swift`); replace
       `GatewayEvent.approvalServerRequest` (the case, its `GatewayLogEntry` name/summary, the
       reducer case, the non-transcript list entry) with `.serverRequest`; drop
       `ApprovalRequest.serverRequestID` (set in `GatewayConnection.presentApproval`)
-- [ ] `serverRequests` queue with `present(_:)` for a new head and `refreshPresented(_:)` for a
+      (`PendingServerRequest.init?(id:method:params:)` is the one rendered-method decoder and
+      `malformedSkip(for:)` the per-kind skip — Tasks 5/6 extend both; `windowOwnedMethods` lives
+      there too; `ClarifyCardView.Mode` now names the top-level `SecretKind`)
+- [x] `serverRequests` queue with `present(_:)` for a new head and `refreshPresented(_:)` for a
       known id; approval answers through `request.answer` → `serverRequestAnswered`
-- [ ] `request.cancel`: remove the entry, present the next, "Timed out" row for a presented
+      (invariant: while the queue is non-empty its head IS the presented card —
+      `State.presentedServerRequest`; `presentNextServerRequest()` raises the next head;
+      `answeringServerRequestID` guards a second tap while an answer is in flight; the outcome
+      action carries an `AnswerEcho` — row kind/text on `ok`, banner on failure)
+- [x] `request.cancel`: remove the entry, present the next, "Timed out" row for a presented
       `timeout`
-- [ ] turn end (`message.complete`, `.error`) clears the queue — generalize `clearStaleApproval`
-- [ ] decline matrix in the client (window-owned × `declinesNotShown`; unrendered prompts silent;
-      malformed rendered kind → its skip)
-- [ ] write tests: two approvals queue and present in order; answering the head presents the next
+- [x] turn end (`message.complete`, `.error`) clears the queue — generalize `clearStaleApproval`
+      (now `clearStalePrompts`; still also called by `applyActivate` on `running == false`
+      until Task 8 — see the ⚠️ there)
+- [x] decline matrix in the client (window-owned × `declinesNotShown`; unrendered prompts silent;
+      malformed rendered kind → its skip) (`handleServerRequest` is now private and synchronous
+      on the receive loop; only the sends run in a `Task`)
+- [x] write tests: two approvals queue and present in order; answering the head presents the next
       with a new token; `expired` removes with "Already handled elsewhere"; an RPC failure keeps
       the card with a banner; a replayed id refreshes without a token bump; cancel of the head /
       of a queued entry / of an unknown id; turn end clears; the decline matrix including
       `vault.code` getting nothing on every backend
-- [ ] ➕ keep the card on a failed answer: the base clears `pendingInteraction` and appends the
+- [x] ➕ keep the card on a failed answer: the base clears `pendingInteraction` and appends the
       "Approved"/"Denied" row BEFORE `request.answer`, so a throw or malformed status leaves a
       banner, no card, and a request still open server-side. Remove only on `ok`/`expired`; on
       failure keep the card and drop or patch the optimistic row. Rewrite the base's
-      `serverApprovalAnswer` test (it asserts the card is gone on failure)
-- [ ] ➕ test the base's `!approve || request.allowsOnce` guard in `respondToApproval`: Approve
+      `serverApprovalAnswer` test (it asserts the card is gone on failure) (no optimistic row on
+      v7: the row is appended on the acknowledgement; the legacy `approval.respond` path keeps
+      its optimistic row)
+- [x] ➕ test the base's `!approve || request.allowsOnce` guard in `respondToApproval`: Approve
       on a card whose `choices` lack `once` sends nothing and keeps the card (uncovered)
-- [ ] ➕ drive the decline-matrix tests through injected frames: the base's
+- [x] ➕ drive the decline-matrix tests through injected frames: the base's
       `declinesOnlyWindowBridges` / `automaticSendFailureDoesNotEndTurn` call
       `handleServerRequest` directly, so `handle(frame:)`'s routing of non-approval methods is
       untested (only approval frames are injected end to end)
-- ⚠️ approval params that decode but carry no `command`/`description` (`{}`, `session_id` only)
-      present a content-less card that looks like the push-tap recovered card instead of being
-      denied as malformed; decide whether that counts as malformed when building the queue
+- ⚠️ (resolved in Task 3) approval params that decode but carry no `command`/`description`
+      (`{}`, `session_id` only) present a content-less card that looks like the push-tap
+      recovered card instead of being denied as malformed — now malformed
+      (`ApprovalRequest.hasContent`: command, description or a danger pattern) and denied
 - ⚠️ a `choices` list with `session` but no `once` renders Deny only (Approve hidden, the toggle
       needs `allowsOnce`); upstream always offers `once` alongside `session`, so accepted
 - ⚠️ the base ignores `params.session_id` (as the client already drops events' `session_id`);
       fine while one socket serves one session (multi-slot is #90)
-- ⚠️ until this task lands, a second server approval overwrites the presented one and the first
-      stays open server-side until its deadline
-- [ ] run tests - must pass before next task
+- ⚠️ (resolved in Task 3) until this task lands, a second server approval overwrites the
+      presented one and the first stays open server-side until its deadline
+- ⚠️ clarify/sudo/secret server requests stay silent (unrendered, no skip) until Tasks 5–6
+      add them to `PendingServerRequest`; the decline-matrix test lists them as silent
+- [x] run tests - must pass before next task (1531 tests in 68 suites passed, 1 known issue;
+      app target builds; `make snapshot` 40 failures, all at identical render size = known drift)
 
 ### Task 4: `ClarifyRequest` questions model and all three shapes
 

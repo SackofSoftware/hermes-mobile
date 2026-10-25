@@ -72,13 +72,18 @@ public struct ChatFeature {
     /// *cannot* assign one without the token). Assigning `nil` to dismiss is fine — a card
     /// that is gone has no identity to keep.
     public internal(set) var pendingInteraction: PendingInteraction?
-    /// Is the standing card an *approval*? The only card `ChatView` gives layout priority
-    /// over the transcript — it is the one built to absorb the squeeze (a bounded, scrollable
-    /// region), so priority buys it readable command lines; the clarify/secret card is rigid
-    /// stacked content and priority would only take room from the transcript.
-    public var isApprovalPending: Bool {
-      if case .approval = pendingInteraction { return true }
-      return false
+    /// Does the standing card earn layout priority over the transcript? `ChatView` gives it to
+    /// the cards built to absorb the squeeze AND tall enough to need it: an approval (its
+    /// command) and a multi-question clarify (up to five sections) — priority buys their
+    /// bounded region readable lines. A single-question clarify hugs a short form, and the
+    /// secret card is a rigid field, so priority there would only take room from the
+    /// transcript.
+    public var isCompressibleCardPending: Bool {
+      switch pendingInteraction {
+      case .approval: return true
+      case let .clarify(request): return request.isMultiQuestion
+      case .secret, .none: return false
+      }
     }
     /// Monotonic count of blocking requests *presented* — bumped by ``present(_:)`` every
     /// time a card is raised, never reset. The view uses it as the card's identity so a
@@ -825,9 +830,6 @@ public struct ChatFeature {
     /// Skip the whole clarify card: v0.21.6+ `{}` (cancel all), intermediate single
     /// `{answer: ""}`, legacy an empty `clarify.respond`.
     case skipClarify
-    /// The single-question card's answer (a raw choice it offered, or typed text) — a thin
-    /// forwarder to ``submitClarify(answers:)`` for the first question.
-    case respondToClarify(answer: String)
     /// A legacy `*.respond` send threw: patch its optimistic echo row to "Failed to send"
     /// and banner (the card is already gone — the legacy path is optimistic).
     case legacyRespondFailed(rowID: ChatRow.ID, banner: String)
@@ -1594,14 +1596,6 @@ public struct ChatFeature {
 
       case .skipClarify:
         return answerClarify(nil, into: &state)
-
-      case let .respondToClarify(answer):
-        // The single-question card's one string: a raw choice it offered, else typed text.
-        guard case let .clarify(request) = state.pendingInteraction,
-              let question = request.questions.first
-        else { return .none }
-        let picked: ClarifyAnswer = question.choices.contains(answer) ? .choices([answer]) : .other(answer)
-        return answerClarify([question.qid ?? "": picked], into: &state)
 
       case let .legacyRespondFailed(rowID, banner):
         // The optimistic echo row must stop claiming an answer the server never got.
@@ -2779,15 +2773,8 @@ public struct ChatFeature {
   static func clarifyEchoText(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> String {
     guard let answers else { return "Skipped" }
     func display(_ question: ClarifyQuestion) -> String {
-      if let qid = question.qid, let locked = request.lockedAnswers[qid] {
-        guard let locked else { return "Skipped" }
-        // A locked multi-select answer is its JSON-array wire string.
-        if question.multiSelect, let picked = try? JSONDecoder().decode([String].self, from: Data(locked.utf8)) {
-          return picked.joined(separator: ", ")
-        }
-        return locked
-      }
-      return (answers[question.qid ?? ""] ?? .skipped).displayText
+      request.lockedDisplayText(for: question)
+        ?? (answers[question.answerKey] ?? .skipped).displayText
     }
     guard request.isMultiQuestion else { return request.questions.first.map(display) ?? "" }
     return request.questions.map { "\($0.question): \(display($0))" }.joined(separator: "\n")

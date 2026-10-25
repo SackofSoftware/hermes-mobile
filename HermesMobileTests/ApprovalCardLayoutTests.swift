@@ -341,9 +341,11 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
   }
 
-  /// The clarify/secret card was never made compressible, so it gets **no** layout priority:
-  /// priority would only take the transcript's room without buying the card anything it can
-  /// use (measured with a long question at 393×516: transcript 160pt → 13pt).
+  /// A **single-question** clarify card gets **no** layout priority (only approvals and
+  /// multi-question clarify do — `isCompressibleCardPending`): priority would only take the
+  /// transcript's room (measured on the old rigid card with a long question at 393×516:
+  /// transcript 160pt → 13pt). Its question now scrolls in a bounded region, so a long one is
+  /// absorbed there instead. The multi-question card is covered by `ClarifyCardLayoutTests`.
   @MainActor
   func testTheClarifyCardDoesNotTakeTheTranscriptsRoom() throws {
     let chat = try hostedChat(
@@ -359,8 +361,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
     XCTAssertGreaterThanOrEqual(
       chat.transcript.bounds.height, 100,
       """
-      The approval card's layout priority must be scoped to approvals: a rigid clarify card \
-      cannot use the extra room, so granting it would only blank the transcript.
+      Layout priority must not reach a single-question clarify card: it cannot use the extra \
+      room, so granting it would only blank the transcript.
       """
     )
     let composer = chat.composer.convert(chat.composer.bounds, to: nil)
@@ -980,8 +982,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// What a hosted `ChatView` gives back: the card's content region, the transcript and the
   /// composer, all live views, plus the window they were laid out in.
   private struct HostedChat {
-    /// The card's bounded content region — `nil` when the standing card is a clarify/secret
-    /// one (plain stacked content, no scroll view of its own) or when none is standing.
+    /// The first plain scroll view — the approval card's bounded content region (a clarify
+    /// card's region when one stands instead; `nil` for the secret card or no card).
     var regionIfAny: UIScrollView?
     var transcript: UIScrollView
     var composer: ComposerInputTextView

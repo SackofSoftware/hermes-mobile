@@ -818,24 +818,38 @@ the same reconcile when it lands.
 - Modify: `HermesMobileTests/ChatSnapshotTests.swift`
 - Create: `HermesMobileTests/ClarifyCardLayoutTests.swift`
 
-- [ ] move `BoundedHeightLayout` to its own file; keep its doc comments and measured
+- [x] move `BoundedHeightLayout` to its own file; keep its doc comments and measured
       derivations; `tuist generate` so the new file is picked up
-- [ ] rebuild `ClarifyCardView` per Technical Details (layout by question count, Other row,
+- [x] rebuild `ClarifyCardView` per Technical Details (layout by question count, Other row,
       Skip everywhere, recommended badge, store-driven locks, Confirm gating, no preselection)
-- [ ] `ChatView.pendingCard`: wire `submitClarify` / `skipClarify`; extend `.layoutPriority(1)`
-      to `store.isCompressibleCardPending` with the rationale updated
-- [ ] add snapshots: `testClarifyCard_multiSelect`, `testClarifyCard_multiQuestion`,
+      (the form rules live in HermesKit as `ClarifyDraft` — picks vs Other text exclusive,
+      radio/checkbox, per-question skip, `answers(for:)` / `isComplete(for:)` — plus
+      `ClarifyRequest.isLocked` / `lockedDisplayText` (shared with the transcript echo) and
+      `ClarifyQuestion.answerKey`. The region reuses the approval card's cap, floor, fade and
+      reserve (reserve only on the multi-question card). The secret card is split out as
+      `SecretCardView` in the same file, unchanged in rendering. The Other row is v7-only (a
+      legacy `clarify.request` keeps today's choices-only form plus Skip). The now-unused
+      `respondToClarify` forwarder is removed; its tests send `submitClarify`)
+- [x] `ChatView.pendingCard`: wire `submitClarify` / `skipClarify`; extend `.layoutPriority(1)`
+      to `store.isCompressibleCardPending` with the rationale updated (replaces
+      `isApprovalPending`: approval or multi-question clarify)
+- [x] add snapshots: `testClarifyCard_multiSelect`, `testClarifyCard_multiQuestion`,
       `testClarifyCard_recommendedBadge`, `testClarifyCard_lockedAnswers`,
       `testClarifyCard_otherRow`, `testApprovalCard_noSessionChoice` (the base added no
       snapshot) (`make snapshot` twice each; pinned width + height since the region scrolls)
-- [ ] ➕ add `testApprovalCard_denyOnly` (`choices: ["deny"]`): the base hides Approve when
+      (`testClarifyCard_choices` / `_freeText` re-recorded for the new form; `ClarifyCardView`
+      takes an optional seeded `ClarifyDraft` so a snapshot can render a form mid-answer)
+- [x] ➕ add `testApprovalCard_denyOnly` (`choices: ["deny"]`): the base hides Approve when
       `!allowsOnce`, and no snapshot covers the one-button row
-- [ ] add `ClarifyCardLayoutTests`: hosted `ChatView` at the shortest keyboard-up window with
+- [x] add `ClarifyCardLayoutTests`: hosted `ChatView` at the shortest keyboard-up window with
       five questions — Confirm/Skip frames inside the window, region
       `contentSize.height > bounds.height`; a single-question card still hugs its content
-- [ ] run HermesKit tests and `make snapshot` — no new failures; any failure with a different
+      (plus: at 393×516 the five-question region outranks the transcript, which keeps ≥ 40pt)
+- [x] run HermesKit tests and `make snapshot` — no new failures; any failure with a different
       render size from its baseline is a regression (equal size with a small residual is the
-      known drift)
+      known drift) (1595 tests in 70 suites passed, 1 known issue; app builds; `make snapshot`
+      37 failures, all at identical render size = known drift — two fewer than before because
+      `testClarifyCard_choices` / `_freeText` were re-recorded; both layout suites pass)
 
 ### Task 8: Reconnect replay and push-tap recovery
 

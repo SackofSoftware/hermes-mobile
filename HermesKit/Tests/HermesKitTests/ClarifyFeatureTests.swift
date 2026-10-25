@@ -68,7 +68,7 @@ struct ClarifyFeatureTests {
       }
     }
 
-    await store.send(.respondToClarify(answer: "a.txt")) {
+    await store.send(.submitClarify(answers: ["": .choices(["a.txt"])])) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "a.txt"))]
     }
@@ -133,7 +133,6 @@ struct ClarifyFeatureTests {
   @Test func respondClarifyIgnoredWhenNoClarifyPending() async {
     let store = TestStore(initialState: readyState()) { ChatFeature() }
     // No pending interaction → response is a no-op.
-    await store.send(.respondToClarify(answer: "x"))
     await store.send(.submitClarify(answers: ["": .other("x")]))
     await store.send(.skipClarify)
   }
@@ -272,17 +271,18 @@ struct ClarifyFeatureTests {
     ])]))
   }
 
-  @Test func answersShapeSingleQuestionThroughTheCardForwarder() async {
+  @Test func answersShapeSingleQuestionAsTheCardSendsIt() async {
     let request = ClarifyRequest(
       requestID: nil,
       questions: [ClarifyQuestion(qid: "q0", question: "Proceed?", choices: ["Yes (Recommended)", "No"])],
       answerShape: .answers
     )
-    // The single card hands over the raw choice; the reducer sends the bare label.
-    let picked = await answer(request, with: .respondToClarify(answer: "Yes (Recommended)"), echo: "Yes")
+    // A tapped choice goes up raw (exactly as the card hands it over); the reducer sends the
+    // bare label.
+    let picked = await answer(request, with: .submitClarify(answers: ["q0": .choices(["Yes (Recommended)"])]), echo: "Yes")
     #expect(picked?["result"] == .object(["answers": .object(["q0": .string("Yes")])]))
-    // Text that is not one of the offered choices is an Other answer, sent as typed.
-    let typed = await answer(request, with: .respondToClarify(answer: "Later"), echo: "Later")
+    // The Other row's text is sent as typed.
+    let typed = await answer(request, with: .submitClarify(answers: ["q0": .other("Later")]), echo: "Later")
     #expect(typed?["result"] == .object(["answers": .object(["q0": .string("Later")])]))
   }
 
@@ -370,10 +370,9 @@ struct ClarifyFeatureTests {
 
   /// Today's fixture, byte for byte: method, params and their values — the raw choice text
   /// (a legacy agent never sees the marker stripped), skip as an empty answer.
-  @Test(arguments: 0..<4)
+  @Test(arguments: 0..<3)
   func legacyClarifyWireIsUnchanged(caseIndex: Int) async {
     let (action, wireAnswer, echo): (ChatFeature.Action, String, String) = [
-      (.respondToClarify(answer: "a.txt (Recommended)"), "a.txt (Recommended)", "a.txt"),
       (.submitClarify(answers: ["": .choices(["a.txt (Recommended)"])]), "a.txt (Recommended)", "a.txt"),
       (.submitClarify(answers: ["": .other("c.txt")]), "c.txt", "c.txt"),
       (.skipClarify, "", "Skipped"),
@@ -409,7 +408,7 @@ struct ClarifyFeatureTests {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable method, _ in throw GatewayError.timedOut(method: method) }
     }
-    await store.send(.respondToClarify(answer: "notes.md")) {
+    await store.send(.submitClarify(answers: ["": .other("notes.md")])) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "notes.md"))]
     }

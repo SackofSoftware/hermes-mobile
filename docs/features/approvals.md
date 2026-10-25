@@ -111,9 +111,11 @@ offers each child `remaining / remainingCount` in flexibility order, the card is
 than the transcript, and the region collapses onto its floor with the keyboard up (measured on an
 iPhone 15: its floor, 96pt, without the priority vs 155pt with it — 88 and 227 when first
 measured, before the floor was raised and the region started handing a 44pt reserve back). It is
-**scoped to `.approval`** (`State.isApprovalPending`) — `ClarifyCardView` is rigid stacked
-content that cannot use the extra room, so priority there only blanks the transcript (measured
-160pt → 13pt). And because a priority-1 child is offered everything the others do not strictly
+**scoped to approvals and multi-question clarify** (`State.isCompressibleCardPending`) — a
+one-question clarify card is a short form whose region hugs it and the secret card is a rigid
+field, so priority there only blanks the transcript (measured on the old rigid clarify card:
+160pt → 13pt). The clarify card uses the same `BoundedHeightLayout` region, cap and floor, with
+a pinned Skip / Submit-Send-Confirm row (`ClarifyCardLayoutTests`). And because a priority-1 child is offered everything the others do not strictly
 need — the greedy transcript's minimum is 0 — the region **hands a fixed 44pt of its offer back**
 (`BoundedHeightLayout.reserve`, floor-outranked): without it the transcript measured **0pt** on
 every phone, i.e. the decision was made with no visible context. The reserve is **absolute, not a

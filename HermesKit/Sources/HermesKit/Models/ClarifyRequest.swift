@@ -19,6 +19,10 @@ public struct ClarifyQuestion: Equatable, Sendable {
 
   public var isFreeText: Bool { choices.isEmpty }
 
+  /// The key this question's answer travels under in `submitClarify(answers:)`: its `qid`,
+  /// or `""` for the `nil`-qid question of the intermediate and legacy single forms.
+  public var answerKey: String { qid ?? "" }
+
   public init(qid: String? = nil, question: String, choices: [String] = [], multiSelect: Bool = false) {
     self.qid = qid
     self.question = question
@@ -70,10 +74,30 @@ public struct ClarifyRequest: Equatable, Sendable, Decodable {
   /// Layout only: several questions render as sections with a pinned Confirm/Skip row.
   public var isMultiQuestion: Bool { questions.count > 1 }
 
-  /// The first question's text — the single-question card and the gateway-log summary.
+  /// The first question's text — the gateway-log summary.
   public var question: String { questions.first?.question ?? "" }
-  /// The first question's raw choices — the single-question card.
+  /// The first question's raw choices.
   public var choices: [String] { questions.first?.choices ?? [] }
+
+  /// Did the server already lock this question's answer (a replayed batch)? A locked question
+  /// renders read-only and its lock is re-sent with the final set.
+  public func isLocked(_ question: ClarifyQuestion) -> Bool {
+    guard let qid = question.qid else { return false }
+    return lockedAnswers.keys.contains(qid)
+  }
+
+  /// What a locked answer reads as — "Skipped" for a locked skip, a multi-select's JSON-array
+  /// wire string as its comma-joined choices, anything else as sent. `nil` when the question
+  /// is not locked. Shared by the card's locked rows and the transcript echo.
+  public func lockedDisplayText(for question: ClarifyQuestion) -> String? {
+    guard let qid = question.qid, let locked = lockedAnswers[qid] else { return nil }
+    guard let locked else { return "Skipped" }
+    if question.multiSelect,
+       let picked = try? JSONDecoder().decode([String].self, from: Data(locked.utf8)) {
+      return picked.joined(separator: ", ")
+    }
+    return locked
+  }
 
   public init(
     requestID: String?,
@@ -219,6 +243,104 @@ public enum ClarifyAnswer: Equatable, Sendable {
   private static func jsonArrayString(_ labels: [String]) -> String {
     guard let data = try? JSONRPCRequest.wireEncoder.encode(labels) else { return "[]" }
     return String(decoding: data, as: UTF8.self)
+  }
+}
+
+/// The clarify card's answers in progress: the user's edits to the questions the server has
+/// not locked. Held by the card as view state (keyed on `pendingInteractionToken`, so a
+/// replacement card never inherits it — and a refreshed replay keeps it while new locks come
+/// from the store) and handed to `submitClarify(answers:)` as ``answers(for:)``. Pure, so the
+/// form's rules are unit-tested here instead of living in the view:
+/// - a picked choice and typed "Other" text are exclusive — picking clears the text, typing
+///   (non-blank) clears the picks — because an answer is one or the other on the wire;
+/// - a single-select question holds one pick (tapping it again keeps it, radio-style); a
+///   multi-select one toggles, kept in the server's choice order;
+/// - any edit un-skips a question; a skip is the answer while it stands (the edits survive it,
+///   so un-skipping brings them back);
+/// - nothing is preselected — the recommended choice is a badge, never a default.
+public struct ClarifyDraft: Equatable, Sendable {
+  private var picked: [String: [String]] = [:]
+  private var typed: [String: String] = [:]
+  private var skipped: Set<String> = []
+
+  public init() {}
+
+  public func isPicked(_ choice: String, in question: ClarifyQuestion) -> Bool {
+    picked[question.answerKey]?.contains(choice) ?? false
+  }
+
+  /// The typed text — the free-text answer, or the "Other" row of a question with choices.
+  public func text(for question: ClarifyQuestion) -> String {
+    typed[question.answerKey] ?? ""
+  }
+
+  public func isSkipped(_ question: ClarifyQuestion) -> Bool {
+    skipped.contains(question.answerKey)
+  }
+
+  /// Pick (single-select) or toggle (multi-select) a raw choice of `question`.
+  public mutating func toggle(_ choice: String, in question: ClarifyQuestion) {
+    let key = question.answerKey
+    guard question.choices.contains(choice) else { return }
+    skipped.remove(key)
+    typed[key] = nil
+    guard question.multiSelect else {
+      picked[key] = [choice]
+      return
+    }
+    var current = picked[key] ?? []
+    if current.contains(choice) {
+      current.removeAll { $0 == choice }
+    } else {
+      current.append(choice)
+    }
+    picked[key] = question.choices.filter(current.contains)
+  }
+
+  public mutating func setText(_ text: String, for question: ClarifyQuestion) {
+    let key = question.answerKey
+    typed[key] = text
+    guard !Self.trimmed(text).isEmpty else { return }
+    picked[key] = nil
+    skipped.remove(key)
+  }
+
+  public mutating func toggleSkip(_ question: ClarifyQuestion) {
+    let key = question.answerKey
+    if skipped.contains(key) {
+      skipped.remove(key)
+    } else {
+      skipped.insert(key)
+    }
+  }
+
+  /// This question's answer, `nil` while it has none. Typed text goes out trimmed.
+  public func answer(for question: ClarifyQuestion) -> ClarifyAnswer? {
+    let key = question.answerKey
+    if skipped.contains(key) { return .skipped }
+    let text = Self.trimmed(typed[key] ?? "")
+    if !text.isEmpty { return .other(text) }
+    if let picks = picked[key], !picks.isEmpty { return .choices(picks) }
+    return nil
+  }
+
+  /// The answers to submit: every unlocked question that has one (the reducer adds the locks
+  /// and sends a missing question as a skip).
+  public func answers(for request: ClarifyRequest) -> [String: ClarifyAnswer] {
+    var answers: [String: ClarifyAnswer] = [:]
+    for question in request.questions where !request.isLocked(question) {
+      answers[question.answerKey] = answer(for: question)
+    }
+    return answers
+  }
+
+  /// Can the form be submitted? Every question is locked, answered or skipped.
+  public func isComplete(for request: ClarifyRequest) -> Bool {
+    request.questions.allSatisfy { request.isLocked($0) || answer(for: $0) != nil }
+  }
+
+  private static func trimmed(_ text: String) -> String {
+    text.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 }
 

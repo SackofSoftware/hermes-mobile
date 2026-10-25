@@ -934,22 +934,28 @@ the same reconcile when it lands.
 
 ### Task 10: [Final] Update documentation
 
-- [ ] `docs/features/approvals.md`: rewrite around server requests (queue, `request.answer` and
+- [x] `docs/features/approvals.md`: rewrite around server requests (queue, `request.answer` and
       `expired`, cancel, turn-end clearing, replay, the decline matrix, answer shapes) and
       push-tap recovery on v7 vs legacy; replace the "ClarifyCardView is rigid" sentence
-- [ ] ➕ rewrite, don't append to, #116's doc text: `docs/features/approvals.md` (~:24-47, the
+      (the sentence was already gone after Task 7; the doc now also covers advertisement,
+      clarify shapes/forms, sudo/secret and a short "clarify card shares the region" section)
+- [x] ➕ rewrite, don't append to, #116's doc text: `docs/features/approvals.md` (~:24-47, the
       "unsupported prompt kinds are left alone" point is stated twice; "phone-only agent waits"
       becomes false for clarify/sudo/secret) and `docs/architecture.md` (~:92-100, "advertises
       when the gateway receives `ready`" — update for the Task 2 ordering)
-- [ ] `docs/features/push-notifications.md`: point the tap-recovery paragraph at the replay
-- [ ] `docs/architecture.md`: the server→client request flow, `client.capabilities` ordering,
-      `open_requests` in "Session re-hydration", `desktop_contract` as the wire signal
-- [ ] `CLAUDE.md` approval/clarify bullet: server requests, one queue, `refreshPresented` as the
-      one exception to `present(_:)`, the decline matrix, narrow-never-widen, legacy kept
-- [ ] `README.md` feature list: multi-select, multi-question and Other in clarify; compatibility
+- [x] `docs/features/push-notifications.md`: point the tap-recovery paragraph at the replay
+- [x] `docs/architecture.md`: the server→client request flow, `client.capabilities` ordering,
+      `open_requests` in "Session re-hydration", `desktop_contract` as the wire signal (new
+      "Server→client requests" subsection under Wire protocol)
+- [x] `CLAUDE.md` approval/clarify bullet: server requests, one queue, `refreshPresented` as the
+      one exception to `present(_:)`, the decline matrix, narrow-never-widen, legacy kept (plus
+      `open_requests` in the hydration bullet and the stale `BoundedHeightLayout` path in Gotchas)
+- [x] `README.md` feature list: multi-select, multi-question and Other in clarify; compatibility
       note (both the v7 and the legacy wire are supported)
-- [ ] comment on #97 with what shipped, the v7 floor, and what legacy agents still get
-- [ ] move this plan to `docs/plans/completed/`
+- [x] comment on #97 with what shipped, the v7 floor, and what legacy agents still get (drafted,
+      posting deferred to the user)
+- [x] move this plan to `docs/plans/completed/` (deferred to the exec orchestrator's completion
+      step)
 
 ## Post-Completion
 

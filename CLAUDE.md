@@ -55,7 +55,8 @@ bullets below are the compressed rules.
 - **Hydration is server-authoritative** via one `hydrate(sessionID)` funnel
   (open/foreground/cold-launch → `.ready` → hydrate): call `session.resume` (NOT
   `session.activate` — live-only, 404s stored sessions) and apply `info` / `running` /
-  `inflight` from the response — rebuild rows wholesale, server wins, never merge; seed
+  `inflight` / `open_requests` (v7 prompt replay, whatever `running` says) from the
+  response — rebuild rows wholesale, server wins, never merge; seed
   the streaming row from `inflight`. Exception (#26): a foreground re-hydrate of a
   still-RUNNING turn preserves the client's live thinking + tool rows (server `inflight`
   carries no reasoning/tools); a completed turn still replaces wholesale. Details:
@@ -163,11 +164,14 @@ bullets below are the compressed rules.
   guarded by strict `canBranch` gates with a client-held `BranchSeed` recovery protocol
   (probe-before-seed-replay; no probe budget). The trickiest state machine in the app —
   read `docs/features/message-actions-and-branching.md` before touching it.
-- **Approval/clarify/secret cards**: a pinned button row over ONE bounded scrollable
-  region (`BoundedHeightLayout`) — never plain stacked `Text`. Every card is keyed on
-  the monotonic `pendingInteractionToken`; **raise cards through `State.present(_:)`,
-  never by assigning `pendingInteraction`**. Layout floors/caps, keyboard handoff, and
-  push-tap approval recovery: `docs/features/approvals.md`.
+- **Prompt cards (#97)**: v7 prompts are server→client requests in ONE per-slot queue whose
+  head is the card, answered via `request.answer` in the request's shape (`expired` → "Already
+  handled elsewhere"; card stays until acknowledged); legacy `*.request` events stay as-is.
+  **Raise cards through `State.present(_:)`** (token-keyed) — `refreshPresented(_:)` (same srq
+  id, no token bump) is the ONE exception. 4404 only window-owned bridges; never answer any
+  other unrendered prompt; narrow the server's choices, never widen. Cards are a pinned row
+  over ONE `BoundedHeightLayout` region. Queue, replay, decline matrix, clarify forms, layout,
+  push-tap recovery: `docs/features/approvals.md`.
 - **Context-usage pill**: display derives from `Usage` helpers in HermesKit (thresholds
   mirror the Hermes TUI, unit-tested); severity→color and popover are local `@State`.
 
@@ -319,7 +323,7 @@ bullets below are the compressed rules.
 - **A `ScrollView` handed a concrete proposal along its scroll axis swallows it
   whole** — it reports the proposal, not its content, so `min(content, cap)` regions
   must probe with that dimension unspecified (custom `Layout`); see
-  `BoundedHeightLayout` in `ApprovalCardView.swift`.
+  `BoundedHeightLayout.swift`.
 - **`@Sendable` effect closures** must capture dependencies explicitly (`[gateway]`) —
   the reducer `self` is not `Sendable`.
 - **Deployment target is iOS 18**. Gate genuinely-newer APIs:

@@ -78,10 +78,17 @@ away from your desk and still keep your agent moving.
   without derailing the original conversation. Branches show nested under their parent
   in the session list, desktop-style.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
-  and `sudo`/`secret` prompts the moment they arrive. Even if the app was offline when
-  an approval fired, tapping its push notification still surfaces an approve/deny card
-  (generic, since no command content ever transits the push gateway) — with honest
-  "already handled elsewhere" feedback if it was resolved on another client.
+  and `sudo`/`secret` prompts the moment they arrive. Clarify questions come in every
+  form the desktop app shows: pick one choice, tick several, type your own answer with
+  "Other", or work through a batch of up to five questions on one card (the agent's
+  recommended choice is marked, never preselected). When several prompts are waiting,
+  they queue and show one at a time. Lost the connection, or opened the app from a push
+  notification? The open prompts come back exactly as the agent asked them, with the
+  command or question in full (no content ever transits the push gateway). If you
+  answer something already handled on another client, the app says so. Works with
+  current Hermes releases, which send prompts as server requests, and with older agents
+  that still use the event-based prompts (there, a push tap brings back a generic
+  approve/deny card, and the newer clarify forms are not available).
 - **Stays connected.** Automatic reconnect with backoff and a clear connection banner
   when the link drops. Reopening a session — after navigating away, backgrounding the app,
   or a cold relaunch — restores its live state: the right model, context usage, full

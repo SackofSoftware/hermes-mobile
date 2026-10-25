@@ -89,15 +89,13 @@ a `testValue`/`.inMemory()` variant):
   long-running cancellable effect; reconnect/backoff lives in the reducer (testable
   with `TestClock`). Each `send` enforces a per-request timeout (default 30s) so a
   stuck/never-acking RPC throws `GatewayError.timedOut` instead of hanging forever.
-  When the gateway receives `ready`, it advertises `client.capabilities` with
-  `{server_requests: true}`. The server can then deliver an `approval` as a JSON-RPC
-  server request; the phone presents the request-bound card and answers with
-  `request.answer {id, result: {choice}}`. A response with `status: "expired"` means another
-  client handled the request (or it timed out), and the UI reports **Already handled elsewhere**.
-  The phone ignores unsupported prompt methods so another attached client can handle them. It
-  sends the non-settling `4404` decline only for window-owned methods when the backend advertises
-  `declines_not_shown: true`; malformed approval payloads are denied. Every outbound JSON-RPC
-  frame uses `JSONRPCRequest.wireEncoder` so wire formatting is consistent.
+  On the `gateway.ready` frame it sends one `client.capabilities {server_requests: true}`
+  per connection and holds `.ready` until that settles or a 5 s cap fires, so the first
+  `session.resume` / `session.create` goes out advertised (see "Server→client requests"
+  below). Inbound server requests are routed on the receive loop: a rendered prompt is
+  yielded as `GatewayEvent.serverRequest`, everything else is skipped, declined or left
+  alone per the decline matrix. Every outbound JSON-RPC frame uses
+  `JSONRPCRequest.wireEncoder` so wire formatting is consistent.
   `connect` branches on the `AuthSession`: `.token` → `?token=` (byte-identical to the
   legacy path); `.cookie` and `.bearer` SHARE one branch → mint a fresh single-use `?ticket=`
   via `POST /api/auth/ws-ticket` per connect (never cached), the regimes differing only inside
@@ -300,6 +298,38 @@ not assumed):
   wholesale replace. The pipeline's RPCs get a 120s budget (vs the 30s default): `slash.exec`
   can block the gateway for minutes.
 
+### Server→client requests (prompt protocol v7, #97)
+
+Since v2026.9.14 Hermes delivers every blocking prompt (approval, clarify, sudo, secret, and
+window-owned bridges like `terminal.read`) as a JSON-RPC request from the server:
+`{"jsonrpc":"2.0","id":"srq-…","method":"<kind>","params":{…}}`. Older agents (v2026.9.11 and
+before) send `*.request` events answered by `*.respond` RPCs; the app keeps that legacy path
+unchanged.
+
+- **Wire signal.** `info.desktop_contract` (in the `session.resume` / `session.create` `info`
+  and in `session.info` events; an Int or a numeric String) is `>= 7` on v7 and 6 on
+  v2026.9.11. `ChatFeature.State.desktopContract` records it per slot. A hydrate counts as v7
+  when the contract is `>= 7` or `open_requests` is non-empty. Receiving needs no gate (one
+  server never speaks both wires); the signal only drives the hydrate's choice between the
+  replay and the legacy clearing rules. A `-32601` on `client.capabilities` does NOT mean
+  legacy: v2026.9.14 is v7 without that method.
+- **Advertisement ordering.** Since v2026.9.21 the server refuses a prompt when no attached
+  client advertised `client.capabilities {server_requests: true}`. The advertisement is per
+  socket, so `GatewayConnection` sends it on every connect, before `.ready` reaches the reducer
+  (5 s cap, one attempt, no retry). A failure other than `-32601` raises a banner that outlives
+  the following hydrate (`GatewayEvent.serverRequestsUnavailable`).
+- **Answering.** The app answers through `request.answer {id, result}` →
+  `{status: "ok" | "expired"}`, an ordinary RPC, rather than a raw response frame; `expired`
+  becomes "Already handled elsewhere". The only raw frame the app sends is the 4404 decline
+  for window-owned bridges, and only when the backend advertised `declines_not_shown`.
+  Unrendered prompts (`vault.*`, `setup_choose`, `display.install.sudo`) get no reply.
+- **Lifecycle.** `ChatFeature` keeps one queue of open requests per slot and presents its head;
+  `request.cancel` events and turn end remove entries; the hydrate's `open_requests` replay
+  restores them.
+
+The full contract (decline matrix, answer shapes, queue rules, clarify forms, push-tap
+recovery): `docs/features/approvals.md`.
+
 ## Push notifications
 
 Push lets the agent reach the phone when its WebSocket is gone (app backgrounded/closed).
@@ -400,7 +430,8 @@ context gauge, dropping tool/thinking rows, or stranding a phantom "working" glo
 session with a stored id, foregrounding it (`.foreground`), and a cold-launch socket connect all
 funnel through the same `.ready` → `hydrate` path (`ChatFeature`), so there is one code path to
 reason about. `hydrate` calls the gateway's **`session.resume`** RPC, which returns
-`{messages, session_id, resumed, info, running, inflight}` and serves **both** a stored session
+`{messages, session_id, resumed, info, running, inflight}` (plus `open_requests` on a v7 live
+reattach) and serves **both** a stored session
 (rebuilt from the DB) and an already-live one (the transport is reattached, in-flight turn
 included). We deliberately do **not** use `session.activate` — that is live-only and answers
 "session not found" for any stored session opened from the list (every common case). On the
@@ -421,6 +452,13 @@ response (`applyActivate`), in order:
    flag; `inflight.user`/`inflight.assistant` rows are appended and, when `inflight.streaming`
    is set, an assistant streaming row is seeded eagerly with `streamingRowID` pointed at it so
    the next `message.delta` reuses it instead of lazily creating a duplicate.
+   **Open prompts** follow the wire signal. On v7 (`desktop_contract >= 7` or a non-empty
+   `open_requests`) the server-request queue is reconciled with `open_requests` whatever
+   `running` says: unlisted ids drop, listed ones refresh in place (same token), new ones
+   append, and the head is presented — this replay is also what push-tap recovery reads. On a
+   legacy server a `running == false` hydrate clears a standing approval card, and an armed
+   push-tap hint on a running turn synthesizes the generic recovered card. Details:
+   `docs/features/approvals.md`.
 5. **`reconcileTimer(running, anchor, now)`** restarts the elapsed "Thinking" timer from a
    client-persisted turn-start anchor. **`running` decides *whether* the timer runs; the anchor
    only supplies the *start instant*.** A running turn resumes ticking seeded at `now − anchor`;

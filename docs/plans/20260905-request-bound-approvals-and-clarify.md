@@ -18,10 +18,10 @@ they do today.
   skipped — instantly, with no card. On v2026.9.14 itself the frames arrive, the app drops them,
   and the agent waits out the deadline. Today's `clarify.respond` / `sudo.respond` /
   `secret.respond` calls hit `-32601` on v7 and are swallowed by `try?`.
-- **Base: PR #116, first commit (`702f983`, "Support server-request approval prompts").** A
-  contributor PR already carries the v7 wire layer and approval presentation. It lands, narrowed
-  to the wire layer (see "Base" below), as the foundation of this plan. Queueing, cancel,
-  replay and every other kind are built here, generalized from the start.
+- **Base: PR #116, merged as `e8fb410` ("Support server-request approval prompts").** A
+  contributor PR carried the v7 wire layer and approval presentation; it is on `main` (see
+  "Base" below for what landed) and is the foundation of this plan. Queueing, cancel, replay
+  and every other kind are built here, generalized from the start.
 - **Benefit.** Prompts work again on current agents. The card the user answers is the request
   the server resolves, and an answer that arrives too late says so ("Already handled
   elsewhere"). A reconnect or push-tap restores the real card (command, question, locked batch
@@ -29,17 +29,17 @@ they do today.
   The phone never widens the server's choice set and never steals a prompt meant for a desktop
   sharing the session.
 - **Integration.** Everything rides the existing `pendingInteraction` / `present(_:)` /
-  `pendingInteractionToken` contract and the single `hydrate` → `applyActivate` funnel. The base
-  PR's inbound `.serverRequest` frame is generalized from approval to every prompt kind. No
-  `AppFeature` routing changes.
+  `pendingInteractionToken` contract and the single `hydrate` → `applyActivate` funnel. The
+  base's `InboundFrame.serverRequest` routing is generalized from approval to every prompt kind.
+  No `AppFeature` routing changes.
 
 Sibling issues split out of #96: #98 (event replay) and #99 (native Projects). Out of scope
 here. Multi-slot fan-out stays #90.
 
 **Release gate.** The base makes the phone advertise, so the server starts routing every prompt
 to it. Until Tasks 3–6 land, the phone stays silent on clarify/sudo/secret (see the decline
-rule), and a phone-only agent waits out those deadlines (clarify up to 3600 s). Do not ship a
-TestFlight build that contains the base without Tasks 3–6.
+rule), and a phone-only agent waits out those deadlines (clarify up to 3600 s). `main` has
+carried the base since `e8fb410`: do not ship a TestFlight build from `main` without Tasks 3–6.
 
 ## Context (from discovery)
 
@@ -147,35 +147,64 @@ frame). With no client attached (the backgrounded-socket case the push targets) 
 waits in `open_requests`, so the resume after a tap restores the exact card. Plugin-side
 behaviour unverified.
 
-**Base: PR #116 first commit (`702f983`), narrowed to the wire layer.** As of today it delivers
-`InboundFrame.serverRequest(id:method:params:)`, `HermesGatewayClient.respond(id:result:)`, a
-fire-and-forget `client.capabilities` after `.ready`, `ApprovalRequest.requestID` /
-`serverRequestID` / `choices` / `allowsSessionChoice` / `allowsOnce`, Approve and the session
-toggle hidden when the server withheld them, `GatewayEvent.approvalServerRequest` →
-`present(.approval)`, and an approval answer by response frame `{choice, all:false}`. What #116
-must still fix before it merges (follow-up comment on the PR):
-- every outbound frame through `JSONRPCRequest.wireEncoder` (drop the private encoder);
-- no `try?` on the advertisement or on sends;
-- the decline rule below instead of `-32601` for everything else (it steals desktop prompts);
-- answer approvals with `request.answer` and show "Already handled elsewhere" on `expired`
-  (restores the `resolved: 0` contract in `docs/features/approvals.md`);
-- a malformed approval is answered `{choice:"deny"}`, never left hanging;
-- reducer tests for present, answer, `expired`, and the decline rule.
-Queueing, `request.cancel`, `open_requests` replay and the other kinds are NOT asked of #116;
-they are Tasks 3–8 here. If #116 is not revised by 2026-10-26, take over `702f983` and do the
-fixes in Task 1.
+**Base: PR #116, merged as squash commit `e8fb410` (2026-10-25).** Verified in Task 1 against
+the code. It delivers:
+- `InboundFrame.serverRequest(id:method:params:)` (string `id` + `method`, classified before
+  int-id responses).
+- `GatewayConnection` (`HermesGatewayClient.swift`): `handle(frame:)` presents a decodable
+  `approval` synchronously (`presentApproval` sets `ApprovalRequest.serverRequestID` and yields
+  `GatewayEvent.approvalServerRequest`); anything else goes to `handleServerRequest` in a `Task`
+  (never awaited inside the receive loop). Decline rule: 4404 (`"Not shown on this client"`,
+  encoded by `wireEncoder`) only for the five window-owned methods and only once the
+  advertisement returned `declines_not_shown: true`; every other method gets nothing; a
+  malformed approval (params `null`, non-object, wrong types, missing) is denied through
+  `send("request.answer", {id, result:{choice:"deny"}})`. There is no raw-response
+  `respond(id:result:)` API.
+- Advertisement: `startAdvertisement()` on the `gateway.ready` frame launches a `Task`
+  (`retryAdvertisement`) and `.ready` is yielded at once, NOT after the advertisement. Success
+  stores `declinesNotShown`; `-32601` stops silently (`advertisementUnsupported`); any other
+  failure retries with 2 s → 30 s backoff for the connection's life and yields one
+  `GatewayEvent.serverRequestFailed` banner per connection ("Couldn’t enable approval
+  requests: …").
+- `GatewayEvent.serverRequestFailed(message:)` — a local, non-turn-ending failure (advertisement,
+  decline send, automatic deny): sets `errorBanner`, leaves `isSending` alone.
+- `ApprovalRequest.requestID` (`request_id`, the queue id), `serverRequestID` (set by the
+  client, never decoded), `choices`, `allowsSessionChoice` / `allowsOnce` (empty `choices` =
+  permissive). `offersSessionApproval` now also requires `allowsOnce && allowsSessionChoice`.
+  `ApprovalCardView` hides Approve when `!allowsOnce`.
+- `ChatFeature`: `.approvalServerRequest` → `present(.approval)` + clear the push-tap hint.
+  `respondToApproval` ignores Approve when `!allowsOnce`, narrows `session` → `once` when
+  `!allowsSessionChoice`, and with a `serverRequestID` sends `request.answer {id,
+  result:{choice}}`: `ok` → nothing, `expired` → `approvalRespondResult(resolved: 0)` ("Already
+  handled elsewhere"), anything else or a throw → banner. The card is cleared and the
+  "Approved"/"Denied" row appended optimistically before the RPC. Legacy `approval.respond`:
+  unchanged without `request_id`; with one (and no srq id) it sends `{session_id, request_id,
+  choice, all:false}`.
+- Tests: `ServerRequestTests` (decline matrix, malformed deny, retry, wire order, failures),
+  `ChatInteractionTests` (answer per status, deny/session choice, `request_id` legacy params),
+  `JSONRPCTests`, `GatewayEventDecodingTests`, `HermesGatewayClientTests`. No snapshot.
+- Docs: server-request paragraphs in `docs/features/approvals.md` and `docs/architecture.md`
+  (`CLAUDE.md` untouched).
 
-**App today (`main`)**
-- `HermesKit/Sources/HermesKit/Models/ApprovalRequest.swift` — `ApprovalRequest`,
-  `ClarifyRequest` (`requestID`, `question`, `choices`).
+Every fix the plan asked of #116 landed (`wireEncoder` on every outbound frame, no `try?` on the
+advertisement or sends, the three-way decline rule, `request.answer` + `expired`, deny on a
+malformed approval, reducer tests). The gaps against this plan's design are the ➕ items in
+Tasks 2, 3, 7, 9 and 10; interim risks are the ⚠️ notes in Tasks 2, 3 and 8.
+
+**App today (`main`, including the base)**
+- `HermesKit/Sources/HermesKit/Models/ApprovalRequest.swift` — `ApprovalRequest` (with the
+  base's `requestID` / `serverRequestID` / `choices`), `ClarifyRequest` (`requestID`,
+  `question`, `choices`).
 - `HermesKit/Sources/HermesKit/Models/GatewayEvent.swift` — `.approvalRequest` /
-  `.clarifyRequest` / `.sudoRequest(SecretPrompt)` / `.secretRequest(SecretPrompt)`;
+  `.approvalServerRequest` / `.serverRequestFailed` / `.clarifyRequest` /
+  `.sudoRequest(SecretPrompt)` / `.secretRequest(SecretPrompt)`;
   `SecretPrompt` requires `request_id` (v7 sudo/secret params carry none); `SessionInfo`
   (synthesized `Decodable`, `:253-286`).
 - `HermesKit/Sources/HermesKit/Models/GatewayLogEntry.swift` — exhaustive name/summary switches.
 - `HermesKit/Sources/HermesKit/Models/JSONRPC.swift` — `InboundFrame`, `JSONRPCRequest.wireEncoder`.
-- `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift` — connection actor; frames are
-  handled on the actor's receive loop.
+- `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift` — connection actor
+  (`GatewayConnection`); frames are handled on the actor's receive loop; the base's
+  `handleServerRequest` / `presentApproval` / advertisement retry live here.
 - `HermesKit/Sources/HermesKit/Models/Session.swift` — `ActivateResponse` (`messages`, `info`,
   `running`, `inflight`; `try? decodeIfPresent(SessionInfo…)` at `:185` drops the whole `info`
   if any field throws).
@@ -189,7 +218,8 @@ fixes in Task 1.
   `ClarifyCardView.swift` (clarify card — single-select list or free-text field, rigid — and the
   secret card), wired in `ChatView.pendingCard`.
 - Tests: `GatewayEventDecodingTests`, `SessionDecodingTests`, `JSONRPCTests`,
-  `HermesGatewayClientTests`, `ChatInteractionTests`, `ClarifyFeatureTests`, `HydrateTests`,
+  `HermesGatewayClientTests`, `ServerRequestTests` (base), `ChatInteractionTests`,
+  `ClarifyFeatureTests`, `HydrateTests`,
   `AppFeatureTests` (push-tap recovery); `ChatSnapshotTests` and `ApprovalCardLayoutTests` in
   `HermesMobileTests`.
 
@@ -376,8 +406,9 @@ public struct OpenRequest: Equatable, Sendable, Decodable {
 }
 ```
 
-The base's `ApprovalRequest.serverRequestID` is removed once the queue exists (the id lives on
-`PendingServerRequest` only).
+The base's `ApprovalRequest.serverRequestID` (set in `GatewayConnection.presentApproval`) is
+removed once the queue exists (the id lives on `PendingServerRequest` only). `requestID`,
+`choices`, `allowsOnce` and `allowsSessionChoice` stay as merged.
 
 Decoding rules: `ApprovalRequest` stays fully lenient. `ClarifyRequest` picks its shape from the
 payload: `questions` (each entry needs `qid` + `question`) → `.answers`; a top-level `question`
@@ -390,20 +421,26 @@ Unknown keys are ignored.
 String that parses as an Int, else nil — it must never throw, because a throw drops the whole
 `info`. `GatewayEvent` gains `.serverRequest(PendingServerRequest)` (replacing the base's
 `.approvalServerRequest`) and `.requestCancel(RequestCancel)` (`"request.cancel"`), each with a
-`GatewayLogEntry` name and a summary that never includes a secret value.
+`GatewayLogEntry` name and a summary that never includes a secret value. The base's
+`.serverRequestFailed(message:)` stays as the local, non-turn-ending failure event for
+advertisement, decline and automatic-skip sends.
 
 ### Client (`HermesGatewayClient`)
 
 - Inbound `.serverRequest`: `approval` / `clarify` / `sudo` / `secret` decode into
-  `GatewayEvent.serverRequest`. A rendered method whose params fail to decode gets that kind's
-  skip as a response frame. Window-owned methods get a 4404 error frame when
-  `declinesNotShown`, else nothing. Every other method gets nothing.
+  `GatewayEvent.serverRequest`, yielded synchronously from `handle(frame:)` as the base does for
+  approval (a following turn terminal must not overtake the card). A rendered method whose
+  params fail to decode gets that kind's skip through `request.answer` from a `Task` (the
+  base's malformed-approval path; a failure → `.serverRequestFailed`). Window-owned methods get
+  a 4404 error frame when `declinesNotShown`, else nothing. Every other method gets nothing.
 - Advertisement: when the `gateway.ready` frame arrives, the actor starts a `Task` that sends
   `client.capabilities {server_requests: true}` and awaits the result with a 5 s cap, stores
   `declinesNotShown`, and only then yields `.ready` (awaiting inside the receive loop would
   deadlock — the response arrives through that loop). `-32601` means "no advertisement on this
   backend"; a timeout or other failure is logged through the gateway log; every outcome still
-  yields `.ready`. Events arriving during the window are yielded as usual.
+  yields `.ready`. Events arriving during the window are yielded as usual. The base already
+  starts the `Task` on `gateway.ready` but yields `.ready` immediately and retries failures in
+  the background (see "Base"); Task 2 reconciles the two.
 - Every outbound frame — declines and skip responses included — is encoded by
   `JSONRPCRequest.wireEncoder`. Answers go through `send("request.answer", …)`.
 
@@ -424,7 +461,9 @@ Actions:
   id is known; present when it became the head.
 - `.gatewayEvent(.requestCancel(c))` — remove the matching entry; if it was presented, present
   the next or clear; `reason == "timeout"` on the presented card appends a "Timed out" row.
-- `respondToApproval(approve:all:)` — builds `{choice}`; legacy path unchanged.
+- `respondToApproval(approve:all:)` — builds `{choice}` (the base's narrowing kept); legacy
+  `approval.respond` path as merged. The v7 outcome moves from the base's
+  `approvalRespondResult(resolved: 0)` overload to `serverRequestAnswered`.
 - `submitClarify(answers: [String: String?])` — keyed by qid (a single legacy/intermediate
   question uses the key `""`); the reducer builds the wire shape from `answerShape`.
 - `skipClarify` — v7 `.answers`: `{}`; `.singleAnswer`: `{answer:""}`; legacy: today's empty
@@ -463,8 +502,8 @@ the same reconcile when it lands.
 
 ### Views (`HermesMobile`)
 
-- `ApprovalCardView`: toggle on `offersSessionApproval && allowsSessionChoice`, Approve hidden
-  when `!allowsOnce` (from the base).
+- `ApprovalCardView`: toggle on `offersSessionApproval` (the base folded `allowsOnce &&
+  allowsSessionChoice` into it), Approve hidden when `!allowsOnce` (from the base).
 - `ClarifyCardView` rebuilt around one `BoundedHeightLayout` region (moved to its own
   `BoundedHeightLayout.swift`; pure move) with a pinned action row. Single question:
   single-select rows (tap submits), multi-select checkmark rows + Submit, free-text field +
@@ -496,7 +535,7 @@ the same reconcile when it lands.
 // server request: sudo (v2026.9.21+)
 {"jsonrpc":"2.0","id":"srq-bbbbbbbbbbbb","method":"sudo","params":{"session_id":"live","command":"apt install …"}}
 // decline, window-owned method, backend with declines_not_shown
-{"jsonrpc":"2.0","id":"srq-cccccccccccc","error":{"code":4404,"message":"not shown on this client"}}
+{"jsonrpc":"2.0","id":"srq-cccccccccccc","error":{"code":4404,"message":"Not shown on this client"}}
 // request.cancel
 {"jsonrpc":"2.0","method":"event","params":{"type":"request.cancel","session_id":"live","seq":123,"payload":{"id":"srq-1a2b3c4d5e6f","method":"approval","reason":"timeout"}}}
 // session.resume extras (live reattach)
@@ -508,18 +547,19 @@ the same reconcile when it lands.
 ### Task 1: Reconcile with the merged base
 
 **Files:**
-- Read: the merged PR #116 server-requests commit(s)
+- Read: the merged PR #116 squash commit `e8fb410`
 - Modify: this plan (names, anything the base delivered differently)
 
-- [ ] confirm the base delivered the items listed under "Base" — in particular `wireEncoder`
+- [x] confirm the base delivered the items listed under "Base" — in particular `wireEncoder`
       for every frame, no `try?`, the three-way decline rule (no 4404 outside the window-owned
       set, nothing on backends without `declines_not_shown`), `request.answer` with `expired`
-      handling, deny on a malformed approval, reducer tests
-- [ ] list every gap as a ➕ item in the matching task below; rename types in this plan to the
+      handling, deny on a malformed approval, reducer tests (all present; see "Base")
+- [x] list every gap as a ➕ item in the matching task below; rename types in this plan to the
       merged names
-- [ ] if #116 was not revised by 2026-10-26: take over `702f983` on a branch and close those gaps
-      here, with tests
-- [ ] run the full suite on `main` — must be green before Task 2
+- [x] if #116 was not revised by 2026-10-26: take over `702f983` on a branch and close those gaps
+      here, with tests (n/a — #116 revised and merged as `e8fb410`)
+- [x] run the full suite on `main` — must be green before Task 2 (run on this branch = `main`
+      + plan edits: 1509 tests in 68 suites passed, 1 known issue)
 
 ### Task 2: Wire-generation signal and advertisement ordering
 
@@ -534,7 +574,8 @@ the same reconcile when it lands.
       `open_requests` (default `[]`)
 - [ ] advertisement in a `Task` started on the `gateway.ready` frame, 5 s cap, store
       `declinesNotShown`, then yield `.ready`; `-32601`, timeout and other failures still reach
-      ready, the latter two logged
+      ready, the latter two logged (the base already starts the `Task` and stores
+      `declinesNotShown`; what changes is holding `.ready` until it settles or the cap fires)
 - [ ] record `desktopContract` per slot from `applyActivate` and `session.info`
 - [ ] write tests: `desktop_contract` as `7`, `"8"`, `"x"`, absent — and a string value leaves the
       model/usage fields of `info` intact; `open_requests` present/absent/malformed; the
@@ -550,6 +591,20 @@ the same reconcile when it lands.
       uncovered)
 - [ ] ➕ drop the redundant `advertisementUnsupported` flag in `GatewayConnection` — the same
       branch sets `advertisedServerRequests = true`, which already stops the retry
+- [ ] ➕ decide whether #116's background retry (`startAdvertisement` → `retryAdvertisement`,
+      2 s → 30 s for the connection's life) survives behind the awaited first attempt. The
+      Technical Details design has none (the next connect is the retry); if it stays, describe it
+      there and keep the item above about `advertisementFailureReported`
+- [ ] ➕ make the advertisement failure visible: the base's `.serverRequestFailed` banner lands
+      just after `.ready` and is wiped by `applyActivate`'s `errorBanner = nil` when the hydrate
+      answers later; once `.ready` waits on the advertisement, the `.ready` handler's own clear
+      wipes it too. Pick banner (CLAUDE.md "surface RPC failures") or gateway log (Technical
+      Details), make it survive the ready/hydrate clears, and test that
+- [ ] ➕ reword the failure copy "Couldn’t enable approval requests" to cover every prompt kind
+      (clarify/sudo/secret ride the same advertisement after Tasks 5–6)
+- ⚠️ until this task lands, `.ready` (and so `session.resume`) does not wait for the
+      advertisement: a prompt raised before the server processed it is refused while the phone
+      is the only client
 - [ ] run tests - must pass before next task
 
 ### Task 3: One queue for every rendered server request
@@ -561,10 +616,12 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift`
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (queue, `refreshPresented`,
   the exhaustive event list)
-- Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `HermesGatewayClientTests.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `HermesGatewayClientTests.swift`, `ServerRequestTests.swift`
 
 - [ ] add `PendingServerRequest`, `SecretKind` (moved), `RequestCancel`, `OpenRequest`; replace
-      the base's approval event with `.serverRequest`; drop `ApprovalRequest.serverRequestID`
+      `GatewayEvent.approvalServerRequest` (the case, its `GatewayLogEntry` name/summary, the
+      reducer case, the non-transcript list entry) with `.serverRequest`; drop
+      `ApprovalRequest.serverRequestID` (set in `GatewayConnection.presentApproval`)
 - [ ] `serverRequests` queue with `present(_:)` for a new head and `refreshPresented(_:)` for a
       known id; approval answers through `request.answer` → `serverRequestAnswered`
 - [ ] `request.cancel`: remove the entry, present the next, "Timed out" row for a presented
@@ -577,6 +634,26 @@ the same reconcile when it lands.
       the card with a banner; a replayed id refreshes without a token bump; cancel of the head /
       of a queued entry / of an unknown id; turn end clears; the decline matrix including
       `vault.code` getting nothing on every backend
+- [ ] ➕ keep the card on a failed answer: the base clears `pendingInteraction` and appends the
+      "Approved"/"Denied" row BEFORE `request.answer`, so a throw or malformed status leaves a
+      banner, no card, and a request still open server-side. Remove only on `ok`/`expired`; on
+      failure keep the card and drop or patch the optimistic row. Rewrite the base's
+      `serverApprovalAnswer` test (it asserts the card is gone on failure)
+- [ ] ➕ test the base's `!approve || request.allowsOnce` guard in `respondToApproval`: Approve
+      on a card whose `choices` lack `once` sends nothing and keeps the card (uncovered)
+- [ ] ➕ drive the decline-matrix tests through injected frames: the base's
+      `declinesOnlyWindowBridges` / `automaticSendFailureDoesNotEndTurn` call
+      `handleServerRequest` directly, so `handle(frame:)`'s routing of non-approval methods is
+      untested (only approval frames are injected end to end)
+- ⚠️ approval params that decode but carry no `command`/`description` (`{}`, `session_id` only)
+      present a content-less card that looks like the push-tap recovered card instead of being
+      denied as malformed; decide whether that counts as malformed when building the queue
+- ⚠️ a `choices` list with `session` but no `once` renders Deny only (Approve hidden, the toggle
+      needs `allowsOnce`); upstream always offers `once` alongside `session`, so accepted
+- ⚠️ the base ignores `params.session_id` (as the client already drops events' `session_id`);
+      fine while one socket serves one session (multi-slot is #90)
+- ⚠️ until this task lands, a second server approval overwrites the presented one and the first
+      stays open server-side until its deadline
 - [ ] run tests - must pass before next task
 
 ### Task 4: `ClarifyRequest` questions model and all three shapes
@@ -658,8 +735,10 @@ the same reconcile when it lands.
       to `store.isCompressibleCardPending` with the rationale updated
 - [ ] add snapshots: `testClarifyCard_multiSelect`, `testClarifyCard_multiQuestion`,
       `testClarifyCard_recommendedBadge`, `testClarifyCard_lockedAnswers`,
-      `testClarifyCard_otherRow`, `testApprovalCard_noSessionChoice` if the base did not add it
-      (`make snapshot` twice each; pinned width + height since the region scrolls)
+      `testClarifyCard_otherRow`, `testApprovalCard_noSessionChoice` (the base added no
+      snapshot) (`make snapshot` twice each; pinned width + height since the region scrolls)
+- [ ] ➕ add `testApprovalCard_denyOnly` (`choices: ["deny"]`): the base hides Approve when
+      `!allowsOnce`, and no snapshot covers the one-button row
 - [ ] add `ClarifyCardLayoutTests`: hosted `ChatView` at the shortest keyboard-up window with
       five questions — Confirm/Skip frames inside the window, region
       `contentSize.height > bounds.height`; a single-question card still hugs its content
@@ -685,6 +764,9 @@ the same reconcile when it lands.
       `running == false` with none clears; v7 hint + approval in the replay → the real card, no
       generic card; v7 hint + empty replay → nothing; legacy hint → generic card (existing
       `AppFeatureTests` cases still pass)
+- ⚠️ until this task lands, the base's `applyActivate` still runs `clearStaleApproval` on
+      `running == false`, which also drops a live server-request approval card (#83319) and
+      leaves the request open server-side
 - [ ] run tests - must pass before next task
 
 ### Task 9: Verify acceptance criteria
@@ -694,6 +776,13 @@ the same reconcile when it lands.
       replay, push-tap, the decline matrix, choice narrowing
 - [ ] verify legacy wire byte-identity: the pre-change `clarify.respond` / `sudo.respond` /
       `secret.respond` / `approval.respond` fixtures still pass for legacy payloads
+- [ ] ➕ settle the base's `request_id` branch in `respondToApproval`: a legacy-event approval
+      carrying `request_id` (no srq id) now sends `{session_id, request_id, choice, all:false}`
+      instead of today's `{session_id, choice, all}`. Check upstream (`git show
+      <tag>:tui_gateway/…`) for any `approval.request` event that carries `request_id` and
+      whether its `approval.respond` accepts it; if none does, the branch is dead — drop it (and
+      `requestBoundApproval*` tests) or document it in `docs/features/approvals.md`. (Task 1
+      could not check: the worktree rules forbid touching the sibling clone)
 - [ ] verify edge cases: a cancel for a queued (not presented) request; a replay that reorders;
       every question skipped; a `running == false` snapshot with an open request; a window-owned
       request on a backend without `declines_not_shown`
@@ -712,6 +801,10 @@ the same reconcile when it lands.
 - [ ] `docs/features/approvals.md`: rewrite around server requests (queue, `request.answer` and
       `expired`, cancel, turn-end clearing, replay, the decline matrix, answer shapes) and
       push-tap recovery on v7 vs legacy; replace the "ClarifyCardView is rigid" sentence
+- [ ] ➕ rewrite, don't append to, #116's doc text: `docs/features/approvals.md` (~:24-47, the
+      "unsupported prompt kinds are left alone" point is stated twice; "phone-only agent waits"
+      becomes false for clarify/sudo/secret) and `docs/architecture.md` (~:92-100, "advertises
+      when the gateway receives `ready`" — update for the Task 2 ordering)
 - [ ] `docs/features/push-notifications.md`: point the tap-recovery paragraph at the replay
 - [ ] `docs/architecture.md`: the server→client request flow, `client.capabilities` ordering,
       `open_requests` in "Session re-hydration", `desktop_contract` as the wire signal

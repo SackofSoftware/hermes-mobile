@@ -589,21 +589,23 @@ reconnecting socket.
 - Create: `HermesKit/Tests/HermesKitTests/ReplayCursorTests.swift`
 - Modify: the 8 `receive(\.gatewayEvent)` asserts that follow a stubbed or real connect (`ChatReductionTests` 3, `HydrateTests` 2, `ServerRequestTests` 3 → `\.gatewayFrame`)
 
-- [ ] add `ReplayCursor`, `replayCursor`, `replayEpoch`, `replaySupported`,
+- [x] add `ReplayCursor`, `replayCursor`, `replayEpoch`, `replaySupported`,
       `isSessionAuthority`, `isFoldingReplay` to `State` (init defaults; `Equatable` as the rest)
-- [ ] add `Action.gatewayFrame(GatewayFrame)`; extract the `.gatewayEvent` body (`:1127-1140`)
+- [x] add `Action.gatewayFrame(GatewayFrame)`; extract the `.gatewayEvent` body (`:1127-1140`)
       into `reduceGatewayEvent(_:into:)`; `.gatewayEvent` and `.gatewayFrame` both call it;
       `.gatewayFrame` first applies the ready rules (epoch + authority) and `advanceCursor`
-- [ ] switch `connect(_:)` to send `.gatewayFrame(frame)`
-- [ ] write tests: seq 1,2,3 advances the cursor; seq 2 after 3 is ignored (event still
+      (helpers: `applyReadyReplayRules`, `advanceReplayCursor`)
+- [x] switch `connect(_:)` to send `.gatewayFrame(frame)`
+- [x] write tests: seq 1,2,3 advances the cursor; seq 2 after 3 is ignored (event still
       reduces); seq-less frame leaves the cursor; a frame for another session id replaces
       the cursor; `.ready` with epoch "e1" adopts it; a later `.ready` with "e2" clears the
       cursor and adopts "e2"; `.ready` without an epoch keeps both; `.ready` with
       `session_authority` sets `isSessionAuthority` and a later plain ready clears it;
       `.gatewayFrame` reduces identically to `.gatewayEvent` for a `message.delta`
       (transcript + persist effect)
-- [ ] update the 8 affected asserts to `\.gatewayFrame`
-- [ ] run tests - must pass before next task
+- [x] update the 8 affected asserts to `\.gatewayFrame`
+      (➕ a 9th: `AppFeatureTests` `\.liveChat.gatewayEvent` after the regular-seat dial)
+- [x] run tests - must pass before next task
 
 ### Task 4: Replay-then-hydrate on `.ready`
 

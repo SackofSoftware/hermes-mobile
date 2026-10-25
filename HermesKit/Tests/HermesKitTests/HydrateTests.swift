@@ -846,7 +846,7 @@ struct HydrateTests {
       $0.hasRequestedSession = false
     }
     // Reconnect fires `.ready` → hydrate runs (flag was reset).
-    await store.receive(\.gatewayEvent)
+    await store.receive(\.gatewayFrame)
     await store.receive(\.activateResult.success)
 
     // Foreground genuinely re-hydrated: server runtime info + inflight streaming row applied,
@@ -967,7 +967,7 @@ struct HydrateTests {
     await store.send(.reattached) {
       $0.hasRequestedSession = false
     }
-    await store.receive(\.gatewayEvent) {
+    await store.receive(\.gatewayFrame) {
       $0.status = .ready
       $0.hasRequestedSession = true
     }

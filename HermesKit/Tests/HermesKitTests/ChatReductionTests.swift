@@ -680,7 +680,7 @@ struct ChatReductionTests {
     await store.send(.task) {
       $0.hasStarted = true
     }
-    await store.receive(\.gatewayEvent) {
+    await store.receive(\.gatewayFrame) {
       $0.status = .ready
       $0.hasRequestedSession = true
     }
@@ -724,7 +724,7 @@ struct ChatReductionTests {
     await store.send(.task) {
       $0.hasStarted = true
     }
-    await store.receive(\.gatewayEvent) {
+    await store.receive(\.gatewayFrame) {
       $0.status = .ready
       $0.hasRequestedSession = true
     }
@@ -769,7 +769,7 @@ struct ChatReductionTests {
     await store.send(.task) {
       $0.hasStarted = true
     }
-    await store.receive(\.gatewayEvent) {
+    await store.receive(\.gatewayFrame) {
       $0.status = .ready
       $0.hasRequestedSession = true
     }

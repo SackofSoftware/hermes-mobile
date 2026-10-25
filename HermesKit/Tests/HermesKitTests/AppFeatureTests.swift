@@ -4810,7 +4810,7 @@ struct AppFeatureTests {
     await store.receive(\.fillLiveChat)
     // The reducer dials the replacement seat; nothing but the archive was ever tapped.
     await store.receive(\.liveChat.task)
-    await store.receive(\.liveChat.gatewayEvent)
+    await store.receive(\.liveChat.gatewayFrame)
     await store.receive(\.liveChat.sessionResult.success)
     #expect(methods.value.contains("session.create"))
     #expect(store.state.liveChat?.liveSessionID == "seat-live")

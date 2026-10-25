@@ -327,15 +327,15 @@ struct ServerRequestTests {
     let message = "Couldn’t enable approvals and other prompts: busy"
     await store.send(.task) { $0.hasStarted = true }
     transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
-    await store.receive(\.gatewayEvent) { $0.status = .ready }
-    await store.receive(\.gatewayEvent) {
+    await store.receive(\.gatewayFrame) { $0.status = .ready }
+    await store.receive(\.gatewayFrame) {
       $0.serverRequestsUnavailable = message
       $0.errorBanner = message
     }
     await clock.advance(by: .seconds(120))
     transport.inject(serverRequestFrame(id: "bridge", method: "tour", params: .object([:])))
     transport.inject(#"{"method":"event","params":{"type":"probe.ack","payload":{}}}"#)
-    await store.receive(\.gatewayEvent) // probe.ack: the receive loop survived the failure
+    await store.receive(\.gatewayFrame) // probe.ack: the receive loop survived the failure
     #expect(attempts.value == 1)
     #expect(transport.sent.count == 1) // the one advertisement; no 4404 for the tour
     #expect(store.state.isSending)

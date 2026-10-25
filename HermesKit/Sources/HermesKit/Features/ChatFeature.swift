@@ -547,6 +547,39 @@ public struct ChatFeature {
     /// re-advertises; the client yields its failure only after that `.ready`).
     var serverRequestsUnavailable: String?
 
+    /// The last server event sequence number this slot has seen for one live session (#98).
+    public struct ReplayCursor: Equatable, Sendable {
+      public var sessionID: String
+      public var seq: Int
+
+      public init(sessionID: String, seq: Int) {
+        self.sessionID = sessionID
+        self.seq = seq
+      }
+    }
+
+    /// Lossless reconnect watermark (#98): advanced by every stamped frame (`seq` present)
+    /// for the slot's session; a frame for another session id replaces it (the slot follows
+    /// one session, a re-minted live id starts over). In memory only, per slot: it survives
+    /// drops, the backoff redial, and `.teardownSocketOnly`, and dies with the slot. Never
+    /// persisted (a cold launch always hydrates). A seq-less frame (agent < v2026.8.27)
+    /// never starts one, so older agents never see a replay RPC.
+    var replayCursor: ReplayCursor?
+    /// The server process's `gateway.ready.replay_epoch`. A different epoch on a later ready
+    /// (gateway restart) clears `replayCursor` before it is adopted; a ready without one
+    /// (older agent) leaves it untouched.
+    var replayEpoch: String?
+    /// False once `session.events.since` answered `-32601` (pre-ring agent). Per slot,
+    /// unpersisted.
+    var replaySupported: Bool
+    /// This connection's ready said `session_authority: true` (canonical session authority
+    /// host, v0.22.3+): replay is skipped there. Reset by every ready frame.
+    var isSessionAuthority: Bool
+    /// True only while a replay batch is being folded: suppresses `drainQueueIfReady`, since
+    /// turn-ending events in the batch describe the past and only the hydrate's `running`
+    /// is a trustworthy idle edge after a drop.
+    var isFoldingReplay: Bool
+
     public enum Status: Equatable, Sendable {
       case connecting
       case ready
@@ -592,6 +625,11 @@ public struct ChatFeature {
       self.hasHydrated = false
       self.desktopContract = nil
       self.serverRequestsUnavailable = nil
+      self.replayCursor = nil
+      self.replayEpoch = nil
+      self.replaySupported = true
+      self.isSessionAuthority = false
+      self.isFoldingReplay = false
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
       self.serverRequests = []
@@ -758,7 +796,12 @@ public struct ChatFeature {
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
     case thinkingTick
+    /// One event to fold. Sent by tests and (Task 4) by the replay fold; the socket effect
+    /// sends `.gatewayFrame`, which reduces through the same path.
     case gatewayEvent(GatewayEvent)
+    /// One inbound socket frame (#98): applies the ready rules (replay epoch, session
+    /// authority) and advances the replay cursor, then reduces exactly as `.gatewayEvent`.
+    case gatewayFrame(GatewayFrame)
     case gatewayClosed
     case reconnectTick
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
@@ -1125,19 +1168,14 @@ public struct ChatFeature {
         return .none
 
       case let .gatewayEvent(event):
-        // Snapshot whether the user is parked at the bottom window *before* the fold appends any
-        // streaming rows, so we can re-pin afterward without yanking a user who scrolled up.
-        let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-        let effect = reduce(event: event, into: &state)
-        maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
-        // Write-back: any event that mutates the transcript / model / usage schedules a
-        // debounced snapshot persist so the next open paints instantly. Debounced (and
-        // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
-        // known session id — nothing to key the snapshot on (and nothing to persist) until
-        // the session resolves.
-        guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
-        else { return effect }
-        return .merge(effect, debouncedPersist())
+        return reduceGatewayEvent(event, into: &state)
+
+      case let .gatewayFrame(frame):
+        if case .ready = frame.event {
+          applyReadyReplayRules(frame, into: &state)
+        }
+        advanceReplayCursor(frame, into: &state)
+        return reduceGatewayEvent(frame.event, into: &state)
 
       case .gatewayClosed:
         state.hasRequestedSession = false
@@ -2998,6 +3036,48 @@ public struct ChatFeature {
     state.windowStart = min(max(0, state.windowStart), count)
   }
 
+  /// The one fold for an inbound event, shared by `.gatewayEvent` and `.gatewayFrame` (and the
+  /// #98 replay fold). Snapshots whether the user is parked at the bottom window *before* the
+  /// fold appends any streaming rows, so it can re-pin afterward without yanking a user who
+  /// scrolled up.
+  private func reduceGatewayEvent(_ event: GatewayEvent, into state: inout State) -> Effect<Action> {
+    let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+    let effect = reduce(event: event, into: &state)
+    maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+    // Write-back: any event that mutates the transcript / model / usage schedules a
+    // debounced snapshot persist so the next open paints instantly. Debounced (and
+    // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
+    // known session id — nothing to key the snapshot on (and nothing to persist) until
+    // the session resolves.
+    guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
+    else { return effect }
+    return .merge(effect, debouncedPersist())
+  }
+
+  /// The `gateway.ready` replay rules (#98), applied before the ready itself reduces (so the
+  /// `.ready` branch sees the fresh verdicts). The authority flag is per connection: every
+  /// ready resets it. A changed epoch means a gateway restart reset every counter, so the
+  /// cursor is dropped before the new epoch is adopted; a ready without an epoch (older
+  /// agent) leaves both untouched.
+  private func applyReadyReplayRules(_ frame: GatewayFrame, into state: inout State) {
+    state.isSessionAuthority = frame.sessionAuthority
+    guard let epoch = frame.replayEpoch else { return }
+    if let known = state.replayEpoch, known != epoch {
+      state.replayCursor = nil
+    }
+    state.replayEpoch = epoch
+  }
+
+  /// Advance the replay watermark (#98) from a stamped frame. A frame without both a
+  /// `session_id` and a `seq` (older agent, session-less global, client-synthesized) is a
+  /// no-op; a non-increasing seq for the cursor's session is ignored (the event still
+  /// reduces); a frame for a different session replaces the cursor.
+  private func advanceReplayCursor(_ frame: GatewayFrame, into state: inout State) {
+    guard let sessionID = frame.sessionID, let seq = frame.seq else { return }
+    if let cursor = state.replayCursor, cursor.sessionID == sessionID, seq <= cursor.seq { return }
+    state.replayCursor = State.ReplayCursor(sessionID: sessionID, seq: seq)
+  }
+
   // MARK: - Effects
 
   private func connect(_ connection: ServerConnection) -> Effect<Action> {
@@ -3006,7 +3086,7 @@ public struct ChatFeature {
       // fresh single-use ws-ticket per connect. A dead session surfaces as `.authExpired`.
       for await frame in gateway.connect(connection.baseURL, connection.auth) {
         debugLog.append(frame.event) // mirror into the app-wide debug buffer (Task 12)
-        await send(.gatewayEvent(frame.event))
+        await send(.gatewayFrame(frame))
       }
       await send(.gatewayClosed)
     }

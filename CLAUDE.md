@@ -44,7 +44,8 @@ bullets below are the compressed rules.
   in the reducer, not the client. Per-request timeout 30s (`GatewayError.timedOut`);
   the slash pipeline uses `HermesGatewayClient.longRunningMethods` → 120s. Reconnect (#98):
   the gated `.ready` replays the gap from the `seq` cursor (`session.events.since`) BEFORE
-  the hydrate, no queue drain mid-fold, failure = plain hydrate (`docs/architecture.md`).
+  the hydrate, no drain/turn-end side effects mid-fold, failure = plain hydrate
+  (`docs/architecture.md`).
 - **Session-not-found self-heal (#17)**: outbound RPCs re-resume (or `session.create`
   when there's no stored id) then replay the RPC **once** — single retry, no loop; the
   banner shows only if the heal also fails. The foreground `session.resume` likewise

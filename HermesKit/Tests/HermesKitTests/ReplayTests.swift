@@ -4,7 +4,7 @@ import Testing
 
 @testable import HermesKit
 
-/// #98 Task 4: replay-then-hydrate on the reducer's `.ready`. A slot holding a watermark for
+/// #98: replay-then-hydrate on the reducer's `.ready`. A slot holding a watermark for
 /// its live session reads the gap (`session.events.since`), folds it through the live event
 /// path behind the seq gate, then runs the ordinary `session.resume` hydrate, which stays the
 /// authority. Every fallback hydrates.
@@ -22,52 +22,91 @@ struct ReplayTests {
     var params: JSONValue
   }
 
-  /// A scripted gateway: records every RPC in send order and answers the replay read and the
-  /// resume from mutable replies; everything else gets `{status: ok}`.
-  final class FakeGateway: Sendable {
+  /// A scripted chat environment: the gateway records every RPC in send order and answers the
+  /// replay read and the resume from mutable replies (everything else gets `{status: ok}`);
+  /// redials, `runningChanged` delegates, turn-anchor writes and debug-log notes are recorded.
+  final class ReplayHarness: Sendable {
     static let tracked: Set<String> = [
       "session.events.since", "session.resume", "session.activate", "session.create", "prompt.submit",
     ]
     let calls = LockIsolated<[RPC]>([])
     let since = LockIsolated<Result<JSONValue, GatewayError>>(.success(ReplayTests.since([])))
-    /// The replay read never answers (until cancelled).
+    /// The replay read does not answer while set (until cancelled, or cleared to release it).
     let hangsSince = LockIsolated(false)
     let resume = LockIsolated<JSONValue>(ReplayTests.resume(running: true))
+    /// When set, `session.resume` fails with it instead of answering `resume`.
+    let resumeError = LockIsolated<GatewayError?>(nil)
     let notes = LockIsolated<[String]>([])
+    /// `hermesGateway.connect` calls (a redial).
+    let connects = LockIsolated(0)
+    /// Every `delegate(.runningChanged)` the chat emitted, in order.
+    let running = LockIsolated<[Bool]>([])
+    /// Every turn-anchor write, in order: "set" / "clear".
+    let anchors = LockIsolated<[String]>([])
 
     /// The session/turn RPCs in send order (catalog/usage fetches filtered out).
     var rpcs: [RPC] { calls.value.filter { Self.tracked.contains($0.method) } }
     var methods: [String] { rpcs.map(\.method) }
-  }
 
-  private func makeStore(
-    _ initial: ChatFeature.State, _ gateway: FakeGateway, exhaustive: Bool = false
-  ) -> TestStoreOf<ChatFeature> {
-    let store = TestStore(initialState: initial) {
-      ChatFeature()
-    } withDependencies: {
-      $0.uuid = .incrementing
-      $0.continuousClock = TestClock()
-      $0.date = .constant(Date(timeIntervalSince1970: 1_000))
-      $0.chatSnapshot = .inMemory()
-      $0.hermesGateway.send = { @Sendable method, params in
-        gateway.calls.withValue { $0.append(RPC(method: method, params: params)) }
-        switch method {
-        case "session.events.since":
-          if gateway.hangsSince.value { try await Task.sleep(for: .seconds(3600)) }
-          return try gateway.since.value.get()
-        case "session.resume":
-          return gateway.resume.value
-        default:
-          return .object(["status": .string("ok")])
+    /// A chat store wired to this harness. `readyOnConnect`: every redial yields one ready
+    /// (same process, epoch e1) and then stays open; otherwise a redial yields nothing.
+    @MainActor
+    func makeStore(
+      _ initial: ChatFeature.State, exhaustive: Bool = false, readyOnConnect: Bool = false
+    ) -> TestStoreOf<ChatFeature> {
+      var snapshot = ChatSnapshotClient.inMemory()
+      let setAnchor = snapshot.setTurnAnchor
+      let clearAnchor = snapshot.clearTurnAnchor
+      snapshot.setTurnAnchor = { @Sendable [self] key, date in
+        anchors.withValue { $0.append("set") }
+        setAnchor(key, date)
+      }
+      snapshot.clearTurnAnchor = { @Sendable [self] key in
+        anchors.withValue { $0.append("clear") }
+        clearAnchor(key)
+      }
+      let recordRunning = Reduce<ChatFeature.State, ChatFeature.Action> { [self] _, action in
+        if case let .delegate(.runningChanged(_, isRunning)) = action {
+          running.withValue { $0.append(isRunning) }
+        }
+        return .none
+      }
+      let store = TestStore(initialState: initial) {
+        CombineReducers {
+          ChatFeature()
+          recordRunning
+        }
+      } withDependencies: { [self] in
+        $0.uuid = .incrementing
+        $0.continuousClock = TestClock()
+        $0.date = .constant(Date(timeIntervalSince1970: 1_000))
+        $0.chatSnapshot = snapshot
+        $0.hermesGateway.connect = { @Sendable [self] _, _ in
+          connects.withValue { $0 += 1 }
+          return AsyncStream<GatewayFrame> {
+            if readyOnConnect { $0.yield(GatewayFrame(.ready, replayEpoch: "e1")) }
+          }
+        }
+        $0.hermesGateway.send = { @Sendable [self] method, params in
+          calls.withValue { $0.append(RPC(method: method, params: params)) }
+          switch method {
+          case "session.events.since":
+            while hangsSince.value { try await Task.sleep(for: .milliseconds(5)) }
+            return try since.value.get()
+          case "session.resume":
+            if let error = resumeError.value { throw error }
+            return resume.value
+          default:
+            return .object(["status": .string("ok")])
+          }
+        }
+        $0.debugLog.note = { @Sendable [self] type, summary in
+          notes.withValue { $0.append("\(type): \(summary)") }
         }
       }
-      $0.debugLog.note = { @Sendable type, summary in
-        gateway.notes.withValue { $0.append("\(type): \(summary)") }
-      }
+      if !exhaustive { store.exhaustivity = .off(showSkippedAssertions: false) }
+      return store
     }
-    if !exhaustive { store.exhaustivity = .off(showSkippedAssertions: false) }
-    return store
   }
 
   /// A slot whose socket dropped: a stored + live session, a watermark at `cursor`, epoch e1.
@@ -114,7 +153,8 @@ struct ReplayTests {
 
   /// A `session.resume` payload (usage present, so no usage fetch).
   nonisolated static func resume(
-    running: Bool, messages: [JSONValue] = [], openRequests: [JSONValue] = [], contract: Int? = 7
+    live: String = "live1", running: Bool, messages: [JSONValue] = [], openRequests: [JSONValue] = [],
+    contract: Int? = 7
   ) -> JSONValue {
     var info: [String: JSONValue] = [
       "model": .string("claude-opus-4-8"),
@@ -124,7 +164,7 @@ struct ReplayTests {
     ]
     if let contract { info["desktop_contract"] = .number(Double(contract)) }
     return .object([
-      "session_id": .string("live1"), "stored_session_id": .string("stored1"),
+      "session_id": .string(live), "stored_session_id": .string("stored1"),
       "messages": .array(messages), "running": .bool(running), "info": .object(info),
       "open_requests": .array(openRequests),
     ])
@@ -149,16 +189,16 @@ struct ReplayTests {
   // MARK: Ordering and wire shape
 
   @Test func replayReadsTheGapBeforeTheResumeWithExactParams() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     var initial = droppedState()
     initial.profileName = "work"
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     await store.send(.gatewayFrame(ready)) {
       $0.status = .ready
       $0.hasRequestedSession = true
     }
-    await store.receive(\.replayResult.success)
+    await store.receive(\.eventReplayResult.success)
     await store.receive(\.activateResult.success)
 
     // `events.since` carries the cursor and nothing else (no profile, no replay_epoch); the
@@ -176,17 +216,17 @@ struct ReplayTests {
   }
 
   @Test func foldedToolRowsSurviveTheRunningHydrate() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal"), "context": .string("Run tests")]),
       Self.event("tool.complete", 43, ["tool_id": .string("t1"), "name": .string("terminal"), "result_text": .string("ok")]),
       Self.event("tool.start", 44, ["tool_id": .string("t2"), "name": .string("read")]),
     ], latest: 44)))
     gateway.resume.setValue(Self.resume(running: true, messages: [Self.message(1, "user", "run the tests")]))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.replayCursor = .init(sessionID: "live1", seq: 44)
       $0.toolRowIDs = ["t1": self.uuid(0), "t2": self.uuid(1)]
     }
@@ -212,7 +252,7 @@ struct ReplayTests {
   }
 
   @Test func replayedReasoningAfterADropLandsInAFreshLiveThinkingRow() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("thinking.delta", 42, ["text": .string("gap reasoning")]),
     ])))
@@ -224,14 +264,14 @@ struct ReplayTests {
       id: uuid(900), kind: .thinking(reasoning: "before", status: nil, elapsedSeconds: 3, isComplete: false)
     )]
     initial.thinkingRowID = uuid(900)
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     // The drop finalizes in-flight state: the pre-drop thinking row is frozen.
     await store.send(.gatewayClosed)
     #expect(store.state.thinkingRowID == nil)
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.thinkingRowID = self.uuid(0)
       $0.replayCursor = .init(sessionID: "live1", seq: 42)
     }
@@ -250,7 +290,7 @@ struct ReplayTests {
   }
 
   @Test func replayedReasoningAfterGraceExpiryExtendsTheLiveThinkingRow() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("thinking.delta", 42, ["text": .string(" + gap")]),
     ])))
@@ -262,12 +302,12 @@ struct ReplayTests {
       id: uuid(900), kind: .thinking(reasoning: "before", status: nil, elapsedSeconds: 3, isComplete: false)
     )]
     initial.thinkingRowID = uuid(900)
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     // Grace expiry keeps every live pointer (nothing is finalized).
     await store.send(.teardownSocketOnly)
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.transcript[id: self.uuid(900)]?.kind =
         .thinking(reasoning: "before + gap", status: nil, elapsedSeconds: 3, isComplete: false)
     }
@@ -283,15 +323,15 @@ struct ReplayTests {
   }
 
   @Test func replayedStatusUpdateRidesTheLiveThinkingRowThroughTheRunningHydrate() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("thinking.delta", 42, ["text": .string("gap reasoning")]),
       Self.event("status.update", 43, ["kind": .string("compress"), "text": .string("Compressing context")]),
     ])))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.thinkingRowID = self.uuid(0)
       $0.replayCursor = .init(sessionID: "live1", seq: 43)
     }
@@ -311,16 +351,16 @@ struct ReplayTests {
   // MARK: Seq gate and fallbacks
 
   @Test func alreadySeenAndForeignEventsAreSkipped() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("tool.start", 41, ["tool_id": .string("t0"), "name": .string("seen")]),
       Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("new")]),
       Self.event("tool.start", 50, session: "live2", ["tool_id": .string("t9"), "name": .string("foreign")]),
     ])))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.toolRowIDs = ["t1": self.uuid(0)]
       $0.replayCursor = .init(sessionID: "live1", seq: 42)
     }
@@ -329,14 +369,14 @@ struct ReplayTests {
   }
 
   @Test func truncatedReplyAdvancesTheCursorFoldsNothingAndHydrates() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("tool.start", 88, ["tool_id": .string("t1"), "name": .string("terminal")]),
     ], latest: 90, truncated: true)))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.replayCursor = .init(sessionID: "live1", seq: 90)
       $0.transcript = []
       $0.toolRowIDs = [:]
@@ -347,14 +387,14 @@ struct ReplayTests {
   }
 
   @Test func replyFromANewEpochDropsTheCursorAndHydrates() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
     ], epoch: "e2")))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.replayCursor = nil
       $0.replayEpoch = "e2"
       $0.transcript = []
@@ -365,15 +405,15 @@ struct ReplayTests {
   }
 
   @Test func consecutiveReconnectsReadFromTheCursorTheFirstReplayAdvanced() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
       Self.event("tool.complete", 43, ["tool_id": .string("t1"), "name": .string("terminal")]),
     ])))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.replayCursor = .init(sessionID: "live1", seq: 43)
     }
     await store.receive(\.activateResult.success)
@@ -384,7 +424,7 @@ struct ReplayTests {
     ])))
     await store.send(.gatewayClosed)
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.replayCursor = .init(sessionID: "live1", seq: 44)
     }
     await store.receive(\.activateResult.success)
@@ -399,8 +439,8 @@ struct ReplayTests {
   }
 
   @Test func gatewayRestartDuringTheGapSkipsTheReadAndHydrates() async {
-    let gateway = FakeGateway()
-    let store = makeStore(droppedState(), gateway)
+    let gateway = ReplayHarness()
+    let store = gateway.makeStore(droppedState())
 
     // A new process epoch on the ready: the old numbering is gone, so no read is attempted.
     await store.send(.gatewayFrame(GatewayFrame(.ready, replayEpoch: "e2"))) {
@@ -422,12 +462,12 @@ struct ReplayTests {
   }
 
   @Test func unknownMethodLatchesReplayOffAndHydrates() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.failure(.server("unknown method: session.events.since")))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.failure) {
+    await store.receive(\.eventReplayResult.failure) {
       $0.replaySupported = false
     }
     await store.receive(\.activateResult.success)
@@ -450,12 +490,12 @@ struct ReplayTests {
     (.failure(.server("internal error")), "internal error"),
   ])
   func otherFailuresHydrateWithoutABannerOrALatch(reply: Result<JSONValue, GatewayError>, note: String) async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(reply)
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.failure) {
+    await store.receive(\.eventReplayResult.failure) {
       $0.replaySupported = true
       $0.replayCursor = .init(sessionID: "live1", seq: 41)
     }
@@ -467,21 +507,21 @@ struct ReplayTests {
   }
 
   @Test func lateResultOverAReconnectingSocketIsDropped() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     // Exhaustive: neither result may change state or start an effect.
-    let store = makeStore(droppedState(), gateway, exhaustive: true)
+    let store = gateway.makeStore(droppedState(), exhaustive: true)
 
-    await store.send(.replayResult(.failure(.disconnected)))
-    await store.send(.replayResult(.success(ReplayBatch(events: [
+    await store.send(.eventReplayResult(.failure(.disconnected)))
+    await store.send(.eventReplayResult(.success(ReplayBatch(events: [
       GatewayFrame(.toolStart(toolID: "t1", name: "terminal", title: nil, argsText: nil), sessionID: "live1", seq: 42),
     ]))))
     #expect(gateway.calls.value.isEmpty)
   }
 
   @Test func dropDuringTheReadCancelsItAndTheNextReadyReplaysFromTheSameCursor() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.hangsSince.setValue(true)
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
     await store.send(.gatewayClosed) {
@@ -493,7 +533,7 @@ struct ReplayTests {
       Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
     ])))
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.replayCursor = .init(sessionID: "live1", seq: 42)
     }
     await store.receive(\.activateResult.success)
@@ -506,27 +546,33 @@ struct ReplayTests {
   }
 
   @Test func teardownDuringTheReadCancelsIt() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.hangsSince.setValue(true)
-    // Exhaustive: a late `.replayResult` (or a hydrate) would fail the test.
-    let store = makeStore(droppedState(), gateway, exhaustive: true)
+    // Exhaustive: a late `.eventReplayResult` (or a hydrate) would fail the test.
+    let store = gateway.makeStore(droppedState(), exhaustive: true)
 
     await store.send(.gatewayFrame(ready)) {
       $0.status = .ready
       $0.hasRequestedSession = true
+      $0.isReplayReadPending = true
     }
-    await store.send(.teardown)
+    await store.send(.teardown) {
+      $0.isReplayReadPending = false
+    }
+    await store.finish()
     #expect(!gateway.methods.contains("session.resume"))
+    // A deliberate cancel is not a failed read.
+    #expect(gateway.notes.value.isEmpty)
   }
 
   // MARK: When replay does not run
 
   @Test(arguments: [nil, ChatFeature.State.ReplayCursor(sessionID: "live-old", seq: 41)])
   func withoutACursorForTheLiveSessionTheResumeIsUnchanged(cursor: ChatFeature.State.ReplayCursor?) async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     var initial = droppedState()
     initial.replayCursor = cursor
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     // An older agent's ready (no epoch) and no usable watermark: today's hydrate, byte for byte.
     await store.send(.gatewayFrame(GatewayFrame(.ready)))
@@ -538,8 +584,8 @@ struct ReplayTests {
   }
 
   @Test func sessionAuthorityHostNeverReplays() async {
-    let gateway = FakeGateway()
-    let store = makeStore(droppedState(), gateway)
+    let gateway = ReplayHarness()
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(GatewayFrame(.ready, replayEpoch: "e1", sessionAuthority: true))) {
       $0.isSessionAuthority = true
@@ -550,10 +596,10 @@ struct ReplayTests {
   }
 
   @Test func attachLiveBranchNeverReplays() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     var initial = droppedState()
     initial.attachLiveSessionID = "live1"
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     await store.send(.gatewayFrame(ready))
     await store.receive(\.activateResult)
@@ -563,12 +609,12 @@ struct ReplayTests {
   }
 
   @Test func freshSessionCreateNeverReplays() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     var initial = ChatFeature.State(connection: conn)
     initial.liveSessionID = "live1"
     initial.status = .reconnecting
     initial.replayCursor = .init(sessionID: "live1", seq: 41)
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     await store.send(.gatewayFrame(ready))
     await store.receive(\.sessionResult)
@@ -579,7 +625,7 @@ struct ReplayTests {
   // MARK: #97 interplay (v7 hydrate)
 
   @Test func replayedTimeoutOfThePresentedCardRaisesTheNextAndTheHydrateRefreshesItInPlace() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("request.cancel", 42, [
         "id": .string("srq-a"), "method": .string("approval"), "reason": .string("timeout"),
@@ -590,11 +636,11 @@ struct ReplayTests {
     initial.desktopContract = 7
     initial.serverRequests = [Self.queued("srq-a", "rm a"), Self.queued("srq-b", "rm b")]
     initial.present(Self.queued("srq-a", "rm a").kind)
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
     #expect(store.state.pendingInteractionToken == 1)
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.serverRequests = [Self.queued("srq-b", "rm b")]
       $0.pendingInteraction = Self.queued("srq-b", "rm b").kind
       $0.pendingInteractionToken = 2
@@ -613,7 +659,7 @@ struct ReplayTests {
   }
 
   @Test func replayedCancelForAnUnknownIdIsANoOpAndForAQueuedIdRemovesItSilently() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("request.cancel", 42, ["id": .string("srq-gone"), "reason": .string("timeout")]),
       Self.event("request.cancel", 43, [
@@ -625,10 +671,10 @@ struct ReplayTests {
     initial.desktopContract = 7
     initial.serverRequests = [Self.queued("srq-a", "rm a"), Self.queued("srq-b", "rm b")]
     initial.present(Self.queued("srq-a", "rm a").kind)
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.serverRequests = [Self.queued("srq-a", "rm a")]
       $0.pendingInteraction = Self.queued("srq-a", "rm a").kind
       $0.pendingInteractionToken = 1
@@ -642,7 +688,7 @@ struct ReplayTests {
 
   @Test(arguments: [false, true])
   func foldNeverDrainsTheQueueAndARunningHydrateDoesNotEither(byCancel: Bool) async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     let turnEnd = byCancel
       ? Self.event("request.cancel", 42, ["id": .string("srq-a"), "reason": .string("resolved")])
       : Self.event("message.complete", 42, ["text": .string("done")])
@@ -656,10 +702,10 @@ struct ReplayTests {
       initial.serverRequests = [Self.queued("srq-a")]
       initial.present(Self.queued("srq-a").kind)
     }
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.pendingInteraction = nil
       $0.queuedPrompts = [QueuedPrompt(id: UUID(77), text: "next")]
       $0.drainingEntry = nil
@@ -672,17 +718,17 @@ struct ReplayTests {
   }
 
   @Test func idleHydrateAfterAFoldDrainsTheQueueOnce() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("message.complete", 42, ["text": .string("done")]),
     ])))
     gateway.resume.setValue(Self.resume(running: false))
     var initial = droppedState()
     initial.queuedPrompts = [QueuedPrompt(id: UUID(77), text: "next"), QueuedPrompt(id: UUID(78), text: "later")]
-    let store = makeStore(initial, gateway)
+    let store = gateway.makeStore(initial)
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.drainingEntry = nil
     }
     await store.receive(\.activateResult.success)
@@ -693,13 +739,13 @@ struct ReplayTests {
   }
 
   @Test func openRequestsOnTheReplyAreIgnoredAndOnlyTheHydrateRaisesTheCard() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([], openRequests: [Self.openRequest("srq-a")])))
     gateway.resume.setValue(Self.resume(running: true, openRequests: [Self.openRequest("srq-a")]))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.pendingInteraction = nil
       $0.pendingInteractionToken = 0
       $0.serverRequests = []
@@ -724,13 +770,13 @@ struct ReplayTests {
     #expect(approvalFrame.event.isLegacyPrompt)
     #expect(clarifyFrame.event.isLegacyPrompt)
 
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([approval, clarify])))
     gateway.resume.setValue(Self.resume(running: true, contract: nil))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.pendingInteraction = nil
       $0.pendingInteractionToken = 0
       $0.replayCursor = .init(sessionID: "live1", seq: 43)
@@ -755,7 +801,7 @@ struct ReplayTests {
   }
 
   @Test func completedTurnIsReplacedWholesaleAndAReplayedReviewSummaryIsWiped() async {
-    let gateway = FakeGateway()
+    let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([
       Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
       Self.event("review.summary", 43, ["text": .string("💾 Self-improvement review: noted.")]),
@@ -763,14 +809,14 @@ struct ReplayTests {
     ])))
     let history = [Self.message(1, "user", "q"), Self.message(2, "assistant", "done")]
     gateway.resume.setValue(Self.resume(running: false, messages: history))
-    let store = makeStore(droppedState(), gateway)
+    let store = gateway.makeStore(droppedState())
 
     await store.send(.gatewayFrame(ready))
-    await store.receive(\.replayResult.success) {
+    // The reply text is left to the hydrate (no materialised assistant row in the fold).
+    await store.receive(\.eventReplayResult.success) {
       $0.transcript = [
         ChatRow(id: self.uuid(0), kind: .tool(name: "terminal", title: "terminal", state: .running, detail: nil, durationS: nil)),
         ChatRow(id: self.uuid(1), kind: .status(kind: ChatRow.Kind.reviewStatusKind, text: "💾 Self-improvement review: noted.")),
-        ChatRow(id: self.uuid(2), kind: .message(role: .assistant, text: "done", isComplete: true)),
       ]
     }
     await store.receive(\.activateResult.success)
@@ -781,6 +827,348 @@ struct ReplayTests {
       SessionMessage(id: 2, role: "assistant", content: "done"),
     ]))
     #expect(store.state.toolRowIDs.isEmpty)
+    await store.send(.teardown)
+  }
+
+  // MARK: Past turn boundaries in the fold
+
+  @Test func aReplayedReplyNeverShowsTwiceBeforeTheHydrate() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("message.delta", 42, ["text": .string("lo")]),
+      Self.event("message.complete", 43, ["text": .string("Hello")]),
+    ])))
+    let history = [Self.message(1, "user", "q"), Self.message(2, "assistant", "Hello")]
+    gateway.resume.setValue(Self.resume(running: false, messages: history))
+    var initial = droppedState()
+    initial.status = .ready
+    initial.hasRequestedSession = true
+    initial.isSending = true
+    initial.transcript = [ChatRow(id: uuid(900), kind: .message(role: .assistant, text: "Hel", isComplete: false))]
+    initial.streamingRowID = uuid(900)
+    let store = gateway.makeStore(initial)
+
+    await store.send(.gatewayClosed)
+    await store.send(.gatewayFrame(ready))
+    // The drop finalized the pre-drop partial; the fold adds no second assistant row.
+    await store.receive(\.eventReplayResult.success) {
+      $0.transcript = [ChatRow(id: self.uuid(900), kind: .message(role: .assistant, text: "Hel", isComplete: true))]
+      $0.replayCursor = .init(sessionID: "live1", seq: 43)
+    }
+    await store.receive(\.activateResult.success)
+    await store.receive(\.delegate.runningChanged)
+    #expect(Array(store.state.transcript) == reconstructTranscript([
+      SessionMessage(id: 1, role: "user", content: "q"),
+      SessionMessage(id: 2, role: "assistant", content: "Hello"),
+    ]))
+    // Only the hydrate reports the turn's state.
+    #expect(gateway.running.value == [false])
+    await store.send(.teardown)
+  }
+
+  @Test func aGapAcrossATurnBoundaryWritesOneAnchorAndNoRunningEdge() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
+      Self.event("message.complete", 43, ["text": .string("A done")]),
+      Self.event("message.start", 44),
+      Self.event("tool.start", 45, ["tool_id": .string("t2"), "name": .string("read")]),
+    ])))
+    gateway.resume.setValue(Self.resume(running: true))
+    let store = gateway.makeStore(droppedState())
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success) {
+      $0.toolRowIDs = ["t2": self.uuid(2)]
+      $0.replayCursor = .init(sessionID: "live1", seq: 45)
+    }
+    await store.receive(\.activateResult.success)
+    await store.receive(\.delegate.runningChanged)
+    // Turn A's tool row is history: the running hydrate keeps only turn B's.
+    #expect(store.state.toolRowIDs == ["t2": uuid(2)])
+    #expect(store.state.transcript[id: uuid(0)] == nil)
+    #expect(store.state.transcript[id: uuid(2)] != nil)
+    await store.send(.teardown)
+    await store.finish()
+    // No glow flicker from the past boundaries, and one anchor write (B started) instead of
+    // a racing clear + set.
+    #expect(gateway.running.value == [true])
+    #expect(gateway.anchors.value == ["set"])
+  }
+
+  @Test func replayedErrorWithSendNowArmedNeverDrainsDuringTheFold() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([Self.event("error", 42, ["message": .string("boom")])])))
+    gateway.resume.setValue(Self.resume(running: true))
+    var initial = droppedState()
+    initial.queuedPrompts = [QueuedPrompt(id: UUID(77), text: "next")]
+    initial.sendNowArmed = true
+    let store = gateway.makeStore(initial)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success) {
+      $0.drainingEntry = nil
+    }
+    await store.receive(\.activateResult.success)
+    #expect(store.state.queuedPrompts.map(\.text) == ["next"])
+    #expect(!gateway.methods.contains("prompt.submit"))
+    await store.send(.teardown)
+  }
+
+  @Test func replayedErrorDoesNotParkAndTheIdleHydrateDrains() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([Self.event("error", 42, ["message": .string("boom")])])))
+    gateway.resume.setValue(Self.resume(running: false))
+    var initial = droppedState()
+    initial.queuedPrompts = [QueuedPrompt(id: UUID(77), text: "next")]
+    let store = gateway.makeStore(initial)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success) {
+      $0.isQueueParked = false
+    }
+    await store.receive(\.activateResult.success)
+    // The past error's banner is wiped and the hydrate's idle edge drains, as without replay.
+    #expect(store.state.errorBanner == nil)
+    #expect(store.state.drainingEntry?.text == "next")
+    await store.send(.teardown)
+  }
+
+  // MARK: Nothing races the read
+
+  @Test(arguments: [false, true])
+  func foregroundDuringTheReadDefersToTheReplaysHydrate(viaReattach: Bool) async {
+    let gateway = ReplayHarness()
+    gateway.hangsSince.setValue(true)
+    let store = gateway.makeStore(droppedState())
+
+    await store.send(.gatewayFrame(ready))
+    await store.send(viaReattach ? .reattached : .foreground)
+    #expect(gateway.methods == ["session.events.since"])
+
+    gateway.hangsSince.setValue(false)
+    await store.receive(\.eventReplayResult.success) {
+      $0.isReplayReadPending = false
+    }
+    await store.receive(\.activateResult.success)
+    // One hydrate, after the fold.
+    #expect(gateway.methods == ["session.events.since", "session.resume"])
+    await store.send(.teardown)
+  }
+
+  @Test func sendingAndDrainingWaitForTheRead() async {
+    let gateway = ReplayHarness()
+    gateway.hangsSince.setValue(true)
+    gateway.resume.setValue(Self.resume(running: false))
+    var initial = droppedState()
+    initial.composerText = "typed"
+    initial.queuedPrompts = [QueuedPrompt(id: UUID(77), text: "next")]
+    initial.isQueueParked = true
+    let store = gateway.makeStore(initial)
+
+    await store.send(.gatewayFrame(ready))
+    // A `prompt.submit` would attach the socket mid-read.
+    #expect(!store.state.canSend)
+    await store.send(.composerSubmitted)
+    #expect(store.state.composerText == "typed")
+    await store.send(.queuedPromptSendNow(id: UUID(77)))
+    #expect(store.state.drainingEntry == nil)
+    #expect(gateway.methods == ["session.events.since"])
+
+    gateway.hangsSince.setValue(false)
+    await store.receive(\.eventReplayResult.success)
+    await store.receive(\.activateResult.success)
+    // The promoted head drains on the hydrate's idle edge, after the resume.
+    #expect(store.state.drainingEntry?.text == "next")
+    #expect(!store.state.isReplayReadPending)
+    await store.send(.teardown)
+  }
+
+  // MARK: Cancellation and late results
+
+  @Test func graceExpiryDuringTheReadCancelsIt() async {
+    let gateway = ReplayHarness()
+    gateway.hangsSince.setValue(true)
+    let store = gateway.makeStore(droppedState(), exhaustive: true)
+
+    await store.send(.gatewayFrame(ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+      $0.isReplayReadPending = true
+    }
+    await store.send(.teardownSocketOnly) {
+      $0.status = .reconnecting
+      $0.hasRequestedSession = false
+      $0.isReplayReadPending = false
+    }
+    // Released after the cancel: an uncancelled read would now deliver `.eventReplayResult`.
+    gateway.hangsSince.setValue(false)
+    await store.finish()
+    #expect(gateway.methods == ["session.events.since"])
+    #expect(gateway.notes.value.isEmpty)
+  }
+
+  @Test func reauthPauseDuringTheReadCancelsIt() async {
+    let gateway = ReplayHarness()
+    gateway.hangsSince.setValue(true)
+    let store = gateway.makeStore(droppedState(), exhaustive: true)
+
+    await store.send(.gatewayFrame(ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+      $0.isReplayReadPending = true
+    }
+    await store.send(.gatewayFrame(GatewayFrame(.authExpired))) {
+      $0.awaitingReauth = true
+      $0.status = .reconnecting
+    }
+    await store.receive(\.delegate.sessionExpired)
+    await store.send(.gatewayClosed) {
+      $0.hasRequestedSession = false
+      $0.isReplayReadPending = false
+    }
+    gateway.hangsSince.setValue(false)
+    await store.finish()
+    #expect(gateway.methods == ["session.events.since"])
+    #expect(gateway.notes.value.isEmpty)
+  }
+
+  @Test func dropDuringTheReadCancelsIt() async throws {
+    let gateway = ReplayHarness()
+    gateway.hangsSince.setValue(true)
+    let store = gateway.makeStore(droppedState(), exhaustive: true)
+
+    await store.send(.gatewayFrame(ready)) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+      $0.isReplayReadPending = true
+    }
+    await store.send(.gatewayClosed) {
+      $0.status = .reconnecting
+      $0.reconnectAttempt = 1
+      $0.hasRequestedSession = false
+      $0.isReplayReadPending = false
+    }
+    // Released after the cancel: an uncancelled read would deliver `.eventReplayResult` here,
+    // which the exhaustive store rejects at the next send.
+    gateway.hangsSince.setValue(false)
+    try await Task.sleep(for: .milliseconds(100))
+    await store.send(.teardown) // the pending backoff redial
+    await store.finish()
+    #expect(gateway.methods == ["session.events.since"])
+    #expect(gateway.notes.value.isEmpty)
+  }
+
+  @Test(arguments: [GatewayError.disconnected, .notConnected])
+  func aDeadSocketResultLeavesRecoveryToTheDrop(error: GatewayError) async {
+    let gateway = ReplayHarness()
+    var initial = droppedState()
+    initial.status = .ready
+    initial.hasRequestedSession = true
+    initial.isReplayReadPending = true
+    // Exhaustive: the result may only mark the socket reconnecting; no hydrate over it.
+    let store = gateway.makeStore(initial, exhaustive: true)
+
+    await store.send(.eventReplayResult(.failure(error))) {
+      $0.isReplayReadPending = false
+      $0.status = .reconnecting
+    }
+    #expect(gateway.calls.value.isEmpty)
+  }
+
+  @Test func aResultWithoutAStoredSessionNeverHydrates() async {
+    let gateway = ReplayHarness()
+    var initial = ChatFeature.State(connection: conn)
+    initial.liveSessionID = "live1"
+    initial.status = .ready
+    initial.replayCursor = .init(sessionID: "live1", seq: 41)
+    let store = gateway.makeStore(initial, exhaustive: true)
+
+    await store.send(.eventReplayResult(.success(ReplayBatch(events: [
+      GatewayFrame(.toolStart(toolID: "t1", name: "terminal", title: nil, argsText: nil), sessionID: "live1", seq: 42),
+    ]))))
+    #expect(gateway.calls.value.isEmpty)
+  }
+
+  @Test func aReadTimeoutSpendsTheHydratesSameSocketRetry() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.failure(.timedOut(method: "session.events.since")))
+    gateway.resumeError.setValue(.timedOut(method: "session.resume"))
+    let store = gateway.makeStore(droppedState())
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.failure) {
+      $0.hydrateRetriedAfterTimeout = true
+    }
+    await store.receive(\.activateResult.failure) {
+      $0.hydrateRetriedAfterTimeout = false
+      $0.hasRequestedSession = false
+    }
+    // A half-open socket redials after the hydrate's first timeout, not a same-socket retry.
+    await waitUntil { gateway.connects.value == 1 }
+    #expect(gateway.methods == ["session.events.since", "session.resume"])
+    await store.send(.teardown)
+  }
+
+  // MARK: Reply shapes
+
+  @Test(arguments: [("e1" as String?, nil as String?), (nil, "e1")])
+  func aMissingEpochOnEitherSideFoldsNormally(stored: String?, reply: String?) async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
+    ], epoch: reply)))
+    var initial = droppedState()
+    initial.replayEpoch = stored
+    let store = gateway.makeStore(initial)
+
+    await store.send(.gatewayFrame(GatewayFrame(.ready, replayEpoch: stored)))
+    await store.receive(\.eventReplayResult.success) {
+      $0.toolRowIDs = ["t1": self.uuid(0)]
+      $0.replayCursor = .init(sessionID: "live1", seq: 42)
+      // A reply without an epoch leaves the stored one; one with an epoch is only compared.
+      $0.replayEpoch = stored
+    }
+    await store.receive(\.activateResult.success)
+    await store.send(.teardown)
+  }
+
+  @Test(arguments: [
+    (nil as Int?, "e1", 41 as Int?),  // no latest_seq: the cursor stays
+    (30, "e1", 41),                   // an older latest_seq never moves it backwards
+    (90, "e2", nil),                  // a new epoch wins over truncation
+  ])
+  func truncatedRepliesNeverMoveTheCursorBackwards(latest: Int?, epoch: String, seq: Int?) async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("tool.start", 88, ["tool_id": .string("t1"), "name": .string("terminal")]),
+    ], latest: latest, truncated: true, epoch: epoch)))
+    let store = gateway.makeStore(droppedState())
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success) {
+      $0.replayCursor = seq.map { .init(sessionID: "live1", seq: $0) }
+      $0.replayEpoch = epoch
+      $0.toolRowIDs = [:]
+    }
+    await store.receive(\.activateResult.success)
+    await store.send(.teardown)
+  }
+
+  @Test func outOfOrderElementsFoldOnlyWhenNewer() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("tool.start", 43, ["tool_id": .string("t2"), "name": .string("read")]),
+      Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
+    ])))
+    let store = gateway.makeStore(droppedState())
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success) {
+      $0.toolRowIDs = ["t2": self.uuid(0)]
+      $0.replayCursor = .init(sessionID: "live1", seq: 43)
+    }
+    await store.receive(\.activateResult.success)
     await store.send(.teardown)
   }
 }

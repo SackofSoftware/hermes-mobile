@@ -11,8 +11,8 @@ import Foundation
 public struct HermesGatewayClient: Sendable {
   /// Open a connection to the server (base URL + auth regime) and stream decoded event
   /// frames: each `GatewayFrame` carries the event plus its `session_id` / `seq` and, on
-  /// `gateway.ready`, the replay epoch (#98). Client-synthesized events are wrapped with
-  /// every frame field nil. The stream finishes when the socket closes or the consumer stops
+  /// `gateway.ready`, the replay epoch (#98). Client-synthesized events are wrapped with no
+  /// envelope data. The stream finishes when the socket closes or the consumer stops
   /// iterating.
   ///
   /// The transport branches on `AuthSession`:
@@ -600,8 +600,19 @@ final class URLSessionWebSocketTransport: WebSocketTransport, @unchecked Sendabl
   private let task: URLSessionWebSocketTask
 
   init(url: URL, session: URLSession) {
-    task = session.webSocketTask(with: url)
+    task = Self.makeTask(url: url, session: session)
     task.resume()
+  }
+
+  /// The configured, not-yet-resumed socket task. Inbound messages are accepted up to the
+  /// server's frame ceiling (`JSONRPCRequest.maxWebSocketFrameBytes`): the
+  /// `URLSessionWebSocketTask` default (1 MiB) fails `receive()` on a bigger message and kills
+  /// the socket, e.g. a large `session.resume` history or a `session.events.since` reply (the
+  /// replay ring holds up to 4 MiB per session).
+  static func makeTask(url: URL, session: URLSession) -> URLSessionWebSocketTask {
+    let task = session.webSocketTask(with: url)
+    task.maximumMessageSize = JSONRPCRequest.maxWebSocketFrameBytes
+    return task
   }
 
   func send(_ text: String) async throws {

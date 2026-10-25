@@ -4,7 +4,7 @@ import Testing
 
 @testable import HermesKit
 
-/// #98 Task 3: the reducer-owned replay watermark. `.gatewayFrame` applies the ready rules
+/// #98: the reducer-owned replay watermark. `.gatewayFrame` applies the ready rules
 /// (epoch adoption/reset, session-authority flag) and advances the per-slot cursor from
 /// stamped frames, then reduces exactly as `.gatewayEvent`.
 @MainActor

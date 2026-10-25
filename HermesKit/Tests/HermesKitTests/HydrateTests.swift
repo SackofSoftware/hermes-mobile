@@ -1808,36 +1808,7 @@ struct HydrateTests {
   // These pin the reconnect entry points that are NOT the plain `.gatewayClosed` backoff
   // (covered in `ReplayTests`).
 
-  /// A slot on a healthy socket mid-turn with a watermark at (live1, 41), epoch e1. Every
-  /// redial yields one ready (same process, epoch e1) and then stays open.
-  private func cursorStore(
-    _ initial: ChatFeature.State, _ gateway: ReplayTests.FakeGateway,
-    connectCalls: LockIsolated<Int> = LockIsolated(0)
-  ) -> TestStoreOf<ChatFeature> {
-    let store = TestStore(initialState: initial) {
-      ChatFeature()
-    } withDependencies: {
-      $0.uuid = .incrementing
-      $0.continuousClock = TestClock()
-      $0.date = .constant(Date(timeIntervalSince1970: 1_000))
-      $0.chatSnapshot = .inMemory()
-      $0.hermesGateway.connect = { @Sendable _, _ in
-        connectCalls.withValue { $0 += 1 }
-        return AsyncStream { $0.yield(GatewayFrame(.ready, replayEpoch: "e1")) }
-      }
-      $0.hermesGateway.send = { @Sendable method, params in
-        gateway.calls.withValue { $0.append(ReplayTests.RPC(method: method, params: params)) }
-        switch method {
-        case "session.events.since": return try gateway.since.value.get()
-        case "session.resume": return gateway.resume.value
-        default: return .object(["status": .string("ok")])
-        }
-      }
-    }
-    store.exhaustivity = .off(showSkippedAssertions: false)
-    return store
-  }
-
+  /// A slot on a healthy socket mid-turn with a watermark at (live1, 41), epoch e1.
   private func liveCursorState() -> ChatFeature.State {
     var state = ChatFeature.State(connection: conn, resumeStoredID: "stored1")
     state.liveSessionID = "live1"
@@ -1855,32 +1826,16 @@ struct HydrateTests {
     "session_id": .string("live1"), "last_seen": .number(41),
   ]))
 
-  /// A `session.resume` reply under an arbitrary live id (an idle session reaped in the gap
-  /// comes back with a fresh runtime id).
-  nonisolated private static func resume(live: String, running: Bool) -> JSONValue {
-    .object([
-      "session_id": .string(live), "stored_session_id": .string("stored1"),
-      "messages": .array([]), "running": .bool(running),
-      "info": .object([
-        "model": .string("claude-opus-4-8"),
-        "usage": .object([
-          "context_used": .number(1), "context_max": .number(200_000), "context_percent": .number(0),
-        ]),
-      ]),
-    ])
-  }
-
   /// Background grace expiry tears the socket down but keeps every bit of slot state; the
   /// foreground (or a re-push of the slot's marker) redials and reads the gap from the
   /// PRE-expiry watermark before the resume — the exact case the replay pays for.
   @Test(arguments: [false, true])
   func graceExpiryRedialReplaysFromThePreExpiryCursor(viaReattach: Bool) async {
-    let gateway = ReplayTests.FakeGateway()
+    let gateway = ReplayTests.ReplayHarness()
     gateway.since.setValue(.success(ReplayTests.since([
       ReplayTests.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
     ], latest: 42)))
-    let connectCalls = LockIsolated(0)
-    let store = cursorStore(liveCursorState(), gateway, connectCalls: connectCalls)
+    let store = gateway.makeStore(liveCursorState(), readyOnConnect: true)
 
     await store.send(.teardownSocketOnly) {
       $0.status = .reconnecting
@@ -1891,12 +1846,12 @@ struct HydrateTests {
 
     await store.send(viaReattach ? .reattached : .foreground)
     await store.receive(\.gatewayFrame)
-    await store.receive(\.replayResult.success) {
+    await store.receive(\.eventReplayResult.success) {
       $0.replayCursor = .init(sessionID: "live1", seq: 42)
     }
     await store.receive(\.activateResult.success)
 
-    #expect(connectCalls.value == 1)
+    #expect(gateway.connects.value == 1)
     #expect(gateway.methods == ["session.events.since", "session.resume"])
     #expect(gateway.rpcs.first == sinceLive1At41)
     // The gap's tool row survived the running hydrate (#26).
@@ -1910,8 +1865,8 @@ struct HydrateTests {
   /// `.resumeAfterReauth` reconnects the SAME session with fresh credentials, so its ready
   /// replays the gap from where the dead socket left off.
   @Test func resumeAfterReauthReplaysTheSameSession() async {
-    let gateway = ReplayTests.FakeGateway()
-    let store = cursorStore(liveCursorState(), gateway)
+    let gateway = ReplayTests.ReplayHarness()
+    let store = gateway.makeStore(liveCursorState(), readyOnConnect: true)
 
     await store.send(.gatewayEvent(.authExpired)) {
       $0.awaitingReauth = true
@@ -1927,7 +1882,7 @@ struct HydrateTests {
       $0.awaitingReauth = false
     }
     await store.receive(\.gatewayFrame)
-    await store.receive(\.replayResult.success)
+    await store.receive(\.eventReplayResult.success)
     await store.receive(\.activateResult.success)
 
     #expect(gateway.methods == ["session.events.since", "session.resume"])
@@ -1942,15 +1897,13 @@ struct HydrateTests {
   /// is left exactly as the live stream set it.
   @Test(arguments: [false, true])
   func healthySocketReHydrateNeverReadsTheGap(viaReattach: Bool) async {
-    let gateway = ReplayTests.FakeGateway()
-    gateway.resume.setValue(Self.resume(live: "live1", running: true))
-    let connectCalls = LockIsolated(0)
-    let store = cursorStore(liveCursorState(), gateway, connectCalls: connectCalls)
+    let gateway = ReplayTests.ReplayHarness()
+    let store = gateway.makeStore(liveCursorState(), readyOnConnect: true)
 
     await store.send(viaReattach ? .reattached : .foreground)
     await store.receive(\.activateResult.success)
 
-    #expect(connectCalls.value == 0)
+    #expect(gateway.connects.value == 0)
     #expect(gateway.methods == ["session.resume"])
     #expect(store.state.replayCursor == .init(sessionID: "live1", seq: 41))
     #expect(store.state.replayEpoch == "e1")
@@ -1963,19 +1916,19 @@ struct HydrateTests {
   /// any new frame resumes without a gap read, and the first stamped frame for live2 starts
   /// a fresh cursor that the next drop replays from.
   @Test func reMintedLiveIDStartsAFreshCursorOnItsFirstStampedFrame() async {
-    let gateway = ReplayTests.FakeGateway()
+    let gateway = ReplayTests.ReplayHarness()
     gateway.since.setValue(.success(ReplayTests.since([], latest: 41)))
-    gateway.resume.setValue(Self.resume(live: "live2", running: false))
+    gateway.resume.setValue(ReplayTests.resume(live: "live2", running: false))
     var initial = liveCursorState()
     initial.status = .reconnecting
     initial.hasRequestedSession = false
     initial.isSending = false
-    let store = cursorStore(initial, gateway)
+    let store = gateway.makeStore(initial, readyOnConnect: true)
 
     // Reconnect: the cursor still matches live1, so the gap is read, then the resume
     // answers with live2.
     await store.send(.gatewayFrame(GatewayFrame(.ready, replayEpoch: "e1")))
-    await store.receive(\.replayResult.success)
+    await store.receive(\.eventReplayResult.success)
     await store.receive(\.activateResult.success) {
       $0.liveSessionID = "live2"
     }
@@ -1993,7 +1946,7 @@ struct HydrateTests {
     }
     await store.send(.gatewayClosed)
     await store.send(.gatewayFrame(GatewayFrame(.ready, replayEpoch: "e1")))
-    await store.receive(\.replayResult.success)
+    await store.receive(\.eventReplayResult.success)
     await store.receive(\.activateResult.success)
     #expect(gateway.rpcs.suffix(2).map(\.method) == ["session.events.since", "session.resume"])
     #expect(gateway.rpcs.suffix(2).first?.params == .object([

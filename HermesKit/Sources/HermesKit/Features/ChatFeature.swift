@@ -548,14 +548,9 @@ public struct ChatFeature {
     var serverRequestsUnavailable: String?
 
     /// The last server event sequence number this slot has seen for one live session (#98).
-    public struct ReplayCursor: Equatable, Sendable {
-      public var sessionID: String
-      public var seq: Int
-
-      public init(sessionID: String, seq: Int) {
-        self.sessionID = sessionID
-        self.seq = seq
-      }
+    struct ReplayCursor: Equatable, Sendable {
+      var sessionID: String
+      var seq: Int
     }
 
     /// Lossless reconnect watermark (#98): advanced by every stamped frame (`seq` present)
@@ -575,10 +570,16 @@ public struct ChatFeature {
     /// This connection's ready said `session_authority: true` (canonical session authority
     /// host, v0.22.3+): replay is skipped there. Reset by every ready frame.
     var isSessionAuthority: Bool
-    /// True only while a replay batch is being folded: suppresses `drainQueueIfReady`, since
-    /// turn-ending events in the batch describe the past and only the hydrate's `running`
-    /// is a trustworthy idle edge after a drop.
+    /// True only while a replay batch is being folded. Turn-boundary events in the batch
+    /// describe the past, so the fold suppresses their present-tense side effects: the queue
+    /// drain and park, `runningChanged`, per-event turn-anchor writes, and assistant text
+    /// (the hydrate re-seeds or rebuilds it). The hydrate's `running` is the authority.
     var isFoldingReplay: Bool
+    /// True from the replay read's issue until its result (or a cancelling drop/teardown).
+    /// The new socket is unattached until the trailing hydrate, so a healthy-socket
+    /// `.foreground`/`.reattached` defers to that hydrate and sending/draining waits for it
+    /// (a `prompt.submit` would attach the socket mid-read).
+    var isReplayReadPending: Bool
 
     public enum Status: Equatable, Sendable {
       case connecting
@@ -630,6 +631,7 @@ public struct ChatFeature {
       self.replaySupported = true
       self.isSessionAuthority = false
       self.isFoldingReplay = false
+      self.isReplayReadPending = false
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
       self.serverRequests = []
@@ -741,6 +743,8 @@ public struct ChatFeature {
         // stranding the chip on the *next* message. Bounded by the loader's per-provider
         // deadline, so the lock is always released.
         && pendingPasteCount == 0
+        // The reconnect replay read (#98): a submit would attach the socket mid-read.
+        && !isReplayReadPending
     }
 
     /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
@@ -805,7 +809,7 @@ public struct ChatFeature {
     case gatewayFrame(GatewayFrame)
     /// The reconnect replay read (#98, `session.events.since`) answered: fold the gap's
     /// events (or take a fallback), then hydrate.
-    case replayResult(Result<ReplayBatch, GatewayError>)
+    case eventReplayResult(Result<ReplayBatch, GatewayError>)
     case gatewayClosed
     case reconnectTick
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
@@ -1075,7 +1079,7 @@ public struct ChatFeature {
          thinkingTimer, persist
     /// The reconnect `session.events.since` read (#98): one outstanding; a deliberate
     /// teardown or a socket drop cancels it (the next `.ready` re-runs it).
-    case replay
+    case eventReplay
     /// One id per `config.set` key so a newer pick for that key supersedes the in-flight
     /// one: a cancelled effect never emits `.configSetFailed`, so a stale rejection can't
     /// roll the newer value back. The two keys never cancel each other.
@@ -1135,12 +1139,13 @@ public struct ChatFeature {
         return releaseVoiceResources(&state)
 
       case .teardown:
+        state.isReplayReadPending = false
         return .merge(
           releaseVoiceResources(&state),
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
           .cancel(id: CancelID.hydrate),
-          .cancel(id: CancelID.replay),
+          .cancel(id: CancelID.eventReplay),
           .cancel(id: CancelID.thinkingTimer),
           .cancel(id: CancelID.persist)
         )
@@ -1161,11 +1166,12 @@ public struct ChatFeature {
         // untouched cursor.
         state.status = .reconnecting
         state.hasRequestedSession = false
+        state.isReplayReadPending = false
         return .merge(
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
           .cancel(id: CancelID.hydrate),
-          .cancel(id: CancelID.replay)
+          .cancel(id: CancelID.eventReplay)
         )
 
       case .loadOlderRequested:
@@ -1188,8 +1194,8 @@ public struct ChatFeature {
         advanceReplayCursor(frame, into: &state)
         return reduceGatewayEvent(frame.event, into: &state)
 
-      case let .replayResult(result):
-        return applyReplayResult(result, into: &state)
+      case let .eventReplayResult(result):
+        return applyEventReplayResult(result, into: &state)
 
       case .gatewayClosed:
         state.hasRequestedSession = false
@@ -1198,17 +1204,18 @@ public struct ChatFeature {
         finalizeInFlight(into: &state)
         // A replay read in flight on the dead socket (#98) is moot: the next `.ready`
         // re-runs it from the same cursor.
+        state.isReplayReadPending = false
         // A dead session already paused us (see `.authExpired`): the stream finishing is just
         // the tail of that — don't schedule a backoff reconnect, wait for re-auth.
         guard !state.awaitingReauth else {
-          return .merge(.cancel(id: CancelID.thinkingTimer), .cancel(id: CancelID.replay))
+          return .merge(.cancel(id: CancelID.thinkingTimer), .cancel(id: CancelID.eventReplay))
         }
         state.status = .reconnecting
         state.reconnectAttempt += 1
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
-          .cancel(id: CancelID.replay),
+          .cancel(id: CancelID.eventReplay),
           .run { [clock] send in
             try await clock.sleep(for: delay)
             await send(.reconnectTick)
@@ -1369,6 +1376,9 @@ public struct ChatFeature {
           state.hasRequestedSession = false
           return connect(state.connection)
         }
+        // A reconnect replay read is in flight (#98): its trailing hydrate is this re-hydrate.
+        // Hydrating now would attach the socket mid-read and land under the fold.
+        guard !state.isReplayReadPending else { return .none }
         // Socket healthy: hydrate directly against it — no reconnect, so the live socket
         // keeps streaming throughout (no event gap). A socket that silently died while
         // suspended still self-heals: the hydrate RPC fails, the receive loop finishes →
@@ -2366,13 +2376,14 @@ public struct ChatFeature {
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
         // Lossless reconnect (#98): a slot holding a watermark for its live session first
         // reads the gap from the server's replay ring, folds it, THEN hydrates
-        // (`applyReplayResult`). This `.ready` is already past the advertisement gate, and
+        // (`applyEventReplayResult`). This `.ready` is already past the advertisement gate, and
         // the new socket is not attached to the session until the resume, so no live
         // session frame can race the fold. No cursor (first connect, an agent without the
         // ring), a `-32601` latch, or a session-authority host → today's plain hydrate.
         if state.replaySupported, !state.isSessionAuthority,
            let cursor = state.replayCursor, cursor.sessionID == state.liveSessionID {
-          return replay(cursor: cursor)
+          state.isReplayReadPending = true
+          return replayEventGap(cursor: cursor)
         }
         return hydrate(sessionID: stored, profile: state.profileName)
       }
@@ -2435,12 +2446,17 @@ public struct ChatFeature {
       if let u = usage { state.usage = u }
       if let id = state.streamingRowID {
         state.transcript[id: id]?.kind = .message(role: .assistant, text: text, isComplete: true)
-      } else if !text.isEmpty {
-        // No deltas arrived (non-streamed reply) — materialise the row now.
+      } else if !text.isEmpty, !state.isFoldingReplay {
+        // No deltas arrived (non-streamed reply) — materialise the row now. Not in a replay
+        // fold (#98): a drop already finalized the pre-drop partial, so a second row would
+        // show the reply twice until the hydrate rebuilds it from history.
         state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .assistant, text: text, isComplete: true)))
       }
       // else: empty tool-only turn → no row at all.
       state.streamingRowID = nil
+      // The turn's tool rows are history now: a later running hydrate (#26) must not
+      // re-append them next to their cooked history rows.
+      state.toolRowIDs = [:]
       // Move the thinking row below the answer, then freeze it in place so the turn ends as
       // […answer][Thought · <elapsed>].
       keepThinkingLast(into: &state)
@@ -2533,6 +2549,7 @@ public struct ChatFeature {
     case let .error(message):
       state.errorBanner = message
       state.isSending = false
+      state.toolRowIDs = [:]
       freezeThinking(into: &state)
       // Same staleness rule as `message.complete`: an errored turn is over, so any
       // standing approval card (real or recovered), the server request queue and the
@@ -2548,7 +2565,8 @@ public struct ChatFeature {
       if state.sendNowArmed {
         drain = drainQueueIfReady(into: &state)
       } else {
-        if !state.queuedPrompts.isEmpty { state.isQueueParked = true }
+        // A replayed past error (#98) does not park: the hydrate's idle edge decides.
+        if !state.queuedPrompts.isEmpty, !state.isFoldingReplay { state.isQueueParked = true }
         drain = .none
       }
       // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
@@ -3085,16 +3103,26 @@ public struct ChatFeature {
 
   /// The `gateway.ready` replay rules (#98), applied before the ready itself reduces (so the
   /// `.ready` branch sees the fresh verdicts). The authority flag is per connection: every
-  /// ready resets it. A changed epoch means a gateway restart reset every counter, so the
-  /// cursor is dropped before the new epoch is adopted; a ready without an epoch (older
-  /// agent) leaves both untouched.
+  /// ready resets it. A changed epoch drops the cursor (`adoptReplayEpochIfChanged`); a ready
+  /// also adopts the first epoch the slot sees; a ready without an epoch (older agent) leaves
+  /// both untouched.
   private func applyReadyReplayRules(_ frame: GatewayFrame, into state: inout State) {
     state.isSessionAuthority = frame.sessionAuthority
     guard let epoch = frame.replayEpoch else { return }
-    if let known = state.replayEpoch, known != epoch {
-      state.replayCursor = nil
-    }
+    adoptReplayEpochIfChanged(epoch, into: &state)
     state.replayEpoch = epoch
+  }
+
+  /// The one epoch-change rule (#98): an `epoch` that differs from the stored one means a
+  /// gateway restart reset every counter, so the cursor is dropped and the new epoch adopted.
+  /// Returns whether that happened. With no stored epoch (or no `epoch`) nothing is compared,
+  /// so nothing changed.
+  @discardableResult
+  private func adoptReplayEpochIfChanged(_ epoch: String?, into state: inout State) -> Bool {
+    guard let epoch, let known = state.replayEpoch, epoch != known else { return false }
+    state.replayCursor = nil
+    state.replayEpoch = epoch
+    return true
   }
 
   /// Advance the replay watermark (#98) from a stamped frame. A frame without both a
@@ -3117,46 +3145,81 @@ public struct ChatFeature {
   /// - otherwise the gap's events fold in order through the same path as live events, behind
   ///   the seq gate (the cursor's session, `seq > cursor.seq`, advancing per event), with the
   ///   four legacy prompt events skipped (no `*.expire` handling: a card that expired in the
-  ///   gap would stand forever) and the queue drain suppressed (`isFoldingReplay`).
+  ///   gap would stand forever), `message.delta`s skipped (the hydrate re-seeds the streaming
+  ///   text) and the past turn boundaries' present-tense side effects suppressed
+  ///   (`isFoldingReplay`); the turn anchor gets one write, for the last boundary folded.
   ///   `open_requests` on the reply is ignored on purpose: the hydrate carries the same list.
-  /// - a failure folds nothing; `-32601` latches replay off for the slot.
+  /// - a failure folds nothing; `-32601` latches replay off for the slot, and a timeout spends
+  ///   the hydrate's same-socket timeout retry (a half-open socket redials after one more).
+  ///   A `.disconnected` / `.notConnected` result does not hydrate: the companion
+  ///   `.gatewayClosed` owns recovery.
   ///
   /// DELIBERATE carve-out from "surface RPC failures": a failed read is recorded only in the
-  /// debug log (by the `replay` effect), never as a banner. The user-visible outcome is
+  /// debug log (by the `replayEventGap` effect), never as a banner. The user-visible outcome is
   /// today's plain hydrate, and a banner would fire on every reconnect to an agent without
   /// the ring.
-  private func applyReplayResult(
+  private func applyEventReplayResult(
     _ result: Result<ReplayBatch, GatewayError>, into state: inout State
   ) -> Effect<Action> {
+    state.isReplayReadPending = false
     // A late result over a dead or reconnecting socket: the next `.ready` re-runs the replay
     // from the same cursor, so never hydrate over it here.
     guard state.status == .ready, let stored = state.storedSessionID else { return .none }
-    var effects: [Effect<Action>] = []
+    var fold: Effect<Action> = .none
     switch result {
     case let .success(batch):
-      if let epoch = batch.epoch, let known = state.replayEpoch, epoch != known {
-        state.replayCursor = nil
-        state.replayEpoch = epoch
-      } else if batch.truncated {
+      guard !adoptReplayEpochIfChanged(batch.epoch, into: &state) else { break }
+      if batch.truncated {
         if let latest = batch.latestSeq, let cursor = state.replayCursor, latest > cursor.seq {
           state.replayCursor?.seq = latest
         }
       } else {
-        state.isFoldingReplay = true
-        for frame in batch.events {
-          guard let cursor = state.replayCursor, frame.sessionID == cursor.sessionID,
-                let seq = frame.seq, seq > cursor.seq
-          else { continue }
-          advanceReplayCursor(frame, into: &state)
-          guard !frame.event.isLegacyPrompt else { continue }
-          effects.append(reduceGatewayEvent(frame.event, into: &state))
-        }
-        state.isFoldingReplay = false
+        fold = foldReplayedEvents(batch.events, into: &state)
       }
     case let .failure(error):
+      if error.isDisconnected || error == .notConnected {
+        state.status = .reconnecting
+        return .none
+      }
       if error.isUnknownMethod { state.replaySupported = false }
+      if error.isTimedOut { state.hydrateRetriedAfterTimeout = true }
     }
-    effects.append(hydrate(sessionID: stored, profile: state.profileName))
+    return .merge(fold, hydrate(sessionID: stored, profile: state.profileName))
+  }
+
+  /// The success-path fold of `applyEventReplayResult`: the seq gate, the legacy-prompt and
+  /// `message.delta` skips, and one turn-anchor write for the last boundary folded.
+  private func foldReplayedEvents(
+    _ events: [GatewayFrame], into state: inout State
+  ) -> Effect<Action> {
+    enum TurnBoundary { case started, ended }
+    var lastBoundary: TurnBoundary?
+    var effects: [Effect<Action>] = []
+    state.isFoldingReplay = true
+    for frame in events {
+      guard let cursor = state.replayCursor, frame.sessionID == cursor.sessionID,
+            let seq = frame.seq, seq > cursor.seq
+      else { continue }
+      state.replayCursor?.seq = seq
+      guard !frame.event.isLegacyPrompt else { continue }
+      switch frame.event {
+      case .messageDelta:
+        continue
+      case .messageStart:
+        lastBoundary = .started
+      case .messageComplete, .error:
+        lastBoundary = .ended
+      default:
+        break
+      }
+      effects.append(reduceGatewayEvent(frame.event, into: &state))
+    }
+    state.isFoldingReplay = false
+    switch lastBoundary {
+    case .started: effects.append(setTurnAnchor(state))
+    case .ended: effects.append(clearTurnAnchor(state))
+    case nil: break
+    }
     return .merge(effects)
   }
 
@@ -3278,11 +3341,13 @@ public struct ChatFeature {
   /// The reconnect replay read (#98): `session.events.since {session_id, last_seen}` for the
   /// cursor's live session, with nothing else — no `profile` (the legacy ring is
   /// process-global by live id) and no `replay_epoch` (a canonical-authority field; the
-  /// method forbids unknown keys). Default 30 s budget: a slow read only delays the hydrate.
+  /// method forbids unknown keys). Default 30 s budget: a slow read only delays the hydrate,
+  /// and its timeout spends the hydrate's same-socket retry (`applyEventReplayResult`).
   ///
   /// A failure is noted in the debug log and NOT surfaced as a banner — the deliberate
-  /// carve-out documented on `applyReplayResult`.
-  private func replay(cursor: State.ReplayCursor) -> Effect<Action> {
+  /// carve-out documented on `applyEventReplayResult`. A cancelled read (drop/teardown) is not a
+  /// failure and writes no note.
+  private func replayEventGap(cursor: State.ReplayCursor) -> Effect<Action> {
     .run { [gateway, debugLog] send in
       let params: JSONValue = .object([
         "session_id": .string(cursor.sessionID),
@@ -3301,12 +3366,12 @@ public struct ChatFeature {
       } catch {
         result = .failure(.disconnected)
       }
-      if case let .failure(error) = result {
+      if case let .failure(error) = result, !Task.isCancelled {
         debugLog.note("session.events.since", error.message)
       }
-      await send(.replayResult(result))
+      await send(.eventReplayResult(result))
     }
-    .cancellable(id: CancelID.replay, cancelInFlight: true)
+    .cancellable(id: CancelID.eventReplay, cancelInFlight: true)
   }
 
   /// Review finding 1's recovery probe: `session.resume` by the branch's PERSISTED
@@ -4049,7 +4114,8 @@ public struct ChatFeature {
     // A replay fold (#98) replays the PAST: its `message.complete` / `request.cancel` /
     // Send-now `.error` must not fire a queued prompt against a turn the server may still
     // be running. The hydrate that follows every fold is the only trustworthy idle edge.
-    guard !state.isFoldingReplay else { return .none }
+    // While the read itself is pending, a `prompt.submit` would attach the socket mid-read.
+    guard !state.isFoldingReplay, !state.isReplayReadPending else { return .none }
     guard !state.queuedPrompts.isEmpty,
           state.drainingEntry == nil,
           !state.isSending, !state.slashExecInFlight,
@@ -4181,7 +4247,8 @@ public struct ChatFeature {
   /// server-confirmed (`message.start`/`complete`/`error` and the activate `running` flag) —
   /// never a cached guess.
   private func runningChanged(_ running: Bool, _ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    // A replay fold's (#98) past boundaries are not the present: the hydrate reports it.
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .send(.delegate(.runningChanged(sessionID: key, running: running)))
   }
 
@@ -4190,7 +4257,8 @@ public struct ChatFeature {
   /// **non-authoritative** — it only supplies the *start instant*; `running` decides whether
   /// the timer runs at all. Written on `prompt.submit`, reaffirmed on `message.start`.
   private func setTurnAnchor(_ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    // A replay fold (#98) writes once, for its last boundary (`applyEventReplayResult`).
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .run { [chatSnapshot, now] _ in
       chatSnapshot.setTurnAnchor(key, now)
     }
@@ -4199,7 +4267,7 @@ public struct ChatFeature {
   /// Drop the turn-start anchor at turn end (completion / error / interrupt) so a stopped
   /// turn never leaves a stale anchor that a later hydrate could mistake for a live timer.
   private func clearTurnAnchor(_ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .run { [chatSnapshot] _ in
       chatSnapshot.clearTurnAnchor(key)
     }

@@ -524,7 +524,7 @@ stored-session path (not the `attachLive` branch attach, a branch-seed replay or
 live session, `replaySupported` is still true, and the connection is not a session-authority
 one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `profile`, no
 `replay_epoch`; the method rejects unknown keys) and hydrates only after the reply
-(`applyReplayResult`):
+(`applyEventReplayResult`):
 
 - **Fold.** The reply's events fold in order through `reduceGatewayEvent`, the same path as live
   events, behind a seq gate (the cursor's session, `seq > cursor.seq`, advancing per event).
@@ -532,15 +532,16 @@ one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `
   but still advance the cursor: the app decodes no `*.expire`, so a card that expired in the gap
   would stand forever. The reply's `open_requests` is ignored; the hydrate carries the same list
   moments later (`docs/features/approvals.md`).
-- **No queue drain during the fold.** `isFoldingReplay` makes `drainQueueIfReady` a no-op.
+- **Past turn boundaries stay past.** `isFoldingReplay` makes `drainQueueIfReady` a no-op.
   `finalizeInFlight` already cleared `isSending` on the drop, so a replayed `message.complete` or
   `request.cancel` would otherwise fire a queued prompt (#66) against a turn the server may still
-  be running. The hydrate's `running` is the only trustworthy idle edge, and its own drain runs
-  as usual.
+  be running. A replayed `.error` does not park the queue, the fold emits no `runningChanged`,
+  and the turn anchor gets one write for the last boundary folded. The hydrate's `running` is the
+  only trustworthy idle edge, and its own drain runs as usual.
 - **Then the hydrate, unchanged.** `applyActivate` stays the authority. A running turn keeps the
-  tool and thinking rows the fold built or extended (#26); the streaming row is re-seeded from
-  `inflight.assistant`, so replayed `message.delta`s never double the text; a completed turn is
-  replaced wholesale. Replayed status rows (`review.summary`, a "Timed out" row) are wiped, as
+  tool and thinking rows the fold built or extended (#26); assistant text is the hydrate's alone
+  (the fold skips `message.delta`s and materialises no `message.complete` row, so a reply never
+  shows twice); a completed turn is replaced wholesale. Replayed status rows (`review.summary`, a "Timed out" row) are wiped, as
   live ones are (accepted, #47). After a `.gatewayClosed` drop `finalizeInFlight` has frozen the
   pre-drop thinking row, so replayed reasoning starts a fresh live one (the frozen row goes with
   the hydrate); after `.teardownSocketOnly` nothing was finalized and replayed reasoning extends
@@ -549,9 +550,10 @@ one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `
   advances to `latest_seq`, desktop parity, so the next drop doesn't re-ask for the evicted
   window); a reply epoch that differs from the stored one (drop the cursor, adopt the epoch);
   `-32601` (an agent without the ring; latches `replaySupported = false` for the slot); any other
-  failure or a malformed result. A result that lands after the socket died again
-  (`status != .ready`) is dropped, and the next `.ready` replays from the same cursor;
-  `.teardown`, `.teardownSocketOnly` and `.gatewayClosed` cancel a read in flight.
+  failure or a malformed result (a timeout spends the hydrate's same-socket retry). A result
+  that lands after the socket died again (`status != .ready`, or a `.disconnected` failure) is
+  dropped, and the next `.ready` replays from the same cursor; `.teardown`,
+  `.teardownSocketOnly` and `.gatewayClosed` cancel a read in flight.
 - **Deliberate carve-out from "surface RPC failures".** A failed read is written to the debug log
   (`DebugLogClient.note`, by the effect) and never to `errorBanner`. The user-visible outcome is
   the plain hydrate, and a banner would fire on every reconnect to an agent without the ring.
@@ -559,8 +561,9 @@ one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `
   `session.activate`, `prompt.submit`) binds the session to the new socket; `client.capabilities`
   and `events.since` attach nothing. Until the resume the server routes the session's events and
   request frames to its detached drop sink, so no live session frame can race the fold, and the
-  desktop's park-and-flush buffer is unnecessary (revisit if anything ever attaches the socket
-  before the read). The cost is a one-RTT window between the read and the attach whose frames are
+  desktop's park-and-flush buffer is unnecessary. Nothing attaches the socket mid-read: while
+  `isReplayReadPending`, a healthy-socket `.foreground` / `.reattached` defers to the replay's
+  hydrate and `canSend` / `drainQueueIfReady` hold the `prompt.submit`. The cost is a one-RTT window between the read and the attach whose frames are
   stamped but dropped; the desktop has the same window. Reading after the advertisement gate
   rather than at socket open (as the desktop does) widens it by up to the advertisement RTT
   (worst case the 5 s cap), accepted to keep a single `.ready` path.

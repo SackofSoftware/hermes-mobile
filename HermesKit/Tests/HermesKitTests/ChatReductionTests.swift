@@ -106,6 +106,8 @@ struct ChatReductionTests {
       $0.streamingRowID = nil
       $0.thinkingRowID = nil
       $0.isSending = false
+      // The finished turn's tool rows are history: a later running hydrate must not re-append them.
+      $0.toolRowIDs = [:]
     }
     #expect(store.state.transcript.last?.id == uuid(0))
   }

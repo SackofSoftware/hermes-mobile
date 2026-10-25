@@ -5,7 +5,7 @@ import Foundation
 /// The envelope carries the frame-level sequencing fields the reducer needs for lossless
 /// reconnect; `GatewayEvent` itself stays payload-only. Client-synthesized events
 /// (`.serverRequest`, `.serverRequestFailed`, `.serverRequestsUnavailable`, `.authExpired`)
-/// are wrapped with every field nil.
+/// are wrapped with no envelope data.
 public struct GatewayFrame: Equatable, Sendable {
   public var event: GatewayEvent
   public var sessionID: String?
@@ -31,14 +31,19 @@ public struct GatewayFrame: Equatable, Sendable {
   /// Decode a bare event object `{type, session_id, seq?, payload?}`: the shape shared by a
   /// live frame's `params` and each `session.events.since` element. A missing, empty, or
   /// non-string `type` → nil.
-  public init?(eventObject: JSONValue) {
+  init?(eventObject: JSONValue) {
     guard let type = eventObject["type"]?.stringValue, !type.isEmpty else { return nil }
     self.init(type: type, eventObject: eventObject)
   }
 
-  /// The shared decode path. A live frame with no `type` still decodes (as `.unknown`) to
-  /// keep the socket lenient; only the replay path requires a type.
-  init(type: String, eventObject: JSONValue) {
+  /// Decode a live frame's `params`. A live frame with no `type` still decodes (as
+  /// `.unknown`) to keep the socket lenient; only the replay path requires a type.
+  init(liveEventObject eventObject: JSONValue) {
+    self.init(type: eventObject["type"]?.stringValue ?? "", eventObject: eventObject)
+  }
+
+  /// The shared decode path.
+  private init(type: String, eventObject: JSONValue) {
     let payload = eventObject["payload"]
     let event = GatewayEvent(type: type, payload: payload)
     var replayEpoch: String?
@@ -69,7 +74,7 @@ public struct ReplayBatch: Equatable, Sendable, Decodable {
   public var truncated: Bool
   public var epoch: String?
 
-  public init(events: [GatewayFrame] = [], latestSeq: Int? = nil, truncated: Bool = false, epoch: String? = nil) {
+  init(events: [GatewayFrame] = [], latestSeq: Int? = nil, truncated: Bool = false, epoch: String? = nil) {
     self.events = events
     self.latestSeq = latestSeq
     self.truncated = truncated
@@ -100,7 +105,7 @@ extension JSONValue {
   }
 }
 
-public extension GatewayEvent {
+extension GatewayEvent {
   /// The four legacy (pre-v7) prompt notifications. They ride the replay ring on
   /// v2026.8.27 – v2026.9.11 agents, but the app decodes no `*.expire`, so replay skips them
   /// rather than raise a card that may have expired in the gap (#98).

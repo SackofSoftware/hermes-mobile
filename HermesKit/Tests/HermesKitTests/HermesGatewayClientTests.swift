@@ -52,6 +52,23 @@ private func requestID(_ frame: String) -> Int? {
 @Suite struct HermesGatewayClientTests {
   private let url = URL(string: "http://test.local:9119")!
 
+  /// The live transport accepts inbound messages up to the server's 16 MiB `ws_max_size`, not
+  /// `URLSessionWebSocketTask`'s 1 MiB default (a bigger `session.resume` / `events.since`
+  /// reply would otherwise kill the socket).
+  @Test func liveTransportAcceptsMessagesUpToTheServerFrameCap() {
+    let session = URLSession(configuration: .ephemeral)
+    // Configured but never resumed: no connection attempt.
+    let task = URLSessionWebSocketTransport.makeTask(
+      url: URL(string: "ws://test.local/api/ws")!, session: session
+    )
+    defer {
+      task.cancel()
+      session.invalidateAndCancel()
+    }
+    #expect(task.maximumMessageSize == 16 * 1024 * 1024)
+    #expect(task.maximumMessageSize == JSONRPCRequest.maxWebSocketFrameBytes)
+  }
+
   @Test func sendResolvesOnMatchingResult() async throws {
     let transport = FakeTransport { frame, inbound in
       if let id = requestID(frame) {

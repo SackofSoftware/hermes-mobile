@@ -561,6 +561,32 @@ struct ServerRequestTests {
     client.disconnect()
   }
 
+  /// Several `gateway.ready` frames while the gate is closed: the LATEST is held and released,
+  /// once, with its own epoch (#98).
+  @Test func heldReadiesReleaseTheLatestFrame() async throws {
+    let capabilitiesID = LockIsolated<Int?>(nil)
+    let transport = FakeTransport { frame, _ in
+      let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
+      if request["method"]?.stringValue == "client.capabilities" {
+        capabilitiesID.setValue(request["id"]?.intValue)
+      }
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
+    var iterator = events.makeAsyncIterator()
+    transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready","payload":{"replay_epoch":"e1"}}}"#)
+    transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready","payload":{"replay_epoch":"e2"}}}"#)
+    transport.inject(probe("probe.closed"))
+    #expect(await iterator.nextEvent() == .unknown(type: "probe.closed", raw: .object([:])))
+    await waitUntil { capabilitiesID.value != nil }
+    let id = try #require(capabilitiesID.value)
+    transport.inject(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
+    #expect(await iterator.next() == GatewayFrame(.ready, replayEpoch: "e2"))
+    transport.inject(probe("probe.opened"))
+    #expect(await iterator.nextEvent() == .unknown(type: "probe.opened", raw: .object([:]))) // one .ready only
+    client.disconnect()
+  }
+
   /// A hung advertisement: the 5 s cap releases the held ready frame, epoch intact (#98).
   @Test func heldReadyKeepsItsEpochThroughTheCap() async throws {
     let clock = TestClock()

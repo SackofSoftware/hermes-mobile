@@ -304,11 +304,10 @@ bullets below are the compressed rules.
   (assert `contentSize` vs `bounds`, hosted `sizeThatFits`) — see
   `MarkdownTableLayoutTests.swift` and `ApprovalCardLayoutTests.swift`. Pin
   `.dynamicTypeSize(.large)`, and vary it where a `@ScaledMetric` cap is under test.
-- **The recorded baselines predate the current simulator runtime** — `make snapshot`
-  fails broadly (40 as of #19, ALL at identical render size; older figures are stale) with
-  no code cause. Judge by size mismatch first: differing render size = real regression;
-  equal size with small pixel residual = drift. A global re-record is the pending fix and
-  must land as its own commit. Per-suite breakdown: `docs/development.md`.
+- **`make snapshot` is clean** (229/229), so any failure is a real signal. A view change
+  re-records its own baselines in the same PR. If a future runtime drifts, judge by size
+  first: differing render size = regression; equal size with small pixel residual = drift,
+  re-recorded in its own commit. Details: `docs/development.md`.
 
 ## Gotchas
 

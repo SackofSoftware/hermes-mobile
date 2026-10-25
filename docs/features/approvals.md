@@ -67,8 +67,8 @@ out that prompt's own deadline (120–300 s).
 The same holds for object params the phone cannot decode: they may be a newer wire shape (upstream
 reshaped clarify three times in two months) that a desktop sharing the session renders, so the
 phone never denies or cancels them for everyone; only params that are not an object at all, which
-no client can render, get the automatic skip. Undecodable includes an approval with no command,
-description or danger pattern (`ApprovalRequest.hasContent`) and a `secret` naming neither a
+no client can render, get the automatic skip. Undecodable includes an approval with no non-blank
+command or description (`ApprovalRequest.hasContent`) and a `secret` naming neither a
 prompt nor an env var: a blind card invites a blind answer. An empty `sudo` renders, since
 v2026.9.14 sends no `command`. A failed automatic send yields `.serverRequestFailed`, which
 banners without ending the turn. The 4404 frame, like every outbound frame, is encoded by
@@ -208,7 +208,7 @@ one `BoundedHeightLayout` region), with the form chosen by the questions:
 
 Every question with choices also gets an "Other" free-text row (v7 only; the upstream tool schema
 tells the model the UI adds one), sent as the typed string. Skip is on every form, and nothing is
-preselected. The card sends `submitClarify(answers: [String: ClarifyAnswer])`, keyed by qid (`""`
+preselected. The card sends `submitClarify(token:answers:)` with `[String: ClarifyAnswer]`, keyed by qid (`""`
 for a qid-less single question): `.choices([raw])`, `.other(text)` or `.skipped`. The reducer
 builds the wire text, so marker stripping and the JSON array stay in HermesKit. Form state is a
 `ClarifyDraft` (a pick and Other text are exclusive; a skip keeps the edits under it), held as

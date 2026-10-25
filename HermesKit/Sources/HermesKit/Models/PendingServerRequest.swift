@@ -100,8 +100,8 @@ public struct PendingServerRequest: Equatable, Sendable, Identifiable {
   /// (``PromptMethod``), or when a rendered method's params do not decode — see
   /// ``malformedSkip(for:params:)`` for what the caller answers then.
   ///
-  /// An approval whose params decode but carry nothing to show (no command, description or
-  /// danger pattern) does not decode: a content-less card would only invite a blind approve.
+  /// An approval whose params decode but carry nothing to show (no non-blank command or
+  /// description) does not decode: a content-less card would only invite a blind approve.
   /// Likewise a `secret` naming neither a `prompt` nor an `env_var` (a blind field); a `sudo`
   /// may be empty (v2026.9.14 sends no `command`). A clarify takes the v7 shapes only
   /// (``ClarifyRequest/init(serverRequestParams:)``).

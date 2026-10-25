@@ -19,7 +19,7 @@ public struct ClarifyQuestion: Equatable, Sendable {
 
   public var isFreeText: Bool { choices.isEmpty }
 
-  /// The key this question's answer travels under in `submitClarify(answers:)`: its `qid`,
+  /// The key this question's answer travels under in `submitClarify(token:answers:)`: its `qid`,
   /// or `""` for the `nil`-qid question of the intermediate and legacy single forms.
   public var answerKey: String { qid ?? "" }
 
@@ -268,7 +268,7 @@ public enum ClarifyAnswer: Equatable, Sendable {
 /// The clarify card's answers in progress: the user's edits to the questions the server has
 /// not locked. Held by the card as view state (keyed on `pendingInteractionToken`, so a
 /// replacement card never inherits it — and a refreshed replay keeps it while new locks come
-/// from the store) and handed to `submitClarify(answers:)` as ``answers(for:)``. Pure, so the
+/// from the store) and handed to `submitClarify(token:answers:)` as ``answers(for:)``. Pure, so the
 /// form's rules are unit-tested here instead of living in the view:
 /// - a picked choice and typed "Other" text are exclusive — picking clears the text, typing
 ///   (non-blank) clears the picks — because an answer is one or the other on the wire;

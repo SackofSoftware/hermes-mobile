@@ -812,7 +812,11 @@ public struct ChatFeature {
     /// (already over, or lost on a reconnecting socket). Safe to send any time; every
     /// precondition is re-checked in `drainQueueIfReady`.
     case maybeDrainQueue
-    case respondToApproval(approve: Bool, all: Bool)
+    /// The card answers (`respondToApproval`, `submitClarify`, `skipClarify`,
+    /// `respondToSecret`, `skipSecret`) carry the `pendingInteractionToken` of the card that
+    /// sent them; one whose token is not the presented card's is dropped, so a tap reduced
+    /// after a cancel or hydrate replaced the card never answers its successor.
+    case respondToApproval(token: Int, approve: Bool, all: Bool)
     /// Outcome of the LEGACY `approval.respond`. `resolved == 0` patches the optimistic row
     /// to "Already handled elsewhere"; `nil` surfaces a send failure. Successful answers
     /// need no action: the optimistic row is already correct.
@@ -826,20 +830,20 @@ public struct ChatFeature {
     /// request's `answerShape`: v7 → `request.answer` (`{answers}` or `{answer}`), legacy →
     /// `clarify.respond`. A question missing from `answers` (and not locked) is skipped;
     /// replayed locks are re-sent with the final set and win over `answers`.
-    case submitClarify(answers: [String: ClarifyAnswer])
+    case submitClarify(token: Int, answers: [String: ClarifyAnswer])
     /// Skip the whole clarify card: v0.21.6+ `{}` (cancel all), intermediate single
     /// `{answer: ""}`, legacy an empty `clarify.respond`.
-    case skipClarify
+    case skipClarify(token: Int)
     /// A legacy `*.respond` send threw: patch its optimistic echo row to "Failed to send"
     /// and banner (the card is already gone — the legacy path is optimistic).
     case legacyRespondFailed(rowID: ChatRow.ID, banner: String)
     /// Answer the presented sudo / secret card with the typed value: v7 →
     /// `request.answer {value}`; legacy → `sudo.respond {password}` / `secret.respond
     /// {value}`. The value is never stored, logged or echoed into the transcript.
-    case respondToSecret(value: String)
+    case respondToSecret(token: Int, value: String)
     /// Skip the presented sudo / secret card: v7 `{value: ""}`; legacy the same respond with
     /// an empty value.
-    case skipSecret
+    case skipSecret(token: Int)
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
     case copyFeedbackExpired(token: String)
@@ -1478,10 +1482,11 @@ public struct ChatFeature {
       case .maybeDrainQueue:
         return drainQueueIfReady(into: &state)
 
-      case let .respondToApproval(approve, all):
+      case let .respondToApproval(token, approve, all):
         // Narrow, never widen: Approve needs `once` in the server's choice set, and
         // "approve all" falls back to `once` when `session` is not offered.
-        guard let interaction = state.pendingInteraction, case let .approval(request) = interaction,
+        guard token == state.pendingInteractionToken,
+              let interaction = state.pendingInteraction, case let .approval(request) = interaction,
               !approve || request.allowsOnce
         else { return .none }
         // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
@@ -1546,6 +1551,8 @@ public struct ChatFeature {
 
       case let .serverRequestAnswered(id, echo, result):
         if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
+        // A settled answer takes down an earlier attempt's failure banner (never another one).
+        if case .success = result, state.errorBanner == echo.failureBanner { state.errorBanner = nil }
         switch result {
         case .success(.ok):
           state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: echo.text)))
@@ -1588,10 +1595,12 @@ public struct ChatFeature {
         }
         return .none
 
-      case let .submitClarify(answers):
+      case let .submitClarify(token, answers):
+        guard token == state.pendingInteractionToken else { return .none }
         return answerClarify(answers, into: &state)
 
-      case .skipClarify:
+      case let .skipClarify(token):
+        guard token == state.pendingInteractionToken else { return .none }
         return answerClarify(nil, into: &state)
 
       case let .legacyRespondFailed(rowID, banner):
@@ -1602,10 +1611,12 @@ public struct ChatFeature {
         state.errorBanner = banner
         return .none
 
-      case let .respondToSecret(value):
+      case let .respondToSecret(token, value):
+        guard token == state.pendingInteractionToken else { return .none }
         return answerSecret(value, into: &state)
 
-      case .skipSecret:
+      case let .skipSecret(token):
+        guard token == state.pendingInteractionToken else { return .none }
         return answerSecret(nil, into: &state)
 
       case let .copyRow(id):

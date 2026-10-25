@@ -2746,7 +2746,8 @@ struct AppFeatureTests {
     // Approve the recovered card: the respond is session-queue-scoped (session_id + choice
     // + all, NO request_id — the synthetic card never had one, by design), and the server's
     // `resolved: 1` keeps the optimistic "Approved" row (no error, no re-patch).
-    await store.send(.liveChat(.respondToApproval(approve: true, all: false)))
+    let cardToken = store.state.liveChat?.pendingInteractionToken ?? 0
+    await store.send(.liveChat(.respondToApproval(token: cardToken, approve: true, all: false)))
     await store.finish()
     let params = respondParams.value
     #expect(params?["session_id"] == .string("live1"))

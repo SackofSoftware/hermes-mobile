@@ -68,7 +68,7 @@ struct ClarifyFeatureTests {
       }
     }
 
-    await store.send(.submitClarify(answers: ["": .choices(["a.txt"])])) {
+    await store.send(.submitClarify(token: store.state.pendingInteractionToken, answers: ["": .choices(["a.txt"])])) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "a.txt"))]
     }
@@ -92,7 +92,7 @@ struct ClarifyFeatureTests {
       }
     }
 
-    await store.send(.respondToSecret(value: "hunter2")) {
+    await store.send(.respondToSecret(token: store.state.pendingInteractionToken, value: "hunter2")) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: "Password submitted"))]
     }
@@ -118,7 +118,7 @@ struct ClarifyFeatureTests {
       }
     }
 
-    await store.send(.respondToSecret(value: "sk-123")) {
+    await store.send(.respondToSecret(token: store.state.pendingInteractionToken, value: "sk-123")) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: "Secret submitted"))]
     }
@@ -133,8 +133,8 @@ struct ClarifyFeatureTests {
   @Test func respondClarifyIgnoredWhenNoClarifyPending() async {
     let store = TestStore(initialState: readyState()) { ChatFeature() }
     // No pending interaction → response is a no-op.
-    await store.send(.submitClarify(answers: ["": .other("x")]))
-    await store.send(.skipClarify)
+    await store.send(.submitClarify(token: store.state.pendingInteractionToken, answers: ["": .other("x")]))
+    await store.send(.skipClarify(token: store.state.pendingInteractionToken))
   }
 
   // MARK: - v7 server requests: routing
@@ -202,7 +202,7 @@ struct ClarifyFeatureTests {
   /// Answers the presented clarify card with `action`, the server acknowledging `ok`, and
   /// returns the exact `request.answer` params that went out.
   private func answer(
-    _ request: ClarifyRequest, with action: ChatFeature.Action, echo: String
+    _ request: ClarifyRequest, with action: (_ cardToken: Int) -> ChatFeature.Action, echo: String
   ) async -> JSONValue? {
     let pending = clarifyServerRequest("srq-c", request)
     let sent = LockIsolated<JSONValue?>(nil)
@@ -214,7 +214,7 @@ struct ClarifyFeatureTests {
         return .object(["status": .string("ok")])
       }
     }
-    await store.send(action) {
+    await store.send(action(store.state.pendingInteractionToken)) {
       $0.answeringServerRequestID = "srq-c" // the card stays until the server acknowledges
     }
     await store.receive(\.serverRequestAnswered) {
@@ -242,12 +242,12 @@ struct ClarifyFeatureTests {
   /// Other answers as typed on a single- and a multi-select question, `null` for the
   /// unanswered question.
   @Test func answersShapeSendsExactParams() async throws {
-    let sent = await answer(batch, with: .submitClarify(answers: [
+    let sent = await answer(batch, with: { .submitClarify(token: $0, answers: [
       "q0": .choices(["SwiftUI (Recommended)"]),
       "q1": .choices(["iOS/iPadOS", "macOS"]),
       "q2": .other("Kotlin"),
       "q4": .other("Watch app"),
-    ]), echo: "Framework?: SwiftUI\nTargets?: iOS/iPadOS, macOS\nLanguage?: Kotlin\nName?: Skipped\nExtras?: Watch app")
+    ]) }, echo: "Framework?: SwiftUI\nTargets?: iOS/iPadOS, macOS\nLanguage?: Kotlin\nName?: Skipped\nExtras?: Watch app")
     #expect(sent == .object([
       "id": .string("srq-c"),
       "result": .object(["answers": .object([
@@ -266,10 +266,10 @@ struct ClarifyFeatureTests {
     var request = batch
     request.questions = Array(batch.questions.prefix(3))
     request.lockedAnswers = ["q0": .some("UIKit"), "q1": String?.none]
-    let sent = await answer(request, with: .submitClarify(answers: [
+    let sent = await answer(request, with: { .submitClarify(token: $0, answers: [
       "q0": .choices(["SwiftUI (Recommended)"]),
       "q2": .skipped,
-    ]), echo: "Framework?: UIKit\nTargets?: Skipped\nLanguage?: Skipped")
+    ]) }, echo: "Framework?: UIKit\nTargets?: Skipped\nLanguage?: Skipped")
     #expect(sent?["result"] == .object(["answers": .object([
       "q0": .string("UIKit"), "q1": .null, "q2": .null,
     ])]))
@@ -283,17 +283,17 @@ struct ClarifyFeatureTests {
     )
     // A tapped choice goes up raw (exactly as the card hands it over); the reducer sends the
     // bare label.
-    let picked = await answer(request, with: .submitClarify(answers: ["q0": .choices(["Yes (Recommended)"])]), echo: "Yes")
+    let picked = await answer(request, with: { .submitClarify(token: $0, answers: ["q0": .choices(["Yes (Recommended)"])]) }, echo: "Yes")
     #expect(picked?["result"] == .object(["answers": .object(["q0": .string("Yes")])]))
     // The Other row's text is sent as typed.
-    let typed = await answer(request, with: .submitClarify(answers: ["q0": .other("Later")]), echo: "Later")
+    let typed = await answer(request, with: { .submitClarify(token: $0, answers: ["q0": .other("Later")]) }, echo: "Later")
     #expect(typed?["result"] == .object(["answers": .object(["q0": .string("Later")])]))
   }
 
   @Test func answersShapeSkipIsCancelAll() async {
     var request = batch
     request.lockedAnswers = ["q0": "UIKit"]
-    let sent = await answer(request, with: .skipClarify, echo: "Skipped")
+    let sent = await answer(request, with: { .skipClarify(token: $0) }, echo: "Skipped")
     #expect(sent == .object(["id": .string("srq-c"), "result": .object([:])]))
   }
 
@@ -306,7 +306,7 @@ struct ClarifyFeatureTests {
     for question in request.questions { draft.toggleSkip(question) }
     #expect(draft.isComplete(for: request))
     let sent = await answer(
-      request, with: .submitClarify(answers: draft.answers(for: request)),
+      request, with: { .submitClarify(token: $0, answers: draft.answers(for: request)) },
       echo: "Framework?: Skipped\nTargets?: Skipped\nLanguage?: Skipped"
     )
     #expect(sent == .object([
@@ -318,15 +318,15 @@ struct ClarifyFeatureTests {
   /// The intermediate (v2026.9.14–.24) single request answers `{answer}`, skip `{answer: ""}`.
   @Test func singleAnswerShapeSendsAnswerAndSkip() async {
     let request = ClarifyRequest(requestID: nil, question: "Proceed?", choices: ["Yes (Recommended)", "No"])
-    let picked = await answer(request, with: .submitClarify(answers: ["": .choices(["Yes (Recommended)"])]), echo: "Yes")
+    let picked = await answer(request, with: { .submitClarify(token: $0, answers: ["": .choices(["Yes (Recommended)"])]) }, echo: "Yes")
     #expect(picked == .object(["id": .string("srq-c"), "result": .object(["answer": .string("Yes")])]))
-    let other = await answer(request, with: .submitClarify(answers: ["": .other("Maybe")]), echo: "Maybe")
+    let other = await answer(request, with: { .submitClarify(token: $0, answers: ["": .other("Maybe")]) }, echo: "Maybe")
     #expect(other?["result"] == .object(["answer": .string("Maybe")]))
-    let skipped = await answer(request, with: .skipClarify, echo: "Skipped")
+    let skipped = await answer(request, with: { .skipClarify(token: $0) }, echo: "Skipped")
     #expect(skipped?["result"] == .object(["answer": .string("")]))
 
     let multi = ClarifyRequest(requestID: nil, question: "Pick", choices: ["A", "B", "C"], multiSelect: true)
-    let picks = await answer(multi, with: .submitClarify(answers: ["": .choices(["A", "C"])]), echo: "A, C")
+    let picks = await answer(multi, with: { .submitClarify(token: $0, answers: ["": .choices(["A", "C"])]) }, echo: "A, C")
     #expect(picks?["result"] == .object(["answer": .string(#"["A","C"]"#)]))
   }
 
@@ -344,11 +344,11 @@ struct ClarifyFeatureTests {
         return .object(["status": .string(status)])
       }
     }
-    await store.send(.submitClarify(answers: ["": .choices(["Yes"])])) {
+    await store.send(.submitClarify(token: store.state.pendingInteractionToken, answers: ["": .choices(["Yes"])])) {
       $0.answeringServerRequestID = "srq-o"
     }
     // A second tap while the answer is in flight sends nothing.
-    await store.send(.skipClarify)
+    await store.send(.skipClarify(token: store.state.pendingInteractionToken))
     await clock.advance(by: .seconds(1))
     await store.receive(\.serverRequestAnswered) {
       $0.answeringServerRequestID = nil
@@ -378,7 +378,7 @@ struct ClarifyFeatureTests {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable _, _ in .object(["status": .string("ok")]) }
     }
-    await store.send(.submitClarify(answers: ["": .other("one")])) { $0.answeringServerRequestID = "srq-1" }
+    await store.send(.submitClarify(token: store.state.pendingInteractionToken, answers: ["": .other("one")])) { $0.answeringServerRequestID = "srq-1" }
     await store.receive(\.serverRequestAnswered) {
       $0.answeringServerRequestID = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "one"))]
@@ -394,10 +394,10 @@ struct ClarifyFeatureTests {
   /// (a legacy agent never sees the marker stripped), skip as an empty answer.
   @Test(arguments: 0..<3)
   func legacyClarifyWireIsUnchanged(caseIndex: Int) async {
-    let (action, wireAnswer, echo): (ChatFeature.Action, String, String) = [
-      (.submitClarify(answers: ["": .choices(["a.txt (Recommended)"])]), "a.txt (Recommended)", "a.txt"),
-      (.submitClarify(answers: ["": .other("c.txt")]), "c.txt", "c.txt"),
-      (.skipClarify, "", "Skipped"),
+    let (action, wireAnswer, echo): ((Int) -> ChatFeature.Action, String, String) = [
+      ({ .submitClarify(token: $0, answers: ["": .choices(["a.txt (Recommended)"])]) }, "a.txt (Recommended)", "a.txt"),
+      ({ .submitClarify(token: $0, answers: ["": .other("c.txt")]) }, "c.txt", "c.txt"),
+      ({ .skipClarify(token: $0) }, "", "Skipped"),
     ][caseIndex]
     let request = ClarifyRequest(requestID: "c1", question: "Which file?", choices: ["a.txt (Recommended)", "b.txt"])
     let sent = LockIsolated<JSONValue?>(nil)
@@ -410,7 +410,7 @@ struct ClarifyFeatureTests {
         return .object([:])
       }
     }
-    await store.send(action) {
+    await store.send(action(store.state.pendingInteractionToken)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: echo))]
     }
@@ -455,7 +455,8 @@ struct ClarifyFeatureTests {
       "q3": .skipped,
     ]
     let echo = skipsCard ? "Skipped" : "Framework?: SwiftUI\nTargets?: iOS/iPadOS, macOS\nName?: Atlas\nExtras?: Skipped"
-    await store.send(skipsCard ? .skipClarify : .submitClarify(answers: answers)) {
+    let token = store.state.pendingInteractionToken
+    await store.send(skipsCard ? .skipClarify(token: token) : .submitClarify(token: token, answers: answers)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: echo))]
     }
@@ -493,7 +494,7 @@ struct ClarifyFeatureTests {
         throw GatewayError.timedOut(method: method)
       }
     }
-    await store.send(.submitClarify(answers: ["q0": .other("x"), "q1": .other("y")])) {
+    await store.send(.submitClarify(token: store.state.pendingInteractionToken, answers: ["q0": .other("x"), "q1": .other("y")])) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "A?: x\nB?: y"))]
     }
@@ -511,7 +512,7 @@ struct ClarifyFeatureTests {
       $0.uuid = .incrementing
       $0.hermesGateway.send = { @Sendable method, _ in throw GatewayError.timedOut(method: method) }
     }
-    await store.send(.submitClarify(answers: ["": .other("notes.md")])) {
+    await store.send(.submitClarify(token: store.state.pendingInteractionToken, answers: ["": .other("notes.md")])) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "notes.md"))]
     }
@@ -558,7 +559,8 @@ struct ClarifyFeatureTests {
         return .object(["status": .string("ok")])
       }
     }
-    await store.send(answers ? .respondToSecret(value: typedValue) : .skipSecret) {
+    let token = store.state.pendingInteractionToken
+    await store.send(answers ? .respondToSecret(token: token, value: typedValue) : .skipSecret(token: token)) {
       $0.answeringServerRequestID = "srq-v"
     }
     let echo = switch (kind, answers) {
@@ -597,8 +599,8 @@ struct ClarifyFeatureTests {
         return .object(["status": .string(status)])
       }
     }
-    await store.send(.respondToSecret(value: typedValue)) { $0.answeringServerRequestID = "srq-o" }
-    await store.send(.skipSecret) // a second tap while the answer is in flight sends nothing
+    await store.send(.respondToSecret(token: store.state.pendingInteractionToken, value: typedValue)) { $0.answeringServerRequestID = "srq-o" }
+    await store.send(.skipSecret(token: store.state.pendingInteractionToken)) // a second tap while the answer is in flight sends nothing
     await clock.advance(by: .seconds(1))
     await store.receive(\.serverRequestAnswered) {
       $0.answeringServerRequestID = nil
@@ -637,7 +639,8 @@ struct ClarifyFeatureTests {
     case (.sudo, false): "Password skipped"
     case (.secret, false): "Secret skipped"
     }
-    await store.send(answers ? .respondToSecret(value: typedValue) : .skipSecret) {
+    let token = store.state.pendingInteractionToken
+    await store.send(answers ? .respondToSecret(token: token, value: typedValue) : .skipSecret(token: token)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: echo))]
     }
@@ -661,7 +664,7 @@ struct ClarifyFeatureTests {
       $0.hermesGateway.send = { @Sendable method, _ in throw GatewayError.timedOut(method: method) }
     }
     let label = kind == .sudo ? "Password submitted" : "Secret submitted"
-    await store.send(.respondToSecret(value: typedValue)) {
+    await store.send(.respondToSecret(token: store.state.pendingInteractionToken, value: typedValue)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: label))]
     }
@@ -676,7 +679,7 @@ struct ClarifyFeatureTests {
     var initial = readyState()
     initial.present(.clarify(ClarifyRequest(requestID: "c1", question: "Which file?")))
     let store = TestStore(initialState: initial) { ChatFeature() }
-    await store.send(.respondToSecret(value: "x"))
-    await store.send(.skipSecret)
+    await store.send(.respondToSecret(token: store.state.pendingInteractionToken, value: "x"))
+    await store.send(.skipSecret(token: store.state.pendingInteractionToken))
   }
 }

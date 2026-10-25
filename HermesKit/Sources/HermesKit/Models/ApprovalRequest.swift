@@ -71,12 +71,11 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
     choices.isEmpty || choices.contains("once")
   }
 
-  /// Whether there is anything to show: a command, a description, or a danger pattern. A v7
-  /// server request without any of them does not decode (`PendingServerRequest`), never
-  /// presented as a blind card.
+  /// Whether there is anything to show: a non-blank command or description, the only fields
+  /// the card renders (a danger pattern is never shown). A v7 server request without either
+  /// does not decode (`PendingServerRequest`), never presented as a blind card.
   public var hasContent: Bool {
-    command?.isEmpty == false || detail?.isEmpty == false
-      || patternKey?.isEmpty == false || !patternKeys.isEmpty
+    command?.trimmedNonEmpty != nil || detail?.trimmedNonEmpty != nil
   }
 
   /// Whether the card may offer the session-wide "Approve all in this session"

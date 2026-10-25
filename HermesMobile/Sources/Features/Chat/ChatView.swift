@@ -331,6 +331,7 @@ struct ChatView: View {
 
   @ViewBuilder
   private var pendingCard: some View {
+    let token = store.pendingInteractionToken
     switch store.pendingInteraction {
     case let .approval(request):
       // The per-presentation identity that keeps this card's `@State` (scroll offset,
@@ -338,21 +339,21 @@ struct ChatView: View {
       // `VStack` call site, so it covers the clarify/secret branches too — see there.
       ApprovalCardView(
         request: request,
-        onApprove: { all in store.send(.respondToApproval(approve: true, all: all)) },
-        onDeny: { store.send(.respondToApproval(approve: false, all: false)) }
+        onApprove: { all in store.send(.respondToApproval(token: token, approve: true, all: all)) },
+        onDeny: { store.send(.respondToApproval(token: token, approve: false, all: false)) }
       )
     case let .clarify(request):
       ClarifyCardView(
         request: request,
-        onSubmit: { answers in store.send(.submitClarify(answers: answers)) },
-        onSkip: { store.send(.skipClarify) }
+        onSubmit: { answers in store.send(.submitClarify(token: token, answers: answers)) },
+        onSkip: { store.send(.skipClarify(token: token)) }
       )
     case let .secret(kind, prompt):
       SecretCardView(
         kind: kind,
         prompt: prompt,
-        onSubmit: { value in store.send(.respondToSecret(value: value)) },
-        onSkip: { store.send(.skipSecret) }
+        onSubmit: { value in store.send(.respondToSecret(token: token, value: value)) },
+        onSkip: { store.send(.skipSecret(token: token)) }
       )
     case .none:
       EmptyView()

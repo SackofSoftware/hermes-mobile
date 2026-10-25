@@ -1508,7 +1508,7 @@ struct HydrateTests {
     let approvalToken = store.state.pendingInteractionToken
 
     // Answering the head (ok) raises the replayed clarify with a fresh token, its lock shown.
-    await store.send(.respondToApproval(approve: true, all: false))
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false))
     await store.receive(\.serverRequestAnswered)
     #expect(store.state.serverRequests.map(\.id) == ["srq-c"])
     #expect(store.state.pendingInteraction == Self.queued(clarify).kind)
@@ -1791,7 +1791,7 @@ struct HydrateTests {
     if byCancel {
       await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-a", reason: "resolved"))))
     } else {
-      await store.send(.respondToApproval(approve: true, all: false))
+      await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false))
       await store.receive(\.serverRequestAnswered)
     }
     #expect(store.state.pendingInteraction == nil)

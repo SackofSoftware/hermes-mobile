@@ -166,19 +166,25 @@ import Testing
     #expect(Set(PromptMethod.allCases.map(\.rawValue)) == ["approval", "clarify", "sudo", "secret"])
   }
 
-  /// A danger pattern alone is content: an approval carrying only `pattern_key` or
-  /// `pattern_keys` renders (the card shows the pattern), it is not a blind card.
+  /// The card renders only the command and the description, so a danger pattern alone, or a
+  /// blank command/description, is a blind card: it does not decode and gets no automatic
+  /// answer. A non-blank field beside a pattern decodes.
   @Test(arguments: [
     JSONValue.object(["pattern_key": .string("rm_rf")]),
     .object(["pattern_keys": .array([.string("rm_rf"), .string("sudo")])]),
+    .object(["command": .string("  \n"), "description": .string("\t"), "pattern_key": .string("rm_rf")]),
   ])
-  func patternOnlyApprovalHasContent(params: JSONValue) throws {
-    let request = try #require(PendingServerRequest(id: "srq-p", method: "approval", params: params))
-    guard case let .approval(approval) = request.kind else {
-      Issue.record("expected an approval, got \(request.kind)"); return
-    }
-    #expect(approval.hasContent)
-    #expect(approval.command == nil)
+  func approvalWithNothingVisibleIsNotRendered(params: JSONValue) {
+    #expect(PendingServerRequest(id: "srq-p", method: "approval", params: params) == nil)
+    #expect(PendingServerRequest.malformedSkip(for: "approval", params: params) == nil)
+  }
+
+  @Test func approvalWithAVisibleFieldBesideAPatternDecodes() throws {
+    let request = try #require(PendingServerRequest(
+      id: "srq-p", method: "approval",
+      params: .object(["command": .string("  \n"), "description": .string("Delete build"), "pattern_key": .string("rm_rf")])
+    ))
+    #expect(request.kind == .approval(ApprovalRequest(command: "  \n", detail: "Delete build", patternKey: "rm_rf")))
   }
 
   @Test func serverRequestLogEntryNamesTheMethod() {

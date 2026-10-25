@@ -55,7 +55,7 @@ struct ChatInteractionTests {
       $0.expectsPendingApproval = false
     }
     #expect(!store.state.canSend)
-    await store.send(.respondToApproval(approve: true, all: true)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: true)) {
       $0.answeringServerRequestID = "srq/7" // the card stays until the server acknowledges
     }
     await store.receive(\.serverRequestAnswered) {
@@ -96,7 +96,7 @@ struct ChatInteractionTests {
         return .object(["status": .string("ok")])
       }
     }
-    await store.send(.respondToApproval(approve: approve, all: true)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: approve, all: true)) {
       $0.answeringServerRequestID = "srq-choice"
     }
     await store.receive(\.serverRequestAnswered) {
@@ -122,8 +122,8 @@ struct ChatInteractionTests {
       initial.present(.approval(denyOnly))
     }
     let store = TestStore(initialState: initial) { ChatFeature() }
-    await store.send(.respondToApproval(approve: true, all: false))
-    await store.send(.respondToApproval(approve: true, all: true))
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false))
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: true))
   }
 
   /// Two parallel approvals queue: the head is presented, the second waits, and answering
@@ -147,7 +147,7 @@ struct ChatInteractionTests {
       $0.serverRequests = [first, second] // queued behind the presented card, not raised
     }
     #expect(store.state.pendingInteraction == first.kind)
-    await store.send(.respondToApproval(approve: true, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
       $0.answeringServerRequestID = "srq-1"
     }
     await store.receive(\.serverRequestAnswered) {
@@ -157,7 +157,7 @@ struct ChatInteractionTests {
       $0.present(second.kind)
     }
     #expect(store.state.pendingInteractionToken == 2)
-    await store.send(.respondToApproval(approve: false, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: false, all: false)) {
       $0.answeringServerRequestID = "srq-2"
     }
     await store.receive(\.serverRequestAnswered) {
@@ -181,10 +181,10 @@ struct ChatInteractionTests {
         return .object(["status": .string("ok")])
       }
     }
-    await store.send(.respondToApproval(approve: true, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
       $0.answeringServerRequestID = "srq-1"
     }
-    await store.send(.respondToApproval(approve: false, all: false)) // ignored: one in flight
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: false, all: false)) // ignored: one in flight
     release.yield(())
     await store.receive(\.serverRequestAnswered) {
       $0.answeringServerRequestID = nil
@@ -193,6 +193,91 @@ struct ChatInteractionTests {
       $0.pendingInteraction = nil
     }
     #expect(calls.value == 1)
+  }
+
+  /// A card answer carries its card's token: one reduced after a cancel replaced the card (a
+  /// tap landing before the re-render) is dropped — nothing goes to the successor, which stays
+  /// unanswered (the default test gateway fails on any send).
+  @Test(arguments: ["approve", "deny", "clarify", "skipClarify", "secret", "skipSecret"])
+  func staleCardAnswerIsDropped(answer: String) async {
+    func entry(_ id: String) -> PendingServerRequest {
+      switch answer {
+      case "approve", "deny": serverApproval(id)
+      case "clarify", "skipClarify": PendingServerRequest(id: id, kind: .clarify(ClarifyRequest(requestID: nil, question: "Name?")))
+      default: PendingServerRequest(id: id, kind: .secret(.secret, SecretPrompt(prompt: "API key")))
+      }
+    }
+    let first = entry("srq-1")
+    let second = entry("srq-2")
+    let store = TestStore(initialState: queuedState([first, second])) { ChatFeature() }
+    let staleToken = store.state.pendingInteractionToken
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-1", reason: "resolved")))) {
+      $0.serverRequests = [second]
+      $0.present(second.kind)
+    }
+    let stale: ChatFeature.Action = switch answer {
+    case "approve": .respondToApproval(token: staleToken, approve: true, all: false)
+    case "deny": .respondToApproval(token: staleToken, approve: false, all: false)
+    case "clarify": .submitClarify(token: staleToken, answers: ["": .other("Ada")])
+    case "skipClarify": .skipClarify(token: staleToken)
+    case "secret": .respondToSecret(token: staleToken, value: "sk-123")
+    default: .skipSecret(token: staleToken)
+    }
+    await store.send(stale)
+  }
+
+  /// A retry the server settles (`ok` or `expired`) takes down the earlier attempt's failure
+  /// banner along with the card.
+  @Test(arguments: ["ok", "expired"])
+  func settledRetryClearsTheFailureBanner(status: String) async {
+    let calls = LockIsolated(0)
+    let store = TestStore(initialState: queuedState([serverApproval("srq-1")])) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { method, _ in
+        let call = calls.withValue { $0 += 1; return $0 }
+        if call == 1 { throw GatewayError.timedOut(method: method) }
+        return .object(["status": .string(status)])
+      }
+    }
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
+      $0.answeringServerRequestID = "srq-1"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.errorBanner = "Failed to send the approval response."
+    }
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
+      $0.answeringServerRequestID = "srq-1"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.errorBanner = nil
+      $0.transcript = [ChatRow(
+        id: self.uuid(0), kind: .status(kind: "approval", text: status == "ok" ? "Approved" : "Already handled elsewhere")
+      )]
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+  }
+
+  /// A settled answer leaves a banner it did not raise standing.
+  @Test func settledAnswerKeepsAnUnrelatedBanner() async {
+    var initial = queuedState([serverApproval("srq-1")])
+    initial.errorBanner = "Connection lost."
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { _, _ in .object(["status": .string("ok")]) }
+    }
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
+      $0.answeringServerRequestID = "srq-1"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+    #expect(store.state.errorBanner == "Connection lost.")
   }
 
   /// A re-delivered request (same srq id) refreshes in place through `refreshPresented` —
@@ -254,9 +339,9 @@ struct ChatInteractionTests {
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
     switch request.kind {
-    case .approval: await store.send(.respondToApproval(approve: false, all: false))
-    case .clarify: await store.send(.submitClarify(answers: ["": .other("Ada")]))
-    case .secret: await store.send(.respondToSecret(value: "k"))
+    case .approval: await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: false, all: false))
+    case .clarify: await store.send(.submitClarify(token: store.state.pendingInteractionToken, answers: ["": .other("Ada")]))
+    case .secret: await store.send(.respondToSecret(token: store.state.pendingInteractionToken, value: "k"))
     }
     await store.receive(\.serverRequestAnswered)
     #expect(sent.value == ["request.answer"])
@@ -311,7 +396,7 @@ struct ChatInteractionTests {
       $0.present(second.kind)
     }
     // The guard is released: the next card answers right away.
-    await store.send(.respondToApproval(approve: false, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: false, all: false)) {
       $0.answeringServerRequestID = "srq-2"
     }
 
@@ -337,6 +422,7 @@ struct ChatInteractionTests {
     release.yield(())
     await store.receive(\.serverRequestAnswered) {
       $0.answeringServerRequestID = nil
+      $0.errorBanner = nil // srq-2 settling takes down the moot srq-1 failure banner
       $0.transcript.append(ChatRow(id: self.uuid(late == "failure" ? 0 : 1), kind: .status(kind: "approval", text: "Denied")))
       $0.serverRequests = []
       $0.pendingInteraction = nil
@@ -429,7 +515,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: true, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
       $0.pendingInteraction = nil
       $0.expectsPendingApproval = false
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
@@ -464,7 +550,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: true, all: true)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: true)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
     }
@@ -491,7 +577,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: false, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: false, all: false)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Denied"))]
     }
@@ -519,7 +605,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: true, all: true)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: true)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
     }
@@ -541,7 +627,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: true, all: true)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: true)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
     }
@@ -564,7 +650,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: false, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: false, all: false)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Denied"))]
     }
@@ -590,7 +676,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: true, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
     }
@@ -624,7 +710,7 @@ struct ChatInteractionTests {
       }
     }
 
-    await store.send(.respondToApproval(approve: true, all: false)) {
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: true, all: false)) {
       $0.pendingInteraction = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
     }
@@ -651,11 +737,12 @@ struct ChatInteractionTests {
   // MARK: Legacy payloads end to end — the wire stays byte-identical to `d97e621`
 
   /// Decodes a legacy `<type>` event frame (the ≤ v2026.9.11 wire), feeds it to the reducer,
-  /// answers it with `answer(event)`, and returns every frame the app sent. The expected params
-  /// in the tests below are `d97e621`'s construction spelled out: a legacy payload never reaches
-  /// the v7 queue or `request.answer`, and its `*.respond` matches byte for byte.
+  /// answers it with `answer(event, cardToken)`, and returns every frame the app sent. The
+  /// expected params in the tests below are `d97e621`'s construction spelled out: a legacy
+  /// payload never reaches the v7 queue or `request.answer`, and its `*.respond` matches byte
+  /// for byte.
   private func legacyWire(
-    _ type: String, _ payload: String, answer: (GatewayEvent) -> ChatFeature.Action
+    _ type: String, _ payload: String, answer: (GatewayEvent, Int) -> ChatFeature.Action
   ) async throws -> [JSONValue] {
     let frame = try InboundFrame(data: Data(
       #"{"jsonrpc":"2.0","method":"event","params":{"type":"\#(type)","session_id":"live","payload":\#(payload)}}"#.utf8
@@ -676,7 +763,7 @@ struct ChatInteractionTests {
     await store.send(.gatewayEvent(event))
     #expect(store.state.serverRequests.isEmpty)
     #expect(store.state.pendingInteraction != nil)
-    await store.send(answer(event))
+    await store.send(answer(event, store.state.pendingInteractionToken))
     await store.finish()
     #expect(store.state.pendingInteraction == nil) // legacy answers stay optimistic
     return sent.value
@@ -689,7 +776,7 @@ struct ChatInteractionTests {
     let sent = try await legacyWire(
       "approval.request",
       #"{"command":"rm -rf /tmp/x","description":"Delete /tmp/x","pattern_key":"rm","pattern_keys":["rm"]}"#
-    ) { _ in .respondToApproval(approve: approve, all: all) }
+    ) { _, token in .respondToApproval(token: token, approve: approve, all: all) }
     #expect(sent == [.object([
       "method": .string("approval.respond"),
       "params": .object([
@@ -714,7 +801,7 @@ struct ChatInteractionTests {
   ) async throws {
     let sent = try await legacyWire(
       "approval.request", #"{"request_id":"approval-7","command":"rm foo","choices":\#(choices)}"#
-    ) { _ in .respondToApproval(approve: approve, all: all) }
+    ) { _, token in .respondToApproval(token: token, approve: approve, all: all) }
     #expect(sent == [.object([
       "method": .string("approval.respond"),
       "params": .object([
@@ -736,10 +823,10 @@ struct ChatInteractionTests {
   func legacyClarifyAnsweredFromTheFormKeepsItsWire(
     payload: String, input: String, requestID: String, wireAnswer: String
   ) async throws {
-    let sent = try await legacyWire("clarify.request", payload) { event in
+    let sent = try await legacyWire("clarify.request", payload) { event, token in
       guard case let .clarifyRequest(request) = event, let question = request.questions.first else {
         Issue.record("expected a legacy clarify, got \(event)")
-        return .skipClarify
+        return .skipClarify(token: token)
       }
       var draft = ClarifyDraft()
       if question.isFreeText {
@@ -747,7 +834,7 @@ struct ChatInteractionTests {
       } else {
         draft.toggle(input, in: question)
       }
-      return .submitClarify(answers: draft.answers(for: request))
+      return .submitClarify(token: token, answers: draft.answers(for: request))
     }
     #expect(sent == [.object([
       "method": .string("clarify.respond"),
@@ -765,7 +852,7 @@ struct ChatInteractionTests {
   func legacySecretPayloadKeepsItsWire(
     type: String, payload: String, method: String, requestID: String, valueKey: String
   ) async throws {
-    let sent = try await legacyWire(type, payload) { _ in .respondToSecret(value: "hunter2/✓") }
+    let sent = try await legacyWire(type, payload) { _, token in .respondToSecret(token: token, value: "hunter2/✓") }
     #expect(sent == [.object([
       "method": .string(method),
       "params": .object([

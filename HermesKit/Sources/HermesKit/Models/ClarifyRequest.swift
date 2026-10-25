@@ -68,6 +68,10 @@ public struct ClarifyRequest: Equatable, Sendable {
   /// Layout only: several questions render as sections with a pinned Confirm/Skip row.
   public var isMultiQuestion: Bool { questions.count > 1 }
 
+  /// Wire shape only: it arrived as a `questions` list, so every answer is keyed by its qid —
+  /// even a list with one usable question.
+  public var isBatch: Bool { questions.first?.qid != nil }
+
   /// The first question's text — the gateway-log summary.
   public var question: String { questions.first?.question ?? "" }
 

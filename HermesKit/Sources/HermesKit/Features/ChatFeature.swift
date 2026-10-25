@@ -1551,8 +1551,13 @@ public struct ChatFeature {
 
       case let .serverRequestAnswered(id, echo, result):
         if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
-        // A settled answer takes down an earlier attempt's failure banner (never another one).
-        if case .success = result, state.errorBanner == echo.failureBanner { state.errorBanner = nil }
+        // A settled answer for the presented card takes down an earlier attempt's failure
+        // banner (never another one, and never from a card already gone — the banner may be
+        // the presented card's own).
+        if case .success = result, state.presentedServerRequest?.id == id,
+           state.errorBanner == echo.failureBanner {
+          state.errorBanner = nil
+        }
         switch result {
         case .success(.ok):
           state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: echo.text)))
@@ -2803,9 +2808,11 @@ public struct ChatFeature {
   }
 
   /// The legacy `clarify.respond` params for an answer (`nil` = skip the card):
-  /// - a single question → one `{session_id, request_id, answer}` with the raw choice text,
-  ///   exactly as the app always sent it (legacy wire byte-identity); a skip is `answer: ""`;
-  /// - a legacy batch → one `{…, question_id, answer}` per question, in order (desktop's
+  /// - the single form (top-level `question`) → one `{session_id, request_id, answer}` with
+  ///   the raw choice text, exactly as the app always sent it (legacy wire byte-identity); a
+  ///   skip is `answer: ""`;
+  /// - a legacy batch (``ClarifyRequest/isBatch``, whatever its length) → one
+  ///   `{…, question_id, answer}` per question, in order (desktop's
   ///   per-question locks: the bare label, a multi-select's JSON-array string, `""` for a
   ///   skipped question); skipping the card is the question-less `answer: ""` (cancel-all).
   static func legacyClarifyRespondParams(
@@ -2816,7 +2823,7 @@ public struct ChatFeature {
         "session_id": .string(sessionID), "request_id": .string(request.requestID ?? ""),
       ]) { current, _ in current })
     }
-    guard let answers, request.isMultiQuestion else {
+    guard let answers, request.isBatch else {
       return [params(["answer": .string(singleWireText(request, answers, stripsRecommended: false))])]
     }
     return request.questions.map { question in

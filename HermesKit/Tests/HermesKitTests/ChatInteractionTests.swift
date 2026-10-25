@@ -429,6 +429,40 @@ struct ChatInteractionTests {
     }
   }
 
+  /// A late success for a cancelled request leaves the presented card's own failure banner
+  /// standing, even though both carry the same text.
+  @Test(arguments: ["ok", "expired"])
+  func lateSuccessKeepsThePresentedCardsFailureBanner(late: String) async {
+    let first = serverApproval("srq-1", command: "rm a")
+    let second = serverApproval("srq-2", command: "rm b")
+    var initial = queuedState([first, second])
+    initial.answeringServerRequestID = "srq-1"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { method, _ in throw GatewayError.timedOut(method: method) }
+    }
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-1", reason: "resolved")))) {
+      $0.serverRequests = [second]
+      $0.answeringServerRequestID = nil
+      $0.present(second.kind)
+    }
+    await store.send(.respondToApproval(token: store.state.pendingInteractionToken, approve: false, all: false)) {
+      $0.answeringServerRequestID = "srq-2"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.errorBanner = "Failed to send the approval response."
+    }
+    let echo = ChatFeature.AnswerEcho(kind: "approval", text: "Approved", failureBanner: "Failed to send the approval response.")
+    await store.send(.serverRequestAnswered(id: "srq-1", echo: echo, .success(late == "ok" ? .ok : .expired))) {
+      $0.transcript = [ChatRow(
+        id: self.uuid(0), kind: .status(kind: "approval", text: late == "ok" ? "Approved" : "Already handled elsewhere")
+      )]
+    }
+    #expect(store.state.errorBanner == "Failed to send the approval response.")
+    #expect(store.state.presentedServerRequest == second)
+  }
+
   /// Turn end clears the whole queue (another client's response-frame answer sends no
   /// `request.cancel`), on `message.complete` and on `error` alike.
   @Test(arguments: [true, false])

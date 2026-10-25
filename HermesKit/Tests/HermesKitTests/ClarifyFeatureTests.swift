@@ -476,6 +476,40 @@ struct ClarifyFeatureTests {
     }
   }
 
+  /// A legacy `questions` list with one question is still a batch on the wire: the answer
+  /// is a `question_id` lock (a question-less respond would cancel the batch), and only
+  /// skipping the card sends the question-less cancel-all.
+  @Test(arguments: [false, true])
+  func oneQuestionLegacyBatchStillAnswersByQuestionID(skipsCard: Bool) async throws {
+    let request = try #require(ClarifyRequest(legacyEvent: .object([
+      "request_id": .string("rb1"),
+      "questions": .array([.object([
+        "qid": .string("q0"), "question": .string("Framework?"),
+        "choices": .array([.string("SwiftUI (Recommended)"), .string("UIKit")]), "multi_select": .bool(false),
+      ])]),
+    ])))
+    let sent = LockIsolated<[JSONValue]>([])
+    var initial = readyState()
+    initial.present(.clarify(request))
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable _, params in
+        sent.withValue { $0.append(params) }
+        return .object(["status": .string("ok")])
+      }
+    }
+    let token = store.state.pendingInteractionToken
+    await store.send(skipsCard ? .skipClarify(token: token) : .submitClarify(token: token, answers: ["q0": .choices(["SwiftUI (Recommended)"])])) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: skipsCard ? "Skipped" : "SwiftUI"))]
+    }
+    await store.finish()
+    let base: [String: JSONValue] = ["session_id": .string("live"), "request_id": .string("rb1")]
+    #expect(sent.value == [.object(base.merging(
+      skipsCard ? ["answer": .string("")] : ["question_id": .string("q0"), "answer": .string("SwiftUI")]
+    ) { a, _ in a })])
+  }
+
   /// A legacy batch lock that fails stops the run (later locks would answer a batch the
   /// server never completed) and surfaces like any legacy failure.
   @Test func legacyBatchFailureStopsAndSurfaces() async {

@@ -173,8 +173,8 @@ resolves exactly that queue entry and ignores `all` when a `request_id` is prese
 the user saw is the one resolved (FIFO would hit the oldest entry, while the legacy card shows
 the newest). An event without one (older agents, the push-tap recovered card) keeps the FIFO
 `{session_id, choice, all}`. A legacy clarify sends the raw choice text and keeps the
-choices-only form (no Other row). A legacy batch clarify (`questions` plus `request_id`) renders
-the multi-question form and answers as the desktop did: one `clarify.respond {…, question_id,
+choices-only form (no Other row). A legacy batch clarify (`questions` plus `request_id`, even a
+one-question list) answers as the desktop did: one `clarify.respond {…, question_id,
 answer}` per question, in order (the bare label, `""` for a skipped question), while Skip sends
 the question-less empty respond that cancels the batch.
 

@@ -858,21 +858,34 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/AppFeatureTests.swift` (existing recovery tests)
 
-- [ ] implement the `applyActivate` ordering in Technical Details: on v7 always reconcile with
+- [x] implement the `applyActivate` ordering in Technical Details: on v7 always reconcile with
       `openRequests` (absence is authoritative, same-id refresh, locks shown); legacy clears on
-      `!running` as today
-- [ ] v7 push-tap: an armed hint is consumed by the replay; no approval in the replay → no card;
+      `!running` as today (`reconcileServerRequests`; v7 = `desktop_contract >= 7` OR a
+      non-empty `open_requests`. Kept ids hold their queue place — a reordering replay never
+      swaps the card under the user — new ids append in replay order; unrendered or malformed
+      entries are not queued and the reducer sends nothing for them; a dropped id releases a
+      stale `answeringServerRequestID`; a standing non-server card is replaced by the head or
+      dismissed by an empty replay)
+- [x] v7 push-tap: an armed hint is consumed by the replay; no approval in the replay → no card;
       legacy keeps the generic recovered card exactly as today
-- [ ] write tests: `open_requests` with an approval and a clarify presents the approval then the
+- [x] write tests: `open_requests` with an approval and a clarify presents the approval then the
       clarify; re-hydrate with the same ids keeps the token; an unlisted presented card is
       cleared; `running == false` with a non-empty `open_requests` keeps the card;
       `running == false` with none clears; v7 hint + approval in the replay → the real card, no
       generic card; v7 hint + empty replay → nothing; legacy hint → generic card (existing
-      `AppFeatureTests` cases still pass)
-- ⚠️ until this task lands, the base's `applyActivate` still runs `clearStaleApproval` on
-      `running == false`, which also drops a live server-request approval card (#83319) and
-      leaves the request open server-side
-- [ ] run tests - must pass before next task
+      `AppFeatureTests` cases still pass) (`HydrateTests` "Server-request replay" section, plus
+      a reordering replay, unrendered/malformed entries skipped, contract-less `open_requests`
+      counted as v7, a clarify-only replay under the hint; `AppFeatureTests`
+      `approvalTapOnV7HydratesTheReplayedCard` drives the on-screen tap end to end through a
+      JSON `session.resume` with `desktop_contract: "8"`)
+- ⚠️ (resolved in Task 8) until this task lands, the base's `applyActivate` still runs
+      `clearStaleApproval` on `running == false`, which also drops a live server-request
+      approval card (#83319) and leaves the request open server-side
+- ⚠️ a server request raised between the server building the resume snapshot and the client
+      applying it is dropped by the reconcile (absence is authoritative, as on desktop); it
+      comes back on the next hydrate or answers through another client. Accepted
+- [x] run tests - must pass before next task (1608 tests in 70 suites passed, 1 known issue; no
+      view or app-used API changed, so no app build / snapshot run)
 
 ### Task 9: Verify acceptance criteria
 

@@ -106,7 +106,9 @@ public struct ChatFeature {
     /// order. **While non-empty, its head IS the presented card** (raised through
     /// ``present(_:)``); the rest wait their turn. A new arrival appends; answering it,
     /// `expired`, a matching `request.cancel` or turn end removes it, and the next head is
-    /// presented with a fresh token. Per slot, unpersisted.
+    /// presented with a fresh token. Every v7 hydrate reconciles it with the server's
+    /// `open_requests` (absence is authoritative, whatever `running` says). Per slot,
+    /// unpersisted.
     public internal(set) var serverRequests: IdentifiedArrayOf<PendingServerRequest>
     /// The srq id whose `request.answer` is in flight. The card stays up until the server
     /// confirms (`ok` / `expired`) so a failed answer leaves it answerable; this guards a
@@ -138,9 +140,11 @@ public struct ChatFeature {
     /// #30: an `approval.request` that fired while the socket was down is gone — the
     /// server does not re-surface pending approvals on `session.resume`). Set by
     /// `AppFeature` when an approval-typed push tap puts this session's chat on screen;
-    /// consumed (reset to `false`) by the next hydrate, which synthesizes a generic
-    /// command-less approval card when the turn is still `running` and no real blocking
-    /// request arrived over the socket. Transient: deliberately NOT persisted in
+    /// consumed (reset to `false`) by the next hydrate. On a legacy server that hydrate
+    /// synthesizes a generic command-less approval card when the turn is still `running` and
+    /// no real blocking request arrived over the socket; on v7 the hydrate's `open_requests`
+    /// replay restores the real card instead, and an empty replay means nothing to recover
+    /// (no card). Transient: deliberately NOT persisted in
     /// `ChatSnapshotClient` (a snapshot repaint must never resurrect a card), and cleared
     /// by a real `.approvalRequest` (the real event wins — no later re-synthesis).
     public var expectsPendingApproval: Bool
@@ -2592,7 +2596,8 @@ public struct ChatFeature {
   }
 
   /// Drop every stale prompt + the push-tap recovery hint when the turn is known to be over
-  /// (turn-end events, or a hydrate reporting `running == false`): the whole v7 server
+  /// (turn-end events, or a LEGACY hydrate reporting `running == false` — a v7 hydrate
+  /// reconciles with `open_requests` instead, see `reconcileServerRequests`): the whole v7 server
   /// request queue (desktop clears its prompts at turn end too — `request.cancel` is not sent
   /// when another client answered by response frame), and a standing legacy approval card.
   /// The server never ends a turn with an approval still queued, so a card outliving its
@@ -2609,6 +2614,53 @@ public struct ChatFeature {
     state.serverRequests.removeAll()
     state.answeringServerRequestID = nil
     state.expectsPendingApproval = false
+  }
+
+  /// Whether a hydrate came from a v7 (server→client request) server: `desktop_contract >= 7`,
+  /// or — positive evidence on its own — a non-empty `open_requests` (only v7 servers send
+  /// it). Never a version string.
+  static func isServerRequestWire(contract: Int?, response: ActivateResponse) -> Bool {
+    (contract ?? 0) >= 7 || !response.openRequests.isEmpty
+  }
+
+  /// Reconcile the server-request queue with a hydrate's `open_requests` (v7). Absence is
+  /// authoritative: an id the replay does not list is dropped (answered elsewhere, timed out,
+  /// or its turn ended). A listed id already queued keeps its place and takes the replayed
+  /// params (fresh batch-clarify locks); a new id is appended in replay (oldest-first) order.
+  /// Entries the app does not render — or whose params do not decode — are not queued: the
+  /// live path already skipped or declined them, and the reducer never answers on its own.
+  /// The head is presented with a fresh token unless the same srq id is already up, in which
+  /// case it is refreshed in place (``State/refreshPresented(_:)`` — no token bump, the card
+  /// keeps its scroll offset and edits). A standing non-server card (a legacy or push-tap
+  /// recovered card) is replaced by the head, or dismissed when the replay holds nothing.
+  private func reconcileServerRequests(with openRequests: [OpenRequest], into state: inout State) {
+    let previouslyPresentedID = state.presentedServerRequest?.id
+    var replay = IdentifiedArrayOf<PendingServerRequest>()
+    for entry in openRequests where replay[id: entry.id] == nil {
+      if let request = PendingServerRequest(id: entry.id, method: entry.method, params: entry.params) {
+        replay.append(request)
+      }
+    }
+    var reconciled = IdentifiedArrayOf<PendingServerRequest>()
+    for kept in state.serverRequests {
+      if let refreshed = replay[id: kept.id] { reconciled.append(refreshed) }
+    }
+    for new in replay where reconciled[id: new.id] == nil {
+      reconciled.append(new)
+    }
+    state.serverRequests = reconciled
+    if let answering = state.answeringServerRequestID, reconciled[id: answering] == nil {
+      state.answeringServerRequestID = nil
+    }
+    guard let head = reconciled.first else {
+      state.pendingInteraction = nil
+      return
+    }
+    if head.id == previouslyPresentedID {
+      state.refreshPresented(head)
+    } else {
+      state.present(head.interaction)
+    }
   }
 
   /// Remove one server request from the queue; when it was the presented card, raise the
@@ -3100,27 +3152,38 @@ public struct ChatFeature {
     let running = response.running ?? false
     state.isSending = running || state.slashExecInFlight
 
-    // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
-    // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
-    // the single synthesis point. Synthesize the generic card only when the authoritative
-    // `running` says the agent is still blocked AND the socket didn't already deliver a
-    // real blocking request. Not running → the approval resolved/denied/timed out while
-    // we were detached → drop silently (no phantom card). Consuming the hint first means
-    // a double hydrate of the same running turn can't synthesize twice.
-    if state.expectsPendingApproval {
+    if Self.isServerRequestWire(contract: state.desktopContract, response: response) {
+      // v7: the server's `open_requests` is the authoritative list of open prompts, whatever
+      // `running` says — a `running == false` snapshot can still have a bridge parked on an
+      // open request (desktop #83319), and a finished turn simply lists none. An armed
+      // push-tap hint is consumed: the replay IS the recovered card (the real one), and a
+      // replay without an approval means there is nothing to recover — no generic card.
       state.expectsPendingApproval = false
-      if running, state.pendingInteraction == nil {
-        state.present(.approval(Self.recoveredApprovalRequest))
+      reconcileServerRequests(with: response.openRequests, into: &state)
+    } else {
+      // Legacy (`desktop_contract < 7`): today's behaviour, byte for byte.
+      // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
+      // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
+      // the single synthesis point. Synthesize the generic card only when the authoritative
+      // `running` says the agent is still blocked AND the socket didn't already deliver a
+      // real blocking request. Not running → the approval resolved/denied/timed out while
+      // we were detached → drop silently (no phantom card). Consuming the hint first means
+      // a double hydrate of the same running turn can't synthesize twice.
+      if state.expectsPendingApproval {
+        state.expectsPendingApproval = false
+        if running, state.pendingInteraction == nil {
+          state.present(.approval(Self.recoveredApprovalRequest))
+        }
       }
-    }
-    // The inverse staleness rule: the authoritative "not running" means no approval can
-    // be pending server-side (the server never ends a turn with one queued), so a card
-    // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
-    // answered on another client while the socket was down and the turn ended — must be
-    // dropped, or it would sit over a finished transcript locking the composer. (The
-    // helper's hint-clear is a no-op here: the block above already consumed it.)
-    if !running {
-      clearStalePrompts(into: &state)
+      // The inverse staleness rule: the authoritative "not running" means no approval can
+      // be pending server-side (the server never ends a turn with one queued), so a card
+      // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
+      // answered on another client while the socket was down and the turn ended — must be
+      // dropped, or it would sit over a finished transcript locking the composer. (The
+      // helper's hint-clear is a no-op here: the block above already consumed it.)
+      if !running {
+        clearStalePrompts(into: &state)
+      }
     }
 
     // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the

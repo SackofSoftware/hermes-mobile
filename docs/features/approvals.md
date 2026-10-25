@@ -157,8 +157,8 @@ is dropped by the reconcile and comes back on the next hydrate.
 
 **Event replay (#98) never carries a prompt.** Request frames are not stamped into the server's
 event ring, so this reconcile stays the only way a prompt comes back. What the ring can hold is
-`request.cancel`, and after a drop the reconnect replay folds the gap's events BEFORE this
-hydrate (`docs/architecture.md` → "Reconnect replay"):
+`request.cancel`, and after a drop the reconnect event replay folds the gap's events BEFORE this
+hydrate (`docs/architecture.md` → "Reconnect event replay"):
 
 - A replayed `request.cancel` runs through the ordinary rules in "How a card ends": an unknown
   id is a no-op, a queued non-head id is removed silently, and the presented head is removed and

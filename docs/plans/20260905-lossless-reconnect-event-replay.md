@@ -273,7 +273,7 @@ release `v0.22.5`. `ws.py` differs only in unrelated lines.
    second initializer builds it from a bare event object (the `events.since` element shape),
    so replayed and live events decode through one path. Client-synthesized events
    (`.serverRequest`, `.serverRequestFailed`, `.serverRequestsUnavailable`, `.authExpired`) are
-   wrapped with every field nil. `GatewayConnection` keeps the held `gateway.ready` frame (not
+   wrapped with no envelope data. `GatewayConnection` keeps the held `gateway.ready` frame (not
    just a flag) so the `.ready` released by the advertisement gate still carries its epoch and
    authority flag.
 2. **The reducer owns the cursor.** `ChatFeature.State` gains `replayCursor: ReplayCursor?`
@@ -281,7 +281,8 @@ release `v0.22.5`. `ws.py` differs only in unrelated lines.
    `isFoldingReplay: Bool` (per slot, unpersisted, reset in `init`). A new
    `.gatewayFrame(GatewayFrame)` action is what the socket effect sends: it applies the ready
    rules, records the cursor, then reduces exactly as `.gatewayEvent` does (shared helper, one
-   code path). `.gatewayEvent` remains for tests and for replayed events.
+   code path). `.gatewayEvent` remains for tests; the replay fold calls `reduceGatewayEvent`
+   directly.
 3. **Replay before hydrate, on the gated `.ready`.**
    - **When.** In `reduce(event: .ready)`, the slot replays when all of these hold:
      - it has a cursor for its live session and `replaySupported`;
@@ -346,8 +347,8 @@ Key decisions:
   would need rules about which disconnects clear it, and would put reconnect knowledge in the
   client. The frame envelope costs ~55 mechanical test edits (counts in Context) and keeps
   every decision in `TestStore` reach.
-- **`.gatewayEvent` action kept.** The 175 existing reduction sends and the replay fold both
-  use it; only the socket effect switches to `.gatewayFrame`.
+- **`.gatewayEvent` action kept.** The 175 existing reduction sends use it (the replay fold
+  calls `reduceGatewayEvent` directly); only the socket effect switches to `.gatewayFrame`.
 - **No parking buffer** (see 4). If a later change attaches the socket before the replay,
   revisit.
 - **Replay after the advertisement, not at socket open as desktop does.** The reducer only
@@ -369,6 +370,19 @@ Key decisions:
   is where multi-session replay would go).
 
 ## Technical Details
+
+**As built** (normative: `docs/architecture.md` → "Event frames and the replay cursor" and
+"Reconnect event replay"). The sketches below predate review; the shipped code differs:
+- names: `.eventReplayResult`, `CancelID.eventReplay`, `replayEventGap(cursor:)`,
+  `applyEventReplayResult` / `foldReplayedEvents`;
+- the fold also suppresses `runningChanged` and per-event anchor writes (one write for the last
+  boundary), skips `message.delta`s and materialises no `message.complete` row, never starts the
+  thinking timer (the hydrate's `running` does), and keeps the push-tap approval hint;
+- `isReplayReadPending` holds sends, drains, prompt answers and healthy-socket
+  `.foreground` / `.reattached` during the read;
+- a read timeout spends the hydrate's same-socket timeout retry;
+- the WebSocket accepts messages up to the 16 MiB frame ceiling
+  (`JSONRPCRequest.maxWebSocketFrameBytes`).
 
 ### Models (`JSONRPC.swift` / new `GatewayFrame.swift`)
 
@@ -404,9 +418,10 @@ public struct ReplayBatch: Equatable, Sendable, Decodable {
 }
 ```
 
-`seq` and `latest_seq` decode from a JSON number (`intValue`); a non-integer or negative value
-is treated as absent. `replay_epoch` and `session_authority` are read from the `gateway.ready`
-payload only (any other frame's `replay_epoch`, as on a canonical host, is ignored).
+`seq` and `latest_seq` decode from a JSON number (`sequenceNumber`, `Int(exactly:)`); a
+non-integer or negative value is treated as absent. `replay_epoch` and `session_authority` are
+read from the `gateway.ready` payload only (any other frame's `replay_epoch`, as on a canonical
+host, is ignored).
 
 ### Client (`HermesGatewayClient.swift`)
 
@@ -464,8 +479,8 @@ if state.replaySupported, !state.isSessionAuthority,
 ```
 `replay(cursor:)` effect (`CancelID.replay`, `cancelInFlight`): `session.events.since
 {session_id: cursor.sessionID, last_seen: cursor.seq}` → `.replayResult`. It uses the default
-30 s per-request budget (desktop uses 10 s). The reducer's hydrate timeout handling is
-downstream and unaffected: a slow replay only delays the hydrate, it never redials.
+30 s per-request budget (desktop uses 10 s). A read timeout spends the hydrate's same-socket
+timeout retry, so a half-open socket redials after one more.
 
 `replayResult` reduction:
 ```
@@ -480,7 +495,8 @@ case .success(let batch):
       if let latest = batch.latestSeq, let c = state.replayCursor, latest > c.seq { state.replayCursor?.seq = latest }
   } else {
       state.isFoldingReplay = true
-      for frame in batch.events where frame passes the seq gate && !frame.event.isLegacyPrompt {
+      for frame in batch.events where frame.sessionID == cursor.sessionID && frame.seq > cursor.seq
+                                      && !frame.event.isLegacyPrompt {
           advanceCursor(frame, into: &state)
           effects.append(reduceGatewayEvent(frame.event, into: &state))
       }
@@ -488,7 +504,8 @@ case .success(let batch):
   }
 case .failure(let error):
   if error.isUnknownMethod { state.replaySupported = false }
-  debugLog.note("session.events.since", error.message)   // carve-out, see Solution Overview 3
+  if error.isTimedOut { state.hydrateRetriedAfterTimeout = true }
+  // the effect already wrote debugLog.note (carve-out, see Solution Overview 3)
 }
 return .merge(effects + [hydrate(sessionID: stored, profile: state.profileName)])
 ```

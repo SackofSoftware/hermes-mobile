@@ -316,7 +316,7 @@ watermark rather than leaving a silent hole). Session-less globals (`gateway.rea
   non-negative integral number (anything else is absent). `replay_epoch` and
   `session_authority` are read from the `gateway.ready` payload only. Client-synthesized events
   (`.serverRequest`, `.serverRequestFailed`, `.serverRequestsUnavailable`, `.authExpired`) carry
-  every field nil. `GatewayFrame(eventObject:)` decodes the bare `{type, session_id, seq,
+  no envelope data. `GatewayFrame(eventObject:)` decodes the bare `{type, session_id, seq,
   payload}` object, the shape shared by a live frame's `params` and each `session.events.since`
   element, so live and replayed events decode through one path.
 - **Held-ready epoch.** The advertisement gate holds the `gateway.ready` frame itself
@@ -330,8 +330,9 @@ watermark rather than leaving a silent hole). Session-less globals (`gateway.rea
   `.gatewayClosed`, the backoff redial, `.teardownSocketOnly`, `.resumeAfterReauth` and the
   foreground/reattach re-hydrates, dies with the slot, and is never persisted (a cold launch
   always hydrates). A resume that answers a re-minted live id (an idle session reaped after the
-  ~20 s orphan grace) leaves the old cursor unmatched, so that reconnect hydrates plainly and the
-  new id's first stamped frame starts a fresh cursor.
+  ~20 s orphan grace) leaves the old cursor unmatched: that reconnect has already read the old id,
+  and the next drop hydrates plainly unless the new id's first stamped frame has started a fresh
+  cursor by then.
 - **Epoch.** `replay_epoch` is a per-process uuid: a gateway restart changes it and resets every
   counter. A ready (or an `events.since` reply) carrying a different epoch than the stored one
   drops the cursor and adopts the new epoch; one without an epoch (older agent) leaves both
@@ -339,7 +340,7 @@ watermark rather than leaving a silent hole). Session-less globals (`gateway.rea
   connection, reset by every ready, and switches replay off: such a host wants a per-session
   epoch the app does not track and would always answer `snapshot_required`.
 
-How the reconnect uses the cursor: "Session re-hydration" → "Reconnect replay" below.
+How the reconnect uses the cursor: "Session re-hydration" → "Reconnect event replay" below.
 
 ### Server→client requests (prompt protocol v7, #97)
 
@@ -473,8 +474,8 @@ context gauge, dropping tool/thinking rows, or stranding a phantom "working" glo
 **One unified `hydrate(sessionID)` effect** serves open, foreground, and cold launch. Opening a
 session with a stored id, foregrounding it (`.foreground`), and a cold-launch socket connect all
 funnel through the same `.ready` → `hydrate` path (`ChatFeature`), so there is one code path to
-reason about (a reconnect holding a replay cursor reads the gap first; see "Reconnect replay"
-below). `hydrate` calls the gateway's **`session.resume`** RPC, which returns
+reason about (a reconnect holding a replay cursor reads the gap first; see "Reconnect event
+replay" below). `hydrate` calls the gateway's **`session.resume`** RPC, which returns
 `{messages, session_id, resumed, info, running, inflight}` (plus `open_requests` on a v7 live
 reattach) and serves **both** a stored session
 (rebuilt from the DB) and an already-live one (the transport is reattached, in-flight turn
@@ -514,7 +515,7 @@ response (`applyActivate`), in order:
    immediately on `.background`/`.inactive` via `persistNow`) so the next cold open paints from
    it.
 
-### Reconnect replay (#98)
+### Reconnect event replay (#98)
 
 `inflight` carries the user prompt and the assistant text so far, never reasoning, tool or
 status rows, so without help a socket drop mid-turn loses every such event emitted during the
@@ -542,11 +543,11 @@ one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `
 - **Then the hydrate, unchanged.** `applyActivate` stays the authority. A running turn keeps the
   tool and thinking rows the fold built or extended (#26); assistant text is the hydrate's alone
   (the fold skips `message.delta`s and materialises no `message.complete` row, so a reply never
-  shows twice); a completed turn is replaced wholesale. Replayed status rows (`review.summary`, a "Timed out" row) are wiped, as
-  live ones are (accepted, #47). After a `.gatewayClosed` drop `finalizeInFlight` has frozen the
-  pre-drop thinking row, so replayed reasoning starts a fresh live one (the frozen row goes with
-  the hydrate); after `.teardownSocketOnly` nothing was finalized and replayed reasoning extends
-  the live row.
+  shows twice); a completed turn is replaced wholesale. Replayed status rows (`review.summary`, a
+  "Timed out" row) are wiped, as live ones are (accepted, #47). After a `.gatewayClosed` drop
+  `finalizeInFlight` has frozen the pre-drop thinking row, so replayed reasoning starts a fresh
+  live one (the frozen row goes with the hydrate); after `.teardownSocketOnly` nothing was
+  finalized and replayed reasoning extends the live row.
 - **Fallbacks** fold nothing and hydrate: `truncated` (the gap fell off the ring; the cursor
   advances to `latest_seq`, desktop parity, so the next drop doesn't re-ask for the evicted
   window); a reply epoch that differs from the stored one (drop the cursor, adopt the epoch);
@@ -566,9 +567,10 @@ one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `
   `isReplayReadPending`, a healthy-socket `.foreground` / `.reattached` defers to the replay's
   hydrate, `canSend` / `drainQueueIfReady` hold the `prompt.submit`, and a prompt-card answer
   is a no-op (it would unblock the agent mid-read). The cost is a one-RTT window between the
-  read and the attach whose frames are stamped but dropped; the desktop has the same window. Reading after the advertisement gate
-  rather than at socket open (as the desktop does) widens it by up to the advertisement RTT
-  (worst case the 5 s cap), accepted to keep a single `.ready` path.
+  read and the attach whose frames are stamped but dropped; the desktop has the same window.
+  Reading after the advertisement gate rather than at socket open (as the desktop does) widens
+  it by up to the advertisement RTT (worst case the 5 s cap), accepted to keep a single `.ready`
+  path.
 - **Server floor.** The ring needs v2026.8.27; the v7 prompts + ring combination this was built
   against starts at v2026.9.14 (current v0.22.x). A first connect (no cursor), an older agent
   (no `seq`, or `-32601`) and a session-authority host all get the plain hydrate, byte-identical
@@ -588,9 +590,9 @@ flushes too, and — when a turn is RUNNING — additionally begins a finite ~30
 expires that window while still backgrounded: one final flush, then a clean socket-only
 disconnect (`.teardownSocketOnly`) that keeps the chat state and the replay cursor in memory, so
 the foreground redial first replays the gap (#98, above) and the hydrate then re-attaches with
-the #26 live-row preservation; push covers the user while the app stays suspended. An idle chat backgrounds with no task (no battery burn), and a stale
-expiry that races `.active` is guarded to a no-op. The nav stack is **not** auto-restored on
-cold launch — opening a session is enough.
+the #26 live-row preservation; push covers the user while the app stays suspended. An idle chat
+backgrounds with no task (no battery burn), and a stale expiry that races `.active` is guarded
+to a no-op. The nav stack is **not** auto-restored on cold launch — opening a session is enough.
 
 Navigation shares the same keep-alive policy (#33): the open chat's state lives in the
 `AppFeature`-owned slot (`liveChat`), and the navigation path holds only thin `ChatScreen`

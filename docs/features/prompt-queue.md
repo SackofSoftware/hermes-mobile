@@ -23,11 +23,12 @@ send arrow back and a blocking card (which suppresses queuing) brings Stop back.
 upload, slash routing, #17 heal — shared by the idle composer path, byte-identical, and the
 drain via `fromQueue:` which must never touch the live composer) and `drainQueueIfReady`
 (head-only, one turn per entry, re-checks every precondition; drain edges = `message.complete`,
-an idle-confirming hydrate in `applyActivate` — which covers `.gatewayClosed` finalization and
-the post-slash refresh — and Send-now's post-interrupt `.maybeDrainQueue` re-check). A
-reconnect replay fold (#98) is never a drain or park edge: its `message.complete` /
-`request.cancel` / `.error` describe the past, so `isFoldingReplay` makes them no-ops until the
-hydrate's `running` says the turn is idle (`docs/architecture.md` → "Reconnect replay").
+a card leaving on an idle turn (`request.cancel`), an idle-confirming hydrate in
+`applyActivate` — which covers `.gatewayClosed` finalization and the post-slash refresh — and
+Send-now's post-interrupt `.maybeDrainQueue` re-check). A reconnect event replay fold (#98) is
+never a drain or park edge: its `message.complete` / `request.cancel` / `.error` describe the
+past, so `isFoldingReplay` makes them no-ops until the hydrate's `running` says the turn is idle
+(`docs/architecture.md` → "Reconnect event replay").
 
 ## Parking
 

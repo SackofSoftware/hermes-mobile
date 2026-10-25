@@ -720,22 +720,27 @@ reconnecting socket.
         duplicate rows
 
 ### Task 7: [Final] Update documentation
-- [ ] `docs/architecture.md`:
+- [x] `docs/architecture.md`:
       - Wire protocol section: frame envelope, cursor, epoch, the held-ready epoch;
       - "Session re-hydration" (`:421`): replay-then-hydrate ordering after the advertisement
         gate, fallbacks, why no parking buffer, the carve-out, no drain during the fold;
       - "Server→client requests" (`:301`): one line that requests never replay and
         `request.cancel` may
-- [ ] `docs/features/approvals.md` "Reconnect replay (v7)": a replayed `request.cancel` runs
+      (➕ new "Event frames and the replay cursor" and "Reconnect replay" subsections; the
+      gateway-client and debug-log client bullets and the grace-expiry paragraph updated; the
+      lifecycle paragraphs now sit under an "App lifecycle and navigation" heading)
+- [x] `docs/features/approvals.md` "Reconnect replay (v7)": a replayed `request.cancel` runs
       before the hydrate; `open_requests` from `events.since` is ignored; legacy prompt events
       are not replayed
-- [ ] `CLAUDE.md` gateway bullet: one line on the cursor and the replay-before-hydrate rule
+      (➕ `docs/features/prompt-queue.md`: the fold is not a drain edge)
+- [x] `CLAUDE.md` gateway bullet: one line on the cursor and the replay-before-hydrate rule
       (after the `.ready` gate, no queue drain during the fold)
-- [ ] `README.md` "Stays connected" bullet (`:92-97`): mention that a running turn's gap is
+- [x] `README.md` "Stays connected" bullet (`:92-97`): mention that a running turn's gap is
       replayed
-- [ ] comment on #98 with the server floor (v2026.8.27 for the ring; v7 combination
-      v2026.9.14+, current v0.22.x) and the fallback behaviour
-- [ ] move this plan to `docs/plans/completed/`
+- [x] comment on #98 with the server floor (v2026.8.27 for the ring; v7 combination
+      v2026.9.14+, current v0.22.x) and the fallback behaviour (drafted at
+      /tmp/issue-98-comment.md; posting left to the user)
+- [x] move this plan to `docs/plans/completed/` (done by the orchestrator at completion)
 
 ## Post-Completion
 

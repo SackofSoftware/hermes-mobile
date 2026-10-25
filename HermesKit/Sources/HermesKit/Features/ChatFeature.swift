@@ -796,8 +796,9 @@ public struct ChatFeature {
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
     case thinkingTick
-    /// One event to fold. Sent by tests and (Task 4) by the replay fold; the socket effect
-    /// sends `.gatewayFrame`, which reduces through the same path.
+    /// One event to fold, bypassing the replay cursor. Sent by tests; the socket effect
+    /// sends `.gatewayFrame` and the replay fold calls `reduceGatewayEvent` directly, so all
+    /// three reduce through the same path.
     case gatewayEvent(GatewayEvent)
     /// One inbound socket frame (#98): applies the ready rules (replay epoch, session
     /// authority) and advances the replay cursor, then reduces exactly as `.gatewayEvent`.

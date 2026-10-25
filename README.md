@@ -90,7 +90,9 @@ away from your desk and still keep your agent moving.
   that still use the event-based prompts (there, a push tap brings back a generic
   approve/deny card, and the newer clarify forms are not available).
 - **Stays connected.** Automatic reconnect with backoff and a clear connection banner
-  when the link drops. Reopening a session — after navigating away, backgrounding the app,
+  when the link drops. On current Hermes releases a reconnect also catches up on what a
+  running turn did while you were offline: the tool calls and thinking from the gap show up
+  right away instead of when the turn ends. Reopening a session — after navigating away, backgrounding the app,
   or a cold relaunch — restores its live state: the right model, context usage, full
   tool/thinking history, and an in-progress turn that keeps streaming with its timer ticking.
   A running turn even keeps its live connection while you browse the session list, and for a

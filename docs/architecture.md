@@ -89,8 +89,10 @@ a `testValue`/`.inMemory()` variant):
   long-running cancellable effect; reconnect/backoff lives in the reducer (testable
   with `TestClock`). Each `send` enforces a per-request timeout (default 30s) so a
   stuck/never-acking RPC throws `GatewayError.timedOut` instead of hanging forever.
+  `connect` yields `GatewayFrame`s: each event with its `session_id` / `seq` envelope (see
+  "Event frames and the replay cursor" below); it holds no replay logic.
   On the `gateway.ready` frame it sends one `client.capabilities {server_requests: true}`
-  per connection and holds `.ready` until that settles or a 5 s cap fires, so the first
+  per connection and holds the ready frame until that settles or a 5 s cap fires, so the first
   `session.resume` / `session.create` goes out advertised (see "Server→client requests"
   below). Inbound server requests are routed on the receive loop: a rendered prompt is
   yielded as `GatewayEvent.serverRequest`, everything else is skipped, declined or left
@@ -150,7 +152,9 @@ a `testValue`/`.inMemory()` variant):
   the generation-scoped expiration handler). `liveValue` is `#if canImport(UIKit)`-guarded
   (no-op elsewhere); `.inMemory()` exposes a test-drivable `expire()` plus begin/end spies.
 - **`PasteboardClient`** — copy.
-- **`DebugLogClient`** — an event ring buffer for the in-app debug log.
+- **`DebugLogClient`** — an event ring buffer for the in-app debug log; `note(type, summary)`
+  adds free-text client entries to the same ring (a swallowed `session.events.since` failure,
+  #98).
 
 ## Wire protocol
 
@@ -298,6 +302,45 @@ not assumed):
   wholesale replace. The pipeline's RPCs get a 120s budget (vs the 30s default): `slash.exec`
   can block the gateway for minutes.
 
+### Event frames and the replay cursor (#98)
+
+Since v2026.8.27 the server stamps every session event (`"method":"event"` with a non-empty
+`params.session_id`) with a per-session `params.seq`, monotonic from 1, and keeps recent events
+in an in-process ring (512 events / 4 MiB per session, 64 sessions; eviction raises a truncation
+watermark rather than leaving a silent hole). Session-less globals (`gateway.ready`,
+`sessions.changed`, `skin.changed`) and server→client request frames are never stamped;
+`request.cancel` is an ordinary event and is.
+
+- **Frame envelope.** `connect` yields `GatewayFrame {event, sessionID, seq, replayEpoch,
+  sessionAuthority}`; `GatewayEvent` itself is unchanged. `seq` decodes only from a
+  non-negative integral number (anything else is absent). `replay_epoch` and
+  `session_authority` are read from the `gateway.ready` payload only. Client-synthesized events
+  (`.serverRequest`, `.serverRequestFailed`, `.serverRequestsUnavailable`, `.authExpired`) carry
+  every field nil. `GatewayFrame(eventObject:)` decodes the bare `{type, session_id, seq,
+  payload}` object, the shape shared by a live frame's `params` and each `session.events.since`
+  element, so live and replayed events decode through one path.
+- **Held-ready epoch.** The advertisement gate holds the `gateway.ready` frame itself
+  (`heldReady`), not a flag, so the `.ready` it releases (on the acknowledgement or the 5 s cap)
+  still carries its epoch and authority flag.
+- **Cursor.** The socket effect sends `.gatewayFrame`: it applies the ready rules, advances
+  `ChatFeature.State.replayCursor` (`sessionID` + `seq`), then reduces exactly as `.gatewayEvent`.
+  A stamped frame advances the cursor only when `seq > cursor.seq` (the event reduces either
+  way); a frame for another session id replaces it; a seq-less frame never touches it, so an
+  older agent never sees a replay RPC. The cursor is per slot and in memory only: it survives
+  `.gatewayClosed`, the backoff redial, `.teardownSocketOnly`, `.resumeAfterReauth` and the
+  foreground/reattach re-hydrates, dies with the slot, and is never persisted (a cold launch
+  always hydrates). A resume that answers a re-minted live id (an idle session reaped after the
+  ~20 s orphan grace) leaves the old cursor unmatched, so that reconnect hydrates plainly and the
+  new id's first stamped frame starts a fresh cursor.
+- **Epoch.** `replay_epoch` is a per-process uuid: a gateway restart changes it and resets every
+  counter. A ready (or an `events.since` reply) carrying a different epoch than the stored one
+  drops the cursor and adopts the new epoch; one without an epoch (older agent) leaves both
+  alone. `session_authority: true` (a canonical session-authority host, v0.22.3+) is per
+  connection, reset by every ready, and switches replay off: such a host wants a per-session
+  epoch the app does not track and would always answer `snapshot_required`.
+
+How the reconnect uses the cursor: "Session re-hydration" → "Reconnect replay" below.
+
 ### Server→client requests (prompt protocol v7, #97)
 
 Since v2026.9.14 Hermes delivers every blocking prompt (approval, clarify, sudo, secret, and
@@ -325,7 +368,8 @@ unchanged.
   Unrendered prompts (`vault.*`, `setup_choose`, `display.install.sudo`) get no reply.
 - **Lifecycle.** `ChatFeature` keeps one queue of open requests per slot and presents its head;
   `request.cancel` events and turn end remove entries; the hydrate's `open_requests` replay
-  restores them.
+  restores them. Request frames carry no `seq` and never ride the event replay ring (#98);
+  a `request.cancel` does, so a reconnect replay may fold one before the hydrate.
 
 The full contract (decline matrix, answer shapes, queue rules, clarify forms, push-tap
 recovery): `docs/features/approvals.md`.
@@ -429,7 +473,8 @@ context gauge, dropping tool/thinking rows, or stranding a phantom "working" glo
 **One unified `hydrate(sessionID)` effect** serves open, foreground, and cold launch. Opening a
 session with a stored id, foregrounding it (`.foreground`), and a cold-launch socket connect all
 funnel through the same `.ready` → `hydrate` path (`ChatFeature`), so there is one code path to
-reason about. `hydrate` calls the gateway's **`session.resume`** RPC, which returns
+reason about (a reconnect holding a replay cursor reads the gap first; see "Reconnect replay"
+below). `hydrate` calls the gateway's **`session.resume`** RPC, which returns
 `{messages, session_id, resumed, info, running, inflight}` (plus `open_requests` on a v7 live
 reattach) and serves **both** a stored session
 (rebuilt from the DB) and an already-live one (the transport is reattached, in-flight turn
@@ -469,6 +514,65 @@ response (`applyActivate`), in order:
    immediately on `.background`/`.inactive` via `persistNow`) so the next cold open paints from
    it.
 
+### Reconnect replay (#98)
+
+`inflight` carries the user prompt and the assistant text so far, never reasoning, tool or
+status rows, so without help a socket drop mid-turn loses every such event emitted during the
+gap until the turn ends. On the `.ready` that the advertisement gate releases, the ordinary
+stored-session path (not the `attachLive` branch attach, a branch-seed replay or
+`session.create`) therefore checks for a replay first: when the slot holds a cursor for its
+live session, `replaySupported` is still true, and the connection is not a session-authority
+one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `profile`, no
+`replay_epoch`; the method rejects unknown keys) and hydrates only after the reply
+(`applyReplayResult`):
+
+- **Fold.** The reply's events fold in order through `reduceGatewayEvent`, the same path as live
+  events, behind a seq gate (the cursor's session, `seq > cursor.seq`, advancing per event).
+  Legacy `approval.request` / `clarify.request` / `sudo.request` / `secret.request` are skipped
+  but still advance the cursor: the app decodes no `*.expire`, so a card that expired in the gap
+  would stand forever. The reply's `open_requests` is ignored; the hydrate carries the same list
+  moments later (`docs/features/approvals.md`).
+- **No queue drain during the fold.** `isFoldingReplay` makes `drainQueueIfReady` a no-op.
+  `finalizeInFlight` already cleared `isSending` on the drop, so a replayed `message.complete` or
+  `request.cancel` would otherwise fire a queued prompt (#66) against a turn the server may still
+  be running. The hydrate's `running` is the only trustworthy idle edge, and its own drain runs
+  as usual.
+- **Then the hydrate, unchanged.** `applyActivate` stays the authority. A running turn keeps the
+  tool and thinking rows the fold built or extended (#26); the streaming row is re-seeded from
+  `inflight.assistant`, so replayed `message.delta`s never double the text; a completed turn is
+  replaced wholesale. Replayed status rows (`review.summary`, a "Timed out" row) are wiped, as
+  live ones are (accepted, #47). After a `.gatewayClosed` drop `finalizeInFlight` has frozen the
+  pre-drop thinking row, so replayed reasoning starts a fresh live one (the frozen row goes with
+  the hydrate); after `.teardownSocketOnly` nothing was finalized and replayed reasoning extends
+  the live row.
+- **Fallbacks** fold nothing and hydrate: `truncated` (the gap fell off the ring; the cursor
+  advances to `latest_seq`, desktop parity, so the next drop doesn't re-ask for the evicted
+  window); a reply epoch that differs from the stored one (drop the cursor, adopt the epoch);
+  `-32601` (an agent without the ring; latches `replaySupported = false` for the slot); any other
+  failure or a malformed result. A result that lands after the socket died again
+  (`status != .ready`) is dropped, and the next `.ready` replays from the same cursor;
+  `.teardown`, `.teardownSocketOnly` and `.gatewayClosed` cancel a read in flight.
+- **Deliberate carve-out from "surface RPC failures".** A failed read is written to the debug log
+  (`DebugLogClient.note`, by the effect) and never to `errorBanner`. The user-visible outcome is
+  the plain hydrate, and a banner would fire on every reconnect to an agent without the ring.
+- **Why before the resume, and no parking buffer.** Only a reattaching RPC (`session.resume`,
+  `session.activate`, `prompt.submit`) binds the session to the new socket; `client.capabilities`
+  and `events.since` attach nothing. Until the resume the server routes the session's events and
+  request frames to its detached drop sink, so no live session frame can race the fold, and the
+  desktop's park-and-flush buffer is unnecessary (revisit if anything ever attaches the socket
+  before the read). The cost is a one-RTT window between the read and the attach whose frames are
+  stamped but dropped; the desktop has the same window. Reading after the advertisement gate
+  rather than at socket open (as the desktop does) widens it by up to the advertisement RTT
+  (worst case the 5 s cap), accepted to keep a single `.ready` path.
+- **Server floor.** The ring needs v2026.8.27; the v7 prompts + ring combination this was built
+  against starts at v2026.9.14 (current v0.22.x). A first connect (no cursor), an older agent
+  (no `seq`, or `-32601`) and a session-authority host all get the plain hydrate, byte-identical
+  to before. ⚠️ v2026.8.27 – v2026.9.7 could restart an evicted session's seq at 1 in the same
+  epoch; the cursor then sticks high and each replay folds nothing before the plain hydrate. Not
+  worked around.
+
+### App lifecycle and navigation
+
 App lifecycle (`scenePhase`, observed in the SwiftUI shell and dispatched as
 `AppFeature.scenePhaseChanged`): `.active` ends any background grace task, then routes the live
 chat's `.foreground` (re-hydrate via `session.resume`; the socket reconnects **only if it isn't
@@ -477,9 +581,9 @@ chat's `.foreground` (re-hydrate via `session.resume`; the socket reconnects **o
 flushes too, and — when a turn is RUNNING — additionally begins a finite ~30s
 `BackgroundTaskClient` window so the socket simply keeps streaming past suspension. If iOS
 expires that window while still backgrounded: one final flush, then a clean socket-only
-disconnect (`.teardownSocketOnly`) that keeps the chat state in memory, so the next foreground
-hydrate re-attaches with the #26 live-row preservation; catch-up beyond that is the existing
-push + reconnect path. An idle chat backgrounds with no task (no battery burn), and a stale
+disconnect (`.teardownSocketOnly`) that keeps the chat state and the replay cursor in memory, so
+the foreground redial first replays the gap (#98, above) and the hydrate then re-attaches with
+the #26 live-row preservation; push covers the user while the app stays suspended. An idle chat backgrounds with no task (no battery burn), and a stale
 expiry that races `.active` is guarded to a no-op. The nav stack is **not** auto-restored on
 cold launch — opening a session is enough.
 

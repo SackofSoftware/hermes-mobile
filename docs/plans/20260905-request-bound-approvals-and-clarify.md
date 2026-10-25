@@ -528,7 +528,7 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Sources/HermesKit/Models/Session.swift` (`ActivateResponse.openRequests`)
 - Modify: `HermesKit/Sources/HermesKit/Clients/HermesGatewayClient.swift`
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
-- Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`, `SessionDecodingTests.swift`, `GatewayEventDecodingTests.swift`
+- Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`, `SessionDecodingTests.swift`, `GatewayEventDecodingTests.swift`, `ServerRequestTests.swift`
 
 - [ ] decode `desktop_contract` leniently (Int, numeric String, else nil — never throws) and
       `open_requests` (default `[]`)
@@ -540,6 +540,16 @@ the same reconcile when it lands.
       model/usage fields of `info` intact; `open_requests` present/absent/malformed; the
       advertisement precedes `session.resume` on the wire; a hung advertisement still reaches
       ready after the cap; events in the window are not lost; `declinesNotShown` stored
+- [ ] ➕ rewrite #116's `unknownAdvertisementMethodIsSilentAndNotRetried` (`ServerRequestTests`):
+      it calls `advertiseServerRequestsIfNeeded()` directly, so the retry loop (started only on
+      `ready`) never runs, the clock advance is a no-op, and `events` is never read — it passes
+      on the pre-fix `e6736df`. Drive it through an injected `ready` frame and assert one
+      `client.capabilities` frame and no `.serverRequestFailed`
+- [ ] ➕ if #116's retry loop survives this task: test that a non-`-32601` failure (`busy`)
+      keeps retrying but surfaces once per connection (`advertisementFailureReported` is
+      uncovered)
+- [ ] ➕ drop the redundant `advertisementUnsupported` flag in `GatewayConnection` — the same
+      branch sets `advertisedServerRequests = true`, which already stops the retry
 - [ ] run tests - must pass before next task
 
 ### Task 3: One queue for every rendered server request

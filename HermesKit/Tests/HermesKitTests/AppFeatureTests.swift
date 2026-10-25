@@ -4792,7 +4792,7 @@ struct AppFeatureTests {
       $0.hermesREST.archive = { @Sendable _, _, _, _ in }
       $0.chatSnapshot = .inMemory()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
-      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(GatewayFrame(.ready)) } }
       $0.hermesGateway.send = { @Sendable method, _ in
         methods.withValue { $0.append(method) }
         return .object([

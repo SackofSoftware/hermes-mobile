@@ -3004,9 +3004,9 @@ public struct ChatFeature {
     .run { [gateway, debugLog] send in
       // Pass the full auth regime: `.token` → `?token=` (byte-identical); `.cookie` mints a
       // fresh single-use ws-ticket per connect. A dead session surfaces as `.authExpired`.
-      for await event in gateway.connect(connection.baseURL, connection.auth) {
-        debugLog.append(event) // mirror into the app-wide debug buffer (Task 12)
-        await send(.gatewayEvent(event))
+      for await frame in gateway.connect(connection.baseURL, connection.auth) {
+        debugLog.append(frame.event) // mirror into the app-wide debug buffer (Task 12)
+        await send(.gatewayEvent(frame.event))
       }
       await send(.gatewayClosed)
     }

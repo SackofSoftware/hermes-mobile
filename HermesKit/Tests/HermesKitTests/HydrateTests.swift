@@ -822,7 +822,7 @@ struct HydrateTests {
       // Reconnect yields a single `.ready`, then idles.
       $0.hermesGateway.connect = { @Sendable _, _ in
         AsyncStream { continuation in
-          continuation.yield(.ready)
+          continuation.yield(GatewayFrame(.ready))
           // keep the stream open so the socket effect doesn't send `.gatewayClosed`
         }
       }
@@ -950,7 +950,7 @@ struct HydrateTests {
       $0.chatSnapshot = .inMemory()
       $0.hermesGateway.connect = { @Sendable _, _ in
         connectCalls.withValue { $0 += 1 }
-        return AsyncStream { continuation in continuation.yield(.ready) }
+        return AsyncStream { continuation in continuation.yield(GatewayFrame(.ready)) }
       }
       $0.hermesGateway.send = { @Sendable _, _ in
         .object([
@@ -1291,7 +1291,7 @@ struct HydrateTests {
       $0.chatSnapshot = snapshotClient
       // Reconnect yields a single `.ready` then idles, so `.foreground` drives a second hydrate.
       $0.hermesGateway.connect = { @Sendable _, _ in
-        AsyncStream { continuation in continuation.yield(.ready) }
+        AsyncStream { continuation in continuation.yield(GatewayFrame(.ready)) }
       }
       $0.hermesGateway.send = { @Sendable _, _ in
         .object([

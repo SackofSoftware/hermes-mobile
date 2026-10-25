@@ -562,22 +562,25 @@ reconnecting socket.
 - Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`
 - Modify: the 7 `yield(.ready)` connect stubs (`AppFeatureTests`, `ChatReductionTests`, `HydrateTests`) and the 4 `AsyncStream<GatewayEvent>` sites (`ServerRequestTests:486,541`, `ChatBranchTests:908,922`)
 
-- [ ] `connect` returns `AsyncStream<GatewayFrame>`; `GatewayConnection` takes an
+- [x] `connect` returns `AsyncStream<GatewayFrame>`; `GatewayConnection` takes an
       `AsyncStream<GatewayFrame>.Continuation`; `handle` yields the frame; every synthesized
       yield (`.serverRequest`, `.serverRequestFailed`, `.serverRequestsUnavailable`,
       `.authExpired`) wraps in `GatewayFrame(_:)`
-- [ ] the ready gate stores the held ready frame (`heldReady: GatewayFrame?`) and
+- [x] the ready gate stores the held ready frame (`heldReady: GatewayFrame?`) and
       `openReadyGate` releases that frame, so the epoch / authority flag survive the
       advertisement wait
-- [ ] update `ChatFeature.connect(_:)` to iterate frames and send `.gatewayEvent(frame.event)`
+- [x] update `ChatFeature.connect(_:)` to iterate frames and send `.gatewayEvent(frame.event)`
       (temporary, Task 3 switches it to `.gatewayFrame`), `debugLog.append(frame.event)`
-- [ ] update the test stubs to yield `GatewayFrame(.ready)` etc.; `DemoMode.swift` compiles
+- [x] update the test stubs to yield `GatewayFrame(.ready)` etc.; `DemoMode.swift` compiles
       unchanged (verify with an app build)
-- [ ] write client tests: a stamped event reaches the stream with `sessionID` + `seq`; a ready
+      (➕ a `nextEvent()` iterator helper in `TestSupport.swift` keeps the ~45 event-level
+      `iterator.next()` asserts in `HermesGatewayClientTests` / `ServerRequestTests` unchanged
+      in meaning)
+- [x] write client tests: a stamped event reaches the stream with `sessionID` + `seq`; a ready
       frame held by the advertisement gate is released carrying its `replay_epoch` (both on
       the acknowledgement and on the 5 s cap); a server-request frame still yields
       `.serverRequest` with nil `seq`; multiple newline-delimited frames keep their seqs
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 3: Reducer cursor and epoch tracking (`.gatewayFrame`)
 

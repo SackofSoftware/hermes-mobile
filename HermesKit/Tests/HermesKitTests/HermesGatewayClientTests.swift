@@ -80,7 +80,7 @@ private func requestID(_ frame: String) -> Int? {
     transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s","payload":{"text":"hi"}}}"#)
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .messageDelta(text: "hi"))
+    #expect(await iterator.nextEvent() == .messageDelta(text: "hi"))
   }
 
   @Test func serverApprovalRequestIsYieldedAndCanBeAnsweredByOriginalID() async throws {
@@ -98,12 +98,12 @@ private func requestID(_ frame: String) -> Int? {
 
     // `.ready` is held until the `client.capabilities` acknowledgement (queued behind the
     // approval frame) arrives; the approval itself is yielded as soon as it is read.
-    let event = await iterator.next()
+    let event = await iterator.nextEvent()
     #expect(event == .serverRequest(PendingServerRequest(
       id: "srq-abc123",
       kind: .approval(ApprovalRequest(requestID: "approval-7", command: "rm foo", choices: ["once", "deny"]))
     )))
-    #expect(await iterator.next() == .ready)
+    #expect(await iterator.nextEvent() == .ready)
 
     let result = try await client.send("request.answer", .object([
       "id": .string("srq-abc123"),
@@ -132,8 +132,70 @@ private func requestID(_ frame: String) -> Int? {
     )
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .messageDelta(text: "a"))
-    #expect(await iterator.next() == .messageDelta(text: "b"))
+    #expect(await iterator.nextEvent() == .messageDelta(text: "a"))
+    #expect(await iterator.nextEvent() == .messageDelta(text: "b"))
+  }
+
+  // MARK: Frame envelope (#98)
+
+  /// A stamped event reaches the stream with its `session_id` and `seq` intact.
+  @Test func stampedEventCarriesSessionAndSeq() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+
+    transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"live1","seq":42,"payload":{"text":"hi"}}}"#)
+
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == GatewayFrame(.messageDelta(text: "hi"), sessionID: "live1", seq: 42))
+  }
+
+  /// An older agent's frame (no `seq`) still reaches the stream, with a nil `seq`.
+  @Test func unstampedEventHasNilSeq() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+
+    transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s","payload":{"text":"hi"}}}"#)
+
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == GatewayFrame(.messageDelta(text: "hi"), sessionID: "s"))
+  }
+
+  /// Frames sharing one WS message keep their own seqs, in order.
+  @Test func newlineDelimitedFramesKeepTheirSeqs() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+
+    transport.inject(
+      #"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"live1","seq":7,"payload":{"text":"a"}}}"#
+      + "\n"
+      + #"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"live1","seq":8,"payload":{"text":"b"}}}"#
+    )
+
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == GatewayFrame(.messageDelta(text: "a"), sessionID: "live1", seq: 7))
+    #expect(await iterator.next() == GatewayFrame(.messageDelta(text: "b"), sessionID: "live1", seq: 8))
+  }
+
+  /// A v7 server→client request is never stamped: it is yielded as a synthesized
+  /// `.serverRequest` with every envelope field nil.
+  @Test func serverRequestFrameHasNoSequencingFields() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+
+    transport.inject(#"{"jsonrpc":"2.0","id":"srq-abc123","method":"approval","params":{"session_id":"live1","request_id":"approval-7","command":"rm foo","choices":["once","deny"]}}"#)
+
+    var iterator = stream.makeAsyncIterator()
+    let frame = try #require(await iterator.next())
+    #expect(frame == GatewayFrame(.serverRequest(PendingServerRequest(
+      id: "srq-abc123",
+      kind: .approval(ApprovalRequest(requestID: "approval-7", command: "rm foo", choices: ["once", "deny"]))
+    ))))
+    #expect(frame.seq == nil)
+    #expect(frame.sessionID == nil)
   }
 
   @Test func errorResponseThrows() async throws {
@@ -303,7 +365,7 @@ private func requestID(_ frame: String) -> Int? {
       _ = try await client.send("session.create", .object([:]))
     }
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == nil) // stream finished
+    #expect(await iterator.nextEvent() == nil) // stream finished
   }
 
   // MARK: - Auth-regime URL branching
@@ -360,8 +422,8 @@ private func requestID(_ frame: String) -> Int? {
     let stream = client.connect(url, .cookie(CookieSession(cookies: [], username: "u", provider: "basic")))
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .authExpired)
-    #expect(await iterator.next() == nil) // then finished
+    #expect(await iterator.nextEvent() == .authExpired)
+    #expect(await iterator.nextEvent() == nil) // then finished
     #expect(built.value == false)         // no socket was opened
   }
 
@@ -375,7 +437,7 @@ private func requestID(_ frame: String) -> Int? {
     let stream = client.connect(url, .cookie(CookieSession(cookies: [], username: "u", provider: "basic")))
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == nil) // finished, no .authExpired emitted
+    #expect(await iterator.nextEvent() == nil) // finished, no .authExpired emitted
   }
 
   /// After a successful **cookie** connect, terminating the stream (consumer cancels →
@@ -473,8 +535,8 @@ private func requestID(_ frame: String) -> Int? {
     let stream = client.connect(url, .bearer(bearerSession))
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .authExpired)
-    #expect(await iterator.next() == nil) // then finished
+    #expect(await iterator.nextEvent() == .authExpired)
+    #expect(await iterator.nextEvent() == nil) // then finished
     #expect(built.value == false)         // no socket was opened
   }
 
@@ -489,7 +551,7 @@ private func requestID(_ frame: String) -> Int? {
     let stream = client.connect(url, .bearer(bearerSession))
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == nil) // finished, no .authExpired emitted
+    #expect(await iterator.nextEvent() == nil) // finished, no .authExpired emitted
   }
 
   /// Terminating a successful bearer connect shuts the opened transport down (the composed

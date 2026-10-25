@@ -662,7 +662,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = ImmediateClock()
-      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(GatewayFrame(.ready)) } }
       $0.hermesGateway.send = { @Sendable method, params in
         // The async slash-catalog fetch (#36) fires after create resolves — don't let it
         // clobber the recorded `session.create` call this test asserts on.
@@ -706,7 +706,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = ImmediateClock()
-      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(GatewayFrame(.ready)) } }
       $0.hermesGateway.send = { @Sendable method, params in
         // Ignore the async slash-catalog fetch (#36) — it must not clobber the recorded
         // `session.create` call these assertions read.
@@ -751,7 +751,7 @@ struct ChatReductionTests {
     } withDependencies: {
       $0.uuid = .incrementing
       $0.continuousClock = ImmediateClock()
-      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(GatewayFrame(.ready)) } }
       $0.hermesGateway.send = { @Sendable method, params in
         // Ignore the async slash-catalog fetch (#36) — it must not clobber the recorded
         // `session.create` call these assertions read.

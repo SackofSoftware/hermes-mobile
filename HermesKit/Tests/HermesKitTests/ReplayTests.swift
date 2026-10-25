@@ -282,6 +282,32 @@ struct ReplayTests {
     await store.send(.teardown)
   }
 
+  @Test func replayedStatusUpdateRidesTheLiveThinkingRowThroughTheRunningHydrate() async {
+    let gateway = FakeGateway()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("thinking.delta", 42, ["text": .string("gap reasoning")]),
+      Self.event("status.update", 43, ["kind": .string("compress"), "text": .string("Compressing context")]),
+    ])))
+    let store = makeStore(droppedState(), gateway)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.replayResult.success) {
+      $0.thinkingRowID = self.uuid(0)
+      $0.replayCursor = .init(sessionID: "live1", seq: 43)
+    }
+    await store.receive(\.activateResult.success)
+
+    // The gap's status lives in the thinking row, which the running hydrate keeps (#26).
+    #expect(store.state.thinkingRowID == uuid(0))
+    guard case let .thinking(reasoning, status, _, isComplete) = store.state.transcript.last?.kind else {
+      Issue.record("expected the live thinking row last"); return
+    }
+    #expect(reasoning == "gap reasoning")
+    #expect(status == "Compressing context")
+    #expect(!isComplete)
+    await store.send(.teardown)
+  }
+
   // MARK: Seq gate and fallbacks
 
   @Test func alreadySeenAndForeignEventsAreSkipped() async {
@@ -335,6 +361,63 @@ struct ReplayTests {
     }
     await store.receive(\.activateResult.success)
     #expect(gateway.methods == ["session.events.since", "session.resume"])
+    await store.send(.teardown)
+  }
+
+  @Test func consecutiveReconnectsReadFromTheCursorTheFirstReplayAdvanced() async {
+    let gateway = FakeGateway()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("tool.start", 42, ["tool_id": .string("t1"), "name": .string("terminal")]),
+      Self.event("tool.complete", 43, ["tool_id": .string("t1"), "name": .string("terminal")]),
+    ])))
+    let store = makeStore(droppedState(), gateway)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.replayResult.success) {
+      $0.replayCursor = .init(sessionID: "live1", seq: 43)
+    }
+    await store.receive(\.activateResult.success)
+
+    // A second drop before any live frame: the read starts where the first replay ended.
+    gateway.since.setValue(.success(Self.since([
+      Self.event("tool.start", 44, ["tool_id": .string("t2"), "name": .string("read")]),
+    ])))
+    await store.send(.gatewayClosed)
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.replayResult.success) {
+      $0.replayCursor = .init(sessionID: "live1", seq: 44)
+    }
+    await store.receive(\.activateResult.success)
+
+    let reads = gateway.rpcs.filter { $0.method == "session.events.since" }
+    #expect(reads.map { $0.params["last_seen"] } == [.number(41), .number(43)])
+    #expect(gateway.methods == [
+      "session.events.since", "session.resume", "session.events.since", "session.resume",
+    ])
+    #expect(Set(store.state.toolRowIDs.keys) == ["t1", "t2"])
+    await store.send(.teardown)
+  }
+
+  @Test func gatewayRestartDuringTheGapSkipsTheReadAndHydrates() async {
+    let gateway = FakeGateway()
+    let store = makeStore(droppedState(), gateway)
+
+    // A new process epoch on the ready: the old numbering is gone, so no read is attempted.
+    await store.send(.gatewayFrame(GatewayFrame(.ready, replayEpoch: "e2"))) {
+      $0.status = .ready
+      $0.hasRequestedSession = true
+      $0.replayEpoch = "e2"
+      $0.replayCursor = nil
+    }
+    await store.receive(\.activateResult.success)
+    #expect(gateway.methods == ["session.resume"])
+    #expect(gateway.notes.value.isEmpty)
+    #expect(store.state.errorBanner == nil)
+
+    // The new process's first stamped frame starts a fresh cursor under e2.
+    await store.send(.gatewayFrame(GatewayFrame(.messageStart, sessionID: "live1", seq: 1))) {
+      $0.replayCursor = .init(sessionID: "live1", seq: 1)
+    }
     await store.send(.teardown)
   }
 

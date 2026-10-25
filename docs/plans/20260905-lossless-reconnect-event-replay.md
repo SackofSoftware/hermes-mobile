@@ -677,29 +677,41 @@ reconnecting socket.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (only if a path resets the cursor unintentionally)
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift`
 
-- [ ] audit every state reset in `ChatFeature` (`.teardownSocketOnly`, `.foreground`,
+- [x] audit every state reset in `ChatFeature` (`.teardownSocketOnly`, `.foreground`,
       `.reattached`, `.resumeAfterReauth`, branch create, `applyActivate`,
       `reconcileServerRequests`). The cursor must survive all but `.teardown`.
       `applyActivate` returning a different live `session_id` leaves the cursor to be
       replaced by the next stamped frame
-- [ ] write tests: grace-expiry `.teardownSocketOnly` → `.foreground` redial replays from
+      (audit result: no source change needed. Only `init`, the ready/reply epoch rules and
+      `advanceReplayCursor` write the cursor; a branch is a new slot, so a fresh `init`;
+      `.liveSessionIDRefreshed` / `.branchReplayResult` re-mint the live id like
+      `applyActivate` does)
+- [x] write tests: grace-expiry `.teardownSocketOnly` → `.foreground` redial replays from
       the pre-expiry cursor; `.resumeAfterReauth` replays (same session, fresh cookies);
       `.foreground` over a healthy socket does NOT call `events.since` (no drop happened:
       `status == .ready`, so it hydrates directly and the `.ready` branch never runs)
-- [ ] run tests - must pass before next task
+      (➕ `.reattached` variants of the grace-expiry and healthy-socket tests; a re-minted
+      live id test)
+- [x] run tests - must pass before next task
 
 ### Task 6: Verify acceptance criteria
-- [ ] verify all requirements from Overview: gap tool/thinking/status events appear after a
+- [x] verify all requirements from Overview: gap tool/thinking/status events appear after a
       reconnect into a running turn; v7 prompts come only from the hydrate's `open_requests`;
       no queued prompt fires before the hydrate; older agents and session-authority hosts
       unchanged; every fallback hydrates
-- [ ] verify edge cases: epoch change mid-session, ring truncation on a long gap, replay
+      (➕ added `replayedStatusUpdateRidesTheLiveThinkingRowThroughTheRunningHydrate`; the
+      requirement-to-test map is in the progress log)
+- [x] verify edge cases: epoch change mid-session, ring truncation on a long gap, replay
       cancelled by teardown, two reconnects in a row (cursor advances through the first
       replay), re-minted live id (an idle session reaped after the 20 s orphan grace)
-- [ ] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
-- [ ] build the app target (`make run` on a simulator): `DemoMode` and the debug log view
-      compile against the frame stream
-- [ ] manual pass against a live agent at v0.22.5 or current `main` (the v7 + ring combination):
+      (➕ added `gatewayRestartDuringTheGapSkipsTheReadAndHydrates` and
+      `consecutiveReconnectsReadFromTheCursorTheFirstReplayAdvanced`; no code change needed)
+- [x] run full test suite: `script -q /dev/null swift test --package-path HermesKit`
+- [x] build the app target (`make run` on a simulator): `DemoMode` and the debug log view
+      compile against the frame stream (built with `tuist generate` + `make build`; not
+      launched)
+- [x] manual pass (skipped - not automatable; needs a live agent, steps kept for the user)
+      against a live agent at v0.22.5 or current `main` (the v7 + ring combination):
       - start a long tool-heavy turn, toggle airplane mode for ~20 s, return: the tool rows
         from the gap are present before the turn ends;
       - repeat with an approval raised during the gap: the card comes back exactly once (from

@@ -83,6 +83,46 @@ private func requestID(_ frame: String) -> Int? {
     #expect(await iterator.next() == .messageDelta(text: "hi"))
   }
 
+  @Test func serverApprovalRequestIsYieldedAndCanBeAnsweredByOriginalID() async throws {
+    let transport = FakeTransport { frame, inbound in
+      if let id = requestID(frame) {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"ok"}}"#)
+      }
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let stream = client.connect(url, .token("t"))
+    var iterator = stream.makeAsyncIterator()
+
+    transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready"}}"#)
+    transport.inject(#"{"jsonrpc":"2.0","id":"srq-abc123","method":"approval","params":{"session_id":"s","request_id":"approval-7","command":"rm foo","choices":["once","deny"]}}"#)
+
+    // The ready notification is part of the normal event stream; the next item is the approval.
+    #expect(await iterator.next() == .ready)
+    let event = await iterator.next()
+    #expect(event == .approvalServerRequest(
+      ApprovalRequest(
+        requestID: "approval-7",
+        serverRequestID: "srq-abc123",
+        command: "rm foo",
+        choices: ["once", "deny"]
+      )
+    ))
+
+    let result = try await client.send("request.answer", .object([
+      "id": .string("srq-abc123"),
+      "result": .object(["choice": .string("once")]),
+    ]))
+    #expect(result["status"]?.stringValue == "ok")
+    let response = try #require(transport.sent.last(where: {
+      (try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)))?["method"]?.stringValue == "request.answer"
+    }))
+    let decoded = try JSONDecoder().decode(JSONValue.self, from: Data(response.utf8))
+    #expect(decoded["params"] == .object([
+      "id": .string("srq-abc123"),
+      "result": .object(["choice": .string("once")]),
+    ]))
+  }
+
   @Test func multipleNewlineDelimitedFramesInOneMessage() async throws {
     let transport = FakeTransport()
     let client = HermesGatewayClient.make { _ in transport }

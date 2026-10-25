@@ -36,10 +36,12 @@ public extension GatewayEvent {
     case .toolStart: return "tool.start"
     case .toolComplete: return "tool.complete"
     case .approvalRequest: return "approval.request"
+    case .approvalServerRequest: return "approval"
     case .clarifyRequest: return "clarify.request"
     case .sudoRequest: return "sudo.request"
     case .secretRequest: return "secret.request"
     case .error: return "error"
+    case .serverRequestFailed: return "(client) server request failed"
     case .reviewSummary: return "review.summary"
     // Client-synthesized, not a server frame (the gateway client yields it on a ws-ticket
     // 401) — labeled distinctly so it never reads as a real `auth.*` wire event in the log.
@@ -64,10 +66,11 @@ public extension GatewayEvent {
       let d = durationS.map { String(format: " (%.1fs)", $0) } ?? ""
       return (name ?? "") + d
     case let .approvalRequest(req): return req.command ?? req.detail ?? "approval"
+    case let .approvalServerRequest(req): return req.command ?? req.detail ?? "approval"
     case let .clarifyRequest(req): return req.question
     case let .sudoRequest(p): return p.prompt ?? p.requestID
     case let .secretRequest(p): return p.prompt ?? p.requestID
-    case let .error(message): return message
+    case let .error(message), let .serverRequestFailed(message): return message
     case let .reviewSummary(text): return Self.truncate(text)
     case .authExpired: return ""
     case .unknown: return ""

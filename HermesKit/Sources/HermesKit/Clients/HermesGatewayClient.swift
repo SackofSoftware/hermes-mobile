@@ -308,6 +308,12 @@ actor GatewayConnection {
   private var timeoutTasks: [Int: Task<Void, Never>] = [:]
   private var receiveTask: Task<Void, Never>?
   private var isFinished = false
+  private var advertisedServerRequests = false
+  private var advertisingServerRequests = false
+  private var declinesNotShown = false
+  private var advertisementUnsupported = false
+  private var advertisementFailureReported = false
+  private var advertisementTask: Task<Void, Never>?
 
   init(
     transport: any WebSocketTransport,
@@ -402,11 +408,111 @@ actor GatewayConnection {
     finish(error: .disconnected)
   }
 
+  /// Only window-owned bridges may decline, and only after positive server support.
+  /// Other unrendered prompts must remain available to another attached client.
+  func handleServerRequest(id: String, method: String, params: JSONValue) async {
+    guard !isFinished else { return }
+    guard method == "approval" else {
+      guard declinesNotShown,
+            ["terminal.read", "preview.read", "window.read", "preview.act", "tour"].contains(method)
+      else { return }
+      let frame: JSONValue = .object([
+        "jsonrpc": .string("2.0"), "id": .string(id),
+        "error": .object([
+          "code": .number(4404), "message": .string("Not shown on this client"),
+        ]),
+      ])
+      do {
+        let data = try JSONRPCRequest.wireEncoder.encode(frame)
+        try await transport.send(String(decoding: data, as: UTF8.self))
+      } catch {
+        reportFailure("Couldn’t decline a window request", error: error)
+      }
+      return
+    }
+    if presentApproval(id: id, params: params) { return }
+    do {
+      let result = try await send(method: "request.answer", params: .object([
+        "id": .string(id), "result": .object(["choice": .string("deny")]),
+      ]))
+      guard ["ok", "expired"].contains(result["status"]?.stringValue ?? "") else {
+        throw GatewayError.server("Malformed request.answer result")
+      }
+    } catch {
+      reportFailure("Couldn’t deny a malformed approval", error: error)
+    }
+  }
+
+  private func presentApproval(id: String, params: JSONValue) -> Bool {
+    guard var request = params.decoded(ApprovalRequest.self) else { return false }
+    request.serverRequestID = id
+    events.yield(.approvalServerRequest(request))
+    return true
+  }
+
+  /// Mark success only after acknowledgement. A failure leaves the probe retryable.
+  func advertiseServerRequestsIfNeeded() async {
+    guard !isFinished, !advertisedServerRequests, !advertisingServerRequests else { return }
+    advertisingServerRequests = true
+    defer { advertisingServerRequests = false }
+    do {
+      let result = try await send(method: "client.capabilities", params: .object(["server_requests": .bool(true)]))
+      guard case .object = result else { throw GatewayError.server("Malformed client.capabilities result") }
+      guard !isFinished else { return }
+      declinesNotShown = result["declines_not_shown"]?.boolValue == true
+      advertisedServerRequests = true
+    } catch let error as GatewayError where error.isUnknownMethod {
+      // Older gateways may support server requests but predate the capability probe.
+      // Treat -32601 as a permanent per-connection capability miss: do not retry and
+      // do not show a user-facing banner for a passive compatibility probe.
+      advertisementUnsupported = true
+      advertisedServerRequests = true
+    } catch {
+      if !advertisementFailureReported {
+        advertisementFailureReported = true
+        reportFailure("Couldn’t enable approval requests", error: error)
+      }
+    }
+  }
+
+  private func startAdvertisement() {
+    guard advertisementTask == nil, !advertisedServerRequests, !advertisementUnsupported else { return }
+    advertisementTask = Task { [weak self] in
+      guard let self else { return }
+      await retryAdvertisement()
+    }
+  }
+
+  private func retryAdvertisement() async {
+    defer { advertisementTask = nil }
+    var delay: Duration = .seconds(2)
+    while !isFinished, !Task.isCancelled {
+      await advertiseServerRequestsIfNeeded()
+      if advertisedServerRequests || isFinished { return }
+      do { try await clock.sleep(for: delay) } catch { return }
+      delay = min(delay * 2, .seconds(30))
+    }
+  }
+
+  private func reportFailure(_ context: String, error: any Error) {
+    guard !isFinished, !(error is CancellationError) else { return }
+    let message = (error as? GatewayError)?.message ?? "Connection lost."
+    events.yield(.serverRequestFailed(message: "\(context): \(message)"))
+  }
+
   private func handle(frame: String) {
     guard let parsed = try? InboundFrame(data: Data(frame.utf8)) else { return }
     switch parsed {
     case let .event(_, event):
+      if case .ready = event {
+        startAdvertisement()
+      }
       events.yield(event)
+    case let .serverRequest(id, method, params):
+      // Present synchronously so a following turn terminal cannot overtake the card.
+      if method == "approval", presentApproval(id: id, params: params) { return }
+      // Never await an RPC inside the receive loop: its acknowledgement arrives here too.
+      Task { await handleServerRequest(id: id, method: method, params: params) }
     case let .response(id, result):
       cancelTimeout(id)
       pending.removeValue(forKey: id)?.resume(returning: result)
@@ -423,6 +529,8 @@ actor GatewayConnection {
   private func finish(error: GatewayError) {
     guard !isFinished else { return }
     isFinished = true
+    advertisementTask?.cancel()
+    advertisementTask = nil
     events.finish()
     for (_, task) in timeoutTasks { task.cancel() }
     timeoutTasks.removeAll()

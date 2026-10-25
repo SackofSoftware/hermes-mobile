@@ -18,10 +18,15 @@ public enum GatewayEvent: Equatable, Sendable {
     args: JSONValue?, resultText: String?, inlineDiff: String?, durationS: Double?
   )
   case approvalRequest(ApprovalRequest)
+  /// A server→client approval, answered by `request.answer` using the request metadata
+  /// attached to the payload. This is distinct from a legacy `approval.request` notification.
+  case approvalServerRequest(ApprovalRequest)
   case clarifyRequest(ClarifyRequest)
   case sudoRequest(SecretPrompt)
   case secretRequest(SecretPrompt)
   case error(message: String)
+  /// Local protocol-operation failure, not a turn-ending agent error.
+  case serverRequestFailed(message: String)
   /// Live-only event from the agent's background self-improvement review
   /// (`review.summary`, issue #47), emitted to the session's own transport (not a
   /// global broadcast). Never written to session history, so a hydrate

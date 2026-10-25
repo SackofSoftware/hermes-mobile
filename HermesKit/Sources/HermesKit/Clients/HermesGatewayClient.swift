@@ -537,7 +537,8 @@ actor GatewayConnection {
   private func handle(frame: String) {
     guard let parsed = try? InboundFrame(data: Data(frame.utf8)) else { return }
     switch parsed {
-    case let .event(_, event):
+    case let .event(gatewayFrame):
+      let event = gatewayFrame.event
       if case .ready = event { return receivedReady() }
       events.yield(event)
     case let .serverRequest(id, method, params):

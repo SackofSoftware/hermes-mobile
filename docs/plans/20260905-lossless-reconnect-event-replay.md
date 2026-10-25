@@ -534,21 +534,25 @@ reconnecting socket.
 - Modify: `HermesKit/Tests/HermesKitTests/JSONRPCTests.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/GatewayEventDecodingTests.swift` (34 `.event(` patterns; adapt the private `frame(_:)` helper), `ChatInteractionTests.swift:784`
 
-- [ ] add `GatewayFrame` with the memberwise init and `init?(eventObject:)` (type required;
+- [x] add `GatewayFrame` with the memberwise init and `init?(eventObject:)` (type required;
       `session_id` / `seq` / `payload` optional; `seq` only when a non-negative integer)
-- [ ] add `ReplayBatch` (lenient: `events` elements that fail `GatewayFrame(eventObject:)`
+- [x] add `ReplayBatch` (lenient: `events` elements that fail `GatewayFrame(eventObject:)`
       are dropped; `truncated` defaults `false`; `open_requests` / unknown keys ignored)
-- [ ] change `InboundFrame.event` to carry a `GatewayFrame`; parse `replay_epoch` and
+      (a missing / non-array `events` throws: the one "malformed" verdict Task 4 maps to
+      `.failure`)
+- [x] change `InboundFrame.event` to carry a `GatewayFrame`; parse `replay_epoch` and
       `session_authority` from the `gateway.ready` payload onto the frame; `session_id` and
       `seq` from `params`
-- [ ] add `GatewayEvent.isLegacyPrompt`
-- [ ] write decoding tests: live frame with `seq`; frame without `seq` (older agent) → nil;
+      (➕ `GatewayConnection.handle` gets a one-line compile fix yielding `frame.event`;
+      Task 2 does the real client change)
+- [x] add `GatewayEvent.isLegacyPrompt`
+- [x] write decoding tests: live frame with `seq`; frame without `seq` (older agent) → nil;
       non-integer `seq` → nil; `gateway.ready` with/without `replay_epoch` and with
       `session_authority: true`; session-less global event; stamped `request.cancel` decodes to
       `.requestCancel` with its `seq`; `events.since` reply with two events + one malformed
       element dropped + `open_requests` present (ignored); `truncated` absent → false
-- [ ] update the 35 `InboundFrame.event` pattern sites
-- [ ] run tests - must pass before next task
+- [x] update the 35 `InboundFrame.event` pattern sites
+- [x] run tests - must pass before next task
 
 ### Task 2: Gateway client yields frames
 

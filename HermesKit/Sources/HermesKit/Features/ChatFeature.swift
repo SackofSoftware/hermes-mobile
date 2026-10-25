@@ -816,7 +816,21 @@ public struct ChatFeature {
     /// with the `echo` row; `.expired` → it leaves with "Already handled elsewhere"; a
     /// failure → `errorBanner`, and the card stays (the request is still open server-side).
     case serverRequestAnswered(id: String, echo: AnswerEcho, Result<AnswerStatus, GatewayError>)
+    /// Answer the presented clarify card, keyed by qid (`""` for the `nil`-qid question of
+    /// the intermediate / legacy single forms). The reducer builds the wire shape from the
+    /// request's `answerShape`: v7 → `request.answer` (`{answers}` or `{answer}`), legacy →
+    /// `clarify.respond`. A question missing from `answers` (and not locked) is skipped;
+    /// replayed locks are re-sent with the final set and win over `answers`.
+    case submitClarify(answers: [String: ClarifyAnswer])
+    /// Skip the whole clarify card: v0.21.6+ `{}` (cancel all), intermediate single
+    /// `{answer: ""}`, legacy an empty `clarify.respond`.
+    case skipClarify
+    /// The single-question card's answer (a raw choice it offered, or typed text) — a thin
+    /// forwarder to ``submitClarify(answers:)`` for the first question.
     case respondToClarify(answer: String)
+    /// A legacy `*.respond` send threw: patch its optimistic echo row to "Failed to send"
+    /// and banner (the card is already gone — the legacy path is optimistic).
+    case legacyRespondFailed(rowID: ChatRow.ID, banner: String)
     case respondToSecret(value: String)
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
@@ -1569,24 +1583,27 @@ public struct ChatFeature {
         }
         return .none
 
+      case let .submitClarify(answers):
+        return answerClarify(answers, into: &state)
+
+      case .skipClarify:
+        return answerClarify(nil, into: &state)
+
       case let .respondToClarify(answer):
+        // The single-question card's one string: a raw choice it offered, else typed text.
         guard case let .clarify(request) = state.pendingInteraction,
-              let sessionID = state.liveSessionID
+              let question = request.questions.first
         else { return .none }
-        state.pendingInteraction = nil
-        // Echo the answer so the transcript records what was chosen/typed.
-        state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "clarify", text: answer))
-        )
-        // Only the legacy event reaches this path, and it always carries a `request_id`.
-        let requestID = request.requestID ?? ""
-        return .run { [gateway] _ in
-          _ = try? await gateway.send("clarify.respond", .object([
-            "session_id": .string(sessionID),
-            "request_id": .string(requestID),
-            "answer": .string(answer),
-          ]))
+        let picked: ClarifyAnswer = question.choices.contains(answer) ? .choices([answer]) : .other(answer)
+        return answerClarify([question.qid ?? "": picked], into: &state)
+
+      case let .legacyRespondFailed(rowID, banner):
+        // The optimistic echo row must stop claiming an answer the server never got.
+        if case let .status(kind, _) = state.transcript[id: rowID]?.kind {
+          state.transcript[id: rowID]?.kind = .status(kind: kind, text: "Failed to send")
         }
+        state.errorBanner = banner
+        return .none
 
       case let .respondToSecret(value):
         guard case let .secret(kind, prompt) = state.pendingInteraction,
@@ -2641,6 +2658,97 @@ public struct ChatFeature {
       }
       await send(.serverRequestAnswered(id: id, echo: echo, outcome))
     }
+  }
+
+  static let clarifyFailureBanner = "Failed to send the clarify response."
+
+  /// Answer (or, with `answers == nil`, skip) the presented clarify card in the shape the
+  /// request arrived in:
+  /// - v7 (the card is a queued server request) → `request.answer {id, result}`; the card
+  ///   stays until the server acknowledges (`serverRequestAnswered`): `.answers` →
+  ///   `{answers: {qid: text|null}}`, skip `{}`; `.singleAnswer` → `{answer}`, skip
+  ///   `{answer: ""}`;
+  /// - legacy event → today's `clarify.respond {session_id, request_id, answer}` (skip: an
+  ///   empty answer), optimistic: the card goes and the echo row is appended at once; a
+  ///   throw patches that row to "Failed to send" and banners (`legacyRespondFailed`).
+  private func answerClarify(_ answers: [String: ClarifyAnswer]?, into state: inout State) -> Effect<Action> {
+    guard case let .clarify(request) = state.pendingInteraction else { return .none }
+    let echoText = Self.clarifyEchoText(request, answers)
+    if let pending = state.presentedServerRequest {
+      guard state.answeringServerRequestID == nil else { return .none }
+      return answerServerRequest(
+        pending.id,
+        result: Self.clarifyResult(request, answers),
+        echo: AnswerEcho(kind: "clarify", text: echoText, failureBanner: Self.clarifyFailureBanner),
+        state: &state
+      )
+    }
+    guard request.answerShape == .legacyRespond, let sessionID = state.liveSessionID else { return .none }
+    state.pendingInteraction = nil
+    let rowID = uuid()
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: "clarify", text: echoText)))
+    // Raw choice text, exactly as the app always sent it (legacy wire byte-identity).
+    let answer = Self.singleWireText(request, answers, stripsRecommended: false)
+    let params: JSONValue = .object([
+      "session_id": .string(sessionID),
+      "request_id": .string(request.requestID ?? ""),
+      "answer": .string(answer),
+    ])
+    return .run { [gateway] send in
+      do {
+        _ = try await gateway.send("clarify.respond", params)
+      } catch {
+        await send(.legacyRespondFailed(rowID: rowID, banner: Self.clarifyFailureBanner))
+      }
+    }
+  }
+
+  /// The v7 `request.answer` result for a clarify request (`nil` answers = skip all).
+  static func clarifyResult(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> JSONValue {
+    switch request.answerShape {
+    case .answers:
+      guard let answers else { return .object([:]) } // cancel all
+      var map: [String: JSONValue] = [:]
+      for (qid, locked) in request.lockedAnswers {
+        map[qid] = locked.map(JSONValue.string) ?? .null
+      }
+      for question in request.questions {
+        guard let qid = question.qid, !request.lockedAnswers.keys.contains(qid) else { continue }
+        map[qid] = (answers[qid] ?? .skipped).wireText(for: question).map(JSONValue.string) ?? .null
+      }
+      return .object(["answers": .object(map)])
+    case .singleAnswer, .legacyRespond:
+      return .object(["answer": .string(singleWireText(request, answers, stripsRecommended: true))])
+    }
+  }
+
+  /// The one answer of a single-form request (`""` for a skip).
+  private static func singleWireText(
+    _ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?, stripsRecommended: Bool
+  ) -> String {
+    guard let question = request.questions.first,
+          let answer = answers?[question.qid ?? ""]
+    else { return "" }
+    return answer.wireText(for: question, stripsRecommended: stripsRecommended) ?? ""
+  }
+
+  /// The transcript echo for a clarify answer: the answer itself for one question, one
+  /// `question: answer` line per question for several (locks included), "Skipped" for a skip.
+  static func clarifyEchoText(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> String {
+    guard let answers else { return "Skipped" }
+    func display(_ question: ClarifyQuestion) -> String {
+      if let qid = question.qid, let locked = request.lockedAnswers[qid] {
+        guard let locked else { return "Skipped" }
+        // A locked multi-select answer is its JSON-array wire string.
+        if question.multiSelect, let picked = try? JSONDecoder().decode([String].self, from: Data(locked.utf8)) {
+          return picked.joined(separator: ", ")
+        }
+        return locked
+      }
+      return (answers[question.qid ?? ""] ?? .skipped).displayText
+    }
+    guard request.isMultiQuestion else { return request.questions.first.map(display) ?? "" }
+    return request.questions.map { "\($0.question): \(display($0))" }.joined(separator: "\n")
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the

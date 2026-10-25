@@ -69,7 +69,7 @@ struct ServerRequestTests {
     transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
     #expect(await iterator.next() == .ready)
     let methods = windowMethods + ["vault.unlock_prompt", "vault.save_login", "vault.code", "setup_choose",
-      "display.install.sudo", "clarify", "sudo", "secret", "future.method"]
+      "display.install.sudo", "sudo", "secret", "future.method"]
     for method in methods {
       transport.inject(serverRequestFrame(
         id: "srq/" + method, method: method,
@@ -112,6 +112,64 @@ struct ServerRequestTests {
     }
     client.disconnect()
     await store.finish()
+  }
+
+  /// A clarify server request reaches the reducer as a queued, presented card, ahead of the
+  /// turn terminal that follows it on the wire.
+  @Test func clarifyServerRequestIsQueuedAndPresented() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
+    transport.inject(
+      #"{"jsonrpc":"2.0","id":"srq-0f0e0d0c0b0a","method":"clarify","params":{"session_id":"live","questions":[{"qid":"q0","question":"Framework?","choices":["SwiftUI (Recommended)","UIKit"],"multi_select":false},{"qid":"q1","question":"Targets?","choices":["iOS","macOS"],"multi_select":true}],"answers":{"q0":"SwiftUI"}}}"#
+        + "\n" + #"{"method":"event","params":{"type":"message.complete","payload":{"text":"done"}}}"#
+    )
+    var iterator = events.makeAsyncIterator()
+    let expected = PendingServerRequest(id: "srq-0f0e0d0c0b0a", kind: .clarify(ClarifyRequest(
+      requestID: nil,
+      questions: [
+        ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
+        ClarifyQuestion(qid: "q1", question: "Targets?", choices: ["iOS", "macOS"], multiSelect: true),
+      ],
+      lockedAnswers: ["q0": "SwiftUI"],
+      answerShape: .answers
+    )))
+    let event = try #require(await iterator.next())
+    #expect(event == .serverRequest(expected))
+    #expect(await iterator.next() == .messageComplete(text: "done", usage: nil))
+    client.disconnect()
+
+    let store = TestStore(initialState: ChatFeature.State(connection: ServerConnection(baseURL: url, token: "t"))) {
+      ChatFeature()
+    }
+    await store.send(.gatewayEvent(event)) {
+      $0.serverRequests = [expected]
+      $0.present(expected.interaction)
+    }
+  }
+
+  /// A rendered clarify whose params are malformed is cancelled with `{}` through
+  /// `request.answer`, never presented.
+  @Test(arguments: [JSONValue.null, .array([]), .object(["session_id": .string("live")]),
+                    .object(["question": .string("  ")]), .object(["request_id": .string("r1")])])
+  func malformedClarifyIsCancelled(payload: JSONValue) async throws {
+    let transport = FakeTransport { frame, inbound in
+      let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
+      if let id = request["id"]?.intValue {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"ok"}}"#)
+        inbound.yield(#"{"method":"event","params":{"type":"probe.answered","payload":{}}}"#)
+      }
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
+    var iterator = events.makeAsyncIterator()
+    transport.inject(serverRequestFrame(id: "srq/bad", method: "clarify", params: payload))
+    #expect(await iterator.next() == .unknown(type: "probe.answered", raw: .object([:])))
+    let frame = try JSONDecoder().decode(JSONValue.self, from: Data(try #require(transport.sent.first).utf8))
+    #expect(frame["method"]?.stringValue == "request.answer")
+    #expect(frame["params"] == .object(["id": .string("srq/bad"), "result": .object([:])]))
+    #expect(transport.sent.count == 1)
+    client.disconnect()
   }
 
   /// A rendered approval whose params are malformed — or carry nothing to show — is denied
@@ -240,7 +298,7 @@ struct ServerRequestTests {
 
   /// A failed automatic send (a 4404 decline, a malformed approval's deny) banners without
   /// ending the turn or the socket. Driven through injected frames.
-  @Test(arguments: ["tour", "approval"])
+  @Test(arguments: ["tour", "approval", "clarify"])
   func automaticSendFailureDoesNotEndTurn(method: String) async throws {
     let transport = FailingReplyTransport()
     let client = HermesGatewayClient.make { _ in transport }
@@ -254,9 +312,11 @@ struct ServerRequestTests {
     initial.isSending = true
     let store = TestStore(initialState: initial) { ChatFeature() }
     await store.send(.gatewayEvent(failure)) {
-      $0.errorBanner = method == "tour"
-        ? "Couldn’t decline a window request: send failed"
-        : "Couldn’t deny a malformed approval: send failed"
+      $0.errorBanner = switch method {
+      case "tour": "Couldn’t decline a window request: send failed"
+      case "approval": "Couldn’t deny a malformed approval: send failed"
+      default: "Couldn’t skip a malformed clarify prompt: send failed"
+      }
     }
     #expect(!transport.base.cancelled)
     client.disconnect()

@@ -134,5 +134,288 @@ struct ClarifyFeatureTests {
     let store = TestStore(initialState: readyState()) { ChatFeature() }
     // No pending interaction → response is a no-op.
     await store.send(.respondToClarify(answer: "x"))
+    await store.send(.submitClarify(answers: ["": .other("x")]))
+    await store.send(.skipClarify)
+  }
+
+  // MARK: - v7 server requests: routing
+
+  @Test func clarifyServerRequestDecodesBothV7Shapes() {
+    let batch = PendingServerRequest(id: "srq-b", method: "clarify", params: .object([
+      "session_id": .string("live"),
+      "questions": .array([.object([
+        "qid": .string("q0"), "question": .string("Framework?"),
+        "choices": .array([.string("SwiftUI (Recommended)"), .string("UIKit")]), "multi_select": .bool(false),
+      ])]),
+    ]))
+    #expect(batch == PendingServerRequest(id: "srq-b", kind: .clarify(ClarifyRequest(
+      requestID: nil,
+      questions: [ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"])],
+      answerShape: .answers
+    ))))
+
+    let single = PendingServerRequest(id: "srq-s", method: "clarify", params: .object([
+      "session_id": .string("live"), "question": .string("Proceed?"),
+      "choices": .array([.string("Yes"), .string("No")]),
+    ]))
+    #expect(single == PendingServerRequest(
+      id: "srq-s", kind: .clarify(ClarifyRequest(requestID: nil, question: "Proceed?", choices: ["Yes", "No"]))
+    ))
+
+    // A stray legacy `request_id` never makes a server request legacy: it is answered
+    // through `request.answer` in the single shape.
+    let stray = PendingServerRequest(id: "srq-r", method: "clarify", params: .object([
+      "request_id": .string("r1"), "question": .string("Pick"),
+      "choices": .array([.string("A"), .string("B")]), "multi_select": .bool(true),
+    ]))
+    #expect(stray == PendingServerRequest(
+      id: "srq-r",
+      kind: .clarify(ClarifyRequest(requestID: nil, question: "Pick", choices: ["A", "B"], multiSelect: true))
+    ))
+    if case let .clarify(request)? = stray?.kind { #expect(request.answerShape == .singleAnswer) }
+  }
+
+  @Test(arguments: [JSONValue.null, .array([]), .object(["session_id": .string("live")]),
+                    .object(["question": .string("   ")]), .object(["request_id": .string("r1")]),
+                    .object(["questions": .array([.object(["question": .string("no qid")])])])])
+  func malformedClarifyServerRequestIsNotRendered(params: JSONValue) {
+    #expect(PendingServerRequest(id: "srq-bad", method: "clarify", params: params) == nil)
+    #expect(PendingServerRequest.malformedSkip(for: "clarify") == .object([:])) // cancel-all
+  }
+
+  // MARK: - v7 server requests: answers per shape
+
+  private func clarifyServerRequest(_ id: String, _ request: ClarifyRequest) -> PendingServerRequest {
+    PendingServerRequest(id: id, kind: .clarify(request))
+  }
+
+  private func presentedState(_ request: PendingServerRequest) -> ChatFeature.State {
+    var state = readyState()
+    state.serverRequests = [request]
+    state.present(request.interaction)
+    return state
+  }
+
+  /// Answers the presented clarify card with `action`, the server acknowledging `ok`, and
+  /// returns the exact `request.answer` params that went out.
+  private func answer(
+    _ request: ClarifyRequest, with action: ChatFeature.Action, echo: String
+  ) async -> JSONValue? {
+    let pending = clarifyServerRequest("srq-c", request)
+    let sent = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(initialState: presentedState(pending)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        #expect(method == "request.answer")
+        sent.setValue(params)
+        return .object(["status": .string("ok")])
+      }
+    }
+    await store.send(action) {
+      $0.answeringServerRequestID = "srq-c" // the card stays until the server acknowledges
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: echo))]
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+    return sent.value
+  }
+
+  private let batch = ClarifyRequest(
+    requestID: nil,
+    questions: [
+      ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
+      ClarifyQuestion(qid: "q1", question: "Targets?", choices: ["iOS/iPadOS", "macOS"], multiSelect: true),
+      ClarifyQuestion(qid: "q2", question: "Language?", choices: ["Swift", "ObjC"]),
+      ClarifyQuestion(qid: "q3", question: "Name?"),
+      ClarifyQuestion(qid: "q4", question: "Extras?", choices: ["Widgets", "Intents"], multiSelect: true),
+    ],
+    answerShape: .answers
+  )
+
+  /// The v0.21.6+ shape: bare choice labels, a multi-select JSON-array string (no `\/`),
+  /// Other answers as typed on a single- and a multi-select question, `null` for the
+  /// unanswered question.
+  @Test func answersShapeSendsExactParams() async throws {
+    let sent = await answer(batch, with: .submitClarify(answers: [
+      "q0": .choices(["SwiftUI (Recommended)"]),
+      "q1": .choices(["iOS/iPadOS", "macOS"]),
+      "q2": .other("Kotlin"),
+      "q4": .other("Watch app"),
+    ]), echo: "Framework?: SwiftUI\nTargets?: iOS/iPadOS, macOS\nLanguage?: Kotlin\nName?: Skipped\nExtras?: Watch app")
+    #expect(sent == .object([
+      "id": .string("srq-c"),
+      "result": .object(["answers": .object([
+        "q0": .string("SwiftUI"),
+        "q1": .string(#"["iOS/iPadOS","macOS"]"#),
+        "q2": .string("Kotlin"),
+        "q3": .null,
+        "q4": .string("Watch app"),
+      ])]),
+    ]))
+  }
+
+  /// An explicit skip of one question sends `null`; replayed locks are re-sent with the final
+  /// set and win over whatever the card handed in.
+  @Test func answersShapeSkipsAndReSendsLocks() async {
+    var request = batch
+    request.questions = Array(batch.questions.prefix(3))
+    request.lockedAnswers = ["q0": .some("UIKit"), "q1": String?.none]
+    let sent = await answer(request, with: .submitClarify(answers: [
+      "q0": .choices(["SwiftUI (Recommended)"]),
+      "q2": .skipped,
+    ]), echo: "Framework?: UIKit\nTargets?: Skipped\nLanguage?: Skipped")
+    #expect(sent?["result"] == .object(["answers": .object([
+      "q0": .string("UIKit"), "q1": .null, "q2": .null,
+    ])]))
+  }
+
+  @Test func answersShapeSingleQuestionThroughTheCardForwarder() async {
+    let request = ClarifyRequest(
+      requestID: nil,
+      questions: [ClarifyQuestion(qid: "q0", question: "Proceed?", choices: ["Yes (Recommended)", "No"])],
+      answerShape: .answers
+    )
+    // The single card hands over the raw choice; the reducer sends the bare label.
+    let picked = await answer(request, with: .respondToClarify(answer: "Yes (Recommended)"), echo: "Yes")
+    #expect(picked?["result"] == .object(["answers": .object(["q0": .string("Yes")])]))
+    // Text that is not one of the offered choices is an Other answer, sent as typed.
+    let typed = await answer(request, with: .respondToClarify(answer: "Later"), echo: "Later")
+    #expect(typed?["result"] == .object(["answers": .object(["q0": .string("Later")])]))
+  }
+
+  @Test func answersShapeSkipIsCancelAll() async {
+    var request = batch
+    request.lockedAnswers = ["q0": "UIKit"]
+    let sent = await answer(request, with: .skipClarify, echo: "Skipped")
+    #expect(sent == .object(["id": .string("srq-c"), "result": .object([:])]))
+  }
+
+  /// The intermediate (v2026.9.14–.24) single request answers `{answer}`, skip `{answer: ""}`.
+  @Test func singleAnswerShapeSendsAnswerAndSkip() async {
+    let request = ClarifyRequest(requestID: nil, question: "Proceed?", choices: ["Yes (Recommended)", "No"])
+    let picked = await answer(request, with: .submitClarify(answers: ["": .choices(["Yes (Recommended)"])]), echo: "Yes")
+    #expect(picked == .object(["id": .string("srq-c"), "result": .object(["answer": .string("Yes")])]))
+    let other = await answer(request, with: .submitClarify(answers: ["": .other("Maybe")]), echo: "Maybe")
+    #expect(other?["result"] == .object(["answer": .string("Maybe")]))
+    let skipped = await answer(request, with: .skipClarify, echo: "Skipped")
+    #expect(skipped?["result"] == .object(["answer": .string("")]))
+
+    let multi = ClarifyRequest(requestID: nil, question: "Pick", choices: ["A", "B", "C"], multiSelect: true)
+    let picks = await answer(multi, with: .submitClarify(answers: ["": .choices(["A", "C"])]), echo: "A, C")
+    #expect(picks?["result"] == .object(["answer": .string(#"["A","C"]"#)]))
+  }
+
+  @Test(arguments: ["expired", "failure", "malformed"])
+  func clarifyAnswerOutcomes(status: String) async {
+    let pending = clarifyServerRequest("srq-o", ClarifyRequest(requestID: nil, question: "Proceed?", choices: ["Yes"]))
+    let clock = TestClock()
+    let sends = LockIsolated(0)
+    let store = TestStore(initialState: presentedState(pending)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, _ in
+        sends.withValue { $0 += 1 }
+        try await clock.sleep(for: .seconds(1)) // the answer stays in flight until advanced
+        if status == "failure" { throw GatewayError.timedOut(method: method) }
+        return .object(["status": .string(status)])
+      }
+    }
+    await store.send(.submitClarify(answers: ["": .choices(["Yes"])])) {
+      $0.answeringServerRequestID = "srq-o"
+    }
+    // A second tap while the answer is in flight sends nothing.
+    await store.send(.skipClarify)
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      if status == "expired" {
+        $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "Already handled elsewhere"))]
+        $0.serverRequests = []
+        $0.pendingInteraction = nil
+      } else {
+        // Still open server-side: the same card stays answerable, with a banner.
+        $0.errorBanner = "Failed to send the clarify response."
+      }
+    }
+    #expect(sends.value == 1)
+    if status != "expired" {
+      #expect(store.state.pendingInteractionToken == 1)
+      #expect(!store.state.canSend)
+    }
+  }
+
+  /// Answering the head presents the next queued request with a fresh token.
+  @Test func answeringTheClarifyHeadPresentsTheNext() async {
+    let first = clarifyServerRequest("srq-1", ClarifyRequest(requestID: nil, question: "First?"))
+    let second = clarifyServerRequest("srq-2", ClarifyRequest(requestID: nil, question: "Second?"))
+    var initial = presentedState(first)
+    initial.serverRequests.append(second)
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable _, _ in .object(["status": .string("ok")]) }
+    }
+    await store.send(.submitClarify(answers: ["": .other("one")])) { $0.answeringServerRequestID = "srq-1" }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "one"))]
+      $0.serverRequests = [second]
+      $0.present(second.interaction)
+    }
+    #expect(store.state.pendingInteractionToken == 2)
+  }
+
+  // MARK: - Legacy `clarify.respond`
+
+  /// Today's fixture, byte for byte: method, params and their values — the raw choice text
+  /// (a legacy agent never sees the marker stripped), skip as an empty answer.
+  @Test(arguments: 0..<4)
+  func legacyClarifyWireIsUnchanged(caseIndex: Int) async {
+    let (action, wireAnswer, echo): (ChatFeature.Action, String, String) = [
+      (.respondToClarify(answer: "a.txt (Recommended)"), "a.txt (Recommended)", "a.txt"),
+      (.submitClarify(answers: ["": .choices(["a.txt (Recommended)"])]), "a.txt (Recommended)", "a.txt"),
+      (.submitClarify(answers: ["": .other("c.txt")]), "c.txt", "c.txt"),
+      (.skipClarify, "", "Skipped"),
+    ][caseIndex]
+    let request = ClarifyRequest(requestID: "c1", question: "Which file?", choices: ["a.txt (Recommended)", "b.txt"])
+    let sent = LockIsolated<JSONValue?>(nil)
+    var initial = readyState()
+    initial.present(.clarify(request))
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object([:])
+      }
+    }
+    await store.send(action) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: echo))]
+    }
+    await store.finish()
+    #expect(sent.value == .object([
+      "method": .string("clarify.respond"),
+      "params": .object([
+        "session_id": .string("live"), "request_id": .string("c1"), "answer": .string(wireAnswer),
+      ]),
+    ]))
+  }
+
+  @Test func legacyClarifyFailureSurfaces() async {
+    var initial = readyState()
+    initial.present(.clarify(ClarifyRequest(requestID: "c1", question: "Which file?")))
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, _ in throw GatewayError.timedOut(method: method) }
+    }
+    await store.send(.respondToClarify(answer: "notes.md")) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "notes.md"))]
+    }
+    await store.receive(\.legacyRespondFailed) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "Failed to send"))]
+      $0.errorBanner = "Failed to send the clarify response."
+    }
   }
 }

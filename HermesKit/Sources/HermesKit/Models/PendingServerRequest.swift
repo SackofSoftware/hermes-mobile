@@ -42,26 +42,46 @@ public struct PendingServerRequest: Equatable, Sendable, Identifiable {
   /// or when a rendered method's params are malformed — the caller then answers with
   /// ``malformedSkip(for:)`` so the agent is never left hanging.
   ///
-  /// Rendered today: `approval`. An approval whose params decode but carry nothing to show
-  /// (no command, description or danger pattern) counts as malformed: on v7 the real card is
-  /// always recoverable from the replay, so a content-less card would only invite a blind
-  /// approve.
+  /// Rendered today: `approval`, `clarify`. An approval whose params decode but carry nothing
+  /// to show (no command, description or danger pattern) counts as malformed: on v7 the real
+  /// card is always recoverable from the replay, so a content-less card would only invite a
+  /// blind approve.
+  ///
+  /// A clarify server request is answered through `request.answer`, never `clarify.respond`,
+  /// so it only accepts the two v7 shapes: a usable `questions` list (`.answers`) or a
+  /// top-level non-blank `question` (`.singleAnswer`). A stray `request_id` (the legacy
+  /// event's key) does not make it legacy — it is answered in the single shape, or is
+  /// malformed when no question is left.
   public init?(id: String, method: String, params: JSONValue) {
     switch method {
     case "approval":
       guard let request = params.decoded(ApprovalRequest.self), request.hasContent else { return nil }
       self.init(id: id, kind: .approval(request))
+    case "clarify":
+      guard var request = params.decoded(ClarifyRequest.self) else { return nil }
+      if request.answerShape == .legacyRespond {
+        guard let only = request.questions.first,
+              !only.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        request = ClarifyRequest(
+          requestID: nil, question: only.question, choices: only.choices,
+          multiSelect: params["multi_select"]?.boolValue ?? false
+        )
+      }
+      self.init(id: id, kind: .clarify(request))
     default:
       return nil
     }
   }
 
   /// The `request.answer` result that skips a rendered method whose params failed to decode
-  /// (approval: `{choice: "deny"}`). `nil` for every method the app does not render — those
-  /// get nothing, or the window-owned 4404 decline (see `windowOwnedMethods`).
+  /// (approval: `{choice: "deny"}`; clarify: `{}`, cancel-all). `nil` for every method the
+  /// app does not render — those get nothing, or the window-owned 4404 decline (see
+  /// `windowOwnedMethods`).
   public static func malformedSkip(for method: String) -> JSONValue? {
     switch method {
     case "approval": .object(["choice": .string("deny")])
+    case "clarify": .object([:])
     default: nil
     }
   }

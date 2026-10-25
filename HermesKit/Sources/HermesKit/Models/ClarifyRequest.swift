@@ -175,6 +175,53 @@ public struct ClarifyRequest: Equatable, Sendable, Decodable {
   }
 }
 
+/// The user's answer to one clarify question, as the card hands it to the reducer (keyed by
+/// qid; `""` for the `nil`-qid question of the intermediate and legacy single forms). The
+/// reducer — not the view — turns it into wire text per the request's
+/// ``ClarifyRequest/AnswerShape``.
+public enum ClarifyAnswer: Equatable, Sendable {
+  /// Picked choices, as the raw strings of ``ClarifyQuestion/choices`` (exactly one for a
+  /// single-select question). Sent as the bare label (the `" (Recommended)"` marker
+  /// stripped); a multi-select question sends a JSON-array string (`"[\"A\",\"B\"]"`).
+  case choices([String])
+  /// Typed text — a free-text question, or the "Other" row of a question with choices
+  /// (multi-select included). Sent as typed: a plain string, never wrapped in an array.
+  case other(String)
+  /// Skip this one question (`null` in a v0.21.6+ `answers` map).
+  case skipped
+
+  /// The wire text for `question`, `nil` for a skip. `stripsRecommended: false` keeps a
+  /// legacy `clarify.respond` byte-identical to what the app sent before (the raw choice).
+  func wireText(for question: ClarifyQuestion, stripsRecommended: Bool = true) -> String? {
+    switch self {
+    case .skipped:
+      return nil
+    case let .other(text):
+      return text
+    case let .choices(raw):
+      let labels = stripsRecommended ? raw.map { ClarifyChoice.split($0).label } : raw
+      guard question.multiSelect else { return labels.first ?? "" }
+      return Self.jsonArrayString(labels)
+    }
+  }
+
+  /// What the transcript echo shows for this answer (never wire syntax).
+  var displayText: String {
+    switch self {
+    case .skipped: "Skipped"
+    case let .other(text): text
+    case let .choices(raw): raw.map { ClarifyChoice.split($0).label }.joined(separator: ", ")
+    }
+  }
+
+  /// `["A","B"]` — compact, with `wireEncoder`'s settings so a choice containing `/` is never
+  /// `\/`-escaped. Encoding `[String]` cannot fail; the fallback only satisfies the type.
+  private static func jsonArrayString(_ labels: [String]) -> String {
+    guard let data = try? JSONRPCRequest.wireEncoder.encode(labels) else { return "[]" }
+    return String(decoding: data, as: UTF8.self)
+  }
+}
+
 /// Presentation helpers for a clarify choice.
 public enum ClarifyChoice {
   /// The server's marker on the first of two or more choices (upstream `RECOMMENDED_LABEL`).

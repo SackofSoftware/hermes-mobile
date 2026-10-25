@@ -475,6 +475,10 @@ Actions:
   `approvalRespondResult(resolved: 0)` overload to `serverRequestAnswered`.
 - `submitClarify(answers: [String: String?])` — keyed by qid (a single legacy/intermediate
   question uses the key `""`); the reducer builds the wire shape from `answerShape`.
+  **As built (Task 5):** `submitClarify(answers: [String: ClarifyAnswer])` with
+  `ClarifyAnswer = .choices([raw]) | .other(text) | .skipped` (in `ClarifyRequest.swift`), so
+  the marker stripping and the multi-select JSON-array string stay in HermesKit; a legacy
+  answer keeps the raw choice (byte-identical wire). Locks win over the card's answers.
 - `skipClarify` — v7 `.answers`: `{}`; `.singleAnswer`: `{answer:""}`; legacy: today's empty
   `clarify.respond`.
 - `respondToSecret(value:)` — v7 `{value}`; legacy `sudo.respond` / `secret.respond`.
@@ -699,6 +703,7 @@ the same reconcile when it lands.
       presented one and the first stays open server-side until its deadline
 - ⚠️ clarify/sudo/secret server requests stay silent (unrendered, no skip) until Tasks 5–6
       add them to `PendingServerRequest`; the decline-matrix test lists them as silent
+      (clarify resolved in Task 5)
 - [x] run tests - must pass before next task (1531 tests in 68 suites passed, 1 known issue;
       app target builds; `make snapshot` 40 failures, all at identical render size = known drift)
 
@@ -736,17 +741,31 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/ClarifyFeatureTests.swift`
 
-- [ ] route `clarify` server requests into the queue; a malformed one gets `{}`
-- [ ] `submitClarify(answers:)` / `skipClarify` build the result per `answerShape` (table in
+- [x] route `clarify` server requests into the queue; a malformed one gets `{}`
+      (`PendingServerRequest.init?` accepts only the two v7 shapes: a stray `request_id` is
+      re-modelled as `.singleAnswer`, or malformed when no question is left)
+- [x] `submitClarify(answers:)` / `skipClarify` build the result per `answerShape` (table in
       Technical Details); bare choice text; Other answers as typed; replayed locks included
-- [ ] legacy `respondToClarify`: replace `try?` with surfaced failure (banner, echo row patched
-      to "Failed to send")
-- [ ] write tests: each shape's exact `request.answer` params; multi-select JSON-array string;
+      (answers are typed `[String: ClarifyAnswer]` — `.choices([raw])` / `.other(text)` /
+      `.skipped` — so the reducer, not the view, strips the marker and builds the JSON-array
+      string; locks win over the card's answers; a question missing from the map is `null`)
+- [x] legacy `respondToClarify`: replace `try?` with surfaced failure (banner, echo row patched
+      to "Failed to send") (`respondToClarify(answer:)` is now a thin forwarder to the shared
+      `answerClarify` for the first question — a raw offered choice → `.choices`, else
+      `.other` — so today's single card also answers v7 requests until Task 7 rewires it;
+      the failure is `legacyRespondFailed(rowID:banner:)`, reusable by Task 6)
+- [x] write tests: each shape's exact `request.answer` params; multi-select JSON-array string;
       an Other answer on a single-select and on a multi-select question; a skipped question sends
       `null`; cancel-all `{}`; intermediate skip `{answer:""}`; `expired`; a failed answer keeps
       the card and banners; legacy wire byte-identical to today's fixture; legacy failure
-      surfaces
-- [ ] run tests - must pass before next task
+      surfaces (`ClarifyFeatureTests`; plus `ServerRequestTests`: an injected clarify frame is
+      queued ahead of the turn terminal, malformed clarify → `{}`, a failed automatic `{}`
+      banners without ending the turn; the decline matrix no longer lists `clarify` as silent)
+- ⚠️ the intermediate (v2026.9.14–.24) batch typed its answers `dict[str,str]`; a skipped
+      question there still goes out as `null` (the app cannot tell that batch from the v0.21.6+
+      shape). Accepted: those releases are superseded
+- [x] run tests - must pass before next task (1567 tests in 69 suites passed, 1 known issue;
+      no view or app-used API changed, so no app build / snapshot run)
 
 ### Task 6: Sudo and secret over server requests
 

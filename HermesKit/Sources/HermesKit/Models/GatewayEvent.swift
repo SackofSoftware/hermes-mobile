@@ -93,7 +93,11 @@ public enum GatewayEvent: Equatable, Sendable {
       if let req = p.decoded(ApprovalRequest.self) { self = .approvalRequest(req) }
       else { self = .unknown(type: type, raw: p) }
     case "clarify.request":
-      if let req = p.decoded(ClarifyRequest.self) { self = .clarifyRequest(req) }
+      // The legacy event is always the `request_id`-bound single form; any other shape on
+      // this event name is not something the legacy wire sends.
+      if let req = p.decoded(ClarifyRequest.self), req.answerShape == .legacyRespond {
+        self = .clarifyRequest(req)
+      }
       else { self = .unknown(type: type, raw: p) }
     case "sudo.request":
       if let req = p.decoded(SecretPrompt.self) { self = .sudoRequest(req) }

@@ -710,16 +710,24 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Tests/HermesKitTests/GatewayEventDecodingTests.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ClarifyChoiceTests.swift`
 
-- [ ] create `ClarifyRequest.swift` with `ClarifyQuestion`, `ClarifyRequest` (`questions`,
+- [x] create `ClarifyRequest.swift` with `ClarifyQuestion`, `ClarifyRequest` (`questions`,
       `lockedAnswers`, `answerShape`, `isMultiQuestion`, the single-form convenience init) and the
-      shape-detecting decoder
-- [ ] add `ClarifyChoice.split(_:)` (case-insensitive `(recommended)` suffix, trimmed)
-- [ ] write decoding tests: v0.21.6 single-select and free-text single questions (one-entry
+      shape-detecting decoder (detection order: usable `questions` → `.answers`; `request_id` →
+      `.legacyRespond`, decoded as before; top-level non-blank `question` → `.singleAnswer`. An
+      unusable `questions` entry is dropped, the rest render; a non-string lock is ignored;
+      `multiSelect` is forced `false` on a free-text question, as upstream normalizes. The
+      `clarify.request` event only accepts the `.legacyRespond` shape. `question` / `choices`
+      stay as first-question accessors so the single card and the log summary are untouched
+      until Task 7)
+- [x] add `ClarifyChoice.split(_:)` (case-insensitive `(recommended)` suffix, trimmed) (a choice
+      that is only the marker keeps it as its label — never an empty row)
+- [x] write decoding tests: v0.21.6 single-select and free-text single questions (one-entry
       `questions`, `isMultiQuestion == false`), three mixed questions, replayed `answers`
       including a `null`, intermediate single with and without `multi_select`, intermediate
       batch, legacy event (unchanged), no usable question → failure
-- [ ] write `ClarifyChoice.split` tests: suffix present / absent / mixed case / lone choice
-- [ ] run tests - must pass before next task
+- [x] write `ClarifyChoice.split` tests: suffix present / absent / mixed case / lone choice
+- [x] run tests - must pass before next task (1554 tests in 69 suites passed, 1 known issue;
+      app target builds; `make snapshot` 40 failures, all at identical render size = known drift)
 
 ### Task 5: Clarify over server requests
 

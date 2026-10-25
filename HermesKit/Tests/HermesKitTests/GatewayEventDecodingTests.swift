@@ -191,6 +191,143 @@ import Testing
     #expect(f == .event(sessionID: "s", .clarifyRequest(ClarifyRequest(requestID: "r3", question: "Name?", choices: []))))
   }
 
+  @Test func legacyClarifyEventKeepsItsSingleRespondShape() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"s","payload":{"request_id":"r2","question":"Which file?","choices":["a.txt","b.txt"]}}}"#)
+    guard case let .event(_, .clarifyRequest(request)) = f else {
+      Issue.record("expected .clarifyRequest, got \(f)"); return
+    }
+    #expect(request.answerShape == .legacyRespond)
+    #expect(request.requestID == "r2")
+    #expect(request.questions == [ClarifyQuestion(qid: nil, question: "Which file?", choices: ["a.txt", "b.txt"])])
+    #expect(request.lockedAnswers.isEmpty)
+    #expect(!request.isMultiQuestion)
+  }
+
+  @Test func legacyClarifyEventWithoutQuestionStillDecodesAsToday() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"s","payload":{"request_id":"r9"}}}"#)
+    #expect(f == .event(sessionID: "s", .clarifyRequest(ClarifyRequest(requestID: "r9", question: ""))))
+  }
+
+  @Test func legacyClarifyEventWithoutRequestIDIsUnknown() throws {
+    // Only the `request_id` form is the legacy wire; a server-request shape on the legacy
+    // event name is not presented (it has no answer path there).
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"s","payload":{"question":"Which file?"}}}"#)
+    guard case .event(_, .unknown(type: "clarify.request", _)) = f else {
+      Issue.record("expected .unknown, got \(f)"); return
+    }
+  }
+
+  // MARK: Clarify server-request params (all three wire generations)
+
+  private func clarify(_ json: String) -> ClarifyRequest? {
+    try? JSONDecoder().decode(ClarifyRequest.self, from: Data(json.utf8))
+  }
+
+  @Test func clarifySingleSelectAsOneEntryQuestions() throws {
+    let request = try #require(clarify(#"{"session_id":"live","questions":[{"qid":"q0","question":"Framework?","choices":["SwiftUI (Recommended)","UIKit"],"multi_select":false}]}"#))
+    #expect(request.answerShape == .answers)
+    #expect(request.requestID == nil)
+    #expect(!request.isMultiQuestion)
+    #expect(request.questions == [
+      ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
+    ])
+    #expect(request.question == "Framework?")
+    #expect(request.choices == ["SwiftUI (Recommended)", "UIKit"]) // raw; split for display
+    #expect(request.lockedAnswers.isEmpty)
+  }
+
+  @Test func clarifyFreeTextAsOneEntryQuestionsWithNullChoices() throws {
+    let request = try #require(clarify(#"{"session_id":"live","questions":[{"qid":"q0","question":"Branch name?","choices":null,"multi_select":false}]}"#))
+    #expect(request.answerShape == .answers)
+    #expect(!request.isMultiQuestion)
+    let question = try #require(request.questions.first)
+    #expect(question.qid == "q0")
+    #expect(question.isFreeText)
+    #expect(!question.multiSelect)
+  }
+
+  @Test func clarifyFreeTextIsNeverMultiSelect() throws {
+    let request = try #require(clarify(#"{"questions":[{"qid":"q0","question":"Name?","multi_select":true}]}"#))
+    #expect(request.questions.first?.multiSelect == false)
+  }
+
+  @Test func clarifyThreeMixedQuestions() throws {
+    let request = try #require(clarify(#"{"session_id":"live","questions":[{"qid":"q0","question":"Framework?","choices":["SwiftUI (Recommended)","UIKit"],"multi_select":false},{"qid":"q1","question":"Targets?","choices":["iOS","macOS","visionOS"],"multi_select":true},{"qid":"q2","question":"App name?","choices":null,"multi_select":false}],"future_key":{"x":1}}"#))
+    #expect(request.answerShape == .answers)
+    #expect(request.isMultiQuestion)
+    #expect(request.questions == [
+      ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
+      ClarifyQuestion(qid: "q1", question: "Targets?", choices: ["iOS", "macOS", "visionOS"], multiSelect: true),
+      ClarifyQuestion(qid: "q2", question: "App name?"),
+    ])
+  }
+
+  @Test func clarifyReplayedAnswersLockIncludingNull() throws {
+    let request = try #require(clarify(#"{"session_id":"live","questions":[{"qid":"q0","question":"Framework?","choices":["SwiftUI (Recommended)","UIKit"],"multi_select":false},{"qid":"q1","question":"Targets?","choices":["iOS","macOS"],"multi_select":true},{"qid":"q2","question":"Name?","choices":null}],"answers":{"q0":"SwiftUI","q1":null,"q2":42}}"#))
+    let expected: [String: String?] = ["q0": "SwiftUI", "q1": nil]
+    #expect(request.lockedAnswers == expected)
+    #expect(request.lockedAnswers["q1"] == .some(nil)) // a locked skip, not "absent"
+    #expect(request.lockedAnswers["q2"] == nil)         // a non-string lock is ignored
+  }
+
+  @Test func clarifyMalformedQuestionEntryIsDroppedNotFatal() throws {
+    let request = try #require(clarify(#"{"questions":[{"question":"No qid?"},{"qid":"q1","question":"   "},"junk",{"qid":"q2","question":"Kept?","choices":["a",1,"b"]}]}"#))
+    #expect(request.questions == [ClarifyQuestion(qid: "q2", question: "Kept?", choices: ["a", "b"])])
+    #expect(!request.isMultiQuestion)
+  }
+
+  @Test func clarifyIntermediateSingleWithoutMultiSelect() throws {
+    let request = try #require(clarify(#"{"session_id":"live","question":"Proceed?","choices":["Yes","No"]}"#))
+    #expect(request.answerShape == .singleAnswer)
+    #expect(request.requestID == nil)
+    #expect(request.questions == [ClarifyQuestion(qid: nil, question: "Proceed?", choices: ["Yes", "No"])])
+    #expect(request == ClarifyRequest(requestID: nil, question: "Proceed?", choices: ["Yes", "No"]))
+  }
+
+  @Test func clarifyIntermediateSingleWithMultiSelect() throws {
+    let request = try #require(clarify(#"{"session_id":"live","question":"Targets?","choices":["iOS","macOS"],"multi_select":true}"#))
+    #expect(request.answerShape == .singleAnswer)
+    #expect(request.questions == [ClarifyQuestion(qid: nil, question: "Targets?", choices: ["iOS", "macOS"], multiSelect: true)])
+  }
+
+  @Test func clarifyIntermediateSingleFreeText() throws {
+    let request = try #require(clarify(#"{"session_id":"live","question":"Name?","choices":null}"#))
+    #expect(request.answerShape == .singleAnswer)
+    #expect(request.questions.first?.isFreeText == true)
+  }
+
+  @Test func clarifyIntermediateBatch() throws {
+    let request = try #require(clarify(#"{"session_id":"live","questions":[{"qid":"q0","question":"Framework?","choices":["SwiftUI","UIKit"]},{"qid":"q1","question":"Name?"}]}"#))
+    #expect(request.answerShape == .answers)
+    #expect(request.isMultiQuestion)
+    #expect(request.questions == [
+      ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI", "UIKit"]),
+      ClarifyQuestion(qid: "q1", question: "Name?"),
+    ])
+  }
+
+  @Test(arguments: [
+    #"{}"#,
+    #"{"session_id":"live"}"#,
+    #"{"questions":[]}"#,
+    #"{"questions":null}"#,
+    #"{"questions":[{"question":"No qid"}]}"#,
+    #"{"questions":[{"qid":"q0"}]}"#,
+    #"{"question":"   "}"#,
+    #"{"question":42}"#,
+    #"[1,2]"#,
+    #""text""#,
+  ])
+  func clarifyWithoutUsableQuestionFailsToDecode(json: String) {
+    #expect(clarify(json) == nil)
+  }
+
+  @Test func clarifyConvenienceInitPicksShapeFromRequestID() {
+    #expect(ClarifyRequest(requestID: "r", question: "Q?").answerShape == .legacyRespond)
+    #expect(ClarifyRequest(requestID: nil, question: "Q?").answerShape == .singleAnswer)
+    #expect(ClarifyRequest(requestID: nil, question: "Q?", multiSelect: true).questions.first?.multiSelect == false)
+  }
+
   @Test func secretRequest() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"secret.request","session_id":"s","payload":{"request_id":"r4","prompt":"API key?"}}}"#)
     #expect(f == .event(sessionID: "s", .secretRequest(SecretPrompt(requestID: "r4", prompt: "API key?"))))

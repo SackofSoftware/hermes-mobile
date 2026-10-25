@@ -1578,7 +1578,8 @@ public struct ChatFeature {
         state.transcript.append(
           ChatRow(id: uuid(), kind: .status(kind: "clarify", text: answer))
         )
-        let requestID = request.requestID
+        // Only the legacy event reaches this path, and it always carries a `request_id`.
+        let requestID = request.requestID ?? ""
         return .run { [gateway] _ in
           _ = try? await gateway.send("clarify.respond", .object([
             "session_id": .string(sessionID),

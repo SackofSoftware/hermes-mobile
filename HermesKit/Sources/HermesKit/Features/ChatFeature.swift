@@ -493,6 +493,18 @@ public struct ChatFeature {
     /// per-slot lifetime, unpersisted. Only `showsEmptyHero` reads it: "the transcript is
     /// empty because the server said so" vs "empty because history hasn't arrived yet".
     var hasHydrated: Bool
+    /// The server's prompt-wire generation (`info.desktop_contract`; `>= 7` = server→client
+    /// requests, 6 = the legacy `*.request` / `*.respond` wire). Recorded from every hydrate
+    /// (`applyActivate`) and from `session.info` events that carry it. Receiving needs no
+    /// gate (the two wires never coexist on one server); this is for proactive choices only
+    /// (push-tap recovery, legacy clearing). Per-slot, unpersisted.
+    var desktopContract: Int?
+    /// This connection's `client.capabilities` failure (`.serverRequestsUnavailable`): the
+    /// server won't route prompts to the phone until the next connect. The ready/hydrate
+    /// "stale connection banner" clears restore it instead of wiping it, so the notice
+    /// outlives the hydrate that lands right after it. Reset by `.ready` (a new socket
+    /// re-advertises; the client yields its failure only after that `.ready`).
+    var serverRequestsUnavailable: String?
 
     public enum Status: Equatable, Sendable {
       case connecting
@@ -542,6 +554,8 @@ public struct ChatFeature {
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
       self.hasHydrated = false
+      self.desktopContract = nil
+      self.serverRequestsUnavailable = nil
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
       self.expectsPendingApproval = false
@@ -2186,7 +2200,10 @@ public struct ChatFeature {
       state.reconnectAttempt = 0
       // The socket is (re)connected — clear any stale connection banner (e.g. a "Connection
       // lost." left over from a lock/unlock drop) so it doesn't linger after we reconnect.
+      // A new socket also re-advertises, so the previous one's advertisement failure goes
+      // too (this connection's own failure, if any, is yielded after this `.ready`).
       state.errorBanner = nil
+      state.serverRequestsUnavailable = nil
       guard !state.hasRequestedSession else { return .none }
       state.hasRequestedSession = true
       // An unpersisted branch (#34) attaches to its already-live session by LIVE id —
@@ -2347,6 +2364,13 @@ public struct ChatFeature {
       state.errorBanner = message
       return .none
 
+    case let .serverRequestsUnavailable(message):
+      // Surfaced like any RPC failure, and kept standing for this connection so the
+      // hydrate's stale-banner clear (which lands right after) restores it. No turn ends.
+      state.serverRequestsUnavailable = message
+      state.errorBanner = message
+      return .none
+
     case let .error(message):
       state.errorBanner = message
       state.isSending = false
@@ -2416,6 +2440,7 @@ public struct ChatFeature {
       if let model = info.model?.nonEmpty { state.model = model }
       if let effort = info.reasoningEffort?.nonEmpty { state.reasoningEffort = effort }
       if let u = info.usage { state.usage = u }
+      if let contract = info.desktopContract { state.desktopContract = contract }
       confirmConfigKeys(info, into: &state)
       return .none
 
@@ -2774,12 +2799,15 @@ public struct ChatFeature {
     state.hydrateRetriedAfterTimeout = false // hydrate landed: the timeout-retry budget resets
     state.hasReplayedBranchSeed = false // and so does the branch seed-replay budget (#34)
     state.hasHydrated = true // the transcript below is now server-authoritative (#80 hero gate)
-    // A successful hydrate means we're connected — clear any stale connection banner.
-    state.errorBanner = nil
+    // A successful hydrate means we're connected — clear any stale connection banner, but
+    // keep this connection's standing advertisement failure up (it is not stale).
+    state.errorBanner = state.serverRequestsUnavailable
 
     // Runtime info: model / reasoning / usage straight from the response (fixes the blank
     // model + context-0 bugs on re-open).
     if let info = response.info {
+      // The hydrate's `info` is a full snapshot, so its contract (or its absence) wins.
+      state.desktopContract = info.desktopContract
       var target = RuntimeInfoTarget(
         model: state.model, reasoningEffort: state.reasoningEffort, usage: state.usage
       )
@@ -3511,8 +3539,8 @@ public struct ChatFeature {
       // Blank text is dropped by the fold with zero state change — don't schedule a
       // pointless snapshot write for it.
       return Self.hasRenderableReviewText(text)
-    case .ready, .error, .serverRequestFailed, .authExpired, .approvalRequest, .approvalServerRequest, .clarifyRequest,
-         .sudoRequest, .secretRequest, .unknown:
+    case .ready, .error, .serverRequestFailed, .serverRequestsUnavailable, .authExpired, .approvalRequest,
+         .approvalServerRequest, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
       return false
     }
   }

@@ -27,6 +27,12 @@ public enum GatewayEvent: Equatable, Sendable {
   case error(message: String)
   /// Local protocol-operation failure, not a turn-ending agent error.
   case serverRequestFailed(message: String)
+  /// Synthetic (client-side, never on the wire): this connection's `client.capabilities`
+  /// advertisement failed (anything but `-32601`), so the server will not route prompts
+  /// to the phone until the next connect re-advertises. Yielded at most once per
+  /// connection and always AFTER that connection's `.ready` — the reducer keeps it standing
+  /// across the ready/hydrate banner clears. Not a turn-ending error.
+  case serverRequestsUnavailable(message: String)
   /// Live-only event from the agent's background self-improvement review
   /// (`review.summary`, issue #47), emitted to the session's own transport (not a
   /// global broadcast). Never written to session history, so a hydrate
@@ -268,17 +274,24 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
   /// `applyActivate`'s runtime info so `/title x` updates the open chat's nav title
   /// immediately. Normal hydrates intentionally leave the title untouched (#36).
   public var title: String?
+  /// The server's prompt-wire generation (`desktop_contract`): `>= 7` speaks server→client
+  /// requests (v7), 6 is the legacy `*.request` / `*.respond` wire (≤ v2026.9.11). Upstream
+  /// types it `int | str | None`, so it is decoded by hand — an Int, or a String that parses
+  /// as one, else nil. It must NEVER throw: `ActivateResponse` decodes `info` with `try?`,
+  /// so a throw here would drop the model/usage fields along with it.
+  public var desktopContract: Int?
 
   enum CodingKeys: String, CodingKey {
     case model, running, version, cwd, usage, title
     case reasoningEffort = "reasoning_effort"
     case profileName = "profile_name"
+    case desktopContract = "desktop_contract"
   }
 
   public init(
     model: String? = nil, reasoningEffort: String? = nil, running: Bool? = nil,
     version: String? = nil, cwd: String? = nil, profileName: String? = nil, usage: Usage? = nil,
-    title: String? = nil
+    title: String? = nil, desktopContract: Int? = nil
   ) {
     self.model = model
     self.reasoningEffort = reasoningEffort
@@ -288,6 +301,30 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
     self.profileName = profileName
     self.usage = usage
     self.title = title
+    self.desktopContract = desktopContract
+  }
+
+  /// Hand-written only for `desktopContract`'s lenient decode; every other field keeps the
+  /// synthesized semantics (absent → nil, wrong type → throw).
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    model = try c.decodeIfPresent(String.self, forKey: .model)
+    reasoningEffort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    running = try c.decodeIfPresent(Bool.self, forKey: .running)
+    version = try c.decodeIfPresent(String.self, forKey: .version)
+    cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+    profileName = try c.decodeIfPresent(String.self, forKey: .profileName)
+    usage = try c.decodeIfPresent(Usage.self, forKey: .usage)
+    title = try c.decodeIfPresent(String.self, forKey: .title)
+    desktopContract = Self.lenientContract(c)
+  }
+
+  private static func lenientContract(_ c: KeyedDecodingContainer<CodingKeys>) -> Int? {
+    if let value = try? c.decodeIfPresent(Int.self, forKey: .desktopContract) { return value }
+    if let text = try? c.decodeIfPresent(String.self, forKey: .desktopContract) {
+      return Int(text.trimmingCharacters(in: .whitespaces))
+    }
+    return nil
   }
 }
 

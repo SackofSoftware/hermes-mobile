@@ -96,8 +96,8 @@ private func requestID(_ frame: String) -> Int? {
     transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready"}}"#)
     transport.inject(#"{"jsonrpc":"2.0","id":"srq-abc123","method":"approval","params":{"session_id":"s","request_id":"approval-7","command":"rm foo","choices":["once","deny"]}}"#)
 
-    // The ready notification is part of the normal event stream; the next item is the approval.
-    #expect(await iterator.next() == .ready)
+    // `.ready` is held until the `client.capabilities` acknowledgement (queued behind the
+    // approval frame) arrives; the approval itself is yielded as soon as it is read.
     let event = await iterator.next()
     #expect(event == .approvalServerRequest(
       ApprovalRequest(
@@ -107,6 +107,7 @@ private func requestID(_ frame: String) -> Int? {
         choices: ["once", "deny"]
       )
     ))
+    #expect(await iterator.next() == .ready)
 
     let result = try await client.send("request.answer", .object([
       "id": .string("srq-abc123"),

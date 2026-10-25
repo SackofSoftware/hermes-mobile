@@ -27,6 +27,17 @@ import Testing
     #expect(info.model == "gpt-5.5")
     #expect(info.running == true)
     #expect(info.profileName == "default")
+    #expect(info.desktopContract == nil) // absent on legacy/old agents
+  }
+
+  @Test(arguments: [(#"7"#, 7), (#""8""#, 8), (#""x""#, nil)] as [(String, Int?)])
+  func sessionInfoEventCarriesDesktopContract(raw: String, expected: Int?) throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info","session_id":"s","payload":{"model":"gpt-5.5","desktop_contract":\#(raw)}}}"#)
+    guard case let .event(_, .sessionInfo(info)) = f else {
+      Issue.record("expected sessionInfo event, got \(f)"); return
+    }
+    #expect(info.desktopContract == expected)
+    #expect(info.model == "gpt-5.5") // a non-numeric contract never costs the other fields
   }
 
   @Test func messageStartHasNoPayloadKey() throws {

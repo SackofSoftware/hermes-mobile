@@ -156,6 +156,10 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
   public var info: SessionInfo?
   public var running: Bool?
   public var inflight: SessionInflight?
+  /// The session's still-open server→client requests (`open_requests`, v7), oldest first.
+  /// Present on a live reattach (`session.resume` / `session.activate`) when non-empty;
+  /// absent → `[]`. Decoded per entry: a malformed entry is dropped, the rest kept.
+  public var openRequests: [OpenRequest]
 
   enum CodingKeys: String, CodingKey {
     case sessionID = "session_id"
@@ -167,11 +171,13 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     // whose stored/persisted id key is `session_key`.
     case sessionKey = "session_key"
     case messages, info, running, inflight
+    case openRequests = "open_requests"
   }
 
   public init(
     sessionID: String, storedSessionID: String? = nil, messages: [SessionMessage] = [],
-    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil
+    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil,
+    openRequests: [OpenRequest] = []
   ) {
     self.sessionID = sessionID
     self.storedSessionID = storedSessionID
@@ -179,6 +185,7 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     self.info = info
     self.running = running
     self.inflight = inflight
+    self.openRequests = openRequests
   }
 
   public init(from decoder: Decoder) throws {
@@ -195,6 +202,33 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     info = try? c.decodeIfPresent(SessionInfo.self, forKey: .info)
     running = try? c.decodeIfPresent(Bool.self, forKey: .running)
     inflight = try? c.decodeIfPresent(SessionInflight.self, forKey: .inflight)
+    let rawOpenRequests = (try? c.decodeIfPresent([JSONValue].self, forKey: .openRequests)) ?? nil
+    openRequests = (rawOpenRequests ?? []).compactMap { $0.decoded(OpenRequest.self) }
+  }
+}
+
+/// One entry of `open_requests` (v7): a server→client request still waiting on an answer,
+/// in the same `{id, method, params}` shape as the live request frame. `params` stays raw —
+/// the reconcile decodes it per `method`, exactly as a live frame is. A missing `params`
+/// decodes as `.null` (the per-kind decode then treats it as malformed).
+public struct OpenRequest: Equatable, Sendable, Decodable {
+  public var id: String
+  public var method: String
+  public var params: JSONValue
+
+  enum CodingKeys: String, CodingKey { case id, method, params }
+
+  public init(id: String, method: String, params: JSONValue = .null) {
+    self.id = id
+    self.method = method
+    self.params = params
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(String.self, forKey: .id)
+    method = try c.decode(String.self, forKey: .method)
+    params = (try? c.decodeIfPresent(JSONValue.self, forKey: .params)) ?? .null
   }
 }
 

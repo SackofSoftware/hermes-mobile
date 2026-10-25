@@ -441,6 +441,15 @@ advertisement, decline and automatic-skip sends.
   yields `.ready`. Events arriving during the window are yielded as usual. The base already
   starts the `Task` on `gateway.ready` but yields `.ready` immediately and retries failures in
   the background (see "Base"); Task 2 reconciles the two.
+  **As built (Task 2):** one attempt per connection, no background retry (the next connect
+  re-advertises). The `.ready` gate (`readyGateOpen`, `advertisementReadyCap` = 5 s) opens on
+  the attempt settling or the cap, whichever is first; a capped attempt keeps running under the
+  30 s request budget and its late outcome still counts. A failure other than `-32601` yields
+  `GatewayEvent.serverRequestsUnavailable(message:)` ("Couldn’t enable approvals and other
+  prompts: …") strictly AFTER `.ready`; the reducer stores it in
+  `State.serverRequestsUnavailable`, which `.ready` resets and `applyActivate`'s stale-banner
+  clear restores (`errorBanner = serverRequestsUnavailable`), so the banner outlives the
+  hydrate that follows. Like every stream event it is mirrored into the gateway log.
 - Every outbound frame — declines and skip responses included — is encoded by
   `JSONRPCRequest.wireEncoder`. Answers go through `send("request.answer", …)`.
 
@@ -570,42 +579,57 @@ the same reconcile when it lands.
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`, `SessionDecodingTests.swift`, `GatewayEventDecodingTests.swift`, `ServerRequestTests.swift`
 
-- [ ] decode `desktop_contract` leniently (Int, numeric String, else nil — never throws) and
-      `open_requests` (default `[]`)
-- [ ] advertisement in a `Task` started on the `gateway.ready` frame, 5 s cap, store
+- [x] decode `desktop_contract` leniently (Int, numeric String, else nil — never throws) and
+      `open_requests` (default `[]`) (`SessionInfo` got a hand-written decoder that keeps the
+      other fields' synthesized semantics; `open_requests` decodes per entry — a malformed entry
+      is dropped, a non-array is `[]`; `OpenRequest` lives next to `ActivateResponse` in
+      `Session.swift`, so Task 3 no longer adds it)
+- [x] advertisement in a `Task` started on the `gateway.ready` frame, 5 s cap, store
       `declinesNotShown`, then yield `.ready`; `-32601`, timeout and other failures still reach
       ready, the latter two logged (the base already starts the `Task` and stores
       `declinesNotShown`; what changes is holding `.ready` until it settles or the cap fires)
-- [ ] record `desktopContract` per slot from `applyActivate` and `session.info`
-- [ ] write tests: `desktop_contract` as `7`, `"8"`, `"x"`, absent — and a string value leaves the
+      (a capped attempt keeps running; its late failure — the 30 s request timeout included —
+      surfaces through `.serverRequestsUnavailable`, which the gateway log mirrors; the cap
+      itself logs nothing)
+- [x] record `desktopContract` per slot from `applyActivate` and `session.info` (a hydrate's
+      `info` is a full snapshot and overwrites; a partial `session.info` writes only when present)
+- [x] write tests: `desktop_contract` as `7`, `"8"`, `"x"`, absent — and a string value leaves the
       model/usage fields of `info` intact; `open_requests` present/absent/malformed; the
       advertisement precedes `session.resume` on the wire; a hung advertisement still reaches
       ready after the cap; events in the window are not lost; `declinesNotShown` stored
-- [ ] ➕ rewrite #116's `unknownAdvertisementMethodIsSilentAndNotRetried` (`ServerRequestTests`):
+- [x] ➕ rewrite #116's `unknownAdvertisementMethodIsSilentAndNotRetried` (`ServerRequestTests`):
       it calls `advertiseServerRequestsIfNeeded()` directly, so the retry loop (started only on
       `ready`) never runs, the clock advance is a no-op, and `events` is never read — it passes
       on the pre-fix `e6736df`. Drive it through an injected `ready` frame and assert one
       `client.capabilities` frame and no `.serverRequestFailed`
-- [ ] ➕ if #116's retry loop survives this task: test that a non-`-32601` failure (`busy`)
+- [x] ➕ if #116's retry loop survives this task: test that a non-`-32601` failure (`busy`)
       keeps retrying but surfaces once per connection (`advertisementFailureReported` is
-      uncovered)
-- [ ] ➕ drop the redundant `advertisementUnsupported` flag in `GatewayConnection` — the same
-      branch sets `advertisedServerRequests = true`, which already stops the retry
-- [ ] ➕ decide whether #116's background retry (`startAdvertisement` → `retryAdvertisement`,
+      uncovered) (n/a — the retry loop is gone; `advertisementFailureSurfacesAfterReadyAndIsNotRetried`
+      covers the single attempt instead)
+- [x] ➕ drop the redundant `advertisementUnsupported` flag in `GatewayConnection` — the same
+      branch sets `advertisedServerRequests = true`, which already stops the retry (gone, along
+      with `advertisedServerRequests` / `advertisingServerRequests` /
+      `advertisementFailureReported`; one `advertisementStarted` flag remains)
+- [x] ➕ decide whether #116's background retry (`startAdvertisement` → `retryAdvertisement`,
       2 s → 30 s for the connection's life) survives behind the awaited first attempt. The
       Technical Details design has none (the next connect is the retry); if it stays, describe it
-      there and keep the item above about `advertisementFailureReported`
-- [ ] ➕ make the advertisement failure visible: the base's `.serverRequestFailed` banner lands
+      there and keep the item above about `advertisementFailureReported` (dropped: one attempt per
+      connection, matching Technical Details and the no-automatic-retries preference)
+- [x] ➕ make the advertisement failure visible: the base's `.serverRequestFailed` banner lands
       just after `.ready` and is wiped by `applyActivate`'s `errorBanner = nil` when the hydrate
       answers later; once `.ready` waits on the advertisement, the `.ready` handler's own clear
       wipes it too. Pick banner (CLAUDE.md "surface RPC failures") or gateway log (Technical
-      Details), make it survive the ready/hydrate clears, and test that
-- [ ] ➕ reword the failure copy "Couldn’t enable approval requests" to cover every prompt kind
-      (clarify/sudo/secret ride the same advertisement after Tasks 5–6)
-- ⚠️ until this task lands, `.ready` (and so `session.resume`) does not wait for the
-      advertisement: a prompt raised before the server processed it is refused while the phone
-      is the only client
-- [ ] run tests - must pass before next task
+      Details), make it survive the ready/hydrate clears, and test that (banner, and the gateway
+      log via the stream mirror: new `GatewayEvent.serverRequestsUnavailable` yielded after
+      `.ready`, kept in `State.serverRequestsUnavailable`, restored by the hydrate clear, reset by
+      the next `.ready`)
+- [x] ➕ reword the failure copy "Couldn’t enable approval requests" to cover every prompt kind
+      (clarify/sudo/secret ride the same advertisement after Tasks 5–6) ("Couldn’t enable
+      approvals and other prompts: …")
+- ⚠️ (resolved in Task 2) until this task lands, `.ready` (and so `session.resume`) does not
+      wait for the advertisement: a prompt raised before the server processed it is refused
+      while the phone is the only client
+- [x] run tests - must pass before next task (1519 tests in 68 suites passed, 1 known issue)
 
 ### Task 3: One queue for every rendered server request
 
@@ -618,7 +642,8 @@ the same reconcile when it lands.
   the exhaustive event list)
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `HermesGatewayClientTests.swift`, `ServerRequestTests.swift`
 
-- [ ] add `PendingServerRequest`, `SecretKind` (moved), `RequestCancel`, `OpenRequest`; replace
+- [ ] add `PendingServerRequest`, `SecretKind` (moved), `RequestCancel` (`OpenRequest` already
+      landed in Task 2, in `Session.swift`); replace
       `GatewayEvent.approvalServerRequest` (the case, its `GatewayLogEntry` name/summary, the
       reducer case, the non-transcript list entry) with `.serverRequest`; drop
       `ApprovalRequest.serverRequestID` (set in `GatewayConnection.presentApproval`)

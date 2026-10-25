@@ -308,12 +308,21 @@ actor GatewayConnection {
   private var timeoutTasks: [Int: Task<Void, Never>] = [:]
   private var receiveTask: Task<Void, Never>?
   private var isFinished = false
-  private var advertisedServerRequests = false
-  private var advertisingServerRequests = false
+  /// One `client.capabilities` attempt per connection — no background retry: the next
+  /// connect re-advertises (the advertisement is per transport and dies with the socket).
+  private var advertisementStarted = false
   private var declinesNotShown = false
-  private var advertisementUnsupported = false
-  private var advertisementFailureReported = false
   private var advertisementTask: Task<Void, Never>?
+  /// `.ready` is held back until the advertisement settles or `advertisementReadyCap`
+  /// fires, so the reducer's first `session.resume` / `session.create` goes out after the
+  /// server knows the phone answers prompts. Once open, the gate stays open.
+  private var readyGateOpen = false
+  private var heldReadyFrames = 0
+  private var readyCapTask: Task<Void, Never>?
+
+  /// How long `.ready` waits on the advertisement. A hung `client.capabilities` keeps
+  /// running past the cap (its late outcome still counts) under the normal request budget.
+  static let advertisementReadyCap: Duration = .seconds(5)
 
   init(
     transport: any WebSocketTransport,
@@ -450,48 +459,57 @@ actor GatewayConnection {
     return true
   }
 
-  /// Mark success only after acknowledgement. A failure leaves the probe retryable.
-  func advertiseServerRequestsIfNeeded() async {
-    guard !isFinished, !advertisedServerRequests, !advertisingServerRequests else { return }
-    advertisingServerRequests = true
-    defer { advertisingServerRequests = false }
+  /// The connection's single `client.capabilities {server_requests: true}` attempt. Opens
+  /// the ready gate whatever the outcome: success stores `declinesNotShown`; `-32601` is
+  /// silent (v2026.9.14 speaks v7 without the probe — it does NOT mean legacy); any other
+  /// failure yields `.serverRequestsUnavailable` AFTER the gate opened, so the reducer's
+  /// `.ready` reset cannot wipe it. Never retried on this socket.
+  func advertiseServerRequests() async {
+    guard !isFinished, !advertisementStarted else { return }
+    advertisementStarted = true
+    let failure: (any Error)?
     do {
       let result = try await send(method: "client.capabilities", params: .object(["server_requests": .bool(true)]))
       guard case .object = result else { throw GatewayError.server("Malformed client.capabilities result") }
-      guard !isFinished else { return }
       declinesNotShown = result["declines_not_shown"]?.boolValue == true
-      advertisedServerRequests = true
+      failure = nil
     } catch let error as GatewayError where error.isUnknownMethod {
-      // Older gateways may support server requests but predate the capability probe.
-      // Treat -32601 as a permanent per-connection capability miss: do not retry and
-      // do not show a user-facing banner for a passive compatibility probe.
-      advertisementUnsupported = true
-      advertisedServerRequests = true
+      failure = nil
     } catch {
-      if !advertisementFailureReported {
-        advertisementFailureReported = true
-        reportFailure("Couldn’t enable approval requests", error: error)
-      }
+      failure = error
+    }
+    openReadyGate()
+    if let failure, !isFinished, !(failure is CancellationError) {
+      let message = (failure as? GatewayError)?.message ?? "Connection lost."
+      events.yield(.serverRequestsUnavailable(message: "Couldn’t enable approvals and other prompts: \(message)"))
     }
   }
 
-  private func startAdvertisement() {
-    guard advertisementTask == nil, !advertisedServerRequests, !advertisementUnsupported else { return }
-    advertisementTask = Task { [weak self] in
-      guard let self else { return }
-      await retryAdvertisement()
+  /// A `gateway.ready` frame: pass it straight through once the gate is open; otherwise hold
+  /// it and (first time only) start the advertisement plus the cap that bounds the wait.
+  /// The advertisement runs in a `Task` — awaiting it here would deadlock the receive loop
+  /// its acknowledgement arrives through. Frames arriving meanwhile are yielded as usual.
+  private func receivedReady() {
+    if readyGateOpen {
+      events.yield(.ready)
+      return
+    }
+    heldReadyFrames += 1
+    guard advertisementTask == nil else { return }
+    advertisementTask = Task { [weak self] in await self?.advertiseServerRequests() }
+    readyCapTask = Task { [weak self, clock] in
+      do { try await clock.sleep(for: GatewayConnection.advertisementReadyCap) } catch { return }
+      await self?.openReadyGate()
     }
   }
 
-  private func retryAdvertisement() async {
-    defer { advertisementTask = nil }
-    var delay: Duration = .seconds(2)
-    while !isFinished, !Task.isCancelled {
-      await advertiseServerRequestsIfNeeded()
-      if advertisedServerRequests || isFinished { return }
-      do { try await clock.sleep(for: delay) } catch { return }
-      delay = min(delay * 2, .seconds(30))
-    }
+  private func openReadyGate() {
+    guard !readyGateOpen, !isFinished else { return }
+    readyGateOpen = true
+    readyCapTask?.cancel()
+    readyCapTask = nil
+    for _ in 0..<heldReadyFrames { events.yield(.ready) }
+    heldReadyFrames = 0
   }
 
   private func reportFailure(_ context: String, error: any Error) {
@@ -504,9 +522,7 @@ actor GatewayConnection {
     guard let parsed = try? InboundFrame(data: Data(frame.utf8)) else { return }
     switch parsed {
     case let .event(_, event):
-      if case .ready = event {
-        startAdvertisement()
-      }
+      if case .ready = event { return receivedReady() }
       events.yield(event)
     case let .serverRequest(id, method, params):
       // Present synchronously so a following turn terminal cannot overtake the card.
@@ -531,6 +547,8 @@ actor GatewayConnection {
     isFinished = true
     advertisementTask?.cancel()
     advertisementTask = nil
+    readyCapTask?.cancel()
+    readyCapTask = nil
     events.finish()
     for (_, task) in timeoutTasks { task.cancel() }
     timeoutTasks.removeAll()

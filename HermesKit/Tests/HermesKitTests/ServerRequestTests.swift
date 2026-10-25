@@ -69,7 +69,7 @@ struct ServerRequestTests {
     transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
     #expect(await iterator.next() == .ready)
     let methods = windowMethods + ["vault.unlock_prompt", "vault.save_login", "vault.code", "setup_choose",
-      "display.install.sudo", "sudo", "secret", "future.method"]
+      "display.install.sudo", "future.method"]
     for method in methods {
       transport.inject(serverRequestFrame(
         id: "srq/" + method, method: method,
@@ -168,6 +168,67 @@ struct ServerRequestTests {
     let frame = try JSONDecoder().decode(JSONValue.self, from: Data(try #require(transport.sent.first).utf8))
     #expect(frame["method"]?.stringValue == "request.answer")
     #expect(frame["params"] == .object(["id": .string("srq/bad"), "result": .object([:])]))
+    #expect(transport.sent.count == 1)
+    client.disconnect()
+  }
+
+  /// Sudo and secret server requests reach the reducer as queued, presented cards, ahead of
+  /// the turn terminal that follows them on the wire; the second queues behind the first.
+  @Test func sudoAndSecretServerRequestsAreQueuedAndPresented() async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
+    transport.inject(
+      #"{"jsonrpc":"2.0","id":"srq-bbbbbbbbbbbb","method":"sudo","params":{"session_id":"live","command":"apt install ripgrep"}}"#
+        + "\n" + #"{"jsonrpc":"2.0","id":"srq-dddddddddddd","method":"secret","params":{"session_id":"live","env_var":"OPENWEATHER_API_KEY","prompt":"Weather API key"}}"#
+        + "\n" + #"{"method":"event","params":{"type":"message.complete","payload":{"text":"done"}}}"#
+    )
+    var iterator = events.makeAsyncIterator()
+    let sudo = PendingServerRequest(
+      id: "srq-bbbbbbbbbbbb", kind: .secret(.sudo, SecretPrompt(command: "apt install ripgrep"))
+    )
+    let secret = PendingServerRequest(
+      id: "srq-dddddddddddd",
+      kind: .secret(.secret, SecretPrompt(prompt: "Weather API key", envVar: "OPENWEATHER_API_KEY"))
+    )
+    #expect(await iterator.next() == .serverRequest(sudo))
+    #expect(await iterator.next() == .serverRequest(secret))
+    #expect(await iterator.next() == .messageComplete(text: "done", usage: nil))
+    #expect(transport.sent.isEmpty) // rendered, so nothing is answered automatically
+    client.disconnect()
+
+    let store = TestStore(initialState: ChatFeature.State(connection: ServerConnection(baseURL: url, token: "t"))) {
+      ChatFeature()
+    }
+    await store.send(.gatewayEvent(.serverRequest(sudo))) {
+      $0.serverRequests = [sudo]
+      $0.present(sudo.interaction)
+    }
+    await store.send(.gatewayEvent(.serverRequest(secret))) {
+      $0.serverRequests = [sudo, secret]
+    }
+  }
+
+  /// A rendered sudo / secret whose params are malformed is skipped with `{value: ""}`
+  /// through `request.answer`, never presented.
+  @Test(arguments: [("sudo", JSONValue.null), ("sudo", .object(["command": .number(1)])),
+                    ("secret", .object(["session_id": .string("live")])), ("secret", .array([]))])
+  func malformedSecretIsSkipped(method: String, payload: JSONValue) async throws {
+    let transport = FakeTransport { frame, inbound in
+      let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
+      if let id = request["id"]?.intValue {
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"ok"}}"#)
+        inbound.yield(#"{"method":"event","params":{"type":"probe.answered","payload":{}}}"#)
+      }
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
+    var iterator = events.makeAsyncIterator()
+    transport.inject(serverRequestFrame(id: "srq/bad", method: method, params: payload))
+    #expect(await iterator.next() == .unknown(type: "probe.answered", raw: .object([:])))
+    let frame = try JSONDecoder().decode(JSONValue.self, from: Data(try #require(transport.sent.first).utf8))
+    #expect(frame["method"]?.stringValue == "request.answer")
+    #expect(frame["params"] == .object(["id": .string("srq/bad"), "result": .object(["value": .string("")])]))
     #expect(transport.sent.count == 1)
     client.disconnect()
   }
@@ -298,7 +359,7 @@ struct ServerRequestTests {
 
   /// A failed automatic send (a 4404 decline, a malformed approval's deny) banners without
   /// ending the turn or the socket. Driven through injected frames.
-  @Test(arguments: ["tour", "approval", "clarify"])
+  @Test(arguments: ["tour", "approval", "clarify", "sudo", "secret"])
   func automaticSendFailureDoesNotEndTurn(method: String) async throws {
     let transport = FailingReplyTransport()
     let client = HermesGatewayClient.make { _ in transport }
@@ -315,7 +376,7 @@ struct ServerRequestTests {
       $0.errorBanner = switch method {
       case "tour": "Couldn’t decline a window request: send failed"
       case "approval": "Couldn’t deny a malformed approval: send failed"
-      default: "Couldn’t skip a malformed clarify prompt: send failed"
+      default: "Couldn’t skip a malformed \(method) prompt: send failed"
       }
     }
     #expect(!transport.base.cancelled)

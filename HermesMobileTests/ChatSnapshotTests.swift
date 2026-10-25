@@ -505,7 +505,30 @@ final class ChatSnapshotTests: SnapshotTestCase {
   func testSecretCard_secure() {
     let view = ClarifyCardView(
       mode: .secret(.secret, SecretPrompt(requestID: "s1", prompt: "Enter the API key for the weather service")),
-      onSubmit: { _ in }
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// v7 sudo (v2026.9.21+) carries the redacted command the password is for.
+  func testSudoCard_command() {
+    let view = ClarifyCardView(
+      mode: .secret(.sudo, SecretPrompt(command: "apt install -y ripgrep fd-find")),
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// v7 secret names the environment variable the value is saved under.
+  func testSecretCard_envVar() {
+    let view = ClarifyCardView(
+      mode: .secret(.secret, SecretPrompt(prompt: "Weather API key", envVar: "OPENWEATHER_API_KEY")),
+      onSubmit: { _ in },
+      onSkip: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())

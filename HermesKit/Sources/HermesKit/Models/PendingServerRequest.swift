@@ -42,10 +42,11 @@ public struct PendingServerRequest: Equatable, Sendable, Identifiable {
   /// or when a rendered method's params are malformed — the caller then answers with
   /// ``malformedSkip(for:)`` so the agent is never left hanging.
   ///
-  /// Rendered today: `approval`, `clarify`. An approval whose params decode but carry nothing
-  /// to show (no command, description or danger pattern) counts as malformed: on v7 the real
-  /// card is always recoverable from the replay, so a content-less card would only invite a
-  /// blind approve.
+  /// Rendered: `approval`, `clarify`, `sudo`, `secret`. An approval whose params decode but
+  /// carry nothing to show (no command, description or danger pattern) counts as malformed:
+  /// on v7 the real card is always recoverable from the replay, so a content-less card would
+  /// only invite a blind approve. Likewise a `secret` naming neither a `prompt` nor an
+  /// `env_var` (a blind field); a `sudo` may be empty (v2026.9.14 sends no `command`).
   ///
   /// A clarify server request is answered through `request.answer`, never `clarify.respond`,
   /// so it only accepts the two v7 shapes: a usable `questions` list (`.answers`) or a
@@ -69,19 +70,28 @@ public struct PendingServerRequest: Equatable, Sendable, Identifiable {
         )
       }
       self.init(id: id, kind: .clarify(request))
+    case "sudo", "secret":
+      guard var prompt = params.decoded(SecretPrompt.self) else { return nil }
+      let kind: SecretKind = method == "sudo" ? .sudo : .secret
+      if kind == .secret, !prompt.namesASecret { return nil }
+      // The srq id identifies a v7 prompt; a stray legacy `request_id` is meaningless here.
+      prompt.requestID = nil
+      self.init(id: id, kind: .secret(kind, prompt))
     default:
       return nil
     }
   }
 
   /// The `request.answer` result that skips a rendered method whose params failed to decode
-  /// (approval: `{choice: "deny"}`; clarify: `{}`, cancel-all). `nil` for every method the
+  /// (approval: `{choice: "deny"}`; clarify: `{}`, cancel-all; sudo / secret: `{value: ""}`).
+  /// `nil` for every method the
   /// app does not render — those get nothing, or the window-owned 4404 decline (see
   /// `windowOwnedMethods`).
   public static func malformedSkip(for method: String) -> JSONValue? {
     switch method {
     case "approval": .object(["choice": .string("deny")])
     case "clarify": .object([:])
+    case "sudo", "secret": .object(["value": .string("")])
     default: nil
     }
   }

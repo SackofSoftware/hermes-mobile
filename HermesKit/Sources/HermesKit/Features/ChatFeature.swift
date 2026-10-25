@@ -831,7 +831,13 @@ public struct ChatFeature {
     /// A legacy `*.respond` send threw: patch its optimistic echo row to "Failed to send"
     /// and banner (the card is already gone — the legacy path is optimistic).
     case legacyRespondFailed(rowID: ChatRow.ID, banner: String)
+    /// Answer the presented sudo / secret card with the typed value: v7 →
+    /// `request.answer {value}`; legacy → `sudo.respond {password}` / `secret.respond
+    /// {value}`. The value is never stored, logged or echoed into the transcript.
     case respondToSecret(value: String)
+    /// Skip the presented sudo / secret card: v7 `{value: ""}`; legacy the same respond with
+    /// an empty value.
+    case skipSecret
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
     case copyFeedbackExpired(token: String)
@@ -1606,27 +1612,10 @@ public struct ChatFeature {
         return .none
 
       case let .respondToSecret(value):
-        guard case let .secret(kind, prompt) = state.pendingInteraction,
-              let sessionID = state.liveSessionID
-        else { return .none }
-        state.pendingInteraction = nil
-        // Never echo the secret value into the transcript.
-        let label = kind == .sudo ? "Password submitted" : "Secret submitted"
-        state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "secret", text: label))
-        )
-        // Method + value key differ per kind (verified against tui_gateway/server.py):
-        // sudo.respond → "password", secret.respond → "value".
-        let method = kind == .sudo ? "sudo.respond" : "secret.respond"
-        let valueKey = kind == .sudo ? "password" : "value"
-        let requestID = prompt.requestID
-        return .run { [gateway] _ in
-          _ = try? await gateway.send(method, .object([
-            "session_id": .string(sessionID),
-            "request_id": .string(requestID),
-            valueKey: .string(value),
-          ]))
-        }
+        return answerSecret(value, into: &state)
+
+      case .skipSecret:
+        return answerSecret(nil, into: &state)
 
       case let .copyRow(id):
         guard let text = state.transcript[id: id]?.copyText, !text.isEmpty else { return .none }
@@ -2661,6 +2650,59 @@ public struct ChatFeature {
   }
 
   static let clarifyFailureBanner = "Failed to send the clarify response."
+
+  static func secretFailureBanner(_ kind: SecretKind) -> String {
+    kind == .sudo ? "Failed to send the password." : "Failed to send the secret."
+  }
+
+  /// Answer (or, with `value == nil`, skip) the presented sudo / secret card:
+  /// - v7 (a queued server request) → `request.answer {id, result: {value}}` (skip:
+  ///   `{value: ""}`); the card stays until the server acknowledges (`serverRequestAnswered`);
+  /// - legacy event → today's `sudo.respond {session_id, request_id, password}` /
+  ///   `secret.respond {session_id, request_id, value}` (skip: an empty value), optimistic: the
+  ///   card goes and the echo row is appended at once; a throw patches that row to "Failed to
+  ///   send" and banners (`legacyRespondFailed`).
+  ///
+  /// Privacy: the value only ever travels in the answer RPC's params. The echo row, the
+  /// banner and the `AnswerEcho` carry fixed copy, never the value.
+  private func answerSecret(_ value: String?, into state: inout State) -> Effect<Action> {
+    guard case let .secret(kind, prompt) = state.pendingInteraction else { return .none }
+    let echoText = switch (kind, value) {
+    case (.sudo, .some): "Password submitted"
+    case (.secret, .some): "Secret submitted"
+    case (.sudo, .none): "Password skipped"
+    case (.secret, .none): "Secret skipped"
+    }
+    let banner = Self.secretFailureBanner(kind)
+    if let pending = state.presentedServerRequest {
+      guard state.answeringServerRequestID == nil else { return .none }
+      return answerServerRequest(
+        pending.id,
+        result: .object(["value": .string(value ?? "")]),
+        echo: AnswerEcho(kind: "secret", text: echoText, failureBanner: banner),
+        state: &state
+      )
+    }
+    guard let requestID = prompt.requestID, let sessionID = state.liveSessionID else { return .none }
+    state.pendingInteraction = nil
+    let rowID = uuid()
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: "secret", text: echoText)))
+    // Method + value key differ per kind (verified against tui_gateway/server.py):
+    // sudo.respond → "password", secret.respond → "value".
+    let method = kind == .sudo ? "sudo.respond" : "secret.respond"
+    let params: JSONValue = .object([
+      "session_id": .string(sessionID),
+      "request_id": .string(requestID),
+      (kind == .sudo ? "password" : "value"): .string(value ?? ""),
+    ])
+    return .run { [gateway] send in
+      do {
+        _ = try await gateway.send(method, params)
+      } catch {
+        await send(.legacyRespondFailed(rowID: rowID, banner: banner))
+      }
+    }
+  }
 
   /// Answer (or, with `answers == nil`, skip) the presented clarify card in the shape the
   /// request arrived in:

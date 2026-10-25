@@ -482,6 +482,8 @@ Actions:
 - `skipClarify` — v7 `.answers`: `{}`; `.singleAnswer`: `{answer:""}`; legacy: today's empty
   `clarify.respond`.
 - `respondToSecret(value:)` — v7 `{value}`; legacy `sudo.respond` / `secret.respond`.
+  **As built (Task 6):** plus `skipSecret` (v7 `{value:""}`, legacy an empty respond), both
+  through one `answerSecret`; echo rows "Password/Secret submitted" / "… skipped".
 - `serverRequestAnswered(id:, Result<AnswerStatus, GatewayError>)` — `.ok` → remove + next;
   `.expired` → remove + "Already handled elsewhere" row + next; failure → `errorBanner`, card
   stays. Legacy clarify/secret failures surface the same way instead of `try?`.
@@ -703,7 +705,7 @@ the same reconcile when it lands.
       presented one and the first stays open server-side until its deadline
 - ⚠️ clarify/sudo/secret server requests stay silent (unrendered, no skip) until Tasks 5–6
       add them to `PendingServerRequest`; the decline-matrix test lists them as silent
-      (clarify resolved in Task 5)
+      (clarify resolved in Task 5, sudo/secret in Task 6)
 - [x] run tests - must pass before next task (1531 tests in 68 suites passed, 1 known issue;
       app target builds; `make snapshot` 40 failures, all at identical render size = known drift)
 
@@ -777,16 +779,32 @@ the same reconcile when it lands.
 - Modify: `HermesMobile/Sources/Features/Chat/ClarifyCardView.swift` (secret card: command / env var line)
 - Modify: `HermesKit/Tests/HermesKitTests/ChatInteractionTests.swift`, `GatewayEventDecodingTests.swift`
 
-- [ ] `SecretPrompt.requestID` optional; add `command`, `envVar`
-- [ ] route `sudo` / `secret` server requests into the queue; answer `{value}`, skip
-      `{value:""}`; a malformed one gets `{value:""}`
-- [ ] legacy `sudo.respond` / `secret.respond` unchanged on the wire; `try?` replaced by
-      surfaced failure
-- [ ] the value never reaches the transcript, the gateway log, or a push (privacy rule)
-- [ ] write tests: v7 sudo with and without `command`, secret with `env_var`; answer and skip
+- [x] `SecretPrompt.requestID` optional; add `command`, `envVar` (the legacy `sudo.request` /
+      `secret.request` events still require `request_id` — without one they stay `.unknown`,
+      as before)
+- [x] route `sudo` / `secret` server requests into the queue; answer `{value}`, skip
+      `{value:""}`; a malformed one gets `{value:""}` (new `skipSecret` action + a Skip button
+      on the secret card; a `secret` naming neither `prompt` nor `env_var` counts as malformed
+      — a blind field — while an empty `sudo` renders, since v2026.9.14 sends no `command`; a
+      stray `request_id` is dropped. The card shows the sudo `command` / secret `env_var` line)
+- [x] legacy `sudo.respond` / `secret.respond` unchanged on the wire; `try?` replaced by
+      surfaced failure (shared `answerSecret`; a throw → `legacyRespondFailed`, row patched to
+      "Failed to send", banner "Failed to send the password." / "… the secret."; a legacy skip
+      sends the same respond with an empty value)
+- [x] the value never reaches the transcript, the gateway log, or a push (privacy rule) (echo
+      rows/banners are fixed copy; the log mirrors inbound events only, whose summary shows the
+      prompt/command/env var; the app sends no pushes)
+- [x] write tests: v7 sudo with and without `command`, secret with `env_var`; answer and skip
       params; the gateway log entry omits the value; legacy wire unchanged; legacy failure
-      surfaces
-- [ ] run tests - must pass before next task
+      surfaces (`GatewayEventDecodingTests`, `ClarifyFeatureTests` — next to the existing
+      secret tests, not `ChatInteractionTests` — and `ServerRequestTests`: injected sudo/secret
+      frames queue ahead of the terminal, malformed → `{value:""}`, a failed automatic skip
+      banners without ending the turn; the decline matrix no longer lists sudo/secret as silent.
+      Snapshots: `testSudoCard_command`, `testSecretCard_envVar`; `testSecretCard_secure`
+      re-recorded for the Skip button)
+- [x] run tests - must pass before next task (1581 tests in 69 suites passed, 1 known issue;
+      app target builds; `make snapshot` 39 failures, all at identical render size = known
+      drift — one fewer than before because `testSecretCard_secure` was re-recorded)
 
 ### Task 7: `ClarifyCardView` forms over a bounded region
 

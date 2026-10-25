@@ -333,6 +333,93 @@ import Testing
     #expect(f == .event(sessionID: "s", .secretRequest(SecretPrompt(requestID: "r4", prompt: "API key?"))))
   }
 
+  @Test func legacySudoRequest() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"sudo.request","session_id":"s","payload":{"request_id":"r5"}}}"#)
+    #expect(f == .event(sessionID: "s", .sudoRequest(SecretPrompt(requestID: "r5"))))
+  }
+
+  /// The legacy events stay `request_id`-bound: without one there is nothing to answer
+  /// through `sudo.respond` / `secret.respond`, so they are `.unknown` exactly as before
+  /// `SecretPrompt.requestID` became optional.
+  @Test(arguments: ["sudo.request", "secret.request"])
+  func legacySecretEventWithoutRequestIDIsUnknown(type: String) throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"\#(type)","session_id":"s","payload":{"prompt":"Password"}}}"#)
+    guard case .event(_, .unknown(type: type, _)) = f else {
+      Issue.record("expected .unknown, got \(f)"); return
+    }
+  }
+
+  // MARK: v7 sudo / secret server requests
+
+  /// v2026.9.21+ sudo carries the redacted `command`; v2026.9.14 sends empty params — both
+  /// render. A stray legacy `request_id` is dropped (the srq id identifies a v7 prompt).
+  @Test func sudoServerRequestDecodesWithAndWithoutCommand() {
+    let withCommand = PendingServerRequest(id: "srq-bbbbbbbbbbbb", method: "sudo", params: .object([
+      "session_id": .string("live"), "command": .string("apt install ripgrep"),
+    ]))
+    #expect(withCommand == PendingServerRequest(
+      id: "srq-bbbbbbbbbbbb", kind: .secret(.sudo, SecretPrompt(command: "apt install ripgrep"))
+    ))
+    #expect(withCommand?.method == "sudo")
+
+    let empty = PendingServerRequest(id: "srq-e", method: "sudo", params: .object(["session_id": .string("live")]))
+    #expect(empty == PendingServerRequest(id: "srq-e", kind: .secret(.sudo, SecretPrompt())))
+
+    let stray = PendingServerRequest(id: "srq-s", method: "sudo", params: .object([
+      "request_id": .string("r1"), "command": .string("ls"),
+    ]))
+    #expect(stray == PendingServerRequest(id: "srq-s", kind: .secret(.sudo, SecretPrompt(command: "ls"))))
+  }
+
+  @Test func secretServerRequestDecodesEnvVar() {
+    let request = PendingServerRequest(id: "srq-sec", method: "secret", params: .object([
+      "session_id": .string("live"), "env_var": .string("OPENWEATHER_API_KEY"),
+      "prompt": .string("Weather API key"), "metadata": .object(["skill": .string("weather")]),
+    ]))
+    #expect(request == PendingServerRequest(id: "srq-sec", kind: .secret(.secret, SecretPrompt(
+      prompt: "Weather API key", envVar: "OPENWEATHER_API_KEY"
+    ))))
+    #expect(request?.method == "secret")
+    // Either field alone names the secret.
+    #expect(PendingServerRequest(id: "a", method: "secret", params: .object(["env_var": .string("K")])) != nil)
+    #expect(PendingServerRequest(id: "b", method: "secret", params: .object(["prompt": .string("Key?")])) != nil)
+  }
+
+  /// Malformed sudo / secret params (wrong types, not an object, a secret naming nothing)
+  /// are not rendered; the client skips them with `{value: ""}`.
+  @Test(arguments: [
+    ("sudo", JSONValue.null), ("sudo", .array([])), ("sudo", .object(["command": .number(9)])),
+    ("secret", .null), ("secret", .object(["session_id": .string("live")])),
+    ("secret", .object(["env_var": .string("  "), "prompt": .string("")])),
+    ("secret", .object(["env_var": .bool(true), "prompt": .string("Key?")])),
+  ])
+  func malformedSecretServerRequestIsNotRendered(method: String, params: JSONValue) {
+    #expect(PendingServerRequest(id: "srq-bad", method: method, params: params) == nil)
+    #expect(PendingServerRequest.malformedSkip(for: method) == .object(["value": .string("")]))
+  }
+
+  /// The gateway log mirrors the prompt only — a request never carries the typed value, and
+  /// answers (outbound) are never logged.
+  @Test func secretServerRequestLogEntryShowsThePromptOnly() {
+    let sudo = GatewayLogEntry(id: 0, event: .serverRequest(PendingServerRequest(
+      id: "srq-1", kind: .secret(.sudo, SecretPrompt(command: "apt install ripgrep"))
+    )))
+    #expect(sudo.type == "sudo")
+    #expect(sudo.summary == "apt install ripgrep")
+    let secret = GatewayLogEntry(id: 1, event: .serverRequest(PendingServerRequest(
+      id: "srq-2", kind: .secret(.secret, SecretPrompt(prompt: "Weather API key", envVar: "OPENWEATHER_API_KEY"))
+    )))
+    #expect(secret.type == "secret")
+    #expect(secret.summary == "Weather API key")
+    let bare = GatewayLogEntry(id: 2, event: .serverRequest(PendingServerRequest(
+      id: "srq-3", kind: .secret(.sudo, SecretPrompt())
+    )))
+    #expect(bare.summary == "srq-3")
+    let legacy = GatewayLogEntry(id: 3, event: .sudoRequest(SecretPrompt(requestID: "r1")))
+    #expect(legacy.type == "sudo.request")
+    #expect(legacy.summary == "r1")
+  }
+
   // MARK: Review summary (issue #47 — live-only per-session emit, never in history)
 
   @Test func reviewSummaryDecodesTextVerbatim() throws {

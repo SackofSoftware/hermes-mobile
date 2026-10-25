@@ -343,9 +343,11 @@ struct ChatView: View {
         store.send(.respondToClarify(answer: answer))
       }
     case let .secret(kind, prompt):
-      ClarifyCardView(mode: .secret(kind, prompt)) { value in
-        store.send(.respondToSecret(value: value))
-      }
+      ClarifyCardView(
+        mode: .secret(kind, prompt),
+        onSubmit: { value in store.send(.respondToSecret(value: value)) },
+        onSkip: { store.send(.skipSecret) }
+      )
     case .none:
       EmptyView()
     }

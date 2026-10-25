@@ -418,4 +418,164 @@ struct ClarifyFeatureTests {
       $0.errorBanner = "Failed to send the clarify response."
     }
   }
+
+  // MARK: - v7 sudo / secret server requests
+
+  private let typedValue = "hunter2-ÿ/secret"
+
+  /// No row, banner or other state field may ever hold the typed value.
+  private func assertValueNeverStored(_ state: ChatFeature.State) {
+    #expect(!String(describing: state.transcript).contains(typedValue))
+    #expect(!(state.errorBanner ?? "").contains(typedValue))
+  }
+
+  @Test(arguments: [SecretKind.sudo, .secret])
+  func secretServerRequestPinsTheCard(kind: SecretKind) async {
+    let pending = PendingServerRequest(
+      id: "srq-s", kind: .secret(kind, kind == .sudo ? SecretPrompt(command: "apt install ripgrep")
+        : SecretPrompt(prompt: "Weather API key", envVar: "OPENWEATHER_API_KEY"))
+    )
+    let store = TestStore(initialState: readyState()) { ChatFeature() }
+    await store.send(.gatewayEvent(.serverRequest(pending))) {
+      $0.serverRequests = [pending]
+      $0.present(pending.interaction)
+    }
+    #expect(store.state.pendingInteractionToken == 1)
+    #expect(!store.state.canSend)
+  }
+
+  /// Answer `{value}` and skip `{value: ""}` through `request.answer` for both kinds; the
+  /// card stays until the server acknowledges, and the echo never holds the value.
+  @Test(arguments: [(SecretKind.sudo, true), (.sudo, false), (.secret, true), (.secret, false)])
+  func secretServerRequestAnswerAndSkipParams(kind: SecretKind, answers: Bool) async {
+    let pending = PendingServerRequest(id: "srq-v", kind: .secret(kind, SecretPrompt(command: "ls")))
+    let sent = LockIsolated<JSONValue?>(nil)
+    let store = TestStore(initialState: presentedState(pending)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object(["status": .string("ok")])
+      }
+    }
+    await store.send(answers ? .respondToSecret(value: typedValue) : .skipSecret) {
+      $0.answeringServerRequestID = "srq-v"
+    }
+    let echo = switch (kind, answers) {
+    case (.sudo, true): "Password submitted"
+    case (.secret, true): "Secret submitted"
+    case (.sudo, false): "Password skipped"
+    case (.secret, false): "Secret skipped"
+    }
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: echo))]
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+    #expect(sent.value == .object([
+      "method": .string("request.answer"),
+      "params": .object([
+        "id": .string("srq-v"),
+        "result": .object(["value": .string(answers ? typedValue : "")]),
+      ]),
+    ]))
+    assertValueNeverStored(store.state)
+  }
+
+  @Test(arguments: ["expired", "failure", "malformed"])
+  func secretAnswerOutcomes(status: String) async {
+    let pending = PendingServerRequest(id: "srq-o", kind: .secret(.sudo, SecretPrompt()))
+    let clock = TestClock()
+    let sends = LockIsolated(0)
+    let store = TestStore(initialState: presentedState(pending)) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, _ in
+        sends.withValue { $0 += 1 }
+        try await clock.sleep(for: .seconds(1))
+        if status == "failure" { throw GatewayError.timedOut(method: method) }
+        return .object(["status": .string(status)])
+      }
+    }
+    await store.send(.respondToSecret(value: typedValue)) { $0.answeringServerRequestID = "srq-o" }
+    await store.send(.skipSecret) // a second tap while the answer is in flight sends nothing
+    await clock.advance(by: .seconds(1))
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      if status == "expired" {
+        $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: "Already handled elsewhere"))]
+        $0.serverRequests = []
+        $0.pendingInteraction = nil
+      } else {
+        // Still open server-side: the same card stays answerable, with a banner.
+        $0.errorBanner = "Failed to send the password."
+      }
+    }
+    #expect(sends.value == 1)
+    assertValueNeverStored(store.state)
+  }
+
+  // MARK: - Legacy `sudo.respond` / `secret.respond`
+
+  /// Today's wire, byte for byte: sudo answers under `password`, secret under `value`; a skip
+  /// sends the same respond with an empty value.
+  @Test(arguments: [(SecretKind.sudo, true), (.sudo, false), (.secret, true), (.secret, false)])
+  func legacySecretWireIsUnchanged(kind: SecretKind, answers: Bool) async {
+    let sent = LockIsolated<JSONValue?>(nil)
+    var initial = readyState()
+    initial.present(.secret(kind, SecretPrompt(requestID: "s1", prompt: "Password")))
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        sent.setValue(.object(["method": .string(method), "params": params]))
+        return .object([:])
+      }
+    }
+    let echo = switch (kind, answers) {
+    case (.sudo, true): "Password submitted"
+    case (.secret, true): "Secret submitted"
+    case (.sudo, false): "Password skipped"
+    case (.secret, false): "Secret skipped"
+    }
+    await store.send(answers ? .respondToSecret(value: typedValue) : .skipSecret) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: echo))]
+    }
+    await store.finish()
+    #expect(sent.value == .object([
+      "method": .string(kind == .sudo ? "sudo.respond" : "secret.respond"),
+      "params": .object([
+        "session_id": .string("live"), "request_id": .string("s1"),
+        (kind == .sudo ? "password" : "value"): .string(answers ? typedValue : ""),
+      ]),
+    ]))
+    assertValueNeverStored(store.state)
+  }
+
+  @Test(arguments: [SecretKind.sudo, .secret])
+  func legacySecretFailureSurfaces(kind: SecretKind) async {
+    var initial = readyState()
+    initial.present(.secret(kind, SecretPrompt(requestID: "s1")))
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, _ in throw GatewayError.timedOut(method: method) }
+    }
+    let label = kind == .sudo ? "Password submitted" : "Secret submitted"
+    await store.send(.respondToSecret(value: typedValue)) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: label))]
+    }
+    await store.receive(\.legacyRespondFailed) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "secret", text: "Failed to send"))]
+      $0.errorBanner = kind == .sudo ? "Failed to send the password." : "Failed to send the secret."
+    }
+    assertValueNeverStored(store.state)
+  }
+
+  @Test func secretAnswerIgnoredWhenNoSecretPending() async {
+    var initial = readyState()
+    initial.present(.clarify(ClarifyRequest(requestID: "c1", question: "Which file?")))
+    let store = TestStore(initialState: initial) { ChatFeature() }
+    await store.send(.respondToSecret(value: "x"))
+    await store.send(.skipSecret)
+  }
 }

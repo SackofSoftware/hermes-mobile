@@ -99,11 +99,13 @@ public enum GatewayEvent: Equatable, Sendable {
         self = .clarifyRequest(req)
       }
       else { self = .unknown(type: type, raw: p) }
+    // The legacy events stay `request_id`-bound (`sudo.respond` / `secret.respond` need it),
+    // exactly as before `SecretPrompt.requestID` became optional for the v7 requests.
     case "sudo.request":
-      if let req = p.decoded(SecretPrompt.self) { self = .sudoRequest(req) }
+      if let req = p.decoded(SecretPrompt.self), req.requestID != nil { self = .sudoRequest(req) }
       else { self = .unknown(type: type, raw: p) }
     case "secret.request":
-      if let req = p.decoded(SecretPrompt.self) { self = .secretRequest(req) }
+      if let req = p.decoded(SecretPrompt.self), req.requestID != nil { self = .secretRequest(req) }
       else { self = .unknown(type: type, raw: p) }
     case "request.cancel":
       if let cancel = p.decoded(RequestCancel.self) { self = .requestCancel(cancel) }
@@ -338,19 +340,41 @@ public struct SessionInfo: Equatable, Sendable, Decodable {
   }
 }
 
-/// Payload for `sudo.request` / `secret.request`. Shape not yet verified against a
-/// live request — to confirm in M2 (Tasks 9–10).
+/// Payload of a sudo / secret prompt: the legacy `sudo.request` / `secret.request` events
+/// (keyed by `request_id`, answered through `sudo.respond` / `secret.respond`) and the v7
+/// `sudo` / `secret` server requests (no `request_id` — the `srq-…` id on
+/// `PendingServerRequest` identifies them; answered through `request.answer {value}`).
+///
+/// Holds the PROMPT only — never the typed value, which goes straight from the card to the
+/// answer RPC and is never stored, logged or echoed.
 public struct SecretPrompt: Equatable, Sendable, Decodable {
-  public var requestID: String
+  /// Legacy event id (`request_id`); `nil` on a v7 server request.
+  public var requestID: String?
   public var prompt: String?
+  /// v7 `sudo`, v2026.9.21+: the command needing the password (redacted server-side).
+  public var command: String?
+  /// v7 `secret`: the environment variable the value is stored under (`env_var`).
+  public var envVar: String?
 
   enum CodingKeys: String, CodingKey {
     case requestID = "request_id"
     case prompt
+    case command
+    case envVar = "env_var"
   }
 
-  public init(requestID: String, prompt: String? = nil) {
+  public init(requestID: String? = nil, prompt: String? = nil, command: String? = nil, envVar: String? = nil) {
     self.requestID = requestID
     self.prompt = prompt
+    self.command = command
+    self.envVar = envVar
+  }
+
+  /// Whether a `secret` request names anything to enter (a non-blank `prompt` or `env_var`).
+  /// A v7 `secret` without either would render a blind "Secret required" field, so it is
+  /// treated as malformed and skipped. Not applied to `sudo`: its v2026.9.14 params are
+  /// legitimately empty (the card says "Password required").
+  var namesASecret: Bool {
+    [prompt, envVar].contains { !($0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
   }
 }

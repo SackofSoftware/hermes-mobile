@@ -73,13 +73,12 @@ public extension GatewayEvent {
       switch request.kind {
       case let .approval(req): return req.command ?? req.detail ?? request.id
       case let .clarify(req): return req.question
-      case let .secret(_, p): return p.prompt ?? request.id
+      case let .secret(_, p): return p.prompt ?? p.command ?? p.envVar ?? request.id
       }
     case let .requestCancel(cancel):
       return [cancel.method, cancel.reason].compactMap { $0 }.joined(separator: " ") + " \(cancel.id)"
     case let .clarifyRequest(req): return req.question
-    case let .sudoRequest(p): return p.prompt ?? p.requestID
-    case let .secretRequest(p): return p.prompt ?? p.requestID
+    case let .sudoRequest(p), let .secretRequest(p): return p.prompt ?? p.requestID ?? ""
     case let .error(message), let .serverRequestFailed(message), let .serverRequestsUnavailable(message):
       return message
     case let .reviewSummary(text): return Self.truncate(text)

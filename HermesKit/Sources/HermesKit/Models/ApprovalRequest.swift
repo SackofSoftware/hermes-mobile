@@ -72,8 +72,8 @@ public struct ApprovalRequest: Equatable, Sendable, Decodable {
   }
 
   /// Whether there is anything to show: a command, a description, or a danger pattern. A v7
-  /// server request without any of them is treated as malformed (denied), never presented
-  /// as a blind card.
+  /// server request without any of them does not decode (`PendingServerRequest`), never
+  /// presented as a blind card.
   public var hasContent: Bool {
     command?.isEmpty == false || detail?.isEmpty == false
       || patternKey?.isEmpty == false || !patternKeys.isEmpty

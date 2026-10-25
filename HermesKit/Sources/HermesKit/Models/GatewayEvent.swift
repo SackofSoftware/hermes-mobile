@@ -93,11 +93,7 @@ public enum GatewayEvent: Equatable, Sendable {
       if let req = p.decoded(ApprovalRequest.self) { self = .approvalRequest(req) }
       else { self = .unknown(type: type, raw: p) }
     case "clarify.request":
-      // The legacy event is always the `request_id`-bound single form; any other shape on
-      // this event name is not something the legacy wire sends.
-      if let req = p.decoded(ClarifyRequest.self), req.answerShape == .legacyRespond {
-        self = .clarifyRequest(req)
-      }
+      if let req = ClarifyRequest(legacyEvent: p) { self = .clarifyRequest(req) }
       else { self = .unknown(type: type, raw: p) }
     // The legacy events stay `request_id`-bound (`sudo.respond` / `secret.respond` need it),
     // exactly as before `SecretPrompt.requestID` became optional for the v7 requests.
@@ -372,7 +368,7 @@ public struct SecretPrompt: Equatable, Sendable, Decodable {
 
   /// Whether a `secret` request names anything to enter (a non-blank `prompt` or `env_var`).
   /// A v7 `secret` without either would render a blind "Secret required" field, so it is
-  /// treated as malformed and skipped. Not applied to `sudo`: its v2026.9.14 params are
+  /// does not decode (`PendingServerRequest`). Not applied to `sudo`: its v2026.9.14 params are
   /// legitimately empty (the card says "Password required").
   var namesASecret: Bool {
     [prompt, envVar].contains { !($0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }

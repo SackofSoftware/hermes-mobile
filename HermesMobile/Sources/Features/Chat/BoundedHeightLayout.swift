@@ -25,8 +25,8 @@ import SwiftUI
 ///   is the right thing to squeeze, and taking the squeeze here is what keeps the buttons on
 ///   screen.
 ///
-/// Shared by the approval card (`ApprovalCardView`) and the clarify card (`ClarifyCardView`):
-/// both are a pinned button row over one bounded, scrollable region.
+/// Used through ``BoundedScrollRegion``, the one region every prompt card's pinned row sits
+/// over.
 struct BoundedHeightLayout: Layout {
   /// Tallest the region will ask for, however long the content is.
   let cap: CGFloat
@@ -78,5 +78,68 @@ struct BoundedHeightLayout: Layout {
       anchor: .topLeading,
       proposal: ProposedViewSize(bounds.size)
     )
+  }
+}
+
+/// The bounded, scrollable region of a prompt card (approval, clarify, sudo/secret): its
+/// content stacked in a vertical `ScrollView` sized by ``BoundedHeightLayout`` — the natural
+/// height while it fits under the Dynamic-Type-scaled cap, the cap past it, down to the floor
+/// under a squeeze — with the live-geometry bottom fade that says "more below". The numbers
+/// and their derivations are `ApprovalCardView`'s (`contentMaxHeightBase` / `Ceiling`,
+/// `contentMinHeight`, `transcriptReserve`, the fade rules): every card's rigid chrome around
+/// the region is the same size, so the same derivations hold.
+struct BoundedScrollRegion<Content: View>: View {
+  /// Spacing of the content's `VStack`.
+  var spacing: CGFloat = 10
+  /// Points handed back to the transcript (``BoundedHeightLayout/reserve``) — only for a card
+  /// `ChatView` gives layout priority; without priority there is nothing to hand back.
+  var reserve: CGFloat = 0
+  @ViewBuilder var content: Content
+
+  /// Bottom-fade state from live scroll geometry — see `ApprovalCardView.FadeState`.
+  @State private var fade = ApprovalCardView.FadeState()
+
+  /// The cap's Dynamic Type input, clamped by ``contentMaxHeight``.
+  @ScaledMetric(relativeTo: .callout)
+  private var scaledContentMaxHeight: CGFloat = ApprovalCardView.contentMaxHeightBase
+
+  private var contentMaxHeight: CGFloat {
+    min(scaledContentMaxHeight, ApprovalCardView.contentMaxHeightCeiling)
+  }
+
+  var body: some View {
+    BoundedHeightLayout(
+      cap: contentMaxHeight, minHeight: ApprovalCardView.contentMinHeight, reserve: reserve
+    ) {
+      ScrollView(.vertical) {
+        VStack(alignment: .leading, spacing: spacing) {
+          content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .scrollBounceBehavior(.basedOnSize)
+      .onScrollGeometryChange(for: ApprovalCardView.FadeState.self) { geometry in
+        ApprovalCardView.FadeState(
+          isFaded: ApprovalCardView.hasBottomOverflow(
+            visibleRect: geometry.visibleRect, contentHeight: geometry.contentSize.height
+          ),
+          rampHeight: ApprovalCardView.fadeRampHeight(viewportHeight: geometry.containerSize.height)
+        )
+      } action: { _, newFade in
+        fade = newFade
+      }
+    }
+    .mask { ApprovalCardView.bottomFadeMask(fade) }
+  }
+}
+
+extension View {
+  /// The prompt cards' shared chrome: padded, on a rounded tertiary background with a `tint`
+  /// stroke, inset from the screen edges.
+  func promptCardChrome(tint: Color) -> some View {
+    padding()
+      .background(Color(uiColor: .tertiarySystemBackground), in: .rect(cornerRadius: 14))
+      .overlay(RoundedRectangle(cornerRadius: 14).stroke(tint.opacity(0.5)))
+      .padding(.horizontal)
   }
 }

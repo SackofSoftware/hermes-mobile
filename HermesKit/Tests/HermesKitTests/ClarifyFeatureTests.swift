@@ -179,7 +179,11 @@ struct ClarifyFeatureTests {
                     .object(["questions": .array([.object(["question": .string("no qid")])])])])
   func malformedClarifyServerRequestIsNotRendered(params: JSONValue) {
     #expect(PendingServerRequest(id: "srq-bad", method: "clarify", params: params) == nil)
-    #expect(PendingServerRequest.malformedSkip(for: "clarify") == .object([:])) // cancel-all
+    if case .object = params {
+      #expect(PendingServerRequest.malformedSkip(for: "clarify", params: params) == nil) // left for a desktop
+    } else {
+      #expect(PendingServerRequest.malformedSkip(for: "clarify", params: params) == .object([:])) // cancel-all
+    }
   }
 
   // MARK: - v7 server requests: answers per shape
@@ -191,7 +195,7 @@ struct ClarifyFeatureTests {
   private func presentedState(_ request: PendingServerRequest) -> ChatFeature.State {
     var state = readyState()
     state.serverRequests = [request]
-    state.present(request.interaction)
+    state.present(request.kind)
     return state
   }
 
@@ -379,7 +383,7 @@ struct ClarifyFeatureTests {
       $0.answeringServerRequestID = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "one"))]
       $0.serverRequests = [second]
-      $0.present(second.interaction)
+      $0.present(second.kind)
     }
     #expect(store.state.pendingInteractionToken == 2)
   }
@@ -419,6 +423,87 @@ struct ClarifyFeatureTests {
     ]))
   }
 
+  /// A legacy batch (v2026.9.11) answers as desktop did: one `clarify.respond` per question,
+  /// in order, with its `question_id` — the bare label, a multi-select JSON-array string, a
+  /// typed answer, `""` for a skipped question. Skip is ONE question-less empty respond
+  /// (cancel-all).
+  @Test(arguments: [false, true])
+  func legacyBatchAnswersOnePerQuestionOrCancelsAll(skipsCard: Bool) async {
+    let request = ClarifyRequest(
+      requestID: "rb1",
+      questions: [
+        ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
+        ClarifyQuestion(qid: "q1", question: "Targets?", choices: ["iOS/iPadOS", "macOS"], multiSelect: true),
+        ClarifyQuestion(qid: "q2", question: "Name?"),
+        ClarifyQuestion(qid: "q3", question: "Extras?", choices: ["Widgets"]),
+      ],
+      answerShape: .legacyRespond
+    )
+    let sent = LockIsolated<[JSONValue]>([])
+    var initial = readyState()
+    initial.present(.clarify(request))
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, params in
+        #expect(method == "clarify.respond")
+        sent.withValue { $0.append(params) }
+        return .object(["status": .string("ok")])
+      }
+    }
+    let answers: [String: ClarifyAnswer] = [
+      "q0": .choices(["SwiftUI (Recommended)"]), "q1": .choices(["iOS/iPadOS", "macOS"]), "q2": .other("Atlas"),
+      "q3": .skipped,
+    ]
+    let echo = skipsCard ? "Skipped" : "Framework?: SwiftUI\nTargets?: iOS/iPadOS, macOS\nName?: Atlas\nExtras?: Skipped"
+    await store.send(skipsCard ? .skipClarify : .submitClarify(answers: answers)) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: echo))]
+    }
+    await store.finish()
+    func respond(_ extra: [String: JSONValue]) -> JSONValue {
+      .object(extra.merging(["session_id": .string("live"), "request_id": .string("rb1")]) { a, _ in a })
+    }
+    if skipsCard {
+      #expect(sent.value == [respond(["answer": .string("")])])
+    } else {
+      #expect(sent.value == [
+        respond(["question_id": .string("q0"), "answer": .string("SwiftUI")]),
+        respond(["question_id": .string("q1"), "answer": .string(#"["iOS/iPadOS","macOS"]"#)]),
+        respond(["question_id": .string("q2"), "answer": .string("Atlas")]),
+        respond(["question_id": .string("q3"), "answer": .string("")]),
+      ])
+    }
+  }
+
+  /// A legacy batch lock that fails stops the run (later locks would answer a batch the
+  /// server never completed) and surfaces like any legacy failure.
+  @Test func legacyBatchFailureStopsAndSurfaces() async {
+    let request = ClarifyRequest(
+      requestID: "rb1",
+      questions: [ClarifyQuestion(qid: "q0", question: "A?"), ClarifyQuestion(qid: "q1", question: "B?")],
+      answerShape: .legacyRespond
+    )
+    let calls = LockIsolated(0)
+    var initial = readyState()
+    initial.present(.clarify(request))
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0 += 1 }
+        throw GatewayError.timedOut(method: method)
+      }
+    }
+    await store.send(.submitClarify(answers: ["q0": .other("x"), "q1": .other("y")])) {
+      $0.pendingInteraction = nil
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "A?: x\nB?: y"))]
+    }
+    await store.receive(\.legacyRespondFailed) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "clarify", text: "Failed to send"))]
+      $0.errorBanner = "Failed to send the clarify response."
+    }
+    #expect(calls.value == 1)
+  }
+
   @Test func legacyClarifyFailureSurfaces() async {
     var initial = readyState()
     initial.present(.clarify(ClarifyRequest(requestID: "c1", question: "Which file?")))
@@ -442,8 +527,7 @@ struct ClarifyFeatureTests {
 
   /// No row, banner or other state field may ever hold the typed value.
   private func assertValueNeverStored(_ state: ChatFeature.State) {
-    #expect(!String(describing: state.transcript).contains(typedValue))
-    #expect(!(state.errorBanner ?? "").contains(typedValue))
+    #expect(!String(customDumping: state).contains(typedValue))
   }
 
   @Test(arguments: [SecretKind.sudo, .secret])
@@ -455,7 +539,7 @@ struct ClarifyFeatureTests {
     let store = TestStore(initialState: readyState()) { ChatFeature() }
     await store.send(.gatewayEvent(.serverRequest(pending))) {
       $0.serverRequests = [pending]
-      $0.present(pending.interaction)
+      $0.present(pending.kind)
     }
     #expect(store.state.pendingInteractionToken == 1)
     #expect(!store.state.canSend)

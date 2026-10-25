@@ -32,24 +32,16 @@ public struct ClarifyQuestion: Equatable, Sendable {
 }
 
 /// A clarify prompt in any of its three wire generations, as one model: the layout comes
-/// from the question count, the answer's wire shape from ``answerShape``.
-///
-/// Decoding picks the shape from the payload:
-/// - a `questions` list with at least one usable entry (`qid` + non-blank `question`) →
-///   ``AnswerShape/answers`` (v0.21.6+, and the intermediate batch); replayed `answers`
-///   become ``lockedAnswers``;
-/// - a `request_id` → ``AnswerShape/legacyRespond`` (the legacy `clarify.request` event,
-///   decoded exactly as before: `question` defaults to `""`);
-/// - a top-level non-blank `question` → ``AnswerShape/singleAnswer`` (the intermediate
-///   single server request);
-/// - anything else is a decode failure.
+/// from the question count, the answer's wire shape from ``answerShape``. Decoded by where it
+/// arrived — ``init(serverRequestParams:)`` or ``init(legacyEvent:)`` — never guessed from the
+/// payload.
 ///
 /// Lenient within a shape: `choices: null` (or a non-array) is free text, non-string choices
-/// are dropped, `multi_select` defaults to `false`, an unusable `questions` entry is dropped
-/// (the rest still render), and unknown keys are ignored.
+/// are dropped, `multi_select` defaults to `false`, an unusable `questions` entry (no `qid`,
+/// blank `question`) is dropped (the rest still render), and unknown keys are ignored.
 ///
 /// Deliberately only `Equatable` (no value-derived card identity) — see `ApprovalRequest`.
-public struct ClarifyRequest: Equatable, Sendable, Decodable {
+public struct ClarifyRequest: Equatable, Sendable {
   /// The legacy event's `request_id` (answered through `clarify.respond`). `nil` for a v7
   /// server request, which is identified by its `srq-…` id on `PendingServerRequest`.
   public var requestID: String?
@@ -67,7 +59,9 @@ public struct ClarifyRequest: Equatable, Sendable, Decodable {
     /// Intermediate single server request: `request.answer {id, result: {answer}}`;
     /// skip is `{answer: ""}`.
     case singleAnswer
-    /// Legacy event: `clarify.respond {session_id, request_id, answer}`.
+    /// Legacy event: `clarify.respond {session_id, request_id, answer}`; a legacy batch sends
+    /// one `clarify.respond` per question with its `question_id`, and its skip is the
+    /// question-less cancel-all.
     case legacyRespond
   }
 
@@ -76,8 +70,28 @@ public struct ClarifyRequest: Equatable, Sendable, Decodable {
 
   /// The first question's text — the gateway-log summary.
   public var question: String { questions.first?.question ?? "" }
-  /// The first question's raw choices.
-  public var choices: [String] { questions.first?.choices ?? [] }
+
+  /// The one-question single-select form, where a tapped choice is the whole answer.
+  public var submitsOnTap: Bool {
+    guard !isMultiQuestion, let question = questions.first else { return false }
+    return !question.isFreeText && !question.multiSelect
+  }
+
+  /// Every question with choices gets an "Other" free-text row (the upstream tool schema tells
+  /// the model the UI adds one) — a v7 form; a legacy `clarify.request` keeps its choices-only
+  /// card.
+  public var offersOtherRow: Bool { answerShape != .legacyRespond }
+
+  /// The card's pinned primary button title: "Confirm" for several questions, "Send" for free
+  /// text (or a single-select question with an Other row), "Submit" for multi-select. `nil`
+  /// where a tap on a choice is the only way to answer (a legacy single-select card).
+  public var submitTitle: String? {
+    if isMultiQuestion { return "Confirm" }
+    guard let question = questions.first else { return nil }
+    if question.isFreeText { return "Send" }
+    if question.multiSelect { return "Submit" }
+    return offersOtherRow ? "Send" : nil
+  }
 
   /// Did the server already lock this question's answer (a replayed batch)? A locked question
   /// renders read-only and its lock is re-sent with the final set.
@@ -121,46 +135,55 @@ public struct ClarifyRequest: Equatable, Sendable, Decodable {
     )
   }
 
-  public init(from decoder: Decoder) throws {
-    let payload = try JSONValue(from: decoder)
-    guard let request = Self.parse(payload) else {
-      throw DecodingError.dataCorrupted(
-        .init(codingPath: decoder.codingPath, debugDescription: "No usable clarify question")
-      )
-    }
-    self = request
-  }
-
-  private static func parse(_ payload: JSONValue) -> ClarifyRequest? {
+  /// A v7 `clarify` server request's params, answered through `request.answer`:
+  /// - a `questions` list with at least one usable entry → ``AnswerShape/answers`` (v0.21.6+,
+  ///   and the intermediate batch); replayed `answers` become ``lockedAnswers``;
+  /// - else a top-level non-blank `question` → ``AnswerShape/singleAnswer`` (the intermediate
+  ///   single form, `multi_select` honoured);
+  /// - anything else is `nil`. A stray `request_id` is ignored — it never makes it legacy.
+  public init?(serverRequestParams payload: JSONValue) {
     guard case .object = payload else { return nil }
-
-    let questions = (payload["questions"]?.arrayValue ?? []).compactMap(batchQuestion)
+    let questions = Self.batchQuestions(payload["questions"])
     if !questions.isEmpty {
-      return ClarifyRequest(
+      self.init(
         requestID: nil,
         questions: questions,
-        lockedAnswers: lockedAnswers(payload["answers"]),
+        lockedAnswers: Self.lockedAnswers(payload["answers"]),
         answerShape: .answers
       )
-    }
-
-    if let requestID = payload["request_id"]?.stringValue {
-      return ClarifyRequest(
-        requestID: requestID,
-        question: payload["question"]?.stringValue ?? "",
-        choices: choices(payload["choices"])
-      )
-    }
-
-    if let question = payload["question"]?.stringValue, !isBlank(question) {
-      return ClarifyRequest(
+    } else if let question = payload["question"]?.stringValue, !Self.isBlank(question) {
+      self.init(
         requestID: nil,
         question: question,
-        choices: choices(payload["choices"]),
+        choices: Self.choices(payload["choices"]),
         multiSelect: payload["multi_select"]?.boolValue ?? false
       )
+    } else {
+      return nil
     }
-    return nil
+  }
+
+  /// A legacy `clarify.request` event's payload (≤ v2026.9.11), answered through
+  /// `clarify.respond` (``AnswerShape/legacyRespond``). Needs a `request_id` — without one
+  /// there is no answer path, so it is `nil`. A usable `questions` list is the legacy batch
+  /// (one `clarify.respond` per question); otherwise it is the single form decoded exactly as
+  /// before: `question` defaults to `""` and `multi_select` is ignored.
+  public init?(legacyEvent payload: JSONValue) {
+    guard let requestID = payload["request_id"]?.stringValue else { return nil }
+    let questions = Self.batchQuestions(payload["questions"])
+    if !questions.isEmpty {
+      self.init(requestID: requestID, questions: questions, answerShape: .legacyRespond)
+    } else {
+      self.init(
+        requestID: requestID,
+        question: payload["question"]?.stringValue ?? "",
+        choices: Self.choices(payload["choices"])
+      )
+    }
+  }
+
+  private static func batchQuestions(_ value: JSONValue?) -> [ClarifyQuestion] {
+    (value?.arrayValue ?? []).compactMap(batchQuestion)
   }
 
   private static func batchQuestion(_ entry: JSONValue) -> ClarifyQuestion? {
@@ -255,8 +278,8 @@ public enum ClarifyAnswer: Equatable, Sendable {
 ///   (non-blank) clears the picks — because an answer is one or the other on the wire;
 /// - a single-select question holds one pick (tapping it again keeps it, radio-style); a
 ///   multi-select one toggles, kept in the server's choice order;
-/// - any edit un-skips a question; a skip is the answer while it stands (the edits survive it,
-///   so un-skipping brings them back);
+/// - a pick or non-blank text un-skips a question; a skip is the answer while it stands (the
+///   edits survive it, so un-skipping brings them back);
 /// - nothing is preselected — the recommended choice is a badge, never a default.
 public struct ClarifyDraft: Equatable, Sendable {
   private var picked: [String: [String]] = [:]
@@ -337,6 +360,12 @@ public struct ClarifyDraft: Equatable, Sendable {
   /// Can the form be submitted? Every question is locked, answered or skipped.
   public func isComplete(for request: ClarifyRequest) -> Bool {
     request.questions.allSatisfy { request.isLocked($0) || answer(for: $0) != nil }
+  }
+
+  /// Does Return in the "Other" row submit the card? Only where a single answer is all the
+  /// card needs (one question) and that answer is there.
+  public func sendsOnReturn(for request: ClarifyRequest) -> Bool {
+    !request.isMultiQuestion && isComplete(for: request)
   }
 
   private static func trimmed(_ text: String) -> String {

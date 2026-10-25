@@ -54,7 +54,8 @@ loop; only the sends run in a `Task`.
 | Method | The phone |
 |---|---|
 | `approval`, `clarify`, `sudo`, `secret` | yields `.serverRequest(PendingServerRequest)` at once, so a turn terminal read right after it cannot overtake the card |
-| the same, params malformed | sends that kind's skip through `request.answer` (`PendingServerRequest.malformedSkip`): `{choice: "deny"}`, `{}`, `{value: ""}` |
+| the same, params not a JSON object (`null`, missing, array, scalar) | sends that kind's skip through `request.answer` (`PendingServerRequest.malformedSkip`): `{choice: "deny"}`, `{}`, `{value: ""}` |
+| the same, object params the phone cannot decode | nothing, and a `.serverRequestFailed` banner ("Couldn’t show … Answer it on another device, or stop the turn.") |
 | window-owned: `terminal.read`, `preview.read`, `window.read`, `preview.act`, `tour` | sends the non-settling `4404` error frame, only once the advertisement returned `declines_not_shown: true`; otherwise nothing |
 | anything else: `vault.*`, `setup_choose`, `display.install.sudo`, new methods | nothing |
 
@@ -63,12 +64,15 @@ desktop sharing the session, and a 4404 on a vault prompt settles it with a refu
 the agent hands to the password manager as the answer. The cost is that a phone-only agent waits
 out that prompt's own deadline (120–300 s).
 
-"Malformed" includes an approval with no command, description or danger pattern
-(`ApprovalRequest.hasContent`) and a `secret` naming neither a prompt nor an env var: a blind
-card invites a blind answer, and on v7 the real card comes back on the replay. An empty `sudo`
-renders, since v2026.9.14 sends no `command`. A failed automatic send yields
-`.serverRequestFailed`, which banners without ending the turn. The 4404 frame, like every
-outbound frame, is encoded by `JSONRPCRequest.wireEncoder`.
+The same holds for object params the phone cannot decode: they may be a newer wire shape (upstream
+reshaped clarify three times in two months) that a desktop sharing the session renders, so the
+phone never denies or cancels them for everyone; only params that are not an object at all, which
+no client can render, get the automatic skip. Undecodable includes an approval with no command,
+description or danger pattern (`ApprovalRequest.hasContent`) and a `secret` naming neither a
+prompt nor an env var: a blind card invites a blind answer. An empty `sudo` renders, since
+v2026.9.14 sends no `command`. A failed automatic send yields `.serverRequestFailed`, which
+banners without ending the turn. The 4404 frame, like every outbound frame, is encoded by
+`JSONRPCRequest.wireEncoder`.
 
 ## One queue per slot
 
@@ -141,8 +145,9 @@ have a bridge parked on an open request.
   `answeringServerRequestID`.
 - A listed id already queued keeps its place and takes the replayed params (fresh batch-clarify
   locks), so a reordering replay never swaps the card under the user.
-- A new id is appended in replay order. Unrendered or malformed entries are not queued, and the
-  reducer sends nothing for them.
+- A new id is appended in replay order. Unrendered or undecodable entries are not queued, and the
+  reducer sends nothing for them. One raised while no client was attached never reached the live
+  routing either, so it waits out its deadline unless another client answers (accepted).
 - The head is refreshed in place when it is already up, and presented with a fresh token
   otherwise. A standing legacy or recovered card is replaced by the head, or dismissed by an
   empty replay.
@@ -156,8 +161,8 @@ Agents up to v2026.9.11 get today's wire byte for byte (pinned by whole-frame te
 `ChatInteractionTests`). The legacy events raise their card through `present(_:)`; a
 `clarify.request`, `sudo.request` or `secret.request` without `request_id` stays `.unknown`.
 Answers are optimistic: the card goes and the echo row is appended before the RPC. A throw
-patches the row to "Failed to send" and banners (`legacyRespondFailed`) instead of a swallowed
-`try?`. Skip sends the same respond with an empty value. Turn end and a `running == false`
+banners instead of a swallowed `try?`; for clarify, sudo and secret it also patches the row to
+"Failed to send" (`legacyRespondFailed`), while an approval's row stands. Skip sends the same respond with an empty value. Turn end and a `running == false`
 hydrate clear a standing approval card and the push-tap hint; legacy clarify and secret cards
 are keyed by their `request_id` and stay.
 
@@ -168,18 +173,22 @@ resolves exactly that queue entry and ignores `all` when a `request_id` is prese
 the user saw is the one resolved (FIFO would hit the oldest entry, while the legacy card shows
 the newest). An event without one (older agents, the push-tap recovered card) keeps the FIFO
 `{session_id, choice, all}`. A legacy clarify sends the raw choice text and keeps the
-choices-only form (no Other row).
+choices-only form (no Other row). A legacy batch clarify (`questions` plus `request_id`) renders
+the multi-question form and answers as the desktop did: one `clarify.respond {…, question_id,
+answer}` per question, in order (the bare label, `""` for a skipped question), while Skip sends
+the question-less empty respond that cancels the batch.
 
 ## Clarify
 
 `ClarifyRequest` models every shape as a `questions` list (`ClarifyQuestion {qid, question,
-choices, multiSelect}`), with `answerShape` picked by the decoder:
+choices, multiSelect}`), decoded by where it arrived:
 
-- a usable `questions` list → `.answers` (v0.21.6+, and the v2026.9.14–.24 batch); unusable
-  entries are dropped and the rest render;
-- `request_id` → `.legacyRespond` (the legacy event);
-- a top-level non-blank `question` → `.singleAnswer` (v2026.9.14–.24 single). A server request
-  never decodes as legacy: a stray `request_id` on one is re-modelled as `.singleAnswer`.
+- a server request (`init(serverRequestParams:)`): a usable `questions` list → `.answers`
+  (v0.21.6+, and the v2026.9.14–.24 batch; unusable entries are dropped and the rest render),
+  else a top-level non-blank `question` → `.singleAnswer` (v2026.9.14–.24 single). A stray
+  `request_id` is ignored;
+- the legacy event (`init(legacyEvent:)`): needs `request_id` → `.legacyRespond`, with the batch's
+  `questions` when it has them.
 
 Replayed `answers` become `lockedAnswers` (a string, or `null` for a skip). Locked questions
 render read-only (`isLocked`, `lockedDisplayText`) and are re-sent with the final set, where they
@@ -218,9 +227,9 @@ from the v0.21.6+ shape, so a skipped question there still goes out as `null`.
 
 `SecretPrompt` carries the `prompt`, the sudo `command` (v2026.9.21+, redacted server-side) and
 the secret's `env_var` (`envVar`); `requestID` is set only on the legacy event. `SecretCardView`
-(in `ClarifyCardView.swift`) shows the command or env var line (up to three lines,
-middle-truncated), a secure field, and Skip (`skipSecret`). Answer and skip both go through
-`answerSecret`. **The value never leaves the answer RPC's params**: the echo rows ("Password
+(in `ClarifyCardView.swift`) scrolls the prompt and the command or env var line in the shared
+region over a pinned row of the secure field, Skip (`skipSecret`) and send; the value goes out as
+typed (no trimming). Answer and skip both go through `answerSecret`. **The value never leaves the answer RPC's params**: the echo rows ("Password
 submitted", "Secret skipped", …), the banners and the gateway log carry fixed copy or the prompt,
 never the value, and nothing about it goes into a push.
 
@@ -310,8 +319,8 @@ than the transcript, and the region collapses onto its floor with the keyboard u
 iPhone 15: its floor, 96pt, without the priority vs 155pt with it — 88 and 227 when first
 measured, before the floor was raised and the region started handing a 44pt reserve back). It is
 **scoped to approvals and multi-question clarify** (`State.isCompressibleCardPending`) — a
-one-question clarify card is a short form whose region hugs it and the secret card is a rigid
-field, so priority there only blanks the transcript (measured on the old rigid clarify card:
+one-question clarify card and the secret card are short forms whose region hugs them, so
+priority there only blanks the transcript (measured on the old rigid clarify card:
 160pt → 13pt). And because a priority-1 child is offered everything the others do not strictly
 need — the greedy transcript's minimum is 0 — the region **hands a fixed 44pt of its offer back**
 (`BoundedHeightLayout.reserve`, floor-outranked): without it the transcript measured **0pt** on
@@ -326,12 +335,13 @@ last line permanently ramped to transparent), and its ramp is a **quarter of the
 at 24pt** — a constant ramp is fine against `MarkdownTableView`'s always-screen-wide edge but
 would tint most of a squeezed region.
 
-### The clarify card shares the region
+### The clarify and secret cards share the region
 
-`ClarifyCardView` reuses the approval card's cap, floor and fade: the rigid chrome around its
-region (a one-line title, one Skip / Submit-Send-Confirm row) is the same size, so the same
-derivations hold. All questions, choices and Other rows scroll; the action row is pinned. The
-44pt reserve applies only to the multi-question card, the one given layout priority.
+Every card's region is one `BoundedScrollRegion` (`BoundedHeightLayout.swift`) with the approval
+card's cap, floor and fade: the rigid chrome around it (a one-line title, one pinned row) is the
+same size, so the same derivations hold. On the clarify card all questions, choices and Other rows
+scroll; on the secret card the prompt and command / env var line do. The 44pt reserve applies only
+to the multi-question clarify card, the one given layout priority.
 
 ### The pendingInteractionToken
 
@@ -369,7 +379,7 @@ regression showed up as 1170×553 against 1170×611 — a size mismatch anti-ali
 produce). `HermesMobileTests/ClarifyCardLayoutTests.swift` does the same for clarify: five
 questions at the shortest keyboard-up window (320×352) keep Skip / Confirm inside the window with
 a scrolling region, at 393×516 the region outranks the transcript but leaves it a row, and a
-single-question card hugs its content. The `testClarifyCard_*`, `testSudoCard_command` and
+single-question card hugs its content. The `testClarifyCard_*`, `testSudoCard_*` and
 `testSecretCard_*` snapshots cover the forms. Selection-vs-scroll gesture precedence inside the
 region is a **manual-check item**, not a tested contract (same caveat family as #59's table
 cells).

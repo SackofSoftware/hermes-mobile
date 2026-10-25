@@ -75,9 +75,8 @@ public struct ChatFeature {
     /// Does the standing card earn layout priority over the transcript? `ChatView` gives it to
     /// the cards built to absorb the squeeze AND tall enough to need it: an approval (its
     /// command) and a multi-question clarify (up to five sections) — priority buys their
-    /// bounded region readable lines. A single-question clarify hugs a short form, and the
-    /// secret card is a rigid field, so priority there would only take room from the
-    /// transcript.
+    /// bounded region readable lines. A single-question clarify and the secret card hug a
+    /// short form, so priority there would only take room from the transcript.
     public var isCompressibleCardPending: Bool {
       switch pendingInteraction {
       case .approval: return true
@@ -126,12 +125,12 @@ public struct ChatFeature {
     /// token's identity contract holds. A no-op for any other id.
     mutating func refreshPresented(_ request: PendingServerRequest) {
       guard presentedServerRequest?.id == request.id else { return }
-      pendingInteraction = request.interaction
+      pendingInteraction = request.kind
     }
     /// After the presented head left the queue: raise the new head (fresh token) or dismiss.
     mutating func presentNextServerRequest() {
       if let head = serverRequests.first {
-        present(head.interaction)
+        present(head.kind)
       } else {
         pendingInteraction = nil
       }
@@ -553,12 +552,9 @@ public struct ChatFeature {
       case reconnecting
     }
 
-    /// A blocking interactive request the agent is waiting on.
-    public enum PendingInteraction: Equatable, Sendable {
-      case approval(ApprovalRequest)
-      case clarify(ClarifyRequest)
-      case secret(SecretKind, SecretPrompt)
-    }
+    /// A blocking interactive request the agent is waiting on (the models-layer enum, shared
+    /// with `PendingServerRequest`).
+    public typealias PendingInteraction = HermesKit.PendingInteraction
 
     public init(
       connection: ServerConnection,
@@ -1506,12 +1502,10 @@ public struct ChatFeature {
           // Answering ANY approval moots the push-tap recovery hint (#30 workaround).
           state.expectsPendingApproval = false
           return answerServerRequest(
-            pending.id,
+            pending,
             result: .object(["choice": .string(effectiveChoice)]),
-            echo: AnswerEcho(
-              kind: "approval", text: approve ? "Approved" : "Denied",
-              failureBanner: "Failed to send the approval response."
-            ),
+            echoText: approve ? "Approved" : "Denied",
+            failureBanner: "Failed to send the approval response.",
             state: &state
           )
         }
@@ -1573,8 +1567,11 @@ public struct ChatFeature {
         case .failure:
           // The request is still open server-side, so the card stays answerable.
           state.errorBanner = echo.failureBanner
+          return .none
         }
-        return .none
+        // A card raised on an idle turn (a stopped snapshot's open request) was holding the
+        // #66 queue back; its leaving is an idle edge.
+        return drainQueueIfReady(into: &state)
 
       case let .approvalRespondResult(rowID, resolved):
         switch resolved {
@@ -1586,7 +1583,8 @@ public struct ChatFeature {
           state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
         case .none:
           // The RPC threw — the card is already dismissed, so surface the failure instead
-          // of silently swallowing it (never a false "Approved").
+          // of silently swallowing it. The optimistic row stands: whether the answer reached
+          // the server is unknowable here, and the banner is the signal.
           state.errorBanner = "Failed to send the approval response."
         default:
           // Defensive only: the effect never feeds back a resolved >= 1 (the optimistic
@@ -2500,9 +2498,8 @@ public struct ChatFeature {
         state.refreshPresented(request)
       } else {
         state.serverRequests.append(request)
-        // A new head (or a queue whose head somehow is not up) is raised; anything else
-        // waits behind the presented card.
-        if state.serverRequests.count == 1 || state.pendingInteraction == nil {
+        // A new head is raised; anything else waits behind the presented card.
+        if state.serverRequests.count == 1 {
           state.presentNextServerRequest()
         }
       }
@@ -2511,10 +2508,12 @@ public struct ChatFeature {
     case let .requestCancel(cancel):
       guard let entry = state.serverRequests[id: cancel.id] else { return .none }
       if state.presentedServerRequest?.id == cancel.id, cancel.reason == "timeout" {
-        state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: entry.statusKind, text: "Timed out")))
+        state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: entry.kind.statusKind, text: "Timed out")))
       }
       removeServerRequest(id: cancel.id, into: &state)
-      return .none
+      // A card raised on an idle turn (a stopped snapshot's open request) was holding the
+      // #66 queue back; its leaving is an idle edge.
+      return drainQueueIfReady(into: &state)
 
     case let .approvalRequest(request):
       // Nice-to-have skipped: the thinking timer keeps running while a blocking card is the
@@ -2627,8 +2626,10 @@ public struct ChatFeature {
   /// authoritative: an id the replay does not list is dropped (answered elsewhere, timed out,
   /// or its turn ended). A listed id already queued keeps its place and takes the replayed
   /// params (fresh batch-clarify locks); a new id is appended in replay (oldest-first) order.
-  /// Entries the app does not render — or whose params do not decode — are not queued: the
-  /// live path already skipped or declined them, and the reducer never answers on its own.
+  /// Entries the app does not render — or whose params do not decode — are not queued and get
+  /// no answer: the reducer never answers on its own. A request raised while no client was
+  /// attached never reached the live path either, so it waits out its deadline unless another
+  /// client answers it (accepted, `docs/features/approvals.md`).
   /// The head is presented with a fresh token unless the same srq id is already up, in which
   /// case it is refreshed in place (``State/refreshPresented(_:)`` — no token bump, the card
   /// keeps its scroll offset and edits). A standing non-server card (a legacy or push-tap
@@ -2659,7 +2660,7 @@ public struct ChatFeature {
     if head.id == previouslyPresentedID {
       state.refreshPresented(head)
     } else {
-      state.present(head.interaction)
+      state.present(head.kind)
     }
   }
 
@@ -2674,10 +2675,15 @@ public struct ChatFeature {
 
   /// Send `request.answer {id, result}` for a presented server request. Plain `gateway.send`
   /// (so `wireEncoder`, the 30 s budget and a surfaced error come for free); the outcome
-  /// feeds `serverRequestAnswered`. A status other than `ok` / `expired` is a failure.
+  /// feeds `serverRequestAnswered` with an echo built here, so a late acknowledgement (the
+  /// card already gone) still knows its row kind. A status other than `ok` / `expired` is a
+  /// failure.
   private func answerServerRequest(
-    _ id: String, result: JSONValue, echo: AnswerEcho, state: inout State
+    _ pending: PendingServerRequest, result: JSONValue, echoText: String, failureBanner: String,
+    state: inout State
   ) -> Effect<Action> {
+    let id = pending.id
+    let echo = AnswerEcho(kind: pending.kind.statusKind, text: echoText, failureBanner: failureBanner)
     state.answeringServerRequestID = id
     return .run { [gateway] send in
       let outcome: Result<AnswerStatus, GatewayError>
@@ -2723,9 +2729,10 @@ public struct ChatFeature {
     if let pending = state.presentedServerRequest {
       guard state.answeringServerRequestID == nil else { return .none }
       return answerServerRequest(
-        pending.id,
+        pending,
         result: .object(["value": .string(value ?? "")]),
-        echo: AnswerEcho(kind: "secret", text: echoText, failureBanner: banner),
+        echoText: echoText,
+        failureBanner: banner,
         state: &state
       )
     }
@@ -2756,18 +2763,19 @@ public struct ChatFeature {
   ///   stays until the server acknowledges (`serverRequestAnswered`): `.answers` →
   ///   `{answers: {qid: text|null}}`, skip `{}`; `.singleAnswer` → `{answer}`, skip
   ///   `{answer: ""}`;
-  /// - legacy event → today's `clarify.respond {session_id, request_id, answer}` (skip: an
-  ///   empty answer), optimistic: the card goes and the echo row is appended at once; a
-  ///   throw patches that row to "Failed to send" and banners (`legacyRespondFailed`).
+  /// - legacy event → `clarify.respond` (``legacyClarifyRespondParams(_:_:sessionID:)``),
+  ///   optimistic: the card goes and the echo row is appended at once; a throw patches that
+  ///   row to "Failed to send" and banners (`legacyRespondFailed`).
   private func answerClarify(_ answers: [String: ClarifyAnswer]?, into state: inout State) -> Effect<Action> {
     guard case let .clarify(request) = state.pendingInteraction else { return .none }
     let echoText = Self.clarifyEchoText(request, answers)
     if let pending = state.presentedServerRequest {
       guard state.answeringServerRequestID == nil else { return .none }
       return answerServerRequest(
-        pending.id,
+        pending,
         result: Self.clarifyResult(request, answers),
-        echo: AnswerEcho(kind: "clarify", text: echoText, failureBanner: Self.clarifyFailureBanner),
+        echoText: echoText,
+        failureBanner: Self.clarifyFailureBanner,
         state: &state
       )
     }
@@ -2775,39 +2783,61 @@ public struct ChatFeature {
     state.pendingInteraction = nil
     let rowID = uuid()
     state.transcript.append(ChatRow(id: rowID, kind: .status(kind: "clarify", text: echoText)))
-    // Raw choice text, exactly as the app always sent it (legacy wire byte-identity).
-    let answer = Self.singleWireText(request, answers, stripsRecommended: false)
-    let params: JSONValue = .object([
-      "session_id": .string(sessionID),
-      "request_id": .string(request.requestID ?? ""),
-      "answer": .string(answer),
-    ])
+    let calls = Self.legacyClarifyRespondParams(request, answers, sessionID: sessionID)
     return .run { [gateway] send in
       do {
-        _ = try await gateway.send("clarify.respond", params)
+        // Sequential, as desktop sends a legacy batch: the LAST lock resolves the tool, so
+        // every earlier one must already have landed.
+        for params in calls {
+          _ = try await gateway.send("clarify.respond", params)
+        }
       } catch {
         await send(.legacyRespondFailed(rowID: rowID, banner: Self.clarifyFailureBanner))
       }
     }
   }
 
+  /// The legacy `clarify.respond` params for an answer (`nil` = skip the card):
+  /// - a single question → one `{session_id, request_id, answer}` with the raw choice text,
+  ///   exactly as the app always sent it (legacy wire byte-identity); a skip is `answer: ""`;
+  /// - a legacy batch → one `{…, question_id, answer}` per question, in order (desktop's
+  ///   per-question locks: the bare label, a multi-select's JSON-array string, `""` for a
+  ///   skipped question); skipping the card is the question-less `answer: ""` (cancel-all).
+  static func legacyClarifyRespondParams(
+    _ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?, sessionID: String
+  ) -> [JSONValue] {
+    func params(_ extra: [String: JSONValue]) -> JSONValue {
+      .object(extra.merging([
+        "session_id": .string(sessionID), "request_id": .string(request.requestID ?? ""),
+      ]) { current, _ in current })
+    }
+    guard let answers, request.isMultiQuestion else {
+      return [params(["answer": .string(singleWireText(request, answers, stripsRecommended: false))])]
+    }
+    return request.questions.map { question in
+      params([
+        "question_id": .string(question.answerKey),
+        "answer": .string((answers[question.answerKey] ?? .skipped).wireText(for: question) ?? ""),
+      ])
+    }
+  }
+
   /// The v7 `request.answer` result for a clarify request (`nil` answers = skip all).
+  /// Only the v7 shapes reach here — a legacy card has no server request behind it.
   static func clarifyResult(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> JSONValue {
-    switch request.answerShape {
-    case .answers:
-      guard let answers else { return .object([:]) } // cancel all
-      var map: [String: JSONValue] = [:]
-      for (qid, locked) in request.lockedAnswers {
-        map[qid] = locked.map(JSONValue.string) ?? .null
-      }
-      for question in request.questions {
-        guard let qid = question.qid, !request.lockedAnswers.keys.contains(qid) else { continue }
-        map[qid] = (answers[qid] ?? .skipped).wireText(for: question).map(JSONValue.string) ?? .null
-      }
-      return .object(["answers": .object(map)])
-    case .singleAnswer, .legacyRespond:
+    guard request.answerShape == .answers else {
       return .object(["answer": .string(singleWireText(request, answers, stripsRecommended: true))])
     }
+    guard let answers else { return .object([:]) } // cancel all
+    var map: [String: JSONValue] = [:]
+    for (qid, locked) in request.lockedAnswers {
+      map[qid] = locked.map(JSONValue.string) ?? .null
+    }
+    for question in request.questions {
+      guard let qid = question.qid, !request.lockedAnswers.keys.contains(qid) else { continue }
+      map[qid] = (answers[qid] ?? .skipped).wireText(for: question).map(JSONValue.string) ?? .null
+    }
+    return .object(["answers": .object(map)])
   }
 
   /// The one answer of a single-form request (`""` for a skip).
@@ -2815,7 +2845,7 @@ public struct ChatFeature {
     _ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?, stripsRecommended: Bool
   ) -> String {
     guard let question = request.questions.first,
-          let answer = answers?[question.qid ?? ""]
+          let answer = answers?[question.answerKey]
     else { return "" }
     return answer.wireText(for: question, stripsRecommended: stripsRecommended) ?? ""
   }
@@ -4573,25 +4603,5 @@ private func uploadAttachment(
       "name": .string(attachment.filename),
     ]))
     return result["ref_text"]?.stringValue
-  }
-}
-
-extension PendingServerRequest {
-  /// The card this request presents.
-  var interaction: ChatFeature.State.PendingInteraction {
-    switch kind {
-    case let .approval(request): .approval(request)
-    case let .clarify(request): .clarify(request)
-    case let .secret(secretKind, prompt): .secret(secretKind, prompt)
-    }
-  }
-
-  /// The transcript status-row kind for this request's outcome rows.
-  var statusKind: String {
-    switch kind {
-    case .approval: "approval"
-    case .clarify: "clarify"
-    case .secret: "secret"
-    }
   }
 }

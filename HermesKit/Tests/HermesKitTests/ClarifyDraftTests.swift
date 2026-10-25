@@ -99,6 +99,59 @@ import Testing
     #expect(draft.answer(for: pickOne) == .choices(["UIKit"]))
   }
 
+  @Test func blankTextKeepsTheSkip() {
+    var draft = ClarifyDraft()
+    draft.toggleSkip(freeText)
+    draft.setText("  ", for: freeText)
+    #expect(draft.isSkipped(freeText))
+    #expect(draft.answer(for: freeText) == .skipped)
+  }
+
+  // MARK: - Form routing (what the card renders and how it submits)
+
+  @Test func singleSelectSubmitsOnTapWithAnOtherRowOnV7Only() {
+    let v7 = ClarifyRequest(requestID: nil, questions: [pickOne], answerShape: .answers)
+    #expect(v7.submitsOnTap)
+    #expect(v7.offersOtherRow)
+    #expect(v7.submitTitle == "Send") // for the Other row's typed answer
+
+    let legacy = ClarifyRequest(requestID: "r1", question: "Framework?", choices: ["SwiftUI", "UIKit"])
+    #expect(legacy.submitsOnTap)
+    #expect(!legacy.offersOtherRow)
+    #expect(legacy.submitTitle == nil) // a tap on a choice is the only way to answer
+  }
+
+  @Test func multiSelectFreeTextAndBatchFormsHaveTheirButtons() {
+    let multi = ClarifyRequest(requestID: nil, questions: [pickMany], answerShape: .answers)
+    #expect(!multi.submitsOnTap)
+    #expect(multi.submitTitle == "Submit")
+
+    let free = ClarifyRequest(requestID: nil, questions: [freeText], answerShape: .answers)
+    #expect(!free.submitsOnTap)
+    #expect(free.submitTitle == "Send")
+
+    #expect(!batch.submitsOnTap) // choices select; Confirm submits
+    #expect(batch.submitTitle == "Confirm")
+    let legacyBatch = ClarifyRequest(requestID: "r1", questions: [pickOne, freeText], answerShape: .legacyRespond)
+    #expect(legacyBatch.submitTitle == "Confirm")
+    #expect(!legacyBatch.offersOtherRow)
+  }
+
+  @Test func returnSendsOnlyACompleteSingleQuestionCard() {
+    let single = ClarifyRequest(requestID: nil, questions: [pickOne], answerShape: .answers)
+    var draft = ClarifyDraft()
+    #expect(!draft.sendsOnReturn(for: single))
+    draft.setText("Flutter", for: pickOne)
+    #expect(draft.sendsOnReturn(for: single))
+
+    var batchDraft = ClarifyDraft()
+    batchDraft.toggle("UIKit", in: pickOne)
+    batchDraft.toggle("iOS", in: pickMany)
+    batchDraft.setText("app", for: freeText)
+    #expect(batchDraft.isComplete(for: batch))
+    #expect(!batchDraft.sendsOnReturn(for: batch), "a batch submits only with Confirm")
+  }
+
   // MARK: - The form as a whole
 
   @Test func completeOnlyWhenEveryQuestionIsAnsweredOrSkipped() {

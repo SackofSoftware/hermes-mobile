@@ -146,7 +146,8 @@ import Testing
   }
 
   /// Rendered server requests decode into the queue entry; content-less or malformed
-  /// approval params and unrendered methods do not (the client skips / declines / ignores).
+  /// approval params and unrendered methods do not. Only non-object params of a rendered
+  /// method get an automatic skip; an undecodable object gets none.
   @Test func pendingServerRequestDecoding() {
     let approval = PendingServerRequest(
       id: "srq-1", method: "approval",
@@ -157,9 +158,27 @@ import Testing
     #expect(PendingServerRequest(id: "srq-2", method: "approval", params: .object(["session_id": .string("live")])) == nil)
     #expect(PendingServerRequest(id: "srq-3", method: "approval", params: .null) == nil)
     #expect(PendingServerRequest(id: "srq-4", method: "vault.code", params: .object([:])) == nil)
-    #expect(PendingServerRequest.malformedSkip(for: "approval") == .object(["choice": .string("deny")]))
-    #expect(PendingServerRequest.malformedSkip(for: "vault.code") == nil)
-    #expect(PendingServerRequest.malformedSkip(for: "tour") == nil)
+    #expect(PendingServerRequest.malformedSkip(for: "approval", params: .null) == .object(["choice": .string("deny")]))
+    #expect(PendingServerRequest.malformedSkip(for: "approval", params: .array([])) == .object(["choice": .string("deny")]))
+    #expect(PendingServerRequest.malformedSkip(for: "approval", params: .object(["session_id": .string("live")])) == nil)
+    #expect(PendingServerRequest.malformedSkip(for: "vault.code", params: .null) == nil)
+    #expect(PendingServerRequest.malformedSkip(for: "tour", params: .null) == nil)
+    #expect(PendingServerRequest.renderedMethods == ["approval", "clarify", "sudo", "secret"])
+  }
+
+  /// A danger pattern alone is content: an approval carrying only `pattern_key` or
+  /// `pattern_keys` renders (the card shows the pattern), it is not a blind card.
+  @Test(arguments: [
+    JSONValue.object(["pattern_key": .string("rm_rf")]),
+    .object(["pattern_keys": .array([.string("rm_rf"), .string("sudo")])]),
+  ])
+  func patternOnlyApprovalHasContent(params: JSONValue) throws {
+    let request = try #require(PendingServerRequest(id: "srq-p", method: "approval", params: params))
+    guard case let .approval(approval) = request.kind else {
+      Issue.record("expected an approval, got \(request.kind)"); return
+    }
+    #expect(approval.hasContent)
+    #expect(approval.command == nil)
   }
 
   @Test func serverRequestLogEntryNamesTheMethod() {
@@ -208,6 +227,40 @@ import Testing
     #expect(f == .event(sessionID: "s", .clarifyRequest(ClarifyRequest(requestID: "r9", question: ""))))
   }
 
+  /// v2026.9.11 emits a multi-question clarify as ONE legacy `clarify.request` carrying the
+  /// batch's `questions` and the `request_id` (`_clarify_block`): it raises the multi-question
+  /// card on the legacy answer path, instead of being dropped.
+  @Test func legacyBatchClarifyEventKeepsItsQuestions() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"s","payload":{"questions":[{"qid":"q0","question":"Framework?","choices":["SwiftUI (Recommended)","UIKit"],"multi_select":false},{"qid":"q1","question":"Targets?","choices":["iOS","macOS"],"multi_select":true},{"qid":"q2","question":"Name?","choices":null,"multi_select":false}],"request_id":"rb1"}}}"#)
+    #expect(f == .event(sessionID: "s", .clarifyRequest(ClarifyRequest(
+      requestID: "rb1",
+      questions: [
+        ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
+        ClarifyQuestion(qid: "q1", question: "Targets?", choices: ["iOS", "macOS"], multiSelect: true),
+        ClarifyQuestion(qid: "q2", question: "Name?"),
+      ],
+      answerShape: .legacyRespond
+    ))))
+  }
+
+  /// The two sources never guess each other's shape: a server request with a stray
+  /// `request_id` is still v7 (and its batch keeps `.answers`); a legacy event with
+  /// `questions` is still legacy.
+  @Test func clarifySourceDecidesTheAnswerShape() throws {
+    let batch: JSONValue = .object([
+      "request_id": .string("r1"),
+      "questions": .array([.object(["qid": .string("q0"), "question": .string("A?")])]),
+    ])
+    #expect(ClarifyRequest(serverRequestParams: batch)?.answerShape == .answers)
+    #expect(ClarifyRequest(serverRequestParams: batch)?.requestID == nil)
+    #expect(ClarifyRequest(legacyEvent: batch)?.answerShape == .legacyRespond)
+    #expect(ClarifyRequest(legacyEvent: batch)?.requestID == "r1")
+    let single: JSONValue = .object(["request_id": .string("r1"), "question": .string("Q?"), "multi_select": .bool(true), "choices": .array([.string("a"), .string("b")])])
+    #expect(ClarifyRequest(serverRequestParams: single) == ClarifyRequest(requestID: nil, question: "Q?", choices: ["a", "b"], multiSelect: true))
+    // The legacy single form ignores `multi_select`, as it always did.
+    #expect(ClarifyRequest(legacyEvent: single) == ClarifyRequest(requestID: "r1", question: "Q?", choices: ["a", "b"]))
+  }
+
   @Test func legacyClarifyEventWithoutRequestIDIsUnknown() throws {
     // Only the `request_id` form is the legacy wire; a server-request shape on the legacy
     // event name is not presented (it has no answer path there).
@@ -220,7 +273,7 @@ import Testing
   // MARK: Clarify server-request params (all three wire generations)
 
   private func clarify(_ json: String) -> ClarifyRequest? {
-    try? JSONDecoder().decode(ClarifyRequest.self, from: Data(json.utf8))
+    (try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))).flatMap(ClarifyRequest.init(serverRequestParams:))
   }
 
   @Test func clarifySingleSelectAsOneEntryQuestions() throws {
@@ -232,7 +285,7 @@ import Testing
       ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
     ])
     #expect(request.question == "Framework?")
-    #expect(request.choices == ["SwiftUI (Recommended)", "UIKit"]) // raw; split for display
+    #expect(request.questions.first?.choices == ["SwiftUI (Recommended)", "UIKit"]) // raw; split for display
     #expect(request.lockedAnswers.isEmpty)
   }
 
@@ -386,7 +439,7 @@ import Testing
   }
 
   /// Malformed sudo / secret params (wrong types, not an object, a secret naming nothing)
-  /// are not rendered; the client skips them with `{value: ""}`.
+  /// are not rendered; only the non-object ones get the automatic `{value: ""}` skip.
   @Test(arguments: [
     ("sudo", JSONValue.null), ("sudo", .array([])), ("sudo", .object(["command": .number(9)])),
     ("secret", .null), ("secret", .object(["session_id": .string("live")])),
@@ -395,7 +448,11 @@ import Testing
   ])
   func malformedSecretServerRequestIsNotRendered(method: String, params: JSONValue) {
     #expect(PendingServerRequest(id: "srq-bad", method: method, params: params) == nil)
-    #expect(PendingServerRequest.malformedSkip(for: method) == .object(["value": .string("")]))
+    if case .object = params {
+      #expect(PendingServerRequest.malformedSkip(for: method, params: params) == nil)
+    } else {
+      #expect(PendingServerRequest.malformedSkip(for: method, params: params) == .object(["value": .string("")]))
+    }
   }
 
   /// The gateway log mirrors the prompt only — a request never carries the typed value, and

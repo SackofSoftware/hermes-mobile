@@ -308,16 +308,18 @@ actor GatewayConnection {
   private var timeoutTasks: [Int: Task<Void, Never>] = [:]
   private var receiveTask: Task<Void, Never>?
   private var isFinished = false
-  /// One `client.capabilities` attempt per connection — no background retry: the next
-  /// connect re-advertises (the advertisement is per transport and dies with the socket).
-  private var advertisementStarted = false
   private var declinesNotShown = false
+  /// The connection's one `client.capabilities` attempt (started by the first `gateway.ready`)
+  /// — no background retry: the next connect re-advertises (the advertisement is per
+  /// transport and dies with the socket).
   private var advertisementTask: Task<Void, Never>?
   /// `.ready` is held back until the advertisement settles or `advertisementReadyCap`
   /// fires, so the reducer's first `session.resume` / `session.create` goes out after the
   /// server knows the phone answers prompts. Once open, the gate stays open.
   private var readyGateOpen = false
-  private var heldReadyFrames = 0
+  /// A `gateway.ready` arrived while the gate was closed. One `.ready` is released when it
+  /// opens — the reducer's `.ready` handling is idempotent, so a duplicate frame needs no count.
+  private var readyHeld = false
   private var readyCapTask: Task<Void, Never>?
 
   /// How long `.ready` waits on the advertisement. A hung `client.capabilities` keeps
@@ -421,8 +423,11 @@ actor GatewayConnection {
   /// matrix:
   /// - a rendered method (`PendingServerRequest`) is yielded as `.serverRequest` at once, so
   ///   a turn terminal read right after it cannot overtake the card;
-  /// - a rendered method whose params are malformed gets that kind's skip through
-  ///   `request.answer`, so the agent is never left hanging;
+  /// - a rendered method whose params are not even a JSON object gets that kind's skip
+  ///   through `request.answer` — no client can render it, so the agent is not left hanging;
+  /// - a rendered method whose object params fail the phone's decode gets NO answer (a newer
+  ///   shape a desktop sharing the session may render — never deny or cancel it for everyone)
+  ///   and a `.serverRequestFailed` banner, so the phone user knows why nothing shows;
   /// - a window-owned bridge gets the non-settling 4404, and only once the advertisement
   ///   acknowledged `declines_not_shown`;
   /// - anything else gets nothing — another attached client may answer it, and an error
@@ -432,11 +437,24 @@ actor GatewayConnection {
   private func handleServerRequest(id: String, method: String, params: JSONValue) {
     if let request = PendingServerRequest(id: id, method: method, params: params) {
       events.yield(.serverRequest(request))
-    } else if let skip = PendingServerRequest.malformedSkip(for: method) {
+    } else if let skip = PendingServerRequest.malformedSkip(for: method, params: params) {
       Task { await answerMalformed(id: id, method: method, result: skip) }
+    } else if PendingServerRequest.renderedMethods.contains(method) {
+      events.yield(.serverRequestFailed(message: Self.unreadablePromptMessage(method)))
     } else if declinesNotShown, PendingServerRequest.windowOwnedMethods.contains(method) {
       Task { await declineNotShown(id: id) }
     }
+  }
+
+  /// The banner for a rendered prompt the phone cannot read (left unanswered on purpose).
+  static func unreadablePromptMessage(_ method: String) -> String {
+    let prompt = switch method {
+    case "approval": "an approval request"
+    case "clarify": "a question"
+    case "sudo": "a password request"
+    default: "a secret request"
+    }
+    return "Couldn’t show \(prompt) from the agent. Answer it on another device, or stop the turn."
   }
 
   private func answerMalformed(id: String, method: String, result skip: JSONValue) async {
@@ -476,9 +494,8 @@ actor GatewayConnection {
   /// silent (v2026.9.14 speaks v7 without the probe — it does NOT mean legacy); any other
   /// failure yields `.serverRequestsUnavailable` AFTER the gate opened, so the reducer's
   /// `.ready` reset cannot wipe it. Never retried on this socket.
-  func advertiseServerRequests() async {
-    guard !isFinished, !advertisementStarted else { return }
-    advertisementStarted = true
+  private func advertiseServerRequests() async {
+    guard !isFinished else { return }
     let failure: (any Error)?
     do {
       let result = try await send(method: "client.capabilities", params: .object(["server_requests": .bool(true)]))
@@ -506,7 +523,7 @@ actor GatewayConnection {
       events.yield(.ready)
       return
     }
-    heldReadyFrames += 1
+    readyHeld = true
     guard advertisementTask == nil else { return }
     advertisementTask = Task { [weak self] in await self?.advertiseServerRequests() }
     readyCapTask = Task { [weak self, clock] in
@@ -520,8 +537,8 @@ actor GatewayConnection {
     readyGateOpen = true
     readyCapTask?.cancel()
     readyCapTask = nil
-    for _ in 0..<heldReadyFrames { events.yield(.ready) }
-    heldReadyFrames = 0
+    if readyHeld { events.yield(.ready) }
+    readyHeld = false
   }
 
   private func reportFailure(_ context: String, error: any Error) {

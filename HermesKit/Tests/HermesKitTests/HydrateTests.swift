@@ -1504,14 +1504,14 @@ struct HydrateTests {
 
     await store.send(.activateResult(.success(Self.replayResponse(running: true, openRequests: [approval, clarify]))))
     #expect(store.state.serverRequests.map(\.id) == ["srq-a", "srq-c"])
-    #expect(store.state.pendingInteraction == Self.queued(approval).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(approval).kind)
     let approvalToken = store.state.pendingInteractionToken
 
     // Answering the head (ok) raises the replayed clarify with a fresh token, its lock shown.
     await store.send(.respondToApproval(approve: true, all: false))
     await store.receive(\.serverRequestAnswered)
     #expect(store.state.serverRequests.map(\.id) == ["srq-c"])
-    #expect(store.state.pendingInteraction == Self.queued(clarify).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(clarify).kind)
     #expect(store.state.pendingInteractionToken == approvalToken + 1)
     guard case let .clarify(request) = store.state.pendingInteraction else {
       Issue.record("expected the clarify card"); return
@@ -1535,7 +1535,7 @@ struct HydrateTests {
       running: true, openRequests: [relocked, Self.approvalEntry("srq-a")]
     ))))
     #expect(store.state.pendingInteractionToken == token)
-    #expect(store.state.pendingInteraction == Self.queued(relocked).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(relocked).kind)
     #expect(store.state.serverRequests.map(\.id) == ["srq-c", "srq-a"])
 
     await store.send(.teardown)
@@ -1551,7 +1551,7 @@ struct HydrateTests {
     // Kept ids hold their place: the card the user is reading is not swapped under them.
     await store.send(.activateResult(.success(Self.replayResponse(running: true, openRequests: [second, first]))))
     #expect(store.state.serverRequests.map(\.id) == ["srq-1", "srq-2"])
-    #expect(store.state.pendingInteraction == Self.queued(first).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(first).kind)
     #expect(store.state.pendingInteractionToken == token)
 
     await store.send(.teardown)
@@ -1573,7 +1573,7 @@ struct HydrateTests {
     // the new srq-3 queues behind it, and the stale in-flight guard is released.
     await store.send(.activateResult(.success(Self.replayResponse(running: true, openRequests: [second, third]))))
     #expect(store.state.serverRequests.map(\.id) == ["srq-2", "srq-3"])
-    #expect(store.state.pendingInteraction == Self.queued(second).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(second).kind)
     #expect(store.state.pendingInteractionToken == token + 1)
     #expect(store.state.answeringServerRequestID == nil)
 
@@ -1597,7 +1597,7 @@ struct HydrateTests {
     let store = replayStore(initial)
 
     await store.send(.activateResult(.success(Self.replayResponse(running: false, openRequests: [approval]))))
-    #expect(store.state.pendingInteraction == Self.queued(approval).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(approval).kind)
     #expect(store.state.pendingInteractionToken == token)
     #expect(store.state.serverRequests.map(\.id) == ["srq-a"])
     #expect(store.state.isSending == false)
@@ -1636,7 +1636,7 @@ struct HydrateTests {
       running: true, openRequests: [vault, malformed, approval, approval]
     ))))
     #expect(store.state.serverRequests.map(\.id) == ["srq-a"])
-    #expect(store.state.pendingInteraction == Self.queued(approval).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(approval).kind)
     #expect(!sent.value.contains("request.answer"))
 
     await store.send(.teardown)
@@ -1648,7 +1648,7 @@ struct HydrateTests {
     let store = replayStore(replayState())
 
     await store.send(.activateResult(.success(Self.replayResponse(running: true, contract: nil, openRequests: [approval]))))
-    #expect(store.state.pendingInteraction == Self.queued(approval).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(approval).kind)
 
     await store.send(.teardown)
   }
@@ -1662,7 +1662,7 @@ struct HydrateTests {
     let store = replayStore(initial)
 
     await store.send(.activateResult(.success(Self.replayResponse(running: true, openRequests: [approval]))))
-    #expect(store.state.pendingInteraction == Self.queued(approval).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(approval).kind)
     #expect(store.state.pendingInteraction != .approval(ChatFeature.recoveredApprovalRequest))
     #expect(store.state.expectsPendingApproval == false)
 
@@ -1691,7 +1691,7 @@ struct HydrateTests {
     let store = replayStore(initial)
 
     await store.send(.activateResult(.success(Self.replayResponse(running: true, openRequests: [clarify]))))
-    #expect(store.state.pendingInteraction == Self.queued(clarify).interaction)
+    #expect(store.state.pendingInteraction == Self.queued(clarify).kind)
     #expect(store.state.expectsPendingApproval == false)
 
     await store.send(.teardown)
@@ -1705,6 +1705,98 @@ struct HydrateTests {
     await store.send(.activateResult(.success(Self.replayResponse(running: true, contract: 6))))
     #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
     #expect(store.state.expectsPendingApproval == false)
+
+    await store.send(.teardown)
+  }
+
+  // MARK: The replay is authoritative over a non-server card
+
+  @Test func v7ReplayReplacesAStandingRecoveredCardWithAFreshToken() async {
+    let approval = Self.approvalEntry("srq-a")
+    var initial = replayState()
+    initial.present(.approval(ChatFeature.recoveredApprovalRequest))
+    let token = initial.pendingInteractionToken
+    let store = replayStore(initial)
+
+    await store.send(.activateResult(.success(Self.replayResponse(running: true, openRequests: [approval]))))
+    #expect(store.state.pendingInteraction == Self.queued(approval).kind)
+    #expect(store.state.pendingInteractionToken == token + 1)
+    #expect(store.state.serverRequests.map(\.id) == ["srq-a"])
+
+    await store.send(.teardown)
+  }
+
+  @Test(arguments: [true, false])
+  func v7EmptyReplayDismissesAStandingLegacyCard(running: Bool) async {
+    var initial = replayState()
+    initial.present(.clarify(ClarifyRequest(requestID: "r1", question: "Which file?")))
+    let store = replayStore(initial)
+
+    await store.send(.activateResult(.success(Self.replayResponse(running: running))))
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.serverRequests.isEmpty)
+
+    await store.send(.teardown)
+  }
+
+  // MARK: How the hydrate records the wire generation
+
+  @Test func hydrateWithoutInfoKeepsTheRecordedContract() async {
+    // No `info` at all: the recorded v7 contract stands, so an armed hint is satisfied by the
+    // (empty) replay — no generic card.
+    var initial = replayState()
+    initial.desktopContract = 7
+    initial.expectsPendingApproval = true
+    let store = replayStore(initial)
+
+    await store.send(.activateResult(.success(ActivateResponse(
+      sessionID: "live123", storedSessionID: "stored123", running: true
+    ))))
+    #expect(store.state.desktopContract == 7)
+    #expect(store.state.pendingInteraction == nil)
+
+    await store.send(.teardown)
+  }
+
+  @Test func hydrateInfoWithoutAContractResetsItToLegacy() async {
+    // A full `info` snapshot without `desktop_contract` wins: the slot is legacy again, so the
+    // armed hint synthesizes the generic card.
+    var initial = replayState()
+    initial.desktopContract = 7
+    initial.expectsPendingApproval = true
+    let store = replayStore(initial)
+
+    await store.send(.activateResult(.success(Self.replayResponse(running: true, contract: nil))))
+    #expect(store.state.desktopContract == nil)
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
+
+    await store.send(.teardown)
+  }
+
+  // MARK: A card raised on an idle turn releases the #66 queue when it leaves
+
+  @Test(arguments: [false, true])
+  func idleCardLeavingDrainsTheQueue(byCancel: Bool) async {
+    let approval = Self.approvalEntry("srq-a")
+    var initial = replayState()
+    initial.queuedPrompts = [QueuedPrompt(id: UUID(77), text: "next")]
+    let store = replayStore(initial)
+
+    // A stopped snapshot with an open request: the card holds the queue back.
+    await store.send(.activateResult(.success(Self.replayResponse(running: false, openRequests: [approval]))))
+    #expect(store.state.pendingInteraction == Self.queued(approval).kind)
+    #expect(store.state.queuedPrompts.map(\.text) == ["next"])
+    #expect(store.state.drainingEntry == nil)
+
+    if byCancel {
+      await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-a", reason: "resolved"))))
+    } else {
+      await store.send(.respondToApproval(approve: true, all: false))
+      await store.receive(\.serverRequestAnswered)
+    }
+    #expect(store.state.pendingInteraction == nil)
+    #expect(store.state.queuedPrompts.isEmpty)
+    #expect(store.state.drainingEntry?.text == "next")
 
     await store.send(.teardown)
   }

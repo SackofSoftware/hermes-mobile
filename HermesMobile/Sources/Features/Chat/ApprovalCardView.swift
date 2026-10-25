@@ -40,30 +40,11 @@ struct ApprovalCardView: View {
 
   @State private var approveAll = false
 
-  /// Bottom-fade state, fed by **live scroll geometry**: whether anything is still hidden
-  /// below the viewport, and how tall the ramp may be at the viewport's current height.
-  ///
-  /// Derived from geometry rather than from the content's measured height because a
-  /// measurement-derived flag would be true for the region's whole lifetime, so its last line
-  /// would sit permanently inside the ramp and never be readable — the opposite of what #65
-  /// asks for. Mirrors `MarkdownTableView`'s trailing fade (#59).
-  @State private var fade = FadeState()
-
-  /// Tallest the scrollable region grows before it scrolls in place, scaled with Dynamic Type
-  /// so a larger text size keeps roughly the same *line count* visible rather than fewer and
-  /// fewer lines. The **effective** cap is ``contentMaxHeight`` — this is only the input to
-  /// the ceiling clamp.
-  @ScaledMetric(relativeTo: .callout)
-  private var scaledContentMaxHeight: CGFloat = ApprovalCardView.contentMaxHeightBase
-
-  /// The cap actually applied: the scaled base, clamped to ``contentMaxHeightCeiling``.
-  private var contentMaxHeight: CGFloat {
-    min(scaledContentMaxHeight, Self.contentMaxHeightCeiling)
-  }
-
-  /// Unscaled base for the cap: about a dozen monospaced `.callout` command lines plus the
-  /// detail and the session toggle under them — enough for the shell commands agents actually
-  /// ask about.
+  /// Unscaled base for the region's cap (``BoundedScrollRegion`` scales it with Dynamic Type,
+  /// `@ScaledMetric(relativeTo: .callout)`, so a larger text size keeps roughly the same *line
+  /// count* visible, then clamps it to ``contentMaxHeightCeiling``): about a dozen monospaced
+  /// `.callout` command lines plus the detail and the session toggle under them — enough for
+  /// the shell commands agents actually ask about.
   static let contentMaxHeightBase: CGFloat = 320
 
   /// Hard ceiling on the scaled cap. `@ScaledMetric(relativeTo: .callout)` runs to roughly
@@ -160,15 +141,12 @@ struct ApprovalCardView: View {
         }
       }
     }
-    .padding()
-    .background(Color(uiColor: .tertiarySystemBackground), in: .rect(cornerRadius: 14))
-    .overlay(RoundedRectangle(cornerRadius: 14).stroke(.orange.opacity(0.5)))
-    .padding(.horizontal)
+    .promptCardChrome(tint: .orange)
   }
 
-  /// Everything the user has to read before answering, in a vertical `ScrollView` bounded by
-  /// ``BoundedHeightLayout``: it asks for its natural height while that fits under the cap and
-  /// for the cap past it, and yields to a shorter proposal down to ``contentMinHeight``.
+  /// Everything the user has to read before answering, in a ``BoundedScrollRegion``: it asks
+  /// for its natural height while that fits under the cap and for the cap past it, and yields
+  /// to a shorter proposal down to ``contentMinHeight``.
   ///
   /// - **Order is load-bearing**: command, then detail, then toggle. The command is the thing
   ///   being approved, the viewport's first screenful is the only thing guaranteed to be read,
@@ -190,54 +168,35 @@ struct ApprovalCardView: View {
   ///   keyboard comes and goes; the layout instead keeps one variant and bounds it, which is
   ///   also what makes the height assertable (`ApprovalCardLayoutTests`).
   private var scrollableContent: some View {
-    BoundedHeightLayout(
-      cap: contentMaxHeight, minHeight: Self.contentMinHeight, reserve: Self.transcriptReserve
-    ) {
-      ScrollView(.vertical) {
-        VStack(alignment: .leading, spacing: 10) {
-          if let command = request.command, !command.isEmpty {
-            commandText(command)
-              .textSelection(.enabled)
-              .padding(Self.commandPadding)
-              .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 8))
-          }
-
-          if let detail = request.detail, !detail.isEmpty {
-            Text(detail)
-              .font(.footnote)
-              .foregroundStyle(.secondary)
-              // Wrap instead of truncating — the recovered-approval card (#30 workaround)
-              // carries a multi-line detail and no command, so the copy must stay readable.
-              .fixedSize(horizontal: false, vertical: true)
-              .frame(maxWidth: .infinity, alignment: .leading)
-          }
-
-          // Hidden on the push-tap-recovered card (#30 workaround): with no command and no
-          // pattern to show, "Approve all" would whitelist an unseen danger pattern for the
-          // whole session — a blind single approve is the most the recovery copy covers.
-          // Its state is mirrored on the Approve button, which is rigid: with a long command
-          // this control is below the fold, and a session-wide whitelist must never be
-          // committed from a switch the user cannot see at the moment they approve.
-          if request.offersSessionApproval {
-            Toggle("Approve all in this session", isOn: $approveAll)
-              .font(.footnote)
-          }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    BoundedScrollRegion(reserve: Self.transcriptReserve) {
+      if let command = request.command, !command.isEmpty {
+        commandText(command)
+          .textSelection(.enabled)
+          .padding(Self.commandPadding)
+          .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 8))
       }
-      .scrollBounceBehavior(.basedOnSize)
-      .onScrollGeometryChange(for: FadeState.self) { geometry in
-        FadeState(
-          isFaded: Self.hasBottomOverflow(
-            visibleRect: geometry.visibleRect, contentHeight: geometry.contentSize.height
-          ),
-          rampHeight: Self.fadeRampHeight(viewportHeight: geometry.containerSize.height)
-        )
-      } action: { _, newFade in
-        fade = newFade
+
+      if let detail = request.detail, !detail.isEmpty {
+        Text(detail)
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+          // Wrap instead of truncating — the recovered-approval card (#30 workaround)
+          // carries a multi-line detail and no command, so the copy must stay readable.
+          .fixedSize(horizontal: false, vertical: true)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+
+      // Hidden on the push-tap-recovered card (#30 workaround): with no command and no
+      // pattern to show, "Approve all" would whitelist an unseen danger pattern for the
+      // whole session — a blind single approve is the most the recovery copy covers.
+      // Its state is mirrored on the Approve button, which is rigid: with a long command
+      // this control is below the fold, and a session-wide whitelist must never be
+      // committed from a switch the user cannot see at the moment they approve.
+      if request.offersSessionApproval {
+        Toggle("Approve all in this session", isOn: $approveAll)
+          .font(.footnote)
       }
     }
-    .mask { Self.bottomFadeMask(fade) }
   }
 
   /// The command's text, laid out at its natural height — `.fixedSize` so it wraps to its
@@ -257,7 +216,12 @@ struct ApprovalCardView: View {
     all ? "Approve all" : "Approve"
   }
 
-  /// What the bottom ramp looks like right now. Both halves come from live scroll geometry.
+  /// What the bottom ramp looks like right now. Both halves come from **live scroll
+  /// geometry** — whether anything is still hidden below the viewport, and how tall the ramp
+  /// may be at the viewport's current height — rather than from the content's measured
+  /// height: a measurement-derived flag would be true for the region's whole lifetime, so its
+  /// last line would sit permanently inside the ramp and never be readable — the opposite of
+  /// what #65 asks for. Mirrors `MarkdownTableView`'s trailing fade (#59).
   struct FadeState: Equatable {
     /// Is there still content below what the viewport shows?
     var isFaded: Bool = false

@@ -1,9 +1,26 @@
 import Foundation
 
-/// Which credential a secret card collects. Lives with the models (not inside
-/// `ChatFeature.State.PendingInteraction`) so `PendingServerRequest` does not depend on
-/// the feature.
+/// Which credential a secret card collects.
 public enum SecretKind: Equatable, Sendable { case sudo, secret }
+
+/// A blocking interactive request the agent is waiting on — the card `ChatFeature` presents
+/// (`ChatFeature.State.PendingInteraction`), whether it came from a legacy `*.request` event
+/// or a v7 server request. Lives with the models so `PendingServerRequest` does not depend on
+/// the feature.
+public enum PendingInteraction: Equatable, Sendable {
+  case approval(ApprovalRequest)
+  case clarify(ClarifyRequest)
+  case secret(SecretKind, SecretPrompt)
+
+  /// The transcript status-row kind for this card's outcome rows.
+  public var statusKind: String {
+    switch self {
+    case .approval: "approval"
+    case .clarify: "clarify"
+    case .secret: "secret"
+    }
+  }
+}
 
 /// One open v7 server→client prompt (`{"id":"srq-…","method":…,"params":…}`). `id` is the
 /// `srq-…` request id — the only place the app stores it; answers go out as
@@ -15,15 +32,10 @@ public enum SecretKind: Equatable, Sendable { case sudo, secret }
 /// `pendingInteractionToken`.
 public struct PendingServerRequest: Equatable, Sendable, Identifiable {
   public var id: String
-  public var kind: Kind
+  /// The card this request presents.
+  public var kind: PendingInteraction
 
-  public enum Kind: Equatable, Sendable {
-    case approval(ApprovalRequest)
-    case clarify(ClarifyRequest)
-    case secret(SecretKind, SecretPrompt)
-  }
-
-  public init(id: String, kind: Kind) {
+  public init(id: String, kind: PendingInteraction) {
     self.id = id
     self.kind = kind
   }
@@ -38,37 +50,22 @@ public struct PendingServerRequest: Equatable, Sendable, Identifiable {
     }
   }
 
-  /// Decode a server request the app renders. `nil` when the method is not rendered here,
-  /// or when a rendered method's params are malformed — the caller then answers with
-  /// ``malformedSkip(for:)`` so the agent is never left hanging.
+  /// Decode a server request the app renders. `nil` when the method is not rendered here
+  /// (``renderedMethods``), or when a rendered method's params do not decode — see
+  /// ``malformedSkip(for:params:)`` for what the caller answers then.
   ///
-  /// Rendered: `approval`, `clarify`, `sudo`, `secret`. An approval whose params decode but
-  /// carry nothing to show (no command, description or danger pattern) counts as malformed:
-  /// on v7 the real card is always recoverable from the replay, so a content-less card would
-  /// only invite a blind approve. Likewise a `secret` naming neither a `prompt` nor an
-  /// `env_var` (a blind field); a `sudo` may be empty (v2026.9.14 sends no `command`).
-  ///
-  /// A clarify server request is answered through `request.answer`, never `clarify.respond`,
-  /// so it only accepts the two v7 shapes: a usable `questions` list (`.answers`) or a
-  /// top-level non-blank `question` (`.singleAnswer`). A stray `request_id` (the legacy
-  /// event's key) does not make it legacy — it is answered in the single shape, or is
-  /// malformed when no question is left.
+  /// An approval whose params decode but carry nothing to show (no command, description or
+  /// danger pattern) does not decode: a content-less card would only invite a blind approve.
+  /// Likewise a `secret` naming neither a `prompt` nor an `env_var` (a blind field); a `sudo`
+  /// may be empty (v2026.9.14 sends no `command`). A clarify takes the v7 shapes only
+  /// (``ClarifyRequest/init(serverRequestParams:)``).
   public init?(id: String, method: String, params: JSONValue) {
     switch method {
     case "approval":
       guard let request = params.decoded(ApprovalRequest.self), request.hasContent else { return nil }
       self.init(id: id, kind: .approval(request))
     case "clarify":
-      guard var request = params.decoded(ClarifyRequest.self) else { return nil }
-      if request.answerShape == .legacyRespond {
-        guard let only = request.questions.first,
-              !only.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return nil }
-        request = ClarifyRequest(
-          requestID: nil, question: only.question, choices: only.choices,
-          multiSelect: params["multi_select"]?.boolValue ?? false
-        )
-      }
+      guard let request = ClarifyRequest(serverRequestParams: params) else { return nil }
       self.init(id: id, kind: .clarify(request))
     case "sudo", "secret":
       guard var prompt = params.decoded(SecretPrompt.self) else { return nil }
@@ -82,17 +79,24 @@ public struct PendingServerRequest: Equatable, Sendable, Identifiable {
     }
   }
 
-  /// The `request.answer` result that skips a rendered method whose params failed to decode
+  /// The methods the app renders as a card.
+  public static let renderedMethods: Set<String> = ["approval", "clarify", "sudo", "secret"]
+
+  /// The `request.answer` result that skips a rendered method whose params are not a JSON
+  /// object at all (`null`, missing, an array, a scalar) — a request no client can render
   /// (approval: `{choice: "deny"}`; clarify: `{}`, cancel-all; sudo / secret: `{value: ""}`).
-  /// `nil` for every method the
-  /// app does not render — those get nothing, or the window-owned 4404 decline (see
-  /// `windowOwnedMethods`).
-  public static func malformedSkip(for method: String) -> JSONValue? {
+  ///
+  /// `nil` for an object that merely fails the phone's decode: that may be a newer wire shape
+  /// a desktop sharing the session renders, so the phone stays silent (and banners) rather
+  /// than deny or cancel it for everyone. `nil` too for every method the app does not render
+  /// — those get nothing, or the window-owned 4404 decline (see `windowOwnedMethods`).
+  public static func malformedSkip(for method: String, params: JSONValue) -> JSONValue? {
+    if case .object = params { return nil }
     switch method {
-    case "approval": .object(["choice": .string("deny")])
-    case "clarify": .object([:])
-    case "sudo", "secret": .object(["value": .string("")])
-    default: nil
+    case "approval": return .object(["choice": .string("deny")])
+    case "clarify": return .object([:])
+    case "sudo", "secret": return .object(["value": .string("")])
+    default: return nil
     }
   }
 

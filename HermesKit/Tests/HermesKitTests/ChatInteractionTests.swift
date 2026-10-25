@@ -51,7 +51,7 @@ struct ChatInteractionTests {
     let request = serverApproval("srq/7")
     await store.send(.gatewayEvent(.serverRequest(request))) {
       $0.serverRequests = [request]
-      $0.present(request.interaction)
+      $0.present(request.kind)
       $0.expectsPendingApproval = false
     }
     #expect(!store.state.canSend)
@@ -141,12 +141,12 @@ struct ChatInteractionTests {
     let second = serverApproval("srq-2", command: "rm b")
     await store.send(.gatewayEvent(.serverRequest(first))) {
       $0.serverRequests = [first]
-      $0.present(first.interaction)
+      $0.present(first.kind)
     }
     await store.send(.gatewayEvent(.serverRequest(second))) {
       $0.serverRequests = [first, second] // queued behind the presented card, not raised
     }
-    #expect(store.state.pendingInteraction == first.interaction)
+    #expect(store.state.pendingInteraction == first.kind)
     await store.send(.respondToApproval(approve: true, all: false)) {
       $0.answeringServerRequestID = "srq-1"
     }
@@ -154,7 +154,7 @@ struct ChatInteractionTests {
       $0.answeringServerRequestID = nil
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
       $0.serverRequests = [second]
-      $0.present(second.interaction)
+      $0.present(second.kind)
     }
     #expect(store.state.pendingInteractionToken == 2)
     await store.send(.respondToApproval(approve: false, all: false)) {
@@ -205,13 +205,62 @@ struct ChatInteractionTests {
     let refreshedFirst = serverApproval("srq-1", command: "rm a --verbose")
     await store.send(.gatewayEvent(.serverRequest(refreshedFirst))) {
       $0.serverRequests[id: "srq-1"] = refreshedFirst
-      $0.pendingInteraction = refreshedFirst.interaction
+      $0.pendingInteraction = refreshedFirst.kind
     }
     let refreshedSecond = serverApproval("srq-2", command: "rm b --verbose")
     await store.send(.gatewayEvent(.serverRequest(refreshedSecond))) {
       $0.serverRequests[id: "srq-2"] = refreshedSecond
     }
     #expect(store.state.pendingInteractionToken == 1)
+  }
+
+  /// A `timeout` cancel on a presented clarify or secret card leaves its own kind's "Timed out"
+  /// row (the row kind comes from the request).
+  @Test(arguments: [
+    PendingServerRequest(id: "srq-c", kind: .clarify(ClarifyRequest(requestID: nil, question: "Proceed?"))),
+    PendingServerRequest(id: "srq-s", kind: .secret(.sudo, SecretPrompt(command: "apt install rg"))),
+  ])
+  func timeoutCancelRowTakesTheRequestKind(request: PendingServerRequest) async {
+    let store = TestStore(initialState: queuedState([request])) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+    }
+    await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: request.id, reason: "timeout")))) {
+      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: request.kind.statusKind, text: "Timed out"))]
+      $0.serverRequests = []
+      $0.pendingInteraction = nil
+    }
+    #expect(store.state.transcript.first?.kind == .status(
+      kind: request.id == "srq-c" ? "clarify" : "secret", text: "Timed out"
+    ))
+  }
+
+  /// v7 answers need no `liveSessionID` (the srq id is the whole address): approval, clarify
+  /// and secret all go out through `request.answer` with no live session recorded.
+  @Test(arguments: [
+    PendingServerRequest(id: "srq-a", kind: .approval(ApprovalRequest(command: "rm foo"))),
+    PendingServerRequest(id: "srq-c", kind: .clarify(ClarifyRequest(requestID: nil, question: "Name?"))),
+    PendingServerRequest(id: "srq-s", kind: .secret(.secret, SecretPrompt(prompt: "API key"))),
+  ])
+  func serverRequestAnswersWithoutALiveSession(request: PendingServerRequest) async {
+    let sent = LockIsolated<[String]>([])
+    var initial = queuedState([request])
+    initial.liveSessionID = nil
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.hermesGateway.send = { method, _ in
+        sent.withValue { $0.append(method) }
+        return .object(["status": .string("ok")])
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+    switch request.kind {
+    case .approval: await store.send(.respondToApproval(approve: false, all: false))
+    case .clarify: await store.send(.submitClarify(answers: ["": .other("Ada")]))
+    case .secret: await store.send(.respondToSecret(value: "k"))
+    }
+    await store.receive(\.serverRequestAnswered)
+    #expect(sent.value == ["request.answer"])
+    #expect(store.state.serverRequests.isEmpty)
   }
 
   /// `request.cancel` for the presented head raises the next (a `timeout` leaves a
@@ -230,7 +279,7 @@ struct ChatInteractionTests {
     await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-1", method: "approval", reason: "timeout")))) {
       $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Timed out"))]
       $0.serverRequests = [third]
-      $0.present(third.interaction)
+      $0.present(third.kind)
     }
     await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-3", method: "approval", reason: "interrupted")))) {
       $0.serverRequests = []
@@ -238,20 +287,59 @@ struct ChatInteractionTests {
     }
   }
 
-  /// A cancel for the request whose answer is in flight drops it; the late
-  /// acknowledgement then only records the outcome row.
-  @Test func cancelWhileAnsweringThenLateAcknowledgement() async {
-    let store = TestStore(initialState: queuedState([serverApproval("srq-1")])) { ChatFeature() } withDependencies: {
+  /// A cancel for the request whose answer is in flight drops it, releases the in-flight
+  /// guard and raises the next card, which is answerable at once. The late acknowledgement
+  /// then only records its outcome: `ok` its echo row, `expired` "Already handled elsewhere",
+  /// a failure its banner — the next card is untouched.
+  @Test(arguments: ["ok", "expired", "failure"])
+  func cancelWhileAnsweringThenLateAcknowledgement(late: String) async {
+    let first = serverApproval("srq-1", command: "rm a")
+    let second = serverApproval("srq-2", command: "rm b")
+    var initial = queuedState([first, second])
+    initial.answeringServerRequestID = "srq-1"
+    let (gate, release) = AsyncStream<Void>.makeStream()
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.uuid = .incrementing
+      $0.hermesGateway.send = { _, _ in
+        for await _ in gate { break }
+        return .object(["status": .string("ok")])
+      }
     }
     await store.send(.gatewayEvent(.requestCancel(RequestCancel(id: "srq-1", reason: "resolved")))) {
+      $0.serverRequests = [second]
+      $0.answeringServerRequestID = nil
+      $0.present(second.kind)
+    }
+    // The guard is released: the next card answers right away.
+    await store.send(.respondToApproval(approve: false, all: false)) {
+      $0.answeringServerRequestID = "srq-2"
+    }
+
+    let echo = ChatFeature.AnswerEcho(kind: "approval", text: "Approved", failureBanner: "Failed to send the approval response.")
+    let outcome: Result<ChatFeature.AnswerStatus, GatewayError> = switch late {
+    case "ok": .success(.ok)
+    case "expired": .success(.expired)
+    default: .failure(.timedOut(method: "request.answer"))
+    }
+    await store.send(.serverRequestAnswered(id: "srq-1", echo: echo, outcome)) {
+      switch late {
+      case "ok":
+        $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Approved"))]
+      case "expired":
+        $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Already handled elsewhere"))]
+      default:
+        $0.errorBanner = "Failed to send the approval response."
+      }
+    }
+    #expect(store.state.presentedServerRequest == second)
+    #expect(store.state.answeringServerRequestID == "srq-2") // srq-2's own answer still in flight
+
+    release.yield(())
+    await store.receive(\.serverRequestAnswered) {
+      $0.answeringServerRequestID = nil
+      $0.transcript.append(ChatRow(id: self.uuid(late == "failure" ? 0 : 1), kind: .status(kind: "approval", text: "Denied")))
       $0.serverRequests = []
       $0.pendingInteraction = nil
-    }
-    await store.send(.serverRequestAnswered(
-      id: "srq-1", echo: .init(kind: "approval", text: "Approved", failureBanner: "x"), .success(.expired)
-    )) {
-      $0.transcript = [ChatRow(id: self.uuid(0), kind: .status(kind: "approval", text: "Already handled elsewhere"))]
     }
   }
 
@@ -286,7 +374,7 @@ struct ChatInteractionTests {
     let request = serverApproval("srq-1")
     await store.send(.gatewayEvent(.serverRequest(request))) {
       $0.serverRequests = [request]
-      $0.present(request.interaction)
+      $0.present(request.kind)
     }
     #expect(store.state.presentedServerRequest == request)
   }

@@ -32,18 +32,6 @@ struct ClarifyCardView: View {
   let onSkip: () -> Void
 
   @State private var draft: ClarifyDraft
-  /// Bottom-fade state from live scroll geometry — `ApprovalCardView`'s, for the same reason.
-  @State private var fade = ApprovalCardView.FadeState()
-
-  /// The cap's Dynamic Type input, clamped by ``contentMaxHeight`` — the approval card's
-  /// numbers, since the rigid chrome around the region (a one-line title, one button row) is
-  /// the same size, so the same derivations hold.
-  @ScaledMetric(relativeTo: .callout)
-  private var scaledContentMaxHeight: CGFloat = ApprovalCardView.contentMaxHeightBase
-
-  private var contentMaxHeight: CGFloat {
-    min(scaledContentMaxHeight, ApprovalCardView.contentMaxHeightCeiling)
-  }
 
   /// `draft` seeds the edits (snapshots render a form mid-answer); the app passes none.
   init(
@@ -75,7 +63,7 @@ struct ClarifyCardView: View {
           Text("Skip").frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
-        if let submitTitle {
+        if let submitTitle = request.submitTitle {
           Button { onSubmit(draft.answers(for: request)) } label: {
             Text(submitTitle).frame(maxWidth: .infinity)
           }
@@ -84,44 +72,21 @@ struct ClarifyCardView: View {
         }
       }
     }
-    .padding()
-    .background(Color(uiColor: .tertiarySystemBackground), in: .rect(cornerRadius: 14))
-    .overlay(RoundedRectangle(cornerRadius: 14).stroke(.blue.opacity(0.5)))
-    .padding(.horizontal)
+    .promptCardChrome(tint: .blue)
   }
 
-  /// The questions, in a vertical `ScrollView` bounded by ``BoundedHeightLayout``: the natural
-  /// height while it fits under the cap, the cap past it, down to the approval card's floor
-  /// under a squeeze. The transcript reserve applies only to the multi-question card — the one
-  /// `ChatView` gives layout priority (`isCompressibleCardPending`); without priority there is
-  /// nothing to hand back.
+  /// The questions, in a ``BoundedScrollRegion``. The transcript reserve applies only to the
+  /// multi-question card — the one `ChatView` gives layout priority
+  /// (`isCompressibleCardPending`).
   private var scrollableContent: some View {
-    BoundedHeightLayout(
-      cap: contentMaxHeight,
-      minHeight: ApprovalCardView.contentMinHeight,
+    BoundedScrollRegion(
+      spacing: request.isMultiQuestion ? 18 : 10,
       reserve: request.isMultiQuestion ? ApprovalCardView.transcriptReserve : 0
     ) {
-      ScrollView(.vertical) {
-        VStack(alignment: .leading, spacing: request.isMultiQuestion ? 18 : 10) {
-          ForEach(Array(request.questions.enumerated()), id: \.offset) { _, question in
-            questionSection(question)
-          }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-      }
-      .scrollBounceBehavior(.basedOnSize)
-      .onScrollGeometryChange(for: ApprovalCardView.FadeState.self) { geometry in
-        ApprovalCardView.FadeState(
-          isFaded: ApprovalCardView.hasBottomOverflow(
-            visibleRect: geometry.visibleRect, contentHeight: geometry.contentSize.height
-          ),
-          rampHeight: ApprovalCardView.fadeRampHeight(viewportHeight: geometry.containerSize.height)
-        )
-      } action: { _, newFade in
-        fade = newFade
+      ForEach(Array(request.questions.enumerated()), id: \.offset) { _, question in
+        questionSection(question)
       }
     }
-    .mask { ApprovalCardView.bottomFadeMask(fade) }
   }
 
   @ViewBuilder
@@ -145,7 +110,7 @@ struct ClarifyCardView: View {
         ForEach(question.choices, id: \.self) { choice in
           choiceRow(choice, in: question)
         }
-        if showsOtherRow {
+        if request.offersOtherRow {
           otherRow(question)
         }
       }
@@ -170,14 +135,14 @@ struct ClarifyCardView: View {
     let split = ClarifyChoice.split(choice)
     let selected = draft.isPicked(choice, in: question)
     return Button {
-      if submitsOnTap {
+      if request.submitsOnTap {
         onSubmit([question.answerKey: .choices([choice])])
       } else {
         draft.toggle(choice, in: question)
       }
     } label: {
       HStack(spacing: 8) {
-        if !submitsOnTap {
+        if !request.submitsOnTap {
           Image(systemName: selectionIcon(selected: selected, multiSelect: question.multiSelect))
         }
         Text(split.label)
@@ -202,8 +167,7 @@ struct ClarifyCardView: View {
       .textFieldStyle(.roundedBorder)
       .submitLabel(.send)
       .onSubmit {
-        // Return sends only where a single answer is all the card needs.
-        if !request.isMultiQuestion, draft.isComplete(for: request) {
+        if draft.sendsOnReturn(for: request) {
           onSubmit(draft.answers(for: request))
         }
       }
@@ -224,36 +188,17 @@ struct ClarifyCardView: View {
     case (false, false): "circle"
     }
   }
-
-  /// The one-question single-select form, where a tapped choice is the whole answer.
-  private var submitsOnTap: Bool {
-    guard !request.isMultiQuestion, let question = request.questions.first else { return false }
-    return !question.isFreeText && !question.multiSelect
-  }
-
-  /// The "Other" row is a v7 form; a legacy `clarify.request` keeps today's choices-only card.
-  private var showsOtherRow: Bool {
-    request.answerShape != .legacyRespond
-  }
-
-  /// The pinned primary button's title, `nil` where a tap on a choice is the only way to answer
-  /// (a legacy single-select card, which has no Other row).
-  private var submitTitle: String? {
-    if request.isMultiQuestion { return "Confirm" }
-    guard let question = request.questions.first else { return nil }
-    if question.isFreeText { return "Send" }
-    if question.multiSelect { return "Submit" }
-    return showsOtherRow ? "Send" : nil
-  }
 }
 
-/// Pinned card for a sudo password or a secret value (legacy event or v7 server request): a
-/// secure-entry field with Skip, plus the sudo `command` / secret `env_var` line when the
-/// request carries one.
+/// Pinned card for a sudo password or a secret value (legacy event or v7 server request), in
+/// the other cards' shape: a rigid one-line title and a **pinned row** — the secure field,
+/// Skip and send — over ONE ``BoundedScrollRegion`` holding the server-controlled text (the
+/// prompt, and the sudo `command` / secret `env_var` line when the request carries one), so a
+/// long prompt or command scrolls in place instead of pushing the field off screen (#65).
 struct SecretCardView: View {
   let kind: SecretKind
   let prompt: SecretPrompt
-  /// Called with the typed value.
+  /// Called with the value exactly as typed.
   let onSubmit: (String) -> Void
   let onSkip: () -> Void
 
@@ -263,24 +208,27 @@ struct SecretCardView: View {
     VStack(alignment: .leading, spacing: 10) {
       Label(kind == .sudo ? "Password required" : "Secret required", systemImage: "key.fill")
         .font(.subheadline.weight(.semibold))
+        .lineLimit(1)
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
 
-      if let promptText = prompt.prompt, !promptText.isEmpty {
-        Text(promptText)
-          .font(.callout)
-          .textSelection(.enabled)
-          .frame(maxWidth: .infinity, alignment: .leading)
-      }
-
-      if let detail {
-        // Clamped: this card is rigid (no bounded scroll region), so a long redacted sudo
-        // command must not push the field and the composer off screen.
-        Text(detail)
-          .font(.caption.monospaced())
-          .foregroundStyle(.secondary)
-          .lineLimit(3)
-          .truncationMode(.middle)
-          .textSelection(.enabled)
-          .frame(maxWidth: .infinity, alignment: .leading)
+      if hasRegionContent {
+        BoundedScrollRegion {
+          if let promptText {
+            Text(promptText)
+              .font(.callout)
+              .textSelection(.enabled)
+              .fixedSize(horizontal: false, vertical: true)
+              .frame(maxWidth: .infinity, alignment: .leading)
+          }
+          if let detail {
+            Text(detail)
+              .font(.caption.monospaced())
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+              .fixedSize(horizontal: false, vertical: true)
+              .frame(maxWidth: .infinity, alignment: .leading)
+          }
+        }
       }
 
       HStack(spacing: 12) {
@@ -296,20 +244,29 @@ struct SecretCardView: View {
           Image(systemName: "paperplane.fill")
         }
         .buttonStyle(.borderedProminent)
-        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .disabled(isBlank)
       }
     }
-    .padding()
-    .background(Color(uiColor: .tertiarySystemBackground), in: .rect(cornerRadius: 14))
-    .overlay(RoundedRectangle(cornerRadius: 14).stroke(.blue.opacity(0.5)))
-    .padding(.horizontal)
+    .promptCardChrome(tint: .blue)
+  }
+
+  /// A blank entry can't be sent (Skip is the way to send nothing) — but a value that is
+  /// sent goes as typed: edge whitespace may be part of a password or secret.
+  private var isBlank: Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   private func submit() {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return }
-    onSubmit(trimmed)
+    guard !isBlank else { return }
+    onSubmit(text)
     text = ""
+  }
+
+  private var hasRegionContent: Bool { promptText != nil || detail != nil }
+
+  private var promptText: String? {
+    guard let value = prompt.prompt, !value.isEmpty else { return nil }
+    return value
   }
 
   /// The sudo `command` or the secret's `env_var`, when the request carries one.

@@ -210,7 +210,7 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
 /// One entry of `open_requests` (v7): a server→client request still waiting on an answer,
 /// in the same `{id, method, params}` shape as the live request frame. `params` stays raw —
 /// the reconcile decodes it per `method`, exactly as a live frame is. A missing `params`
-/// decodes as `.null` (the per-kind decode then treats it as malformed).
+/// decodes as `.null` (the per-kind decode then rejects it).
 public struct OpenRequest: Equatable, Sendable, Decodable {
   public var id: String
   public var method: String

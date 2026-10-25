@@ -108,7 +108,7 @@ struct ServerRequestTests {
     let expected = PendingServerRequest(id: "srq-approval", kind: .approval(ApprovalRequest(command: "rm /tmp/foo")))
     await store.send(.gatewayEvent(event)) {
       $0.serverRequests = [expected]
-      $0.present(expected.interaction)
+      $0.present(expected.kind)
     }
     client.disconnect()
     await store.finish()
@@ -144,14 +144,13 @@ struct ServerRequestTests {
     }
     await store.send(.gatewayEvent(event)) {
       $0.serverRequests = [expected]
-      $0.present(expected.interaction)
+      $0.present(expected.kind)
     }
   }
 
-  /// A rendered clarify whose params are malformed is cancelled with `{}` through
+  /// A rendered clarify whose params are not an object is cancelled with `{}` through
   /// `request.answer`, never presented.
-  @Test(arguments: [JSONValue.null, .array([]), .object(["session_id": .string("live")]),
-                    .object(["question": .string("  ")]), .object(["request_id": .string("r1")])])
+  @Test(arguments: [JSONValue.null, .array([]), .string("q")])
   func malformedClarifyIsCancelled(payload: JSONValue) async throws {
     let transport = FakeTransport { frame, inbound in
       let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
@@ -202,17 +201,16 @@ struct ServerRequestTests {
     }
     await store.send(.gatewayEvent(.serverRequest(sudo))) {
       $0.serverRequests = [sudo]
-      $0.present(sudo.interaction)
+      $0.present(sudo.kind)
     }
     await store.send(.gatewayEvent(.serverRequest(secret))) {
       $0.serverRequests = [sudo, secret]
     }
   }
 
-  /// A rendered sudo / secret whose params are malformed is skipped with `{value: ""}`
+  /// A rendered sudo / secret whose params are not an object is skipped with `{value: ""}`
   /// through `request.answer`, never presented.
-  @Test(arguments: [("sudo", JSONValue.null), ("sudo", .object(["command": .number(1)])),
-                    ("secret", .object(["session_id": .string("live")])), ("secret", .array([]))])
+  @Test(arguments: [("sudo", JSONValue.null), ("sudo", .number(1)), ("secret", .null), ("secret", .array([]))])
   func malformedSecretIsSkipped(method: String, payload: JSONValue) async throws {
     let transport = FakeTransport { frame, inbound in
       let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
@@ -233,11 +231,10 @@ struct ServerRequestTests {
     client.disconnect()
   }
 
-  /// A rendered approval whose params are malformed — or carry nothing to show — is denied
-  /// through `request.answer`, never presented. The probe yielded by the fake on the answer
-  /// arrives FIRST, so no card event preceded it.
-  @Test(arguments: [JSONValue.null, .array([]), .object(["command": .number(9)]),
-                    .object(["choices": .string("once")]), .object(["session_id": .string("live")])])
+  /// A rendered approval whose params are not an object is denied through `request.answer`,
+  /// never presented. The probe yielded by the fake on the answer arrives FIRST, so no card
+  /// event preceded it.
+  @Test(arguments: [JSONValue.null, .array([]), .bool(true)])
   func malformedApprovalIsDenied(payload: JSONValue) async throws {
     let transport = FakeTransport { frame, inbound in
       let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
@@ -260,9 +257,55 @@ struct ServerRequestTests {
     client.disconnect()
   }
 
+  /// A rendered method whose OBJECT params the phone cannot decode — a newer shape a desktop
+  /// sharing the session may render, or a content-less approval / secret — is never answered
+  /// (no deny, no cancel for everyone) and never presented; the phone banners instead,
+  /// without ending the turn.
+  @Test(arguments: [
+    ("approval", JSONValue.object(["session_id": .string("live")])),
+    ("approval", .object(["command": .number(9)])),
+    ("approval", .object(["choices": .string("once")])),
+    ("clarify", .object(["session_id": .string("live")])),
+    ("clarify", .object(["question": .string("  ")])),
+    ("clarify", .object(["request_id": .string("r1")])),
+    ("clarify", .object(["prompts": .array([.object(["id": .string("q0"), "text": .string("New shape?")])])])),
+    ("sudo", .object(["command": .number(1)])),
+    ("secret", .object(["session_id": .string("live")])),
+  ])
+  func undecodableObjectParamsAreLeftUnansweredWithABanner(method: String, payload: JSONValue) async throws {
+    let transport = FakeTransport()
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
+    var iterator = events.makeAsyncIterator()
+    transport.inject(serverRequestFrame(id: "srq/new", method: method, params: payload))
+    transport.inject(probe("probe.after"))
+    let banner = try #require(await iterator.next())
+    #expect(banner == .serverRequestFailed(message: GatewayConnection.unreadablePromptMessage(method)))
+    #expect(await iterator.next() == .unknown(type: "probe.after", raw: .object([:])))
+    for _ in 0..<200 { await Task.yield() } // a stray automatic answer would land meanwhile
+    #expect(transport.sent.isEmpty)
+    client.disconnect()
+
+    var initial = ChatFeature.State(connection: ServerConnection(baseURL: url, token: "t"), status: .ready)
+    initial.isSending = true
+    let store = TestStore(initialState: initial) { ChatFeature() }
+    await store.send(.gatewayEvent(banner)) {
+      $0.errorBanner = GatewayConnection.unreadablePromptMessage(method)
+    }
+  }
+
+  @Test func unreadablePromptMessageNamesEachKind() {
+    #expect(GatewayConnection.unreadablePromptMessage("approval")
+      == "Couldn’t show an approval request from the agent. Answer it on another device, or stop the turn.")
+    #expect(GatewayConnection.unreadablePromptMessage("clarify").hasPrefix("Couldn’t show a question from the agent."))
+    #expect(GatewayConnection.unreadablePromptMessage("sudo").hasPrefix("Couldn’t show a password request"))
+    #expect(GatewayConnection.unreadablePromptMessage("secret").hasPrefix("Couldn’t show a secret request"))
+  }
+
   /// A failed advertisement opens the ready gate first and only then surfaces, so the
-  /// `.ready` reset can't wipe it; the socket stays up, and nothing retries on this
-  /// connection (the next connect re-advertises — no background retry loop).
+  /// `.ready` reset can't wipe it; the socket and the running turn stay up, nothing retries
+  /// on this connection (the next connect re-advertises — no background retry loop), and
+  /// with `declines_not_shown` never confirmed a window bridge gets no 4404.
   @Test func advertisementFailureSurfacesAfterReadyAndIsNotRetried() async throws {
     let clock = TestClock()
     let attempts = LockIsolated(0)
@@ -276,6 +319,7 @@ struct ServerRequestTests {
     let client = HermesGatewayClient.make(clock: clock) { _ in transport }
     var initial = ChatFeature.State(connection: ServerConnection(baseURL: url, token: "t"))
     initial.hasRequestedSession = true // isolate protocol bootstrap from session hydration
+    initial.isSending = true // a running turn: the failure must not end it
     let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
       $0.hermesGateway = client
       $0.debugLog.append = { _ in }
@@ -289,9 +333,12 @@ struct ServerRequestTests {
       $0.errorBanner = message
     }
     await clock.advance(by: .seconds(120))
+    transport.inject(serverRequestFrame(id: "bridge", method: "tour", params: .object([:])))
     transport.inject(#"{"method":"event","params":{"type":"probe.ack","payload":{}}}"#)
     await store.receive(\.gatewayEvent) // probe.ack: the receive loop survived the failure
     #expect(attempts.value == 1)
+    #expect(transport.sent.count == 1) // the one advertisement; no 4404 for the tour
+    #expect(store.state.isSending)
     await store.send(.teardown)
     await store.finish()
   }
@@ -342,19 +389,24 @@ struct ServerRequestTests {
     let transport = FakeTransport() // never answers
     let client = HermesGatewayClient.make(clock: clock) { _ in transport }
     let events = client.connect(url, .token("t"))
-    var iterator = events.makeAsyncIterator()
+    // Events are collected off the test task, and the clock is advanced in bounded steps
+    // until each one lands: a sleeper that registers late still fires, and a missing event
+    // fails the wait instead of hanging the suite.
+    let received = LockIsolated<[GatewayEvent]>([])
+    let consumer = Task { for await event in events { received.withValue { $0.append(event) } } }
     transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
-    transport.inject(#"{"method":"event","params":{"type":"probe.window","payload":{}}}"#)
-    #expect(await iterator.next() == .unknown(type: "probe.window", raw: .object([:])))
     await waitUntil { transport.sent.count == 1 }
-    for _ in 0..<20 { await Task.yield() } // the cap + request-timeout sleeps reach the clock
-    await clock.advance(by: GatewayConnection.advertisementReadyCap)
-    #expect(await iterator.next() == .ready)
-    await clock.advance(by: .seconds(25))
-    #expect(await iterator.next() == .serverRequestsUnavailable(
+
+    let start = clock.now
+    await advanceUntil(clock, step: .seconds(1), limit: 30) { received.value.contains(.ready) }
+    #expect(start.duration(to: clock.now) >= GatewayConnection.advertisementReadyCap)
+    let failure = GatewayEvent.serverRequestsUnavailable(
       message: "Couldn’t enable approvals and other prompts: request timed out: client.capabilities"
-    ))
+    )
+    await advanceUntil(clock, step: .seconds(1), limit: 60) { received.value.contains(failure) }
+    #expect(received.value == [.ready, failure])
     client.disconnect()
+    consumer.cancel()
   }
 
   /// A failed automatic send (a 4404 decline, a malformed approval's deny) banners without
@@ -449,37 +501,103 @@ struct ServerRequestTests {
     await connection.shutdown()
   }
 
-  @Test func advertisementFailureSurfacesWithoutEndingTurnAndIsNotRetried() async throws {
-    let attempts = LockIsolated(0)
+  // MARK: The ready gate
+
+  /// A second `gateway.ready` while the gate is closed releases ONE `.ready` (the reducer's
+  /// handling is idempotent), and a `gateway.ready` after the gate opened passes straight
+  /// through.
+  @Test func readyFramesAroundTheGate() async throws {
+    let capabilitiesID = LockIsolated<Int?>(nil)
+    let transport = FakeTransport { frame, _ in
+      let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
+      if request["method"]?.stringValue == "client.capabilities" {
+        capabilitiesID.setValue(request["id"]?.intValue)
+      }
+    }
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
+    var iterator = events.makeAsyncIterator()
+    transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
+    transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
+    transport.inject(probe("probe.closed"))
+    #expect(await iterator.next() == .unknown(type: "probe.closed", raw: .object([:])))
+    await waitUntil { capabilitiesID.value != nil }
+    let id = try #require(capabilitiesID.value)
+    transport.inject(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
+    #expect(await iterator.next() == .ready)
+    transport.inject(probe("probe.opened"))
+    #expect(await iterator.next() == .unknown(type: "probe.opened", raw: .object([:]))) // one .ready only
+
+    transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
+    #expect(await iterator.next() == .ready) // the open gate passes it through
+    #expect(transport.sent.count == 1) // and it never re-advertises
+    client.disconnect()
+  }
+
+  /// Shutting down while the gate is closed releases no `.ready`: the stream just ends.
+  @Test func shutdownWhileTheGateIsClosedYieldsNoReady() async throws {
+    let clock = TestClock()
+    let transport = FakeTransport() // never acknowledges the advertisement
+    let (events, continuation) = AsyncStream<GatewayEvent>.makeStream()
+    let connection = GatewayConnection(transport: transport, events: continuation, clock: clock)
+    await connection.start()
+    var iterator = events.makeAsyncIterator()
+    transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
+    transport.inject(probe("probe.closed"))
+    #expect(await iterator.next() == .unknown(type: "probe.closed", raw: .object([:])))
+    await connection.shutdown()
+    await clock.advance(by: .seconds(60)) // a surviving cap task would release `.ready` here
+    #expect(await iterator.next() == nil)
+  }
+
+  /// An advertisement that succeeds AFTER the cap released `.ready` still counts: its
+  /// `declines_not_shown` licenses the 4404.
+  @Test func lateAdvertisementSuccessStillStoresDeclines() async throws {
+    let clock = TestClock()
+    let capabilitiesID = LockIsolated<Int?>(nil)
+    let transport = FakeTransport { frame, _ in
+      let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
+      if request["method"]?.stringValue == "client.capabilities" {
+        capabilitiesID.setValue(request["id"]?.intValue)
+      }
+    }
+    let received = LockIsolated<[GatewayEvent]>([])
+    let client = HermesGatewayClient.make(clock: clock) { _ in transport }
+    let events = client.connect(url, .token("t"))
+    let consumer = Task { for await event in events { received.withValue { $0.append(event) } } }
+    transport.inject(#"{"method":"event","params":{"type":"gateway.ready"}}"#)
+    await waitUntil { capabilitiesID.value != nil }
+    await advanceUntil(clock, step: .seconds(1), limit: 30) { received.value.contains(.ready) }
+
+    let id = try #require(capabilitiesID.value)
+    transport.inject(#"{"jsonrpc":"2.0","id":\#(id),"result":{"declines_not_shown":true}}"#)
+    transport.inject(probe("probe.acked"))
+    await waitUntil { received.value.contains(.unknown(type: "probe.acked", raw: .object([:]))) }
+    transport.inject(serverRequestFrame(id: "srq-tour", method: "tour", params: .object([:])))
+    await waitUntil { transport.sent.count == 2 }
+    let decline = try JSONDecoder().decode(JSONValue.self, from: Data(try #require(transport.sent.last).utf8))
+    #expect(decline["error"]?["code"] == .number(4404))
+    client.disconnect()
+    consumer.cancel()
+  }
+
+  /// An automatic skip whose `request.answer` comes back with a status other than `ok` /
+  /// `expired` is a failure, bannered like a throw.
+  @Test func automaticSkipWithAnUnknownStatusBanners() async throws {
     let transport = FakeTransport { frame, inbound in
       let request = try! JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
       if let id = request["id"]?.intValue {
-        attempts.withValue { $0 += 1 }
-        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"error":{"message":"busy"}}"#)
+        inbound.yield(#"{"jsonrpc":"2.0","id":\#(id),"result":{"status":"weird"}}"#)
       }
     }
-    let (events, continuation) = AsyncStream<GatewayEvent>.makeStream()
-    let connection = GatewayConnection(transport: transport, events: continuation)
-    await connection.start()
-    await connection.advertiseServerRequests()
-    var initial = ChatFeature.State(connection: ServerConnection(baseURL: url, token: "t"), status: .ready)
-    initial.isSending = true
-    initial.present(.approval(ApprovalRequest(command: "rm foo")))
-    let store = TestStore(initialState: initial) { ChatFeature() }
+    let client = HermesGatewayClient.make { _ in transport }
+    let events = client.connect(url, .token("t"))
     var iterator = events.makeAsyncIterator()
-    let failure = try #require(await iterator.next())
-    await store.send(.gatewayEvent(failure)) {
-      $0.serverRequestsUnavailable = "Couldn’t enable approvals and other prompts: busy"
-      $0.errorBanner = "Couldn’t enable approvals and other prompts: busy"
-    }
-    await connection.advertiseServerRequests() // one attempt per connection
-    #expect(attempts.value == 1)
-    transport.inject(serverRequestFrame(id: "bridge", method: "tour", params: .object([:])))
-    transport.inject(probe("probe.after"))
-    #expect(await iterator.next() == .unknown(type: "probe.after", raw: .object([:])))
-    #expect(transport.sent.count == 1) // `declines_not_shown` never confirmed → no 4404
-    await connection.shutdown()
-    await store.finish()
+    transport.inject(serverRequestFrame(id: "srq/bad", method: "approval", params: .null))
+    #expect(await iterator.next() == .serverRequestFailed(
+      message: "Couldn’t deny a malformed approval: Malformed request.answer result"
+    ))
+    client.disconnect()
   }
 
   // MARK: Reducer: wire generation + the standing advertisement failure

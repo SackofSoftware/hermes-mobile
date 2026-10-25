@@ -32,8 +32,8 @@ struct ChatView: View {
       //
       // Scoped by `isCompressibleCardPending`: the approval card and the multi-question
       // clarify card (up to five sections) are the bounded, scrollable cards tall enough to
-      // need the room. A one-question clarify is a short form whose region hugs it, and the
-      // secret card is a rigid field, so priority there would only take room from the
+      // need the room. A one-question clarify and the secret card are short forms whose
+      // region hugs them, so priority there would only take room from the
       // transcript (measured on the old rigid clarify card: 160pt → 13pt with a long
       // question) without giving the card anything it uses. Every card gets a fresh identity
       // per presentation — a replacement that does not pass through `nil` (a queued request, a

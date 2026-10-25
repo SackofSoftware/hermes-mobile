@@ -669,6 +669,21 @@ final class ChatSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  /// A sudo command far taller than the cap scrolls inside the card's bounded region, under a
+  /// bottom fade, while the field, Skip and send stay pinned below it. Height pinned for the
+  /// reason on `testApprovalCard` (a compressible region renders at its floor otherwise).
+  func testSudoCard_longCommandScrolls() {
+    let view = SecretCardView(
+      kind: .sudo,
+      prompt: SecretPrompt(command: ApprovalCardLayoutTests.longCommand),
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 460)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
   /// v7 secret names the environment variable the value is saved under.
   func testSecretCard_envVar() {
     let view = SecretCardView(

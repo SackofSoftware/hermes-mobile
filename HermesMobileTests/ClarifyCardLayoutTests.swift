@@ -50,19 +50,23 @@ final class ClarifyCardLayoutTests: XCTestCase {
       "…and the region must keep its floor's worth of readable questions"
     )
 
+    let composer = chat.composer.convert(chat.composer.bounds, to: nil)
+    XCTAssertLessThanOrEqual(
+      composer.maxY, chat.windowHeight, "the card must not push the composer off screen")
+    let regionFrame = region.convert(region.bounds, to: nil)
+
     for title in ["Skip", "Confirm"] {
       let frame = try buttonFrame(title, in: chat)
       XCTAssertGreaterThanOrEqual(frame.minY, 0, "\(title) must not be clipped off the top")
       XCTAssertLessThanOrEqual(
         frame.maxY, chat.windowHeight, "\(title) must stay inside the window — it is pinned")
+      // The pinned row sits between the region and the composer: below the scroll, never
+      // overlapping it, and above the composer, never under it.
+      XCTAssertGreaterThanOrEqual(
+        frame.minY, regionFrame.maxY - 0.5, "\(title) must sit below the region, not over it")
+      XCTAssertLessThanOrEqual(
+        frame.maxY, composer.minY + 0.5, "\(title) must sit above the composer, not under it")
     }
-
-    let composer = chat.composer.convert(chat.composer.bounds, to: nil)
-    XCTAssertLessThanOrEqual(
-      composer.maxY, chat.windowHeight, "the card must not push the composer off screen")
-    let regionFrame = region.convert(region.bounds, to: nil)
-    XCTAssertLessThan(
-      regionFrame.maxY, composer.minY, "the pinned row must fit between the region and the composer")
   }
 
   /// The multi-question card gets `ChatView`'s layout priority (`isCompressibleCardPending`) —

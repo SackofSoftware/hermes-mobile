@@ -615,21 +615,24 @@ reconnecting socket.
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift`, `DebugLogClientTests.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ReplayTests.swift`
 
-- [ ] add `CancelID.replay`, `Action.replayResult(Result<ReplayBatch, GatewayError>)`, the
+- [x] add `CancelID.replay`, `Action.replayResult(Result<ReplayBatch, GatewayError>)`, the
       `replay(cursor:)` effect (`session.events.since {session_id, last_seen}`, nothing else;
       malformed result → `.failure(.server("Malformed session.events.since result"))`)
-- [ ] add `DebugLogClient.note(type:summary:)` (ring buffer + no-op `testValue`)
-- [ ] insert the replay branch in `reduce(event: .ready)` (stored-session path only, cursor
+      (➕ the failure `debugLog.note` is written by this effect, before it sends `.replayResult`)
+- [x] add `DebugLogClient.note(type:summary:)` (ring buffer + no-op `testValue`)
+- [x] insert the replay branch in `reduce(event: .ready)` (stored-session path only, cursor
       must match `liveSessionID`, `replaySupported`, `!isSessionAuthority`)
-- [ ] implement `replayResult`: guard `status == .ready`; epoch mismatch → drop cursor, adopt;
+- [x] implement `replayResult`: guard `status == .ready`; epoch mismatch → drop cursor, adopt;
       `truncated` → advance cursor to `latest_seq`, fold nothing; otherwise fold gated events in
       order via `reduceGatewayEvent` + `advanceCursor` under `isFoldingReplay`, skipping
       `isLegacyPrompt`, merging the fold's effects; `-32601` → `replaySupported = false`; any
       failure → `debugLog.note` with the call-site carve-out comment; always finish with
       `hydrate(sessionID: stored, profile: state.profileName)`
-- [ ] `drainQueueIfReady` returns `.none` while `isFoldingReplay`
-- [ ] cancel `CancelID.replay` on `.teardown`, `.teardownSocketOnly`, and `.gatewayClosed`
-- [ ] write reduction tests (`TestStore`, `TestClock`, in-memory snapshot):
+      (➕ the seq gate also requires the element's `session_id` to equal the cursor's)
+- [x] `drainQueueIfReady` returns `.none` while `isFoldingReplay`
+- [x] cancel `CancelID.replay` on `.teardown`, `.teardownSocketOnly`, and `.gatewayClosed`
+- [x] write reduction tests (`TestStore`, `TestClock`, in-memory snapshot):
+      (➕ all in `ReplayTests.swift`; `HydrateTests.swift` is untouched here, Task 5 extends it)
       - reconnect with cursor (live1, 41) sends `session.events.since {session_id: live1,
         last_seen: 41}` (exact params, no `profile`) BEFORE `session.resume` (record the RPC
         order)
@@ -666,7 +669,7 @@ reconnecting socket.
       - replayed `message.complete` with a `running: false` hydrate → wholesale replace, no
         preserved rows; replayed `review.summary` is wiped by the hydrate (pins the accepted
         behaviour)
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 5: Cursor lifetime across background grace and re-hydrates
 

@@ -55,15 +55,27 @@ class SnapshotTestCase: XCTestCase {
   /// with the simulator's setting and mismatch every pixel; pass `.light` only for a screen
   /// whose light rendering is itself under test (the sidebar's accent highlight over a light
   /// list).
+  ///
+  /// `height` overrides the device's height (same width, safe area, and traits) for a screen
+  /// whose content under test runs past one phone screen — the date-sectioned session list.
   func deviceImage<V: SwiftUI.View>(
     precision: Float = 0.98,
-    appearance: UIUserInterfaceStyle = .dark
+    appearance: UIUserInterfaceStyle = .dark,
+    height: CGFloat? = nil
   ) -> Snapshotting<V, UIImage> {
-    .image(
+    var config = device
+    if let height, let width = device.size?.width {
+      config = ViewImageConfig(
+        safeArea: device.safeArea,
+        size: CGSize(width: width, height: height),
+        traits: device.traits
+      )
+    }
+    return .image(
       drawHierarchyInKeyWindow: true,
       precision: precision,
       perceptualPrecision: 0.98,
-      layout: .device(config: device),
+      layout: .device(config: config),
       traits: UITraitCollection(userInterfaceStyle: appearance)
     )
   }

@@ -1,17 +1,14 @@
 import HermesKit
 import SwiftUI
 
-/// One row in the session list. Like the desktop sidebar: a human-readable name
-/// (`Session.displayName`: title → preview → id) + relative age + an unread dot. A
-/// *secondary* preview line is shown only for search results (`showsPreview`); when a
-/// session has no real title the preview is promoted to the headline everywhere.
+/// The compact one-line session row for dense surfaces — cron run peeks, the flat cron
+/// fallback, unmatched cron runs, and the archived sheet (interactive rows are
+/// `SessionCardView` cards). Like the desktop sidebar: a human-readable name
+/// (`Session.displayName`: title → preview → id) + relative age + an unread dot.
 struct SessionRowView: View {
   let session: Session
   /// Reference date the timestamp is relative to (injected so it's controllable).
   var now: Date = Date()
-  /// Show the preview as a *secondary* line under a real title (search results). The
-  /// preview is still promoted to the headline for untitled sessions regardless of this.
-  var showsPreview: Bool = false
   /// New activity since the user last opened this session.
   var isUnread: Bool = false
   /// Whether this session is pinned (shows a small pin glyph).
@@ -31,10 +28,8 @@ struct SessionRowView: View {
 
   var body: some View {
     // Never show the raw `session.id` as a name: with no real title (incl. the server's
-    // "Untitled" placeholder), promote the first-message preview to the headline — in the
-    // grouped list too, not just search. `displayName` is the shared rule (title → preview → id).
-    let snippet = session.resolvedPreview
-    let promotesSnippet = session.resolvedTitle == nil && snippet != nil
+    // "Untitled" placeholder), promote the first-message preview to the headline.
+    // `displayName` is the shared rule (title → preview → id).
     let headline = session.displayName
 
     return VStack(alignment: .leading, spacing: 4) {
@@ -69,13 +64,6 @@ struct SessionRowView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
-      }
-      // Show the snippet as a secondary line only when it isn't already the headline.
-      if showsPreview, !promotesSnippet, let preview = snippet {
-        Text(preview)
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          .lineLimit(2)
       }
     }
     .padding(.vertical, 2)

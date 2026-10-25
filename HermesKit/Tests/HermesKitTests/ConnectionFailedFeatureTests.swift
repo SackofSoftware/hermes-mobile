@@ -212,7 +212,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable connection, limit, offset, order in
+      $0.hermesREST.sessions = { @Sendable connection, limit, offset, order, _ in
         probed.withValue { $0.append(connection) }
         pages.withValue { $0.append((limit, offset, order)) }
         return []
@@ -239,7 +239,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state(connection: cookieConnection)) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable connection, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable connection, _, _, _, _ in
         probed.setValue(connection)
         return []
       }
@@ -256,7 +256,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state(reason: .unreachable)) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.offline }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.offline }
     }
 
     await store.send(.retryTapped) { $0.isRetrying = true }
@@ -283,7 +283,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state(reason: .unreachable)) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw error }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw error }
     }
 
     await store.send(.retryTapped) { $0.isRetrying = true }
@@ -297,7 +297,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unauthorized }
     }
 
     await store.send(.retryTapped) { $0.isRetrying = true }
@@ -312,7 +312,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw error }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw error }
     }
 
     await store.send(.retryTapped) { $0.isRetrying = true }
@@ -325,7 +325,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state(reason: .offline)) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw Boom() }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw Boom() }
     }
 
     await store.send(.retryTapped) { $0.isRetrying = true }
@@ -342,7 +342,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state(reason: .unreachable)) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         throw URLError(.notConnectedToInternet)
       }
     }
@@ -360,7 +360,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     await store.send(.sceneBecameActive) { $0.isRetrying = true }
@@ -375,7 +375,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         probes.withValue { $0 += 1 }
         for await _ in gate { break }
         return []
@@ -402,7 +402,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         let attempt = probes.withValue { value -> Int in
           value += 1
           return value
@@ -452,7 +452,7 @@ struct ConnectionFailedFeatureTests {
     let store = TestStore(initialState: state()) {
       ConnectionFailedFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         for await _ in gate { break }
         return []
       }

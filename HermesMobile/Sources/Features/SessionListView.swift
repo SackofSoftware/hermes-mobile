@@ -2,10 +2,9 @@ import ComposableArchitecture
 import HermesKit
 import SwiftUI
 
-/// The session list: a flat (Codex-style) list, searchable, pull-to-refresh. Grouping
-/// (by workspace / chronological) is chosen from the top-trailing menu, which also opens
-/// the Archived sessions sheet. "New chat" lives in the bottom bar (alongside the iOS 26
-/// bottom search field).
+/// The session list: searchable, pull-to-refresh, inbox-style cards sectioned by update date
+/// (Today, Yesterday, …). The top-trailing button opens the Archived sessions sheet. "New
+/// chat" lives in the bottom bar (alongside the iOS 26 bottom search field).
 struct SessionListView: View {
   @Bindable var store: StoreOf<SessionListFeature>
   /// The session shown in the split view's detail column (#80), whose row gets the
@@ -13,7 +12,14 @@ struct SessionListView: View {
   /// width) highlights nothing — the iPhone list is unchanged. Passed in by `AppView` from
   /// `AppFeature.State.currentViewingSessionID`; the list itself never tracks selection.
   var highlightedSessionID: String? = nil
+  /// Sessions whose card shows the needs-input status dot — `AppFeature.State
+  /// .needsInputSessionIDs`, passed in by `AppView` like the highlight.
+  var needsInputSessionIDs: Set<String> = []
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  /// Slides the selected-tab capsule between the bottom bar's tabs.
+  @Namespace private var tabSelection
+  /// Keyboard focus for the search field, raised as soon as the field opens.
+  @FocusState private var isSearchFieldFocused: Bool
 
   var body: some View {
     List {
@@ -22,19 +28,30 @@ struct SessionListView: View {
           .foregroundStyle(.red)
           .listRowSeparator(.hidden)
       }
-      if store.isSearching {
-        // Search results are flat, with the matching snippet shown.
-        ForEach(store.sessions) { session in
-          row(session, showsPreview: true)
+      switch store.effectiveTab {
+      case .sessions:
+        if store.isSearching {
+          // Search results are flat cards. A hit carries only id, snippet (as `preview`) and
+          // start time: the untitled card promotes the snippet to its title, and the header
+          // leaves out the workspace it doesn't know.
+          ForEach(store.sessions) { session in
+            row(session, showsWorkspace: false)
+          }
+        } else {
+          sessionListContent
         }
-      } else {
-        sessionListContent
+      case .cron:
+        cronTabContent
       }
     }
     .listStyle(.plain)
     .listSectionSeparator(.hidden) // flat list — no section hairlines (row hairlines hidden per-row)
+    // Let the compact date headers size to their text instead of the plain list's tall default,
+    // and drop the built-in gap between sections: the header's own top inset separates them.
+    .environment(\.defaultMinListHeaderHeight, 0)
+    .listSectionSpacing(0)
     .overlay {
-      if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
+      if store.showsEmptyPlaceholder {
         ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
       }
     }
@@ -43,12 +60,18 @@ struct SessionListView: View {
     .overlay(alignment: .bottom) {
       CopiedToastView(token: store.copiedIDToastToken)
     }
-    // The profile pill is the centered (principal) title; "Sessions" is a list section
-    // header instead, leaving room for future sibling sections (e.g. "Cron jobs"). The
-    // pill needs the inline bar, so keep the nav title empty + inline in both cases.
+    // The profile pill is the centered (principal) title; "Sessions" / "Cron Jobs" is a list
+    // header row instead. The pill needs the inline bar, so keep the nav title empty + inline.
     .navigationTitle("")
     .navigationBarTitleDisplayMode(.inline)
-    .searchable(text: $store.searchQuery, prompt: "Search sessions")
+    // Search is opened from the toolbar's search button (Sessions tab only): the field then
+    // replaces the nav bar row, so the bottom stays the tab bar + New chat.
+    .toolbar(store.isSearchPresented ? .hidden : .visible, for: .navigationBar)
+    .safeAreaInset(edge: .top) {
+      if store.isSearchPresented {
+        searchBar
+      }
+    }
     .refreshable { store.send(.pulledToRefresh) }
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
@@ -61,15 +84,26 @@ struct SessionListView: View {
           profilePill
         }
       }
-      ToolbarItem(placement: .topBarTrailing) {
-        organizeMenu
+      // One trailing group, so iOS 26 draws Archive + Search in a single glass pill.
+      ToolbarItemGroup(placement: .topBarTrailing) {
+        Button {
+          store.send(.archivedButtonTapped)
+        } label: {
+          Label("Archived sessions", systemImage: "archivebox")
+        }
+        if store.effectiveTab == .sessions {
+          Button {
+            store.send(.searchButtonTapped, animation: reduceMotion ? nil : .snappy)
+          } label: {
+            Label("Search sessions", systemImage: "magnifyingglass")
+          }
+        }
       }
     }
-    // New chat lives at the bottom (Codex-style). A `safeAreaInset` keeps it in the
-    // normal view hierarchy so it sits above the home indicator — and, on iOS 26 where
-    // `.searchable` moves to the bottom, above the search field too.
+    // The bottom bar: the Sessions | Cron Jobs tabs (only with cron content) and New chat.
+    // A `safeAreaInset` keeps it in the normal view hierarchy, above the home indicator.
     .safeAreaInset(edge: .bottom) {
-      newChatBar
+      bottomBar
     }
     // `bottomActionSheet`, not `.confirmationDialog`: on iOS 26 the SwiftUI modifier
     // renders as a floating popover (dropping the title and Cancel) wherever it's
@@ -131,68 +165,76 @@ struct SessionListView: View {
     }
   }
 
-  /// The non-search list body: the "Sessions" header, the pinned section, the interactive
-  /// sessions (workspace groups or chronological), then the always-on Cron Jobs section.
+  /// The Sessions tab's non-search body: the "Sessions" header, the pinned section, then the
+  /// interactive sessions split into update-date sections (cron runs live in their own tab).
   /// Extracted from `body` to keep the `List` builder within the compiler's type-check
   /// budget.
   @ViewBuilder
   private var sessionListContent: some View {
-    // Top-level "Sessions" section header. Future sibling areas (e.g. "Cron jobs")
-    // render their own header the same way, all scoped to the active profile pill.
-    sessionsSectionHeader
-    // Pinned sessions float to the top in both grouping modes.
+    // Top-level "Sessions" header, scoped to the active profile pill.
+    tabTitleHeader("Sessions")
+    // Pinned sessions float to the top — as cards too, so the column never mixes card and
+    // one-line geometry (desktop parity).
     if !store.pinnedSessions.isEmpty {
-      Section("Pinned") {
+      Section {
         ForEach(store.pinnedEntries) { entry in
           row(entry)
         }
+      } header: {
+        sectionHeader("Pinned")
       }
     }
-    switch store.groupingMode {
-    case .workspace:
-      ForEach(store.groups) { group in
-        groupSection(group)
+    // The last-active-ordered lane, split into date sections (Today, Yesterday, …);
+    // branches nest under their parent with elbow stems and never split across a header.
+    ForEach(store.dateSections) { section in
+      Section {
+        ForEach(section.entries) { entry in
+          row(entry)
+        }
+      } header: {
+        sectionHeader(section.label)
       }
-    case .chronological:
-      // One last-active-ordered list — no workspace headers; branches nest under
-      // their parent with elbow stems.
-      ForEach(store.chronologicalEntries) { entry in
-        row(entry)
-      }
-    }
-    // Cron-scheduled sessions live in their own always-on section below the
-    // interactive list, in both grouping modes (filtered out of pinned/groups/
-    // chronological by the reducer). Hidden when there are none, or when the
-    // user turned the section off in the organize menu.
-    if store.showCronSection, !store.cronSessions.isEmpty {
-      cronJobsSection
     }
   }
 
-  /// Top-level content section header. The active profile is shown in the pill (the
-  /// centered nav title); this labels the sessions list as one section so future sibling
-  /// sections (e.g. "Cron jobs") can sit alongside it under the same profile.
-  private var sessionsSectionHeader: some View {
-    Text("Sessions")
+  /// A Pinned / date-section header: the title on the leading side and a hairline running to
+  /// the trailing edge, centred on the title, hugging the cards below it.
+  private func sectionHeader(_ label: String) -> some View {
+    HStack(spacing: 8) {
+      Text(label)
+        .font(.footnote.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .fixedSize()
+      Rectangle()
+        .fill(Color.secondary.opacity(0.3))
+        .frame(height: 1)
+    }
+    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
+  }
+
+  /// A tab's top-level title row ("Sessions" / "Cron Jobs"). The active profile is shown in
+  /// the pill (the centered nav title); both tabs are scoped to it.
+  private func tabTitleHeader(_ title: String) -> some View {
+    Text(title)
       .font(.title2.weight(.bold))
       .listRowSeparator(.hidden)
       .listRowBackground(Color.clear)
       .accessibilityAddTraits(.isHeader)
   }
 
-  /// Always-on "Cron Jobs" section. When the agent exposes `/api/cron/jobs` the rows are
-  /// the *jobs* (state dot, next-run countdown, unread dot), desktop-style: tapping a job
-  /// expands a single-open inline peek of its recent *runs* (standard `row(_:)`, so
-  /// tap-to-open and unread styling stay identical); a context menu offers Run now /
-  /// Pause / Resume. Older agents (or before the first jobs fetch) fall back to the flat
-  /// run list. The header carries the aggregate unread badge either way.
+  /// The Cron Jobs tab. When the agent exposes `/api/cron/jobs` the rows are the *jobs*
+  /// (state dot, next-run countdown, unread dot), desktop-style: tapping a job expands a
+  /// single-open inline peek of its recent *runs* (the compact `cronRunRow(_:)` — a dense
+  /// tree surface keeps the one-liner, like the desktop); a context menu offers Run now /
+  /// Pause / Resume. Older agents (or before the first jobs fetch) fall back to the flat run
+  /// list. The tab's own badge carries the aggregate unread count.
   @ViewBuilder
-  private var cronJobsSection: some View {
-    cronSectionHeader
+  private var cronTabContent: some View {
+    tabTitleHeader("Cron Jobs")
     if store.cronJobGroups.isEmpty {
       // Flat fallback: agent without the jobs API, or the jobs fetch hasn't landed yet.
       ForEach(store.cronSessions) { session in
-        row(session)
+        cronRunRow(session)
       }
     } else {
       ForEach(store.cronJobGroups) { group in
@@ -206,38 +248,16 @@ struct SessionListView: View {
               .listRowSeparator(.hidden)
           }
           ForEach(group.runs) { run in
-            row(run)
+            cronRunRow(run)
               .padding(.leading, 24) // indented under the owning job
           }
         }
       }
       // Runs whose job no longer exists (deleted job, legacy id) — never hide output.
       ForEach(store.unmatchedCronSessions) { session in
-        row(session)
+        cronRunRow(session)
       }
     }
-  }
-
-  /// "Cron Jobs" header with the aggregate unread badge (count of cron runs with unseen
-  /// output — the desktop's `CRON JOBS 4`), so activity is visible even from the header.
-  private var cronSectionHeader: some View {
-    HStack(spacing: 8) {
-      Label("Cron Jobs", systemImage: "clock")
-        .font(.title2.weight(.bold))
-      if store.cronUnreadCount > 0 {
-        Text("\(store.cronUnreadCount)")
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(.white)
-          .padding(.horizontal, 7)
-          .padding(.vertical, 2)
-          .background(Color.hermesAccent, in: Capsule())
-          .accessibilityLabel("\(store.cronUnreadCount) unread cron runs")
-      }
-      Spacer()
-    }
-    .listRowSeparator(.hidden)
-    .listRowBackground(Color.clear)
-    .accessibilityAddTraits(.isHeader)
   }
 
   /// One cron *job* row: state dot, title, next-run countdown (relative, from the same
@@ -404,118 +424,198 @@ struct SessionListView: View {
   /// The bottom "new session" button — a trailing circular FAB in the Hermes accent
   /// (icon-only: it starts a new session, not a chat). Rendered via `safeAreaInset` so the
   /// list content scrolls clear of it.
-  private var newChatBar: some View {
-    HStack {
-      Spacer()
+  /// The bottom bar: a glass Sessions | Cron Jobs tab pill on the leading side (only while
+  /// there is cron content — `showsTabBar`) and the round glass New chat button trailing.
+  private var bottomBar: some View {
+    HStack(alignment: .center) {
+      if store.showsTabBar {
+        tabPill
+      }
+      Spacer(minLength: 0)
       Button {
         store.send(.newSessionButtonTapped)
       } label: {
         Image(systemName: "square.and.pencil")
           .font(.title2.weight(.semibold))
-          .foregroundStyle(.white)
-          .frame(width: 56, height: 56)
-          .background(Color.hermesAccent, in: Circle())
-          .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
+          .foregroundStyle(.primary)
+          .frame(width: Self.barHeight, height: Self.barHeight)
+          .contentShape(Circle())
+          .modifier(GlassBackground(
+            shape: Circle(), isInteractive: true, fallbackShadowRadius: 6, fallbackShadowY: 3
+          ))
       }
+      .buttonStyle(.plain)
       .accessibilityLabel("New session")
     }
     .padding(.horizontal)
     .padding(.vertical, 8)
   }
 
-  /// Top-trailing menu: choose the grouping mode (checkmark on the active one), then a
-  /// divider and the Archived sessions entry. Mirrors the Codex "Organize / Manage" menu.
-  private var organizeMenu: some View {
-    Menu {
-      Picker(
-        "Grouping",
-        selection: Binding(
-          get: { store.groupingMode },
-          set: { store.send(.setGroupingMode($0)) }
-        )
-      ) {
-        Label("By workspace", systemImage: "folder").tag(SessionGroupingMode.workspace)
-        Label("Chronological", systemImage: "clock").tag(SessionGroupingMode.chronological)
+  /// The bar's shared height: the tab pill and the New chat circle line up.
+  private static let barHeight: CGFloat = 64
+
+  /// The open search field in place of the nav bar row: a glass capsule field (focused on
+  /// open) beside a round glass close button that hides it and clears the query.
+  private var searchBar: some View {
+    HStack(spacing: 12) {
+      HStack(spacing: 10) {
+        Image(systemName: "magnifyingglass")
+          .font(.body.weight(.semibold))
+          .foregroundStyle(.secondary)
+        TextField("Search sessions", text: $store.searchQuery)
+          .focused($isSearchFieldFocused)
+          .submitLabel(.search)
+          .autocorrectionDisabled()
+          .textInputAutocapitalization(.never)
       }
-      .pickerStyle(.inline)
-
-      Divider()
-
-      Toggle(isOn: Binding(
-        get: { store.showCronSection },
-        set: { store.send(.setShowCronSection($0)) }
-      )) {
-        Label("Cron Jobs section", systemImage: "clock")
-      }
-
-      Divider()
-
+      .padding(.horizontal, 16)
+      .frame(height: Self.searchBarHeight)
+      .modifier(GlassBackground(shape: Capsule()))
       Button {
-        store.send(.archivedButtonTapped)
+        isSearchFieldFocused = false
+        store.send(.searchCloseTapped, animation: reduceMotion ? nil : .snappy)
       } label: {
-        Label("Archived sessions", systemImage: "archivebox")
+        Image(systemName: "xmark")
+          .font(.body.weight(.semibold))
+          .foregroundStyle(.primary)
+          .frame(width: Self.searchBarHeight, height: Self.searchBarHeight)
+          .contentShape(Circle())
+          .modifier(GlassBackground(shape: Circle(), isInteractive: true))
       }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Close search")
+    }
+    .padding(.horizontal)
+    .padding(.vertical, 6)
+    .onAppear { isSearchFieldFocused = true }
+  }
+
+  private static let searchBarHeight: CGFloat = 48
+
+  private var tabPill: some View {
+    HStack(spacing: 0) {
+      tabButton(.sessions, title: "Sessions", systemImage: "text.bubble.fill")
+      tabButton(.cron, title: "Cron Jobs", systemImage: "clock.fill", badge: store.cronUnreadCount)
+    }
+    .padding(4)
+    .frame(height: Self.barHeight)
+    .modifier(GlassBackground(shape: Capsule(), fallbackShadowRadius: 6, fallbackShadowY: 3))
+  }
+
+  /// One tab: icon over label, the selected one on an inner capsule in the accent color. The
+  /// Cron Jobs tab carries the aggregate unread-run badge (the desktop's `CRON JOBS 4`).
+  private func tabButton(
+    _ tab: SessionListTab,
+    title: String,
+    systemImage: String,
+    badge: Int = 0
+  ) -> some View {
+    let isSelected = store.effectiveTab == tab
+    return Button {
+      store.send(.selectTab(tab), animation: reduceMotion ? nil : .snappy)
     } label: {
-      Label("Organize", systemImage: "line.3.horizontal.decrease.circle")
-    }
-  }
-
-  @ViewBuilder
-  private func groupSection(_ group: SessionGroup) -> some View {
-    let visible = store.state.visibleEntries(in: group)
-    let hidden = group.sessions.count - visible.count
-    let isExpanded = store.expandedGroups.contains(group.id)
-    Section(group.label) {
-      ForEach(visible) { entry in
-        row(entry)
+      VStack(spacing: 2) {
+        Image(systemName: systemImage)
+          .font(.title3)
+          .overlay(alignment: .topTrailing) {
+            if badge > 0 {
+              Text("\(badge)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.hermesAccent, in: Capsule())
+                .offset(x: 12, y: -6)
+            }
+          }
+        Text(title)
+          .font(.caption.weight(.semibold))
       }
-      if hidden > 0 || isExpanded, group.sessions.count > SessionListFeature.State.collapsedLimit {
-        Button(isExpanded ? "Show less" : "Show \(hidden) more") {
-          store.send(.toggleGroupExpansion(groupID: group.id))
+      .foregroundStyle(isSelected ? Color.hermesAccent : Color.primary)
+      .padding(.horizontal, 18)
+      .frame(maxHeight: .infinity)
+      .background {
+        if isSelected {
+          Capsule()
+            .fill(Color(.systemBackground).opacity(0.55))
+            .matchedGeometryEffect(id: "selectedTab", in: tabSelection)
         }
-        .font(.subheadline)
-        .listRowSeparator(.hidden)
       }
+      .contentShape(Capsule())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(tabAccessibilityLabel(title: title, badge: badge))
+    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+  }
+
+  private func tabAccessibilityLabel(title: String, badge: Int) -> String {
+    switch badge {
+    case 0: title
+    case 1: "\(title), 1 unread cron run"
+    default: "\(title), \(badge) unread cron runs"
     }
   }
 
-  /// Stemmed-entry convenience: renders a lane's `SessionBranchEntry` — the standard row
-  /// with the branch elbow stem (`└─`/`├─`) and a leading indent when nested.
+  /// Stemmed-entry convenience: renders a lane's `SessionBranchEntry` — the card with the
+  /// branch elbow stem (`└─`/`├─`) in its header and a leading indent when nested.
   private func row(_ entry: SessionBranchEntry) -> some View {
     row(entry.session, branchStem: entry.branchStem)
   }
 
+  /// An interactive session (Pinned, date sections, search) as an inbox-style card.
   private func row(
     _ session: Session,
     branchStem: String? = nil,
-    showsPreview: Bool = false
+    showsWorkspace: Bool = true
   ) -> some View {
-    // Derive pinned state from the store so every row (search, grouped, Pinned section)
-    // reflects the true state — search rows used to default to unpinned and offered a
-    // no-op "Pin" for already-pinned sessions.
+    sessionRow(session) { isPinned in
+      // Branch cards keep the 16pt indent on top of the header's elbow stem, so a nested
+      // card's whole body (not just its header) reads as belonging to the parent above.
+      SessionCardView(
+        session: session,
+        now: store.now,
+        branchStem: branchStem,
+        isUnread: store.unreadSessionIDs.contains(session.id),
+        isPinned: isPinned,
+        isActive: session.isActive == true,
+        needsInput: needsInputSessionIDs.contains(session.id),
+        showsWorkspace: showsWorkspace
+      )
+      .padding(.leading, branchStem == nil ? 0 : 16)
+    }
+    // Tighter than the plain list's default row padding: the card's own line spacing already
+    // separates its parts, so the gap between cards stays small.
+    .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+  }
+
+  /// A cron run (job peek, flat fallback, unmatched runs) as the compact one-line row — a
+  /// dense tree surface, like the desktop's cron section. Same affordances as a card.
+  private func cronRunRow(_ session: Session) -> some View {
+    sessionRow(session) { isPinned in
+      SessionRowView(
+        session: session,
+        now: store.now,
+        isUnread: store.unreadSessionIDs.contains(session.id),
+        isPinned: isPinned,
+        isActive: session.isActive == true
+      )
+    }
+  }
+
+  /// The single affordance funnel every session row goes through, whatever its body: tap to
+  /// open, highlight, swipe actions, context menu.
+  private func sessionRow<Content: View>(
+    _ session: Session,
+    @ViewBuilder content: (_ isPinned: Bool) -> Content
+  ) -> some View {
+    // Derive pinned state from the store so every row (search, date sections, Pinned
+    // section) reflects the true state — search rows used to default to unpinned and
+    // offered a no-op "Pin" for already-pinned sessions.
     let isPinned = store.pinnedIDs.contains(session.id)
     return Button {
       store.send(.sessionTapped(session.id))
     } label: {
-      // Branch rows get the desktop-style elbow stem + indent; nesting is display-only,
-      // so the row content (and its swipe/context affordances below) stay unchanged.
-      HStack(alignment: .firstTextBaseline, spacing: 0) {
-        if let branchStem {
-          Text(branchStem)
-            .font(.caption.monospaced())
-            .foregroundStyle(.tertiary)
-            .accessibilityHidden(true)
-        }
-        SessionRowView(
-          session: session,
-          now: store.now,
-          showsPreview: showsPreview,
-          isUnread: store.unreadSessionIDs.contains(session.id),
-          isPinned: isPinned,
-          isActive: session.isActive == true
-        )
-      }
-      .padding(.leading, branchStem == nil ? 0 : 16)
+      content(isPinned)
     }
     .buttonStyle(.plain)
     .listRowSeparator(.hidden)
@@ -601,7 +701,7 @@ struct SessionListView: View {
 
   @ViewBuilder
   private func pinButton(_ session: Session, isPinned: Bool) -> some View {
-    // Animate the send so the row glides between its workspace group and the Pinned
+    // Animate the send so the row glides between its date section and the Pinned
     // section (and the section itself fades in/out) instead of jumping.
     if isPinned {
       Button("Unpin", systemImage: "pin.slash") {

@@ -46,7 +46,7 @@ struct ReauthFeatureTests {
         #expect(s == session)
         activated.setValue(true)
       }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         #expect(activated.value, "cookies must be activated before the validating call")
         return []
       }
@@ -73,7 +73,7 @@ struct ReauthFeatureTests {
       ReauthFeature()
     } withDependencies: {
       $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in session }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     await store.send(.signInTapped) { $0.status = .validating }
@@ -124,7 +124,7 @@ struct ReauthFeatureTests {
     ) {
       ReauthFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     await store.send(.signInTapped) { $0.status = .validating }
@@ -179,7 +179,7 @@ struct ReauthFeatureTests {
         #expect(provider == "nous")
         return fresh
       }
-      $0.hermesREST.sessions = { @Sendable connection, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable connection, _, _, _, _ in
         let seeded = tokenStore.current
         #expect(seeded == fresh, "the fresh pair must replace the dead one before validating")
         #expect(connection.auth == .bearer(fresh))
@@ -209,7 +209,7 @@ struct ReauthFeatureTests {
       ReauthFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in fresh }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.bearerTokens = BearerTokenStore()
       $0.keychain = KeychainClient.inMemory()
     }
@@ -232,7 +232,7 @@ struct ReauthFeatureTests {
       ReauthFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in fresh }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.bearerTokens = BearerTokenStore()
       $0.keychain = KeychainClient.inMemory()
     }
@@ -317,7 +317,7 @@ struct ReauthFeatureTests {
       ReauthFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in fresh }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unauthorized }
       $0.bearerTokens = tokenStore
       $0.keychain = keychain
     }
@@ -337,7 +337,7 @@ struct ReauthFeatureTests {
       ReauthFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in fresh }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.serviceUnavailable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.serviceUnavailable }
       $0.bearerTokens = tokenStore
       $0.keychain = KeychainClient.inMemory()
     }

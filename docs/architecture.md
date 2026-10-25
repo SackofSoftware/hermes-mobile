@@ -48,7 +48,7 @@ AppFeature                 // root nav + launch auto-connect; onboarding until c
 ├─ ReauthFeature           // re-auth modal: fixed URL, prefilled identity, password/token field
 │                          //   or (.oauth) a single "Continue with …" button;
 │                          //   same-user resume vs different-user switch vs Quit→onboarding
-├─ SessionListFeature      // flat list, grouped by workspace OR chronological (persisted) /
+├─ SessionListFeature      // flat list: pinned + update-date sections + cron jobs section /
 │  │                       //   search / create; pin (client-side) + archive/rename/delete (server) +
 │  │                       //   working-glow auto-poll; profile pill/switcher (per-call scoped) +
 │  │                       //   presents Settings + Archived + AddProfile sheets
@@ -129,9 +129,8 @@ a `testValue`/`.inMemory()` variant):
   server: on hydrate the server wins, cached rows are replaced wholesale (no merge/dedup), and
   the whole store is wiped on logout. `.inMemory()` test variant.
 - **`PreferencesClient`** — non-secret prefs: server URL (for auto-login), per-session
-  seen counts, client-side pinned session ids, the session-list grouping mode
-  (`SessionGroupingMode`), and the selected profile name (`hermes.selected-profile-id`). All
-  cleared/reset on logout.
+  seen counts, client-side pinned session ids, the default swipe action, and the selected
+  profile name (`hermes.selected-profile-id`). All cleared/reset on logout.
 - **`PushClient`** — push notifications: `requestAuthorization`/`authorizationStatus`,
   device-token registration as an `AsyncStream<String>` (lowercase-hex, re-emits on OS token
   rotation), an `incomingTaps()` stream of `PushTap` values (carrying `session_id` + optional

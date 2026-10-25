@@ -25,6 +25,16 @@ enum DemoMode {
 
   // Fixed reference values so relative timestamps render deterministically.
   private static let now = Date(timeIntervalSince1970: 1_749_600_000)
+  /// Pinned so the date-section headers never depend on the capture device's time zone:
+  /// `now` is Wed 11 Jun 2025 00:00 UTC, i.e. still Tue 10 Jun's nominal day (4 AM
+  /// rollover), with a Monday-first week.
+  private static let calendar: Calendar = {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "UTC")!
+    calendar.locale = Locale(identifier: "en_US")
+    calendar.firstWeekday = 2
+    return calendar
+  }()
   private static let connection = ServerConnection(
     baseURL: URL(string: "http://mac.tailnet:9119")!,
     token: "demo-token"
@@ -47,9 +57,10 @@ enum DemoMode {
     // ready status frozen exactly as authored.
     deps.hermesGateway.connect = { _, _ in AsyncStream { _ in } }
     // Session-list refresh + poll return the seeded sessions unchanged — both the unscoped
-    // (`rest.sessions`) and the profile-scoped (`profiles.sessions`) fetch paths.
-    deps.hermesREST.sessions = { _, _, _, _ in seededSessions }
-    deps.hermesProfiles.sessions = { _, _, _, _, _, _ in seededSessions }
+    // (`rest.sessions`) and the profile-scoped (`profiles.sessions`) fetch paths. Both
+    // source slices get the same page, which the list merges back to one copy.
+    deps.hermesREST.sessions = { _, _, _, _, _ in seededSessions }
+    deps.hermesProfiles.sessions = { _, _, _, _, _, _, _ in seededSessions }
     // The agent always exposes the default profile, so the "default" pill is always present.
     deps.hermesProfiles.list = { _ in [Profile(name: "default", isDefault: true)] }
     // Keep the grouped Cron Jobs section frozen on the seeded jobs across polls.
@@ -62,16 +73,16 @@ enum DemoMode {
     // Settings probes the same hub for the plugin's version. Report no version so the demo
     // never renders the "plugin update available" row in a screenshot.
     deps.hermesREST.pushPluginInfo = { _ in PushPluginInfo(status: pushStatus) }
-    // Deterministic relative timestamps.
+    // Deterministic relative timestamps and date-section headers.
     deps.date = .constant(now)
-    // Persisted UI prefs, pre-seeded so `reloadPrefs` keeps our curated grouping/pins.
+    deps.sessionListCalendar = calendar
+    // Persisted UI prefs, pre-seeded so `reloadPrefs` keeps our curated pins/unread state.
     deps.preferences = demoPreferences
   }
 
   private static var demoPreferences: PreferencesClient {
     var client = PreferencesClient.inMemory()
     client.loadServerURL = { connection.baseURL.absoluteString }
-    client.loadGroupingMode = { .chronological }
     client.loadPinnedIDs = { ["s0"] }
     client.loadSeenCounts = {
       // s1 and the newest digest run have unread activity (seen < messageCount) — the
@@ -125,23 +136,26 @@ enum DemoMode {
   // MARK: Sessions
 
   private static let seededSessions: [Session] = {
-    // Everyday life: planning, research, writing, travel — no dev workspaces, so the list
-    // is grouped chronologically (a flat recency list under "Pinned").
-    var sessions: [Session] = [
-      ("s0", "Plan a long weekend in Lisbon", false),
-      ("s1", "Summarize my unread newsletters", true),
-      ("s2", "Draft a thank-you note to Sarah", false),
-      ("s3", "Weekly meal plan & grocery list", false),
-      ("s4", "Compare two health insurance plans", false),
-      ("s5", "Birthday gift ideas for Mom", false),
-    ].enumerated().map { idx, t in
-      Session(
-        id: t.0,
-        title: t.1,
-        updatedAt: Date(timeIntervalSince1970: 1_749_597_600 - Double(idx) * 7_200),
-        startedAt: Date(timeIntervalSince1970: 1_749_597_600 - Double(idx) * 7_200),
+    // Everyday life: planning, research, writing, travel — no dev workspaces. The
+    // last-active ages (hours before `now`) spread the unpinned rows across the Today /
+    // Yesterday / Last week date sections under "Pinned".
+    let rows: [(id: String, title: String, isActive: Bool, hoursAgo: Double)] = [
+      ("s0", "Plan a long weekend in Lisbon", false, 40.0 / 60), // 40 min
+      ("s1", "Summarize my unread newsletters", true, 2),
+      ("s2", "Draft a thank-you note to Sarah", false, 5),
+      ("s3", "Weekly meal plan & grocery list", false, 26),
+      ("s4", "Compare two health insurance plans", false, 30),
+      ("s5", "Birthday gift ideas for Mom", false, 8 * 24),
+    ]
+    var sessions: [Session] = rows.map { row in
+      let lastActive = now.addingTimeInterval(-row.hoursAgo * 3_600)
+      return Session(
+        id: row.id,
+        title: row.title,
+        updatedAt: lastActive,
+        startedAt: lastActive,
         messageCount: 12,
-        isActive: t.2
+        isActive: row.isActive
       )
     }
     // Cron run sessions → grouped under their jobs in the "Cron Jobs" section. The run
@@ -200,8 +214,8 @@ enum DemoMode {
       connection: connection,
       sessions: IdentifiedArray(uniqueElements: seededSessions),
       now: now,
+      calendar: calendar,
       pinnedIDs: ["s0"],
-      groupingMode: .chronological,
       cronJobs: IdentifiedArray(uniqueElements: seededCronJobs),
       // The digest's peek starts open so the panel shows job → runs at a glance.
       expandedCronJobID: "digest01"

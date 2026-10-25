@@ -39,6 +39,33 @@ public enum SessionOrder: String, Sendable {
   case recent
 }
 
+/// Source scoping for a session list request (`source=` / `exclude_sources=` on
+/// `/api/sessions` and `/api/profiles/sessions`). The list fetches interactive sessions and
+/// cron runs as two independent slices, like the desktop: cron runs are always the newest
+/// rows, so in one shared page a busy job crowds real conversations out of the window.
+/// Agents that predate the parameters ignore them and return the unscoped page.
+public enum SessionSourceFilter: Equatable, Sendable {
+  /// No scoping — every source.
+  case all
+  /// Everything except these sources.
+  case excluding([String])
+  /// Only this source.
+  case only(String)
+
+  /// The interactive list: everything but cron runs.
+  public static let interactive = SessionSourceFilter.excluding([Session.cronSource])
+  /// The Cron Jobs tab's runs.
+  public static let cron = SessionSourceFilter.only(Session.cronSource)
+
+  var queryItems: [URLQueryItem] {
+    switch self {
+    case .all: []
+    case let .excluding(sources): [.init(name: "exclude_sources", value: sources.joined(separator: ","))]
+    case let .only(source): [.init(name: "source", value: source)]
+    }
+  }
+}
+
 /// How ONE outgoing REST request authenticates.
 ///
 /// The transport helpers (`get`/`postJSON`/`send`) take this instead of an optional token
@@ -199,7 +226,7 @@ public struct HermesRESTClient: Sendable {
   /// Call it BEFORE `BearerTokenStore.clear()`: once the store is drained the request has
   /// nothing to authenticate with and is skipped (silently, like any other failure).
   public var logout: @Sendable (_ connection: ServerConnection) async -> Void = { _ in }
-  public var sessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int, _ order: SessionOrder) async throws -> [Session]
+  public var sessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int, _ order: SessionOrder, _ source: SessionSourceFilter) async throws -> [Session]
   /// Just the archived (soft-hidden) sessions — `GET /api/sessions?archived=only`.
   public var archivedSessions: @Sendable (_ connection: ServerConnection, _ limit: Int, _ offset: Int) async throws -> [Session]
   /// Full-text search — `GET /api/sessions/search?q=…`. A non-nil `profile` adds
@@ -348,12 +375,12 @@ public extension HermesRESTClient {
           authLog.info("POST /auth/logout failed (best-effort, ignored): \(error)")
         }
       },
-      sessions: { conn, limit, offset, order in
+      sessions: { conn, limit, offset, order, source in
         let url = try makeURL(conn.baseURL, "/api/sessions", query: [
           .init(name: "limit", value: String(limit)),
           .init(name: "offset", value: String(offset)),
           .init(name: "order", value: order.rawValue),
-        ])
+        ] + source.queryItems)
         let response: SessionsResponse = try await get(url, auth: authFor(conn), session: session)
         return response.sessions.map(\.asSession)
       },
@@ -851,9 +878,10 @@ struct SessionListDTO: Decodable {
   let source: String?
   let parentSessionID: String?
   let lineageRootID: String?
+  let model: String?
 
   enum CodingKeys: String, CodingKey {
-    case id, title, preview, cwd, source
+    case id, title, preview, cwd, source, model
     case lastActive = "last_active"
     case startedAt = "started_at"
     case messageCount = "message_count"
@@ -878,7 +906,8 @@ struct SessionListDTO: Decodable {
       isActive: isActive,
       source: source,
       parentSessionID: parentSessionID?.trimmedNonEmpty,
-      lineageRootID: lineageRootID?.trimmedNonEmpty
+      lineageRootID: lineageRootID?.trimmedNonEmpty,
+      model: model?.nonEmpty
     )
   }
 }

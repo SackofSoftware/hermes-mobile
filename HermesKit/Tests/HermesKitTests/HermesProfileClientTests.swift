@@ -154,7 +154,7 @@ struct HermesProfileClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"Work chat","preview":"hi","last_active":1749556800.0,"started_at":1749550000.0,"message_count":2,"cwd":"/w","is_active":false}],"profile_totals":{"total":1}}
     """#)
-    let sessions = try await makeClient().sessions(connection, "work", .exclude, .recent, 20, 0)
+    let sessions = try await makeClient().sessions(connection, "work", .exclude, .recent, 20, 0, .all)
     #expect(sessions.count == 1)
     let s = try #require(sessions.first)
     #expect(s.id == "20260610_120231_afcca6")
@@ -171,11 +171,26 @@ struct HermesProfileClientTests {
     #expect(query.contains(URLQueryItem(name: "order", value: "recent")))
     #expect(query.contains(URLQueryItem(name: "limit", value: "20")))
     #expect(query.contains(URLQueryItem(name: "offset", value: "0")))
+    #expect(!query.contains { $0.name == "source" || $0.name == "exclude_sources" })
+  }
+
+  @Test func sessionsSourceSlicesAddTheirScopingQuery() async throws {
+    MockURLProtocol.set(json: #"{"sessions":[],"profile_totals":{}}"#)
+    _ = try await makeClient().sessions(connection, "work", .exclude, .recent, 50, 0, .interactive)
+    var req = try #require(MockURLProtocol.lastRequest)
+    var query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query.contains(URLQueryItem(name: "exclude_sources", value: "cron")))
+
+    _ = try await makeClient().sessions(connection, "work", .exclude, .recent, 50, 0, .cron)
+    req = try #require(MockURLProtocol.lastRequest)
+    query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query.contains(URLQueryItem(name: "source", value: "cron")))
+    #expect(query.contains(URLQueryItem(name: "profile", value: "work")))
   }
 
   @Test func sessionsArchivedOnlyMapsToOnlyQuery() async throws {
     MockURLProtocol.set(json: #"{"sessions":[],"profile_totals":{}}"#)
-    _ = try await makeClient().sessions(connection, "work", .only, .recent, 50, 0)
+    _ = try await makeClient().sessions(connection, "work", .only, .recent, 50, 0, .all)
     let req = try #require(MockURLProtocol.lastRequest)
     let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
     #expect(query.contains(URLQueryItem(name: "archived", value: "only")))
@@ -199,7 +214,7 @@ struct HermesProfileClientTests {
 
     // Soul + sessions are no-ops in the in-memory variant.
     try await client.updateSoul(conn, "default", "hi")
-    #expect(try await client.sessions(conn, "default", .exclude, .recent, 20, 0).isEmpty)
+    #expect(try await client.sessions(conn, "default", .exclude, .recent, 20, 0, .all).isEmpty)
   }
 }
 } // extension RESTTransportSuite

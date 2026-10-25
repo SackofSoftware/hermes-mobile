@@ -187,7 +187,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","preview":"hello there","last_active":1749556800.0,"started_at":1749550000.0,"message_count":4,"unread":true,"cwd":"/Users/me/dev/hermes-mobile","is_active":true,"archived":false}],"total":1,"limit":20,"offset":0}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     #expect(sessions.count == 1)
     let s = try #require(sessions.first)
     #expect(s.id == "20260610_120231_afcca6")
@@ -203,7 +203,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"Nightly job","last_active":1749556800.0,"source":"cron"}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.source == "cron")
     #expect(s.isCron == true)
@@ -214,7 +214,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.source == nil)
     #expect(s.isCron == false)
@@ -225,7 +225,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0,"source":null}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.source == nil)
     #expect(s.isCron == false)
@@ -235,7 +235,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260724_101500_bbbb22","title":"Branch","last_active":1749556800.0,"parent_session_id":"20260610_120231_afcca6"}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.parentSessionID == "20260610_120231_afcca6")
   }
@@ -245,7 +245,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.parentSessionID == nil)
   }
@@ -255,7 +255,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0,"parent_session_id":null}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.parentSessionID == nil)
   }
@@ -266,7 +266,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"a","last_active":1.0,"parent_session_id":""},{"id":"b","last_active":1.0,"parent_session_id":"  "}],"total":2}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     #expect(sessions.count == 2)
     #expect(sessions.allSatisfy { $0.parentSessionID == nil })
   }
@@ -278,7 +278,7 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"tip_id","title":"Long chat","last_active":1749556800.0,"_lineage_root_id":"root_id"}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.lineageRootID == "root_id")
   }
@@ -287,20 +287,39 @@ struct HermesRESTClientTests {
     MockURLProtocol.set(json: #"""
     {"sessions":[{"id":"20260610_120231_afcca6","title":"My chat","last_active":1749556800.0}],"total":1}
     """#)
-    let sessions = try await makeClient().sessions(connection, 20, 0, .recent)
+    let sessions = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let s = try #require(sessions.first)
     #expect(s.lineageRootID == nil)
   }
 
   @Test func sessionsAttachesSessionTokenHeaderAndQuery() async throws {
     MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
-    _ = try await makeClient().sessions(connection, 20, 0, .recent)
+    _ = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let req = try #require(MockURLProtocol.lastRequest)
     #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
     #expect(req.url?.path == "/api/sessions")
     let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
     #expect(query.contains(URLQueryItem(name: "order", value: "recent")))
     #expect(query.contains(URLQueryItem(name: "limit", value: "20")))
+    #expect(!query.contains { $0.name == "source" || $0.name == "exclude_sources" })
+  }
+
+  @Test func sessionsInteractiveSliceExcludesCronSource() async throws {
+    MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
+    _ = try await makeClient().sessions(connection, 50, 0, .recent, .interactive)
+    let req = try #require(MockURLProtocol.lastRequest)
+    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query.contains(URLQueryItem(name: "exclude_sources", value: "cron")))
+    #expect(!query.contains { $0.name == "source" })
+  }
+
+  @Test func sessionsCronSliceRequestsOnlyCronSource() async throws {
+    MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
+    _ = try await makeClient().sessions(connection, 50, 0, .recent, .cron)
+    let req = try #require(MockURLProtocol.lastRequest)
+    let query = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(query.contains(URLQueryItem(name: "source", value: "cron")))
+    #expect(!query.contains { $0.name == "exclude_sources" })
   }
 
   // MARK: Auth-regime header guards (`RequestAuth`)
@@ -310,7 +329,7 @@ struct HermesRESTClientTests {
   /// down to the exact header name, its verbatim value, and the ABSENCE of `Authorization`.
   @Test func tokenModeSendsOnlyTheSessionTokenHeader() async throws {
     MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
-    _ = try await makeClient().sessions(connection, 20, 0, .recent)
+    _ = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     let req = try #require(MockURLProtocol.lastRequest)
     #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == "tok")
     #expect(req.value(forHTTPHeaderField: "Authorization") == nil)
@@ -333,7 +352,7 @@ struct HermesRESTClientTests {
       auth: .cookie(CookieSession(cookies: [], username: "ada", provider: "basic"))
     )
     MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
-    _ = try await makeClient().sessions(cookieConnection, 20, 0, .recent)
+    _ = try await makeClient().sessions(cookieConnection, 20, 0, .recent, .all)
     let req = try #require(MockURLProtocol.lastRequest)
     #expect(req.value(forHTTPHeaderField: "X-Hermes-Session-Token") == nil)
     #expect(req.value(forHTTPHeaderField: "Authorization") == nil)
@@ -508,7 +527,7 @@ struct HermesRESTClientTests {
   @Test func unauthorizedMapsToTypedError() async throws {
     MockURLProtocol.set(status: 401, json: #"{"detail":"Unauthorized"}"#)
     await #expect(throws: RESTError.unauthorized) {
-      _ = try await makeClient().sessions(connection, 20, 0, .recent)
+      _ = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     }
   }
 
@@ -518,7 +537,7 @@ struct HermesRESTClientTests {
   @Test func nonLoginRateLimitedMapsToGenericServerError() async throws {
     MockURLProtocol.set(status: 429, json: #"{"detail":"slow down"}"#)
     await #expect(throws: RESTError.server(status: 429, detail: "slow down")) {
-      _ = try await makeClient().sessions(connection, 20, 0, .recent)
+      _ = try await makeClient().sessions(connection, 20, 0, .recent, .all)
     }
   }
 
@@ -574,7 +593,7 @@ struct HermesRESTClientTests {
   @Test func getTransportOfflineMapsToOffline() async throws {
     MockURLProtocol.set(fail: true, failCode: .notConnectedToInternet)
     await #expect(throws: RESTError.offline) {
-      _ = try await makeClient().sessions(connection, 1, 0, .recent)
+      _ = try await makeClient().sessions(connection, 1, 0, .recent, .all)
     }
   }
 

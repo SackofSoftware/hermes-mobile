@@ -100,7 +100,7 @@ struct ArchivedSessionsFeatureTests {
         Issue.record("default endpoint must not be used when a profile is scoped")
         return []
       }
-      $0.hermesProfiles.sessions = { @Sendable _, profile, archived, _, _, _ in
+      $0.hermesProfiles.sessions = { @Sendable _, profile, archived, _, _, _, _ in
         captured.setValue((profile, archived))
         return [Session(id: "p", title: "Profile-archived")]
       }
@@ -135,7 +135,7 @@ struct ArchivedSessionsFeatureTests {
         Issue.record("unscoped endpoint must not be used for the literal default profile")
         return []
       }
-      $0.hermesProfiles.sessions = { @Sendable _, profile, archived, _, _, _ in
+      $0.hermesProfiles.sessions = { @Sendable _, profile, archived, _, _, _, _ in
         captured.setValue((profile, archived))
         return [Session(id: "d", title: "Default-archived")]
       }
@@ -165,7 +165,7 @@ struct ArchivedSessionsFeatureTests {
         usedREST.setValue(true)
         return [Session(id: "a", title: "Old")]
       }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in
         Issue.record("profile endpoint must not be used without the profiles API")
         return []
       }

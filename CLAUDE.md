@@ -210,7 +210,7 @@ bullets below are the compressed rules.
   anchor only; server wins on hydrate, persistence debounced (flushed on
   `.background`), wiped on logout; behind the client boundary (no reactive `@FetchAll`).
 - **Persistence**: secrets → `KeychainClient`; non-secret prefs (URL, seen counts,
-  pins, grouping, profile) → `PreferencesClient`. Clients over `@Shared` for test
+  pins, swipe default, profile) → `PreferencesClient`. Clients over `@Shared` for test
   isolation; both have `.inMemory()`. **Logout must clear every prefs entry.**
 - **Pins are device-local; archive, rename, and delete are server-side**, optimistic
   with rollback (list → REST `PATCH`/`DELETE`; chat rename → `session.title`).
@@ -226,11 +226,15 @@ bullets below are the compressed rules.
   round-trip runs in the parent list (a presented sheet's effects die on dismissal).
   A destructive success restarts (not bare-cancels) a pending fetch; a failure after a
   profile switch drops the rollback re-insert. Details: `docs/features/session-list.md`.
-- **Grouping, cron jobs, and branch nesting are display-only** over the one fetched
-  array: grouping is a persisted pref; cron sessions partition into an always-on
-  section grouped under jobs (capability-gated; no optimistic job-state mutation);
-  nesting via pure `flattenSessionsWithBranches` (orphans de-nest, never hidden;
-  search stays flat). Details: `docs/features/session-list.md`.
+- **Date sections, inbox cards, cron jobs, and branch nesting are display-only** over one
+  array fetched as TWO source slices (interactive + cron, never one shared page — cron runs
+  starve it): always-on update-date sections via pure `SessionDateBucket` /
+  `groupEntriesByDate` (no grouping pref); `SessionCardView` on every interactive row,
+  compact `SessionRowView` only for cron runs + the archived sheet; cron sessions sit in
+  a job-grouped Cron Jobs TAB (bottom-bar pill only with cron content; views read
+  `effectiveTab`; unread badge on the tab; search is Sessions-only, opened from the toolbar);
+  nesting via pure `flattenSessionsWithBranches` (orphans de-nest; search stays flat).
+  Details: `docs/features/session-list.md`.
 - **Row affordances**: trailing swipe = destructive default FIRST (full-swipe target),
   then Rename; context menu always offers both Archive and Delete (gated); Copy ID
   context-menu-only; rows are natural-height — NO min-height floor (a floor for
@@ -288,13 +292,14 @@ bullets below are the compressed rules.
 - Snapshot tests: `make snapshot` (assert) / `make snapshot-record` (re-record — it
   `rm -rf`s the whole `__Snapshots__` dir; use only for a deliberate global re-render).
   To add ONE new snapshot test, run `make snapshot` twice (first records + fails by
-  design, second asserts clean). Row timestamps are pinned for determinism.
+  design, second asserts clean). Row timestamps (and the list's section calendar) are
+  pinned for determinism — `docs/development.md`.
 - **A snapshot of a SCROLLABLE view must pin an explicit size along its scroll axis** —
   `componentImage()` renders at `.sizeThatFits`, and a `ScrollView` offered nothing
   records a blank sliver. Pin both width and height for a vertical one.
 - **A `List` cannot be component-rendered at all** — `componentImage()` paints its section
   headers and FAB but NO rows, and ignores the dark trait; list snapshots use
-  `deviceImage()` (both helpers take an `appearance:`).
+  `deviceImage()` (both helpers take an `appearance:`; `deviceImage(height:)` for a tall list).
 - **Layout facts a snapshot cannot prove go in a measured `UIWindow`-hosted XCTest**
   (assert `contentSize` vs `bounds`, hosted `sizeThatFits`) — see
   `MarkdownTableLayoutTests.swift` and `ApprovalCardLayoutTests.swift`. Pin

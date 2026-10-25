@@ -263,7 +263,7 @@ public struct ArchivedSessionsFeature {
         if let profileName {
           // Profile-scoped list → hits this profile's `state.db` (the literal `"default"`
           // included), not the server's launch profile's.
-          sessions = try await profiles.sessions(connection, profileName, .only, .recent, 100, 0)
+          sessions = try await profiles.sessions(connection, profileName, .only, .recent, 100, 0, .all)
         } else {
           sessions = try await rest.archivedSessions(connection, 100, 0)
         }

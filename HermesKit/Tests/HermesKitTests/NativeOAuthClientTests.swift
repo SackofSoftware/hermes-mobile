@@ -53,7 +53,7 @@ struct NativeOAuthClientTests {
     store.seed(stored(expiresAt: 1_000_600), baseURL: baseURL, persist: { _ in })
 
     MockURLProtocol.set(json: #"{"sessions":[],"total":0}"#)
-    _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent)
+    _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent, .all)
 
     #expect(MockURLProtocol.requests.count == 1) // no refresh hop
     let req = try #require(MockURLProtocol.lastRequest)
@@ -77,7 +77,7 @@ struct NativeOAuthClientTests {
       .init(statusCode: 200, body: Data(rotatedJSON.utf8)),
       .init(statusCode: 200, body: Data(#"{"sessions":[],"total":0}"#.utf8)),
     ])
-    _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent)
+    _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent, .all)
 
     #expect(MockURLProtocol.requests.count == 2)
     let refresh = try #require(MockURLProtocol.requests.first)
@@ -107,7 +107,7 @@ struct NativeOAuthClientTests {
     // The store's `GatewayError.authExpired` verdict re-enters the REST domain as a 401 so
     // the existing `asRESTError` → re-auth routing sees what it already knows how to route.
     await #expect(throws: RESTError.unauthorized) {
-      _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent)
+      _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent, .all)
     }
     #expect(store.current == nil)
     #expect(MockURLProtocol.requests.count == 1) // the API call never went out
@@ -121,7 +121,7 @@ struct NativeOAuthClientTests {
     // 503 = a provider is momentarily unreachable. Retryable, so the pair must survive.
     MockURLProtocol.set(status: 503)
     await #expect(throws: RESTError.serviceUnavailable) {
-      _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent)
+      _ = try await makeClient(tokenStore: store).sessions(bearerConnection(), 20, 0, .recent, .all)
     }
     #expect(store.current?.accessToken == "AT1")
   }

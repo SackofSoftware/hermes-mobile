@@ -20,7 +20,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown } // can't tell → don't nag
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         [Session(id: "s1", title: "Hello", preview: "hi")]
       }
     }
@@ -52,7 +52,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unreachable }
     }
 
     await store.send(.task) {
@@ -85,8 +85,8 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
-        fetchCount.withValue { $0 += 1 }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, source in
+        if source == .interactive { fetchCount.withValue { $0 += 1 } }  // one per load
         return [Session(id: "s1", isActive: true)]
       }
     }
@@ -134,8 +134,8 @@ struct SessionListFeatureTests {
       SessionListFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
-        fetchCount.withValue { $0 += 1 }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, source in
+        if source == .interactive { fetchCount.withValue { $0 += 1 } }  // one per load
         return []
       }
       $0.hermesREST.search = { @Sendable _, _, _ in
@@ -160,7 +160,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     // While the archive is in flight, the poll skips (guard non-empty).
@@ -177,10 +177,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -319,7 +318,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = prefs
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
 
     let duplicated = [
@@ -333,10 +332,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
 
@@ -377,7 +375,7 @@ struct SessionListFeatureTests {
 
   // MARK: Pinning
 
-  @Test func pinMovesSessionIntoPinnedSetAndOutOfGroup() async {
+  @Test func pinMovesSessionIntoPinnedSetAndOutOfMainLane() async {
     let prefs = PreferencesClient.inMemory()
     let sessions = [
       Session(id: "a", cwd: "/w", startedAt: Date(timeIntervalSince1970: 1)),
@@ -392,17 +390,17 @@ struct SessionListFeatureTests {
     }
 
     #expect(store.state.pinnedSessions.isEmpty)
-    #expect(store.state.groups[0].sessions.map(\.id) == ["a", "b"])
+    #expect(store.state.unpinnedSessions.map(\.id) == ["a", "b"])
 
     await store.send(.pinSession(id: "a")) {
       $0.pinnedIDs = ["a"]
     }
     #expect(store.state.pinnedSessions.map(\.id) == ["a"])
-    #expect(store.state.groups[0].sessions.map(\.id) == ["b"]) // pinned dropped from group
+    #expect(store.state.unpinnedSessions.map(\.id) == ["b"]) // pinned dropped from the main lane
     #expect(prefs.loadPinnedIDs() == ["a"]) // persisted
   }
 
-  @Test func unpinRestoresSessionToGroup() async {
+  @Test func unpinRestoresSessionToMainLane() async {
     let prefs = PreferencesClient.inMemory()
     let sessions = [
       Session(id: "a", cwd: "/w", startedAt: Date(timeIntervalSince1970: 1)),
@@ -426,7 +424,7 @@ struct SessionListFeatureTests {
       $0.pinnedIDs = []
     }
     #expect(store.state.pinnedSessions.isEmpty)
-    #expect(store.state.groups[0].sessions.map(\.id) == ["a", "b"]) // restored to group
+    #expect(store.state.unpinnedSessions.map(\.id) == ["a", "b"]) // restored to the main lane
     #expect(prefs.loadPinnedIDs() == []) // persisted
   }
 
@@ -525,9 +523,9 @@ struct SessionListFeatureTests {
     // Interactive sections see only non-cron rows.
     #expect(state.interactiveSessions.map(\.id) == ["i1", "i2"])
     #expect(state.chronologicalSessions.map(\.id) == ["i2", "i1"]) // updatedAt desc
-    let groupedIDs = state.groups.flatMap { $0.sessions.map(\.id) }
-    #expect(groupedIDs.sorted() == ["i1", "i2"])
-    #expect(groupedIDs.contains(where: { $0.hasPrefix("c") }) == false)
+    let sectionedIDs = state.dateSections.flatMap { $0.entries.map(\.id) }
+    #expect(sectionedIDs == ["i2", "i1"])
+    #expect(sectionedIDs.contains(where: { $0.hasPrefix("c") }) == false)
   }
 
   @Test func pinnedCronSessionSurfacesOnlyUnderCronJobs() {
@@ -563,7 +561,7 @@ struct SessionListFeatureTests {
     #expect(state.pinnedSessions.map(\.id) == ["a"])
     #expect(state.unpinnedSessions.map(\.id) == ["b"])
     #expect(state.chronologicalSessions.map(\.id) == ["b"])
-    #expect(state.groups.flatMap { $0.sessions.map(\.id) } == ["b"])
+    #expect(state.dateSections.flatMap { $0.entries.map(\.id) } == ["b"])
   }
 
   // MARK: Branch nesting per lane
@@ -584,45 +582,6 @@ struct SessionListFeatureTests {
     // member (the branch at 20), still below "other" (30).
     #expect(state.chronologicalEntries.map(\.id) == ["other", "parent", "branch"])
     #expect(state.chronologicalEntries.map(\.branchStem) == [nil, nil, "└─ "])
-  }
-
-  @Test func branchNestsUnderParentInWorkspaceGroupLane() throws {
-    let sessions = [
-      Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 10), cwd: "/w"),
-      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 20), cwd: "/w", parentSessionID: "parent"),
-      Session(id: "other", updatedAt: Date(timeIntervalSince1970: 30), cwd: "/w"),
-    ]
-    let state = SessionListFeature.State(
-      connection: connection,
-      sessions: IdentifiedArray(uniqueElements: sessions)
-    )
-
-    let group = try #require(state.groups.first)
-    let entries = state.visibleEntries(in: group)
-    #expect(entries.map(\.id) == ["other", "parent", "branch"])
-    #expect(entries.map(\.branchStem) == [nil, nil, "└─ "])
-  }
-
-  @Test func branchWhoseParentIsCappedOutOfCollapsedGroupDeNests() throws {
-    // Six rows in one workspace: the collapsed cap (5) cuts the stale parent, so its
-    // (visible) branch de-nests — nesting happens within the RENDERED slice only.
-    var sessions = (1...4).map { i in
-      Session(id: "s\(i)", updatedAt: Date(timeIntervalSince1970: Double(100 - i)), cwd: "/w")
-    }
-    sessions.append(
-      Session(id: "branch", updatedAt: Date(timeIntervalSince1970: 50), cwd: "/w", parentSessionID: "parent")
-    )
-    sessions.append(Session(id: "parent", updatedAt: Date(timeIntervalSince1970: 1), cwd: "/w"))
-    let state = SessionListFeature.State(
-      connection: connection,
-      sessions: IdentifiedArray(uniqueElements: sessions)
-    )
-
-    let group = try #require(state.groups.first)
-    let entries = state.visibleEntries(in: group)
-    #expect(entries.count == SessionListFeature.State.collapsedLimit)
-    #expect(!entries.map(\.id).contains("parent")) // capped out while collapsed
-    #expect(entries.first { $0.id == "branch" }?.branchStem == nil) // de-nested, not hidden
   }
 
   @Test func pinnedBranchDeNestsInPinnedLane() {
@@ -725,7 +684,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [Session(id: "s1")] }
     }
 
     await store.send(.task) {
@@ -745,27 +704,6 @@ struct SessionListFeatureTests {
       $0.cronJobsSupported = false
     }
     await store.send(.onDisappear) // cancels the auto-poll loop
-  }
-
-  @Test func toggleGroupExpansionExpandsThenCollapses() async {
-    let sessions = (0..<7).map { Session(id: "s\($0)", cwd: "/w", startedAt: Date(timeIntervalSince1970: Double($0))) }
-    let store = TestStore(
-      initialState: SessionListFeature.State(connection: connection, sessions: IdentifiedArray(uniqueElements: sessions))
-    ) {
-      SessionListFeature()
-    }
-    let group = store.state.groups[0]
-    #expect(store.state.visibleSessions(in: group).count == 5) // collapsed
-
-    await store.send(.toggleGroupExpansion(groupID: group.id)) {
-      $0.expandedGroups = [group.id]
-    }
-    #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 7) // expanded
-
-    await store.send(.toggleGroupExpansion(groupID: group.id)) {
-      $0.expandedGroups = []
-    }
-    #expect(store.state.visibleSessions(in: store.state.groups[0]).count == 5) // re-collapsed
   }
 
   // MARK: Archiving
@@ -891,7 +829,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesREST.archive = { @Sendable _, _, _, _ in }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         // First call (in flight at confirm time) parks forever with the STALE list —
         // cancelled, its response must never arrive. Second call (the restart) returns
         // the authoritative post-archive list.
@@ -952,7 +890,7 @@ struct SessionListFeatureTests {
       $0.preferences = .inMemory()
       $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did, it would throw — the row must come back regardless.
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unreachable }
     }
 
     await store.send(.confirmationDialog(.presented(.confirmArchive(id: "a")))) {
@@ -993,7 +931,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesREST.archive = { @Sendable _, _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did it would throw — restore must be purely local.
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unreachable }
     }
 
     // Optimistic removal clears pin + seen and persists the cleared prefs.
@@ -1162,7 +1100,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesREST.deleteSession = { @Sendable _, _, _ in throw RESTError.unreachable }
       // No reload happens; if one did it would throw — restore must be purely local.
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unreachable }
     }
 
     await store.send(.confirmationDialog(.presented(.confirmDelete(id: "a")))) {
@@ -1362,7 +1300,7 @@ struct SessionListFeatureTests {
       // The cancelled load still runs its trailing cron fetch (the send is dropped) — stub
       // it so the unimplemented-dependency check doesn't trip; no response is received.
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         // Block until released, then return the OLD list (both sessions) — stale data.
         var iterator = gate.stream.makeAsyncIterator()
         await iterator.next()
@@ -1413,7 +1351,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         // First call (the mid-window refresh) parks forever — stale, its response must
         // never land. Second call (the restart) returns the authoritative list.
         if calls.withValue({ $0 += 1; return $0 }) == 1 { try await Task.never() }
@@ -1625,7 +1563,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.continuousClock = TestClock() // never advanced — proves there is no debounce
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "fresh")] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [Session(id: "fresh")] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
     }
 
@@ -1660,7 +1598,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         // The cleared-search reload parks (a pre-archive response that must never
         // land); the restart returns the authoritative post-archive list.
         if calls.withValue({ $0 += 1; return $0 }) == 1 { try await Task.never() }
@@ -1706,7 +1644,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = prefs
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     await store.send(.pulledToRefresh) {
@@ -1714,8 +1652,9 @@ struct SessionListFeatureTests {
       $0.isLoading = true
       $0.defaultSwipeAction = .delete // seeded from prefs with the other pref reloads
     }
-    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -1777,7 +1716,7 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     // While the rename is in flight, the poll skips (guard non-empty).
@@ -1794,10 +1733,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -2184,7 +2122,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [Session(id: "s1")] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [Session(id: "s1")] }
     }
 
     await store.send(.settings(.presented(.delegate(.reconnect))))
@@ -2212,104 +2150,203 @@ struct SessionListFeatureTests {
     }
   }
 
-  // MARK: - Grouping mode
+  // MARK: - Date sections
 
-  @Test func setGroupingModeUpdatesStateAndPersists() async {
-    let prefs = PreferencesClient.inMemory()
-    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
-      SessionListFeature()
-    } withDependencies: {
-      $0.preferences = prefs
-    }
+  /// Gregorian, New York, en_US, Monday-first — the bucket suite's pinned calendar.
+  private let sectionCalendar = SessionDateBucketTests.calendar()
 
-    #expect(store.state.groupingMode == .workspace) // default
-    await store.send(.setGroupingMode(.chronological)) {
-      $0.groupingMode = .chronological
-    }
-    #expect(prefs.loadGroupingMode() == .chronological) // persisted
-
-    // Re-sending the same mode is a no-op (no state change).
-    await store.send(.setGroupingMode(.chronological))
+  private func localDate(_ month: Int, _ day: Int, _ hour: Int = 10) -> Date {
+    SessionDateBucketTests.date(2026, month, day, hour)
   }
 
-  @Test func loadSeedsGroupingModeFromPreferences() async {
-    let prefs = PreferencesClient.inMemory()
-    prefs.saveGroupingMode(.chronological)
+  @Test func taskCapturesTheSessionListCalendar() async {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
       SessionListFeature()
     } withDependencies: {
       $0.date = .constant(now)
+      $0.sessionListCalendar = sectionCalendar
       $0.continuousClock = TestClock()
-      $0.preferences = prefs
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     await store.send(.task) {
       $0.now = self.now
+      $0.calendar = self.sectionCalendar // captured from the dependency with `now`
       $0.isLoading = true
-      $0.groupingMode = .chronological // seeded from prefs on load
     }
     await store.receive(\.setupPush)
     await store.receive(\.pushPluginStatusLoaded)
     await store.receive(\.profilesResponse.failure)
-    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
     await store.send(.onDisappear)
   }
 
-  // MARK: - Cron section visibility
-
-  @Test func setShowCronSectionUpdatesStateAndPersists() async {
-    let prefs = PreferencesClient.inMemory()
-    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+  @Test func pollTickAcrossTheDayRolloverRebucketsDateSections() async {
+    let session = Session(id: "s1", updatedAt: localDate(6, 18, 10))
+    let currentDate = LockIsolated(SessionDateBucketTests.thuNoon) // Thu 18 Jun, noon
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [session],
+        now: SessionDateBucketTests.thuNoon,
+        calendar: sectionCalendar,
+        seenCounts: ["s1": 0]
+      )
+    ) {
       SessionListFeature()
     } withDependencies: {
-      $0.preferences = prefs
+      $0.date = DateGenerator { currentDate.value }
+      $0.sessionListCalendar = sectionCalendar
+      $0.preferences.loadSeenCounts = { ["s1": 0] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [session] }
     }
+    #expect(store.state.dateSections.map(\.id) == ["today"])
+    #expect(store.state.dateSections.map(\.label) == ["Today"])
 
-    #expect(store.state.showCronSection == true) // default: shown
-    await store.send(.setShowCronSection(false)) {
-      $0.showCronSection = false
+    // The poll refreshes `now` past the NEXT nominal day's 4 AM rollover — the same row
+    // (unchanged on the server) re-buckets under "Yesterday" with no new ticker.
+    let nextMorning = localDate(6, 19, 5)
+    currentDate.setValue(nextMorning)
+    await store.send(.pollTick)
+    await store.receive(\.pulledToRefresh) {
+      $0.now = nextMorning
+      $0.isLoading = true
     }
-    #expect(prefs.loadShowCronSection() == false) // persisted
-
-    // Re-sending the same value is a no-op (no state change).
-    await store.send(.setShowCronSection(false))
+    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
+    await store.receive(\.cronJobsResponse.failure) { $0.cronJobsSupported = false }
+    #expect(store.state.dateSections.map(\.id) == ["yesterday"])
+    #expect(store.state.dateSections.map(\.label) == ["Yesterday"])
+    #expect(store.state.dateSections.flatMap { $0.entries.map(\.id) } == ["s1"])
   }
 
-  @Test func loadSeedsShowCronSectionFromPreferences() async {
-    let prefs = PreferencesClient.inMemory()
-    prefs.saveShowCronSection(false)
+  @Test func dateSectionsExcludePinnedAndCronRowsAndKeepBranchClustersIntact() {
+    let sessions = [
+      Session(id: "today", updatedAt: localDate(6, 18, 11)),
+      Session(id: "pinned", updatedAt: localDate(6, 18, 9)),
+      Session(id: "cron_job1_1", updatedAt: localDate(6, 18, 8), source: "cron"),
+      // A stale parent from last week, lifted by its fresh branch: the whole cluster
+      // lands in "Today" (never split across a header).
+      Session(id: "parent", updatedAt: localDate(6, 10)),
+      Session(id: "branch", updatedAt: localDate(6, 18, 7), parentSessionID: "parent"),
+      Session(id: "yesterday", updatedAt: localDate(6, 17)),
+      Session(id: "lastWeek", updatedAt: localDate(6, 9)),
+      Session(id: "undated"),
+    ]
+    let state = SessionListFeature.State(
+      connection: connection,
+      sessions: IdentifiedArray(uniqueElements: sessions),
+      now: SessionDateBucketTests.thuNoon,
+      calendar: sectionCalendar,
+      pinnedIDs: ["pinned"]
+    )
+
+    let sections = state.dateSections
+    #expect(sections.map(\.id) == ["today", "yesterday", "last-week", SessionDateSection.olderID])
+    #expect(sections.map(\.label) == ["Today", "Yesterday", "Last week", "Older"])
+    #expect(sections[0].entries.map(\.id) == ["today", "parent", "branch"])
+    #expect(sections[0].entries.map(\.branchStem) == [nil, nil, "└─ "])
+    let sectionedIDs = sections.flatMap { $0.entries.map(\.id) }
+    #expect(!sectionedIDs.contains("pinned")) // owns the Pinned section
+    #expect(!sectionedIDs.contains("cron_job1_1")) // owns the Cron Jobs section
+    // The sections are exactly the chronological lane, split — nothing dropped or reordered.
+    #expect(sectionedIDs == state.chronologicalEntries.map(\.id))
+  }
+
+  // MARK: - Bottom-bar tabs
+
+  @Test func selectTabSwitchesTheRenderedTab() async {
+    let run = Session(id: "cron_job1_20260702_090000", source: "cron")
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: [run])
+    ) {
+      SessionListFeature()
+    }
+
+    #expect(store.state.effectiveTab == .sessions) // a launch starts on Sessions
+    await store.send(.selectTab(.cron)) {
+      $0.selectedTab = .cron
+    }
+    #expect(store.state.effectiveTab == .cron)
+    await store.send(.selectTab(.sessions)) {
+      $0.selectedTab = .sessions
+    }
+  }
+
+  /// The Cron Jobs tab exists only with cron content and outside search: losing either
+  /// falls back to Sessions without forgetting the selection.
+  @Test func cronTabFallsBackToSessionsWithoutCronContentOrWhileSearching() {
+    var state = SessionListFeature.State(connection: connection, selectedTab: .cron)
+    #expect(!state.showsTabBar)
+    #expect(state.effectiveTab == .sessions, "no cron content: no Cron Jobs tab")
+
+    state.sessions = [Session(id: "cron_job1_20260702_090000", source: "cron")]
+    #expect(state.showsTabBar)
+    #expect(state.effectiveTab == .cron)
+
+    state.searchQuery = "deploy"
+    #expect(!state.showsTabBar, "search is a Sessions-only mode")
+    #expect(state.effectiveTab == .sessions)
+    #expect(state.selectedTab == .cron)
+
+    state.searchQuery = ""
+    state.isSearchPresented = true
+    #expect(!state.showsTabBar, "an open search field hides the tabs before any query")
+  }
+
+  // MARK: - Search field
+
+  @Test func searchButtonOpensTheFieldAndCloseWithoutAQueryJustHidesIt() async {
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    }
+
+    await store.send(.searchButtonTapped) {
+      $0.isSearchPresented = true
+    }
+    await store.send(.searchCloseTapped) {
+      $0.isSearchPresented = false
+    }
+  }
+
+  /// Closing with a live query clears it and reloads the normal list at once — the stale
+  /// search results must not linger until the next poll.
+  @Test func searchCloseWithAQueryClearsItAndReloadsTheList() async {
+    let fetched = LockIsolated<[SessionSourceFilter]>([])
+    let hit = Session(id: "hit", preview: "deploy")
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection, sessions: [hit], searchQuery: "deploy", isSearchPresented: true
+      )
+    ) {
       SessionListFeature()
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.preferences = prefs
-      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
-      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
-      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, source in
+        fetched.withValue { $0.append(source) }
+        return source == .interactive ? [Session(id: "s1", title: "Chat")] : []
+      }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [] }
     }
+    store.exhaustivity = .off
 
-    await store.send(.task) {
-      $0.now = self.now
+    await store.send(.searchCloseTapped) {
+      $0.isSearchPresented = false
+      $0.searchQuery = ""
       $0.isLoading = true
-      $0.showCronSection = false // seeded from prefs on load
     }
-    await store.receive(\.setupPush)
-    await store.receive(\.pushPluginStatusLoaded)
-    await store.receive(\.profilesResponse.failure)
-    await store.receive(\.sessionsResponse.success) { $0.isLoading = false }
-    await store.receive(\.cronJobsResponse.failure) {
-      $0.cronJobsSupported = false
+    await store.receive(\.sessionsResponse.success) {
+      $0.sessions = [Session(id: "s1", title: "Chat")]
     }
-    await store.send(.onDisappear)
+    #expect(fetched.value == [.interactive, .cron])
   }
 
   @Test func chronologicalSessionsAreRecencyOrderedAndExcludePinned() {
@@ -2683,8 +2720,8 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
-      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
-        scopedFetch.withValue { $0.append(profile) }
+      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _, source in
+        if source == .interactive { scopedFetch.withValue { $0.append(profile) } }  // one per load
         return [Session(id: "w1", title: "Work")]
       }
     }
@@ -2722,8 +2759,8 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
-        unscopedFetch.withValue { $0 += 1 }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, source in
+        if source == .interactive { unscopedFetch.withValue { $0 += 1 } }  // one per load
         return [Session(id: "s1")]
       }
     }
@@ -2755,7 +2792,6 @@ struct SessionListFeatureTests {
       initialState: SessionListFeature.State(
         connection: connection,
         searchQuery: "stale",
-        expandedGroups: ["g1"],
         profiles: [Profile(name: "default", isDefault: true), Profile(name: "work")],
         selectedProfileName: "default",
         profilesSupported: true
@@ -2766,8 +2802,8 @@ struct SessionListFeatureTests {
       $0.date = .constant(now)
       $0.preferences = prefs
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
-        scopedFetch.withValue { $0.append(profile) }
+      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _, source in
+        if source == .interactive { scopedFetch.withValue { $0.append(profile) } }  // one per load
         return [Session(id: "w1")]
       }
     }
@@ -2775,7 +2811,6 @@ struct SessionListFeatureTests {
     await store.send(.selectProfile(name: "work")) {
       $0.selectedProfileName = "work"
       $0.searchQuery = "" // list UI reset on switch
-      $0.expandedGroups = []
       $0.now = self.now
       $0.isLoading = true
     }
@@ -2814,7 +2849,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "fresh")]
       }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
 
     await store.send(.addProfile(.presented(.delegate(.created(name: "fresh"))))) {
@@ -2830,10 +2865,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
     #expect(prefs.loadSelectedProfileID() == "fresh")
@@ -2856,7 +2890,7 @@ struct SessionListFeatureTests {
       $0.preferences = prefs
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.delete = { @Sendable _, name in deleted.withValue { $0.append(name) } }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
 
     // Tapping delete presents the confirmation dialog.
@@ -2886,10 +2920,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
     #expect(deleted.value == ["work"])
@@ -2964,8 +2997,8 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in
         [Profile(name: "default", isDefault: true), Profile(name: "work")]
       }
-      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _ in
-        scopedFetch.withValue { $0.append(profile) }
+      $0.hermesProfiles.sessions = { @Sendable _, profile, _, _, _, _, source in
+        if source == .interactive { scopedFetch.withValue { $0.append(profile) } }  // one per load
         return [Session(id: "d1")]
       }
     }
@@ -3247,7 +3280,7 @@ struct SessionListFeatureTests {
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         [Session(id: "s1", isActive: active.value)]
       }
     }
@@ -3448,7 +3481,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = prefs
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
     }
 
@@ -3460,10 +3493,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
     }
     #expect(prefs.loadSelectedProfileID() == "default")
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }
@@ -3483,7 +3515,7 @@ struct SessionListFeatureTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.preferences = prefs
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
     }
 
@@ -3493,10 +3525,9 @@ struct SessionListFeatureTests {
       $0.now = self.now
     }
     #expect(prefs.loadSelectedProfileID() == persisted)
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
   }

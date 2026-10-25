@@ -16,7 +16,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     await store.send(.task) {
@@ -45,7 +45,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .cookie(cookieSession) }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
 
     await store.send(.task) {
@@ -64,7 +64,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("bad") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unauthorized }
     }
 
     await store.send(.task) {
@@ -89,7 +89,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .cookie(cookieSession) }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unauthorized }
     }
 
     await store.send(.task) {
@@ -433,7 +433,7 @@ struct AppFeatureTests {
       AppFeature()
     } withDependencies: {
       $0.chatSnapshot = snapshotClient
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -491,10 +491,10 @@ struct AppFeatureTests {
       AppFeature()
     } withDependencies: {
       $0.chatSnapshot = .inMemory()
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
       $0.date = .constant(Date(timeIntervalSince1970: 0))
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
@@ -1729,7 +1729,7 @@ struct AppFeatureTests {
     } withDependencies: {
       // The chat reconnect opens a never-yielding socket; the list refresh hits REST.
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -1755,7 +1755,7 @@ struct AppFeatureTests {
     ) {
       AppFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
       $0.date = .constant(Date(timeIntervalSince1970: 0))
@@ -1897,7 +1897,7 @@ struct AppFeatureTests {
           continuation.onTermination = { _ in socketClosed.setValue(true) }
         }
       }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
     }
@@ -2018,7 +2018,7 @@ struct AppFeatureTests {
       $0.chatSnapshot = .inMemory()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
     }
@@ -2115,7 +2115,7 @@ struct AppFeatureTests {
       $0.chatSnapshot = .inMemory()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
       $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
     }
@@ -3175,7 +3175,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unreachable }
     }
 
     await store.send(.task) {
@@ -3199,7 +3199,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.offline }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.offline }
     }
 
     await store.send(.task) {
@@ -3224,7 +3224,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in auth }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unreachable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unreachable }
     }
 
     await store.send(.task) {
@@ -3271,7 +3271,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         throw RESTError.server(status: status, detail: nil)
       }
     }
@@ -3299,7 +3299,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw error }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw error }
     }
 
     await store.send(.task) {
@@ -3323,7 +3323,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw error }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw error }
     }
 
     await store.send(.task) {
@@ -3349,7 +3349,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         throw URLError(.notConnectedToInternet)
       }
     }
@@ -3382,7 +3382,7 @@ struct AppFeatureTests {
     } withDependencies: {
       $0.keychain.loadSession = { @Sendable _ in .token("tok") }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         probes.withValue { $0 += 1 }
         return []
       }
@@ -3462,7 +3462,7 @@ struct AppFeatureTests {
   }
 
   /// "Log Out" from the retry screen runs the logout recipe — keychain session, server URL,
-  /// identity-scoped prefs, grouping mode, badge, push registration — and lands on a FRESH
+  /// identity-scoped prefs, swipe default, badge, push registration — and lands on a FRESH
   /// (nothing prefilled) onboarding.
   @Test func logoutFromRetryScreenClearsEverythingAndShowsFreshOnboarding() async {
     let sessionDeleted = LockIsolated(false)
@@ -3472,7 +3472,6 @@ struct AppFeatureTests {
     preferences.savePinnedIDs(["s-pinned"])
     preferences.saveSeenCounts(["s-pinned": 3])
     preferences.saveSelectedProfileID("work")
-    preferences.saveGroupingMode(.chronological)
     preferences.saveDefaultSessionSwipeAction(.delete)
     preferences.savePushDeviceToken("cafef00d")
     let push = PushClient.inMemory()
@@ -3508,7 +3507,6 @@ struct AppFeatureTests {
     #expect(preferences.loadPinnedIDs().isEmpty)
     #expect(preferences.loadSeenCounts().isEmpty)
     #expect(preferences.loadSelectedProfileID() == nil)
-    #expect(preferences.loadGroupingMode() == .default)
     #expect(preferences.loadDefaultSessionSwipeAction() == .default) // swipe pref reset too
     #expect(preferences.loadPushDeviceToken() == nil)
     #expect(unregistered.value == "cafef00d") // best-effort unregister with the stored token
@@ -3527,7 +3525,7 @@ struct AppFeatureTests {
     ) {
       AppFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -3558,7 +3556,7 @@ struct AppFeatureTests {
     ) {
       AppFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         let attempt = probes.withValue { value -> Int in
           value += 1
           return value
@@ -3638,6 +3636,22 @@ struct AppFeatureTests {
 
     state.layout = .regular
     #expect(state.highlightedSessionID == "s1", "the same state highlights in regular")
+  }
+
+  /// The list's needs-input dot: unopened approval pushes, plus the live chat only while it
+  /// actually has an interaction card up.
+  @Test func needsInputCombinesApprovalPushesAndTheLiveChatsOpenCard() {
+    var chat = ChatFeature.State(connection: connection, resumeStoredID: "s1")
+    var state = AppFeature.State(
+      home: SessionListFeature.State(connection: connection),
+      liveChat: chat,
+      pendingApprovalSessionIDs: ["pushed"]
+    )
+    #expect(state.needsInputSessionIDs == ["pushed"], "an idle live chat needs nothing")
+
+    chat.present(.approval(ApprovalRequest(command: "rm -rf /tmp/x")))
+    state.liveChat = chat
+    #expect(state.needsInputSessionIDs == ["pushed", "s1"])
   }
 
   /// compact → regular with a pushed marker: the path clears (the slot becomes the detail;
@@ -5279,7 +5293,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5334,7 +5348,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5386,7 +5400,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5428,7 +5442,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5470,7 +5484,7 @@ struct AppFeatureTests {
       $0.preferences = .inMemory()
       $0.push = PushClient.inMemory().client
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5502,7 +5516,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5548,7 +5562,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
     #expect(store.state.home?.scopedProfileName == nil)
@@ -5589,7 +5603,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5723,7 +5737,7 @@ struct AppFeatureTests {
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
 
     await store.send(.home(.selectProfile(name: "work"))) {
@@ -5731,10 +5745,9 @@ struct AppFeatureTests {
       $0.home?.now = Date(timeIntervalSince1970: 0)
       $0.home?.isLoading = true
     }
-    await store.receive(\.home.sessionsResponse) {
-      $0.home?.isLoading = false
-    }
+    await store.receive(\.home.sessionsResponse)
     await store.receive(\.home.cronJobsResponse) {
+      $0.home?.isLoading = false
       $0.home?.cronJobsSupported = false
     }
     #expect(store.state.liveChat == chat)
@@ -5761,7 +5774,7 @@ struct AppFeatureTests {
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.preferences = .inMemory()
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
 
     await store.send(.home(.selectProfile(name: "work"))) {
@@ -5769,10 +5782,9 @@ struct AppFeatureTests {
       $0.home?.now = Date(timeIntervalSince1970: 0)
       $0.home?.isLoading = true
     }
-    await store.receive(\.home.sessionsResponse) {
-      $0.home?.isLoading = false
-    }
+    await store.receive(\.home.sessionsResponse)
     await store.receive(\.home.cronJobsResponse) {
+      $0.home?.isLoading = false
       $0.home?.cronJobsSupported = false
     }
     #expect(store.state.liveChat == chat)
@@ -5808,7 +5820,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5852,7 +5864,7 @@ struct AppFeatureTests {
       $0.push = PushClient.inMemory().client
       $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { _ in } }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off(showSkippedAssertions: false)
 
@@ -5908,7 +5920,7 @@ struct AppFeatureTests {
       $0.keychain = keychain
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
       $0.bearerTokens = tokenStore
-      $0.hermesREST.sessions = { @Sendable connection, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable connection, _, _, _, _ in
         #expect(tokenStore.current == session, "the probe must run against a seeded store")
         #expect(connection.token == nil) // never the legacy session-token path
         return []
@@ -5945,7 +5957,7 @@ struct AppFeatureTests {
       $0.keychain.loadSession = { @Sendable _ in .bearer(session) }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
       $0.bearerTokens = tokenStore
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unauthorized }
     }
 
     await store.send(.task) {
@@ -5974,7 +5986,7 @@ struct AppFeatureTests {
       $0.keychain.loadSession = { @Sendable _ in .bearer(session) }
       $0.preferences.loadServerURL = { "http://mac.tailnet:9119" }
       $0.bearerTokens = tokenStore
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.offline }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.offline }
     }
 
     await store.send(.task) {

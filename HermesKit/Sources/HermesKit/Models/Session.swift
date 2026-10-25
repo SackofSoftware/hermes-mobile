@@ -10,13 +10,14 @@ public struct Session: Equatable, Sendable, Identifiable {
   public var title: String?
   public var updatedAt: Date?
   public var preview: String?
-  /// Working directory of the session — the workspace it belongs to. Used to group the
-  /// list like the desktop app (see `SessionGroup`). Nil/empty → "No workspace".
+  /// Working directory of the session — the workspace it belongs to; the session card's
+  /// header label (`workspaceLabel`). Search hits carry none.
   public var cwd: String?
-  /// Original start time; used to order rows within a workspace group (desktop parity).
+  /// Original start time (decoded for parity with the desktop row; the list orders by
+  /// `updatedAt`).
   public var startedAt: Date?
-  /// Number of messages — used only as the unread fallback for older agents that omit
-  /// the server-backed `unread` field.
+  /// Number of messages — the session card footer's count (`SessionCardContent`), and the
+  /// unread fallback for older agents that omit the server-backed `unread` field.
   public var messageCount: Int?
   /// Server-backed read state (`last_read_at` vs activity), shared by Desktop and every
   /// mobile client. Nil means an older agent omitted the field; the list then falls back
@@ -39,6 +40,10 @@ public struct Session: Equatable, Sendable, Identifiable {
   /// `flattenSessionsWithBranches` so branches keep nesting under a compressed parent
   /// (desktop `byVisibleId` aliasing). `nil` for un-compressed sessions and old agents.
   public var lineageRootID: String?
+  /// The raw server model id (`model` on REST `GET /api/sessions`), shown verbatim in the
+  /// session card footer exactly as the chat's model chip shows it. `nil` on older agents
+  /// that omit the field (or send it blank).
+  public var model: String?
 
   public init(
     id: String,
@@ -52,7 +57,8 @@ public struct Session: Equatable, Sendable, Identifiable {
     isActive: Bool? = nil,
     source: String? = nil,
     parentSessionID: String? = nil,
-    lineageRootID: String? = nil
+    lineageRootID: String? = nil,
+    model: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -66,11 +72,15 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.source = source
     self.parentSessionID = parentSessionID
     self.lineageRootID = lineageRootID
+    self.model = model
   }
 
   /// Whether this is a cron-scheduled session — the single source of truth for the
   /// Cron Jobs list partition (mirrors the desktop's `source === "cron"` special-case).
-  public var isCron: Bool { source == "cron" }
+  public var isCron: Bool { source == Self.cronSource }
+
+  /// The `source` value of a cron-scheduled run.
+  public static let cronSource = "cron"
 
   /// A real, user-facing title: non-empty and not the server's `"Untitled"` placeholder
   /// (the agent sends that for auto-named/cron sessions before a real title exists).

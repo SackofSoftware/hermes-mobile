@@ -84,28 +84,9 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
-  func testSessionRow_searchResult() {
-    // A search result: no title, `id` is a meaningless stored id, so the snippet is
-    // promoted to the headline instead of showing the raw id.
-    let view = SessionRowView(
-      session: Session(
-        id: "20260610_120231_afcca6",
-        title: nil,
-        updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
-        preview: "Can you help me refactor the WebSocket JSON-RPC parser?"
-      ),
-      now: now,
-      showsPreview: true
-    )
-    .padding()
-    .frame(width: device.size?.width ?? 390)
-    assertSnapshot(of: view, as: componentImage())
-  }
-
   func testSessionRow_untitledPromotesPreview() {
-    // In the grouped list (showsPreview: false) a session with the server's "Untitled"
-    // placeholder and no real title promotes its first-message preview to the headline —
-    // it must never render the raw id (#13).
+    // A session with the server's "Untitled" placeholder and no real title promotes its
+    // first-message preview to the headline — it must never render the raw id (#13).
     let view = SessionRowView(
       session: Session(
         id: "20260610_120231_afcca6",
@@ -120,12 +101,127 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  // MARK: SessionCardView
+
+  /// The inbox card's full anatomy: workspace (cwd basename) + age header, title, preview
+  /// line, and the model · message-count footer. Variants below change one input each.
+  private func cardFixtureSession(
+    title: String? = "Refactor the streaming parser",
+    preview: String? = "Can you help me refactor the WebSocket JSON-RPC parser?",
+    cwd: String? = "/Users/eugene/Developer/hermes-mobile",
+    messageCount: Int? = 12,
+    model: String? = "claude-sonnet-4-5"
+  ) -> Session {
+    Session(
+      id: "20260610_120231_afcca6",
+      title: title,
+      updatedAt: Date(timeIntervalSince1970: 1_749_599_700),
+      preview: preview,
+      cwd: cwd,
+      messageCount: messageCount,
+      model: model
+    )
+  }
+
+  private func assertCardSnapshot(
+    _ card: SessionCardView,
+    width: CGFloat? = nil,
+    testName: String = #function,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    let view = card
+      .padding()
+      .frame(width: width ?? device.size?.width ?? 390)
+    assertSnapshot(of: view, as: componentImage(), file: file, testName: testName, line: line)
+  }
+
+  func testSessionCard_titled() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now))
+  }
+
+  /// An untitled session (server "Untitled" placeholder) promotes its preview into the title
+  /// slot and drops the preview line — the same text must never render twice.
+  func testSessionCard_untitledPromotesPreview() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(title: "Untitled"), now: now))
+  }
+
+  func testSessionCard_unread() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now, isUnread: true))
+  }
+
+  func testSessionCard_pinned() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now, isPinned: true))
+  }
+
+  func testSessionCard_workingGlow() {
+    assertCardSnapshot(SessionCardView(session: cardFixtureSession(), now: now, isActive: true))
+  }
+
+  /// A pending approval outranks the running turn: the status dot turns amber while the glow
+  /// still marks the turn as live.
+  func testSessionCard_needsInput() {
+    assertCardSnapshot(
+      SessionCardView(session: cardFixtureSession(), now: now, isActive: true, needsInput: true)
+    )
+  }
+
+  /// Older agent (no `model`) and zero messages: the whole footer line is omitted, and a
+  /// missing `cwd` reads "No workspace".
+  func testSessionCard_noFooter() {
+    assertCardSnapshot(
+      SessionCardView(
+        session: cardFixtureSession(cwd: nil, messageCount: 0, model: nil),
+        now: now
+      )
+    )
+  }
+
+  func testSessionCard_branchStem() {
+    assertCardSnapshot(
+      SessionCardView(
+        session: cardFixtureSession(title: "Try the incremental decoder instead", messageCount: 1),
+        now: now,
+        branchStem: "└─ "
+      )
+    )
+  }
+
+  /// A long title wraps to a second line before truncating — rendered at the 320pt iPad
+  /// sidebar width, where one line would lose the distinguishing part.
+  func testSessionCard_longTitleWrapsToTwoLines() {
+    assertCardSnapshot(
+      SessionCardView(
+        session: cardFixtureSession(
+          title: "Dnipro to Bratislava travel options with train changes and border crossings"
+        ),
+        now: now
+      ),
+      width: 320
+    )
+  }
+
   // MARK: SessionListView
 
+  /// The calendar every list snapshot buckets its date sections with — Gregorian, UTC,
+  /// Monday-first, en_US — so the headers never follow the simulator's time zone or locale.
+  /// Against `now` (Wed 11 Jun 2025 00:00 UTC, i.e. nominal day Tue 10 Jun under the 4 AM
+  /// rollover) the fixtures' 1_749_556_800 − n days land in Today (n = 0), Yesterday (1), and
+  /// Last week (2…).
+  private var listCalendar: Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "UTC")!
+    calendar.locale = Locale(identifier: "en_US")
+    calendar.firstWeekday = 2
+    return calendar
+  }
+
+  /// The default list: interactive sessions as inbox cards split into Today / Yesterday /
+  /// Last week sections; one unread card, one from a second workspace, and footers with and
+  /// without a model.
   func testSessionList() {
     let now = self.now
     let mobile = "/Users/me/dev/hermes-mobile"
-    // 6 sessions in one workspace (triggers "Show more"), 1 in another.
     var sessions: [Session] = (0..<6).map { i in
       Session(id: "m\(i)",
               title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass",
@@ -133,7 +229,8 @@ final class SessionSnapshotTests: SnapshotTestCase {
               updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
               cwd: mobile,
               startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
-              messageCount: 10)
+              messageCount: 10,
+              model: i.isMultiple(of: 2) ? "claude-sonnet-4-5" : nil)
     }
     sessions.append(
       Session(id: "a1", title: nil,
@@ -152,13 +249,13 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            calendar: listCalendar,
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -189,13 +286,14 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
             copiedIDToastToken: 1
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -225,49 +323,14 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
             pinnedIDs: ["m1"] // "Plan the iOS MVP" floats to the top Pinned section
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
-          $0.continuousClock = ImmediateClock()
-          $0.date = .constant(now)
-        }
-      )
-    }
-    assertSnapshot(of: view, as: deviceImage())
-  }
-
-  func testSessionList_chronological() {
-    let now = self.now
-    // Two workspaces, but chronological mode shows one flat recency-ordered list.
-    let sessions: [Session] = (0..<5).map { i in
-      Session(id: "m\(i)",
-              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass",
-                      "Model picker", "Workspace grouping"][i],
-              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
-              cwd: i.isMultiple(of: 2) ? "/Users/me/dev/hermes-mobile" : "/Users/me/dev/hermes-agent",
-              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
-              messageCount: 10)
-    }
-    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
-
-    let view = NavigationStack {
-      SessionListView(
-        store: Store(
-          initialState: SessionListFeature.State(
-            connection: ServerConnection(baseURL: URL(string: "http://mac.tailnet:9119")!, token: "t"),
-            sessions: IdentifiedArray(uniqueElements: sessions),
-            now: now,
-            seenCounts: seen,
-            groupingMode: .chronological
-          )
-        ) {
-          SessionListFeature().ignoring(\.task)
-        } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -278,7 +341,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
 
   /// Branch nesting (#34): a parent session with two branch children renders the children
   /// nested underneath with desktop-style elbow stems — newest sibling first (`├─`), last
-  /// sibling `└─` — indented, in the parent's workspace group; an unrelated session stays
+  /// sibling `└─` — indented, in the parent's date section; an unrelated session stays
   /// a normal top-level row below the cluster.
   func testSessionList_branchNesting() {
     let now = self.now
@@ -317,19 +380,77 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            calendar: listCalendar,
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
       )
     }
     assertSnapshot(of: view, as: deviceImage())
+  }
+
+  /// The date-section anatomy end to end: a pinned card on top (its own stale date never
+  /// opens a section), then Today (a parent with a nested branch card — the cluster stays in
+  /// one section), Yesterday, Last week, and a prior-year "December 2024" section.
+  func testSessionList_dateSections() {
+    let now = self.now
+    let mobile = "/Users/me/dev/hermes-mobile"
+    let agent = "/Users/me/dev/hermes-agent"
+    let sessions: [Session] = [
+      Session(id: "p0", title: "Release checklist",
+              updatedAt: Date(timeIntervalSince1970: 1_749_124_800), // Thu 5 Jun 12:00
+              preview: "Walk me through the TestFlight upload steps",
+              cwd: mobile, messageCount: 18, model: "claude-opus-4-1"),
+      Session(id: "t0", title: "Refactor the streaming parser",
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800), // Tue 10 Jun 12:00
+              preview: "Can you help me refactor the WebSocket JSON-RPC parser?",
+              cwd: mobile, messageCount: 12, model: "claude-sonnet-4-5"),
+      Session(id: "t1", title: "Try an actor-isolated fold",
+              updatedAt: Date(timeIntervalSince1970: 1_749_553_200), // Tue 10 Jun 11:00
+              cwd: mobile, messageCount: 4,
+              parentSessionID: "t0", model: "claude-sonnet-4-5"),
+      Session(id: "y0", title: "Plan the iOS MVP",
+              updatedAt: Date(timeIntervalSince1970: 1_749_481_200), // Mon 9 Jun 15:00
+              preview: "What should the first TestFlight build include?",
+              cwd: agent, messageCount: 7),
+      Session(id: "w0", title: "Untitled",
+              updatedAt: Date(timeIntervalSince1970: 1_749_038_400), // Wed 4 Jun 12:00
+              preview: "Summarise the open pull requests",
+              cwd: agent, messageCount: 3, model: "gpt-5"),
+      Session(id: "d0", title: "Holiday travel options",
+              updatedAt: Date(timeIntervalSince1970: 1_734_264_000), // Sun 15 Dec 2024 12:00
+              messageCount: 9),
+    ]
+    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+
+    let view = NavigationStack {
+      SessionListView(
+        store: Store(
+          initialState: SessionListFeature.State(
+            connection: connection,
+            sessions: IdentifiedArray(uniqueElements: sessions),
+            now: now,
+            calendar: listCalendar,
+            seenCounts: seen,
+            pinnedIDs: ["p0"]
+          )
+        ) {
+          SessionListFeature().ignoring(\.task)
+        } withDependencies: {
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
+          $0.continuousClock = ImmediateClock()
+          $0.date = .constant(now)
+        }
+      )
+    }
+    // Taller than one phone screen so every header down to "December 2024" is in frame.
+    assertSnapshot(of: view, as: deviceImage(height: 1250))
   }
 
   // MARK: Selected-row highlight (iPad sidebar, #80)
@@ -362,13 +483,13 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            calendar: listCalendar,
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         },
@@ -387,12 +508,12 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: highlightedListHost(), as: deviceImage(appearance: .light))
   }
 
-  // MARK: Cron Jobs section
+  // MARK: Bottom-bar tabs + Cron Jobs tab
 
-  /// A mix of interactive + cron sessions: the cron rows are pulled out into a dedicated
-  /// "Cron Jobs" section (Clock icon) below the interactive workspace groups, in workspace
-  /// grouping mode.
-  func testSessionList_cronSection() {
+  /// A mix of interactive + cron sessions on the Sessions tab: the cron rows stay out of the
+  /// date sections, and the bottom bar shows the Sessions | Cron Jobs tab pill (Sessions
+  /// selected) beside the New chat button.
+  func testSessionList_sessionsTabWithTabBar() {
     let now = self.now
     let mobile = "/Users/me/dev/hermes-mobile"
     // 3 interactive sessions in one workspace.
@@ -423,13 +544,13 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            calendar: listCalendar,
+            seenCounts: seen
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -475,9 +596,9 @@ final class SessionSnapshotTests: SnapshotTestCase {
     return ([interactive] + backupRuns + [digestRun], jobs, seen)
   }
 
-  /// Grouped Cron Jobs section, collapsed: job rows with state dots (accent scheduled,
-  /// amber paused), the 7-hour countdown, the paused job's schedule line, the unread dot
-  /// on the backup job, and the header's aggregate unread badge.
+  /// The Cron Jobs tab, grouped: job rows with state dots (accent scheduled, amber paused),
+  /// the 7-hour countdown, the paused job's schedule line, the unread dot on the backup job,
+  /// and the tab's aggregate unread badge.
   func testSessionList_cronJobsGrouped() {
     let now = self.now
     let (sessions, jobs, seen) = cronGroupedFixtures()
@@ -488,14 +609,15 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
-            groupingMode: .chronological,
+            selectedTab: .cron,
             cronJobs: IdentifiedArray(uniqueElements: jobs)
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.hermesREST.cronJobs = { _, _ in jobs }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
@@ -506,7 +628,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
   }
 
   /// Grouped Cron Jobs section with the backup job's inline peek expanded: its runs render
-  /// indented via the standard row builder, the unread run keeps its dot, and the peek is
+  /// indented as compact one-line rows (never cards), the unread run keeps its dot, and the peek is
   /// single-open (the paused job stays collapsed).
   func testSessionList_cronJobsGrouped_expandedPeek() {
     let now = self.now
@@ -518,15 +640,16 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
-            groupingMode: .chronological,
+            selectedTab: .cron,
             cronJobs: IdentifiedArray(uniqueElements: jobs),
             expandedCronJobID: "backup01"
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.hermesREST.cronJobs = { _, _ in jobs }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
@@ -536,8 +659,8 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// Old agent (no `/api/cron/jobs` → `cronJobsSupported == false`): the section falls
-  /// back to today's flat run rows — but the unread badge still works (one unread run).
+  /// Old agent (no `/api/cron/jobs` → `cronJobsSupported == false`): the Cron Jobs tab falls
+  /// back to flat run rows — but the tab's unread badge still works (one unread run).
   func testSessionList_cronJobsFallbackFlatWithBadge() {
     let now = self.now
     let (sessions, _, seen) = cronGroupedFixtures()
@@ -548,14 +671,15 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
-            groupingMode: .chronological,
+            selectedTab: .cron,
             cronJobsSupported: false
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -564,28 +688,13 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// The Cron Jobs section is orthogonal to the grouping mode: even in chronological mode
-  /// the interactive list stays flat while cron rows still break out into their own section.
-  func testSessionList_cronSection_chronological() {
-    let now = self.now
-    var sessions: [Session] = (0..<4).map { i in
-      Session(id: "m\(i)",
-              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass",
-                      "Model picker"][i],
-              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
-              cwd: i.isMultiple(of: 2) ? "/Users/me/dev/hermes-mobile" : "/Users/me/dev/hermes-agent",
-              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
-              messageCount: 10)
-    }
-    sessions.append(
-      Session(id: "c0", title: "Nightly backup",
-              updatedAt: Date(timeIntervalSince1970: 1_749_540_000),
-              cwd: "/Users/me/dev/hermes-mobile",
-              startedAt: Date(timeIntervalSince1970: 1_749_540_000),
-              messageCount: 5, source: "cron")
-    )
-    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+  // MARK: Search results
 
+  /// The search button's open state with nothing typed yet: the nav bar row gives way to the
+  /// glass search field and the round close button, and the tab pill hides.
+  func testSessionList_searchOpen() {
+    let now = self.now
+    let (sessions, jobs, seen) = cronGroupedFixtures()
     let view = NavigationStack {
       SessionListView(
         store: Store(
@@ -593,13 +702,16 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
-            groupingMode: .chronological
+            isSearchPresented: true,
+            cronJobs: IdentifiedArray(uniqueElements: jobs)
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
+          $0.hermesREST.cronJobs = { _, _ in jobs }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -608,21 +720,22 @@ final class SessionSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: deviceImage())
   }
 
-  /// Regression guard: with zero cron sessions, no "Cron Jobs" section header renders —
-  /// the list is just the interactive sessions (mirrors `testSessionList`'s no-cron
-  /// fixture). All sessions here are interactive (`source == nil`).
-  func testSessionList_noCronSection() {
+  /// Search results are flat cards (no date sections). The rows mirror the search DTO's
+  /// shape — no title or workspace, the match snippet as `preview` — so the snippet is
+  /// promoted into the card's title slot and the header leaves the workspace out.
+  func testSessionList_searchResultsCards() {
     let now = self.now
-    let mobile = "/Users/me/dev/hermes-mobile"
-    let sessions: [Session] = (0..<3).map { i in
-      Session(id: "m\(i)",
-              title: ["Refactor the streaming parser", "Plan the iOS MVP", "UX polish pass"][i],
-              updatedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
-              cwd: mobile,
-              startedAt: Date(timeIntervalSince1970: 1_749_556_800 - Double(i) * 86_400),
-              messageCount: 10)
-    }
-    let seen = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messageCount ?? 0) })
+    let sessions: [Session] = [
+      Session(id: "20260610_120231_afcca6",
+              updatedAt: Date(timeIntervalSince1970: 1_749_556_800),
+              preview: "Can you help me refactor the WebSocket JSON-RPC parser?"),
+      Session(id: "20260609_090000_b1c2d3",
+              updatedAt: Date(timeIntervalSince1970: 1_749_459_600),
+              preview: "The parser drops frames larger than 16 MiB — why?"),
+      Session(id: "20260530_180000_e4f5a6",
+              updatedAt: Date(timeIntervalSince1970: 1_748_628_000),
+              preview: "Write a streaming parser test for partial deltas"),
+    ]
 
     let view = NavigationStack {
       SessionListView(
@@ -630,14 +743,16 @@ final class SessionSnapshotTests: SnapshotTestCase {
           initialState: SessionListFeature.State(
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
+            searchQuery: "parser",
             now: now,
-            seenCounts: seen,
-            expandedGroups: [mobile]
+            calendar: listCalendar,
+            isSearchPresented: true
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
+          $0.hermesREST.search = { _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -680,6 +795,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
             profiles: IdentifiedArray(uniqueElements: profileFixtures()),
             selectedProfileName: "default",
@@ -688,7 +804,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -718,6 +834,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
             profiles: IdentifiedArray(uniqueElements: profileFixtures()),
             selectedProfileName: "work",
@@ -726,7 +843,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }
@@ -782,13 +899,14 @@ final class SessionSnapshotTests: SnapshotTestCase {
             connection: connection,
             sessions: IdentifiedArray(uniqueElements: sessions),
             now: now,
+            calendar: listCalendar,
             seenCounts: seen,
             profilesSupported: false
           )
         ) {
           SessionListFeature().ignoring(\.task)
         } withDependencies: {
-          $0.hermesREST.sessions = { _, _, _, _ in sessions }
+          $0.hermesREST.sessions = { _, _, _, _, _ in sessions }
           $0.continuousClock = ImmediateClock()
           $0.date = .constant(now)
         }

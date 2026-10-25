@@ -80,7 +80,7 @@ struct ConnectionFeatureTests {
       ConnectionFeature()
     } withDependencies: {
       $0.hermesREST.status = { @Sendable _ in okStatus() }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.keychain = keychain
       $0.preferences = preferences
     }
@@ -152,7 +152,7 @@ struct ConnectionFeatureTests {
     ) {
       ConnectionFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unauthorized }
       $0.keychain = keychain
     }
 
@@ -459,7 +459,7 @@ struct ConnectionFeatureTests {
         #expect(session == cookieSession)
         activated.setValue(true)
       }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         #expect(activated.value, "cookies must be activated before the validating call")
         return []
       }
@@ -515,7 +515,7 @@ struct ConnectionFeatureTests {
     ) {
       ConnectionFeature()
     } withDependencies: {
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         throw URLError(.notConnectedToInternet)
       }
       $0.keychain = keychain
@@ -587,7 +587,7 @@ struct ConnectionFeatureTests {
         #expect(provider == "nous")
         return bearer
       }
-      $0.hermesREST.sessions = { @Sendable connection, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable connection, _, _, _, _ in
         // The pair must be in the store BEFORE the validating call — a `.bearer` request
         // resolves its `Authorization` header through it, so an unseeded store 401s.
         let seeded = tokenStore.current
@@ -624,7 +624,7 @@ struct ConnectionFeatureTests {
         #expect(provider == "self_hosted")
         return bearer
       }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.keychain = KeychainClient.inMemory()
       $0.preferences = PreferencesClient.inMemory()
     }
@@ -779,7 +779,7 @@ struct ConnectionFeatureTests {
       ConnectionFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in bearerFixture() }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.unauthorized }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.unauthorized }
       $0.bearerTokens = tokenStore
       $0.keychain = keychain
       $0.preferences = preferences
@@ -801,7 +801,7 @@ struct ConnectionFeatureTests {
       ConnectionFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in bearerFixture() }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in throw RESTError.serviceUnavailable }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in throw RESTError.serviceUnavailable }
       $0.bearerTokens = tokenStore
       $0.keychain = KeychainClient.inMemory()
       $0.preferences = PreferencesClient.inMemory()
@@ -837,7 +837,7 @@ struct ConnectionFeatureTests {
       ConnectionFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in minted }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         // Stands in for the live transport, which resolves `Authorization` through the store.
         _ = try await tokenStore.validAccessToken { _, _ in rotated }
         return []
@@ -875,7 +875,7 @@ struct ConnectionFeatureTests {
       ConnectionFeature()
     } withDependencies: {
       $0.oauthLogin.signIn = { @Sendable _, _ in minted }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in
         // The live transport resolves `Authorization` through the store — which rotates —
         // and only then does the server reject the identity.
         _ = try await tokenStore.validAccessToken { _, _ in rotated }
@@ -917,7 +917,7 @@ struct ConnectionFeatureTests {
         }
         return attempt == 0 ? abandoned : winner
       }
-      $0.hermesREST.sessions = { @Sendable connection, _, _, _ in
+      $0.hermesREST.sessions = { @Sendable connection, _, _, _, _ in
         guard connection.auth == .bearer(abandoned) else { return [] }
         // The first attempt is still validating when the second tap arrives.
         try await Task.sleep(for: .seconds(60))
@@ -955,7 +955,7 @@ struct ConnectionFeatureTests {
         }
         return bearerFixture()
       }
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.bearerTokens = BearerTokenStore()
       $0.keychain = keychain
       $0.preferences = .inMemory()
@@ -1034,7 +1034,7 @@ struct ConnectionFeatureTests {
     let minted = bearerFixture()
     let (validating, signalValidating) = AsyncStream<Void>.makeStream()
     var rest = HermesRESTClient.testValue
-    rest.sessions = { @Sendable _, _, _, _ in
+    rest.sessions = { @Sendable _, _, _, _, _ in
       signalValidating.yield() // the pair is seeded by now
       try await Task.sleep(for: .seconds(60))
       return []
@@ -1074,7 +1074,7 @@ struct ConnectionFeatureTests {
     let (validating, signalValidating) = AsyncStream<Void>.makeStream()
     let release = LockIsolated<CheckedContinuation<Void, Never>?>(nil)
     var rest = HermesRESTClient.testValue
-    rest.sessions = { @Sendable _, _, _, _ in
+    rest.sessions = { @Sendable _, _, _, _, _ in
       // Not cancellation-aware: the call SUCCEEDS, just after the task was cancelled.
       await withCheckedContinuation { continuation in
         release.setValue(continuation)
@@ -1121,7 +1121,7 @@ struct ConnectionFeatureTests {
     let (browserOpen, signalBrowserOpen) = AsyncStream<Void>.makeStream()
     let release = LockIsolated<CheckedContinuation<Void, Never>?>(nil)
     var rest = HermesRESTClient.testValue
-    rest.sessions = { @Sendable _, _, _, _ in [] }
+    rest.sessions = { @Sendable _, _, _, _, _ in [] }
     var slowLogin = OAuthLoginClient.testValue
     slowLogin.signIn = { @Sendable _, _ in
       await withCheckedContinuation { continuation in
@@ -1172,7 +1172,7 @@ struct ConnectionFeatureTests {
     let (validating, signalValidating) = AsyncStream<Void>.makeStream()
     let release = LockIsolated<CheckedContinuation<Void, Never>?>(nil)
     var rest = HermesRESTClient.testValue
-    rest.sessions = { @Sendable _, _, _, _ in
+    rest.sessions = { @Sendable _, _, _, _, _ in
       await withCheckedContinuation { continuation in
         release.setValue(continuation)
         signalValidating.yield()

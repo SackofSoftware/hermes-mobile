@@ -131,6 +131,17 @@ public struct AppFeature {
       layout == .regular ? currentViewingSessionID : nil
     }
 
+    /// Sessions whose list card shows the needs-input status dot: an approval push this
+    /// device hasn't opened yet, plus the live chat while an approval / clarify / secret card
+    /// is up. The list has no live events for other sessions, so this is what mobile knows.
+    public var needsInputSessionIDs: Set<String> {
+      var ids = pendingApprovalSessionIDs
+      if let chat = liveChat, chat.pendingInteraction != nil, let key = chat.sessionKey {
+        ids.insert(key)
+      }
+      return ids
+    }
+
     /// What the regular-width seat reseat (`reduceProfileReseat`) is watching: the list's
     /// scoped profile, whether the seat's composer input is still resolving, and the layout.
     /// The second member DEFERS rather than skips a reseat that would land mid-paste or
@@ -331,7 +342,7 @@ public struct AppFeature {
             // Keychain persist hook, so a rotation during the probe is saved.
             Self.seedBearerStore(session, baseURL: url, keychain: keychain, store: bearerTokens)
             do {
-              _ = try await rest.sessions(connection, 1, 0, .recent)
+              _ = try await rest.sessions(connection, 1, 0, .recent, .all)
               await send(.autoConnectSucceeded(connection))
             } catch {
               // A dead refresh token surfaces here as `RESTError.unauthorized` (the store
@@ -391,9 +402,7 @@ public struct AppFeature {
         try? keychain.deleteSession()
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
-        preferences.saveGroupingMode(.default)
         preferences.saveDefaultSessionSwipeAction(.default)
-        preferences.saveShowCronSection(true)
         state.connectionFailed = nil
         state.path = .init()
         state.liveChat = nil
@@ -758,9 +767,7 @@ public struct AppFeature {
         try? keychain.deleteSession()
         preferences.clearServerURL()
         preferences.clearIdentityScopedPrefs()
-        preferences.saveGroupingMode(.default)
         preferences.saveDefaultSessionSwipeAction(.default)
-        preferences.saveShowCronSection(true)
         state.reauth = nil
         state.path = .init()
         state.liveChat = nil

@@ -536,8 +536,9 @@ one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `
   `finalizeInFlight` already cleared `isSending` on the drop, so a replayed `message.complete` or
   `request.cancel` would otherwise fire a queued prompt (#66) against a turn the server may still
   be running. A replayed `.error` does not park the queue, the fold emits no `runningChanged`,
-  and the turn anchor gets one write for the last boundary folded. The hydrate's `running` is the
-  only trustworthy idle edge, and its own drain runs as usual.
+  and the turn anchor gets one write for the last boundary folded; the fold never starts the
+  thinking timer. The hydrate's `running` is the only trustworthy idle edge (and the only timer
+  start), and its own drain runs as usual.
 - **Then the hydrate, unchanged.** `applyActivate` stays the authority. A running turn keeps the
   tool and thinking rows the fold built or extended (#26); assistant text is the hydrate's alone
   (the fold skips `message.delta`s and materialises no `message.complete` row, so a reply never
@@ -563,8 +564,9 @@ one, it calls `session.events.since {session_id, last_seen}` (nothing else: no `
   request frames to its detached drop sink, so no live session frame can race the fold, and the
   desktop's park-and-flush buffer is unnecessary. Nothing attaches the socket mid-read: while
   `isReplayReadPending`, a healthy-socket `.foreground` / `.reattached` defers to the replay's
-  hydrate and `canSend` / `drainQueueIfReady` hold the `prompt.submit`. The cost is a one-RTT window between the read and the attach whose frames are
-  stamped but dropped; the desktop has the same window. Reading after the advertisement gate
+  hydrate, `canSend` / `drainQueueIfReady` hold the `prompt.submit`, and a prompt-card answer
+  is a no-op (it would unblock the agent mid-read). The cost is a one-RTT window between the
+  read and the attach whose frames are stamped but dropped; the desktop has the same window. Reading after the advertisement gate
   rather than at socket open (as the desktop does) widens it by up to the advertisement RTT
   (worst case the 5 s cap), accepted to keep a single `.ready` path.
 - **Server floor.** The ring needs v2026.8.27; the v7 prompts + ring combination this was built

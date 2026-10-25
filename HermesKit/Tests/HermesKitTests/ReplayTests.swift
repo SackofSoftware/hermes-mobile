@@ -52,7 +52,8 @@ struct ReplayTests {
     /// (same process, epoch e1) and then stays open; otherwise a redial yields nothing.
     @MainActor
     func makeStore(
-      _ initial: ChatFeature.State, exhaustive: Bool = false, readyOnConnect: Bool = false
+      _ initial: ChatFeature.State, exhaustive: Bool = false, readyOnConnect: Bool = false,
+      clock: TestClock<Duration> = TestClock()
     ) -> TestStoreOf<ChatFeature> {
       var snapshot = ChatSnapshotClient.inMemory()
       let setAnchor = snapshot.setTurnAnchor
@@ -78,7 +79,7 @@ struct ReplayTests {
         }
       } withDependencies: { [self] in
         $0.uuid = .incrementing
-        $0.continuousClock = TestClock()
+        $0.continuousClock = clock
         $0.date = .constant(Date(timeIntervalSince1970: 1_000))
         $0.chatSnapshot = snapshot
         $0.hermesGateway.connect = { @Sendable [self] _, _ in
@@ -896,6 +897,84 @@ struct ReplayTests {
     #expect(gateway.anchors.value == ["set"])
   }
 
+  @Test(arguments: [
+    ReplayTests.event("message.complete", 42, ["text": .string("A done")]),
+    ReplayTests.event("error", 42, ["message": .string("boom")]),
+  ])
+  func aReplayedPastTurnEndKeepsThePushTapApprovalHint(turnEnd: JSONValue) async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([turnEnd, Self.event("message.start", 43)])))
+    gateway.resume.setValue(Self.resume(running: true, contract: nil))
+    var initial = droppedState()
+    initial.expectsPendingApproval = true
+    let store = gateway.makeStore(initial)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success)
+    #expect(store.state.expectsPendingApproval)
+    await store.receive(\.activateResult.success)
+    // Legacy contract: the running hydrate consumes the hint into the recovered card.
+    #expect(!store.state.expectsPendingApproval)
+    #expect(store.state.pendingInteraction == .approval(ChatFeature.recoveredApprovalRequest))
+    await store.send(.teardown)
+  }
+
+  @Test func aGapThatStartsAndEndsATurnLeavesNoThinkingTimer() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([
+      Self.event("message.start", 42),
+      Self.event("message.complete", 43, ["text": .string("done")]),
+    ])))
+    gateway.resumeError.setValue(.server("boom"))
+    let clock = TestClock()
+    let store = gateway.makeStore(droppedState(), clock: clock)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success)
+    await store.receive(\.activateResult.failure)
+    // The batch's start never outlives its own complete, even with no hydrate to settle it.
+    await clock.advance(by: .seconds(3))
+    await store.skipReceivedActions()
+    #expect(store.state.thinkingSeconds == 0)
+    await store.send(.teardown)
+  }
+
+  @Test func aGapEndingAtATurnStartLeavesTheTimerToAStoppedHydrate() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([Self.event("message.start", 42)])))
+    gateway.resume.setValue(Self.resume(running: false))
+    let clock = TestClock()
+    let store = gateway.makeStore(droppedState(), clock: clock)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success)
+    await store.receive(\.activateResult.success)
+    // The turn finished in the gap: the stopped hydrate leaves no tick and no anchor behind.
+    await clock.advance(by: .seconds(3))
+    await store.skipReceivedActions()
+    #expect(store.state.thinkingSeconds == 0)
+    #expect(!store.state.isSending)
+    await store.send(.teardown)
+    await store.finish()
+    #expect(gateway.anchors.value == ["set", "clear"])
+  }
+
+  @Test func aGapEndingAtATurnStartTicksOnceTheHydrateSaysRunning() async {
+    let gateway = ReplayHarness()
+    gateway.since.setValue(.success(Self.since([Self.event("message.start", 42)])))
+    gateway.resume.setValue(Self.resume(running: true))
+    let clock = TestClock()
+    let store = gateway.makeStore(droppedState(), clock: clock)
+
+    await store.send(.gatewayFrame(ready))
+    await store.receive(\.eventReplayResult.success)
+    await store.receive(\.activateResult.success)
+    await clock.advance(by: .seconds(3))
+    await store.skipReceivedActions()
+    #expect(store.state.thinkingSeconds == 3)
+    await store.send(.teardown)
+  }
+
   @Test func replayedErrorWithSendNowArmedNeverDrainsDuringTheFold() async {
     let gateway = ReplayHarness()
     gateway.since.setValue(.success(Self.since([Self.event("error", 42, ["message": .string("boom")])])))
@@ -981,6 +1060,33 @@ struct ReplayTests {
     // The promoted head drains on the hydrate's idle edge, after the resume.
     #expect(store.state.drainingEntry?.text == "next")
     #expect(!store.state.isReplayReadPending)
+    await store.send(.teardown)
+  }
+
+  @Test func answeringACardWaitsForTheRead() async {
+    let gateway = ReplayHarness()
+    gateway.hangsSince.setValue(true)
+    gateway.resume.setValue(Self.resume(running: true, openRequests: [Self.openRequest("srq-a")]))
+    var initial = droppedState()
+    initial.desktopContract = 7
+    initial.serverRequests = [Self.queued("srq-a")]
+    initial.present(Self.queued("srq-a").kind)
+    let store = gateway.makeStore(initial)
+    let token = store.state.pendingInteractionToken
+
+    await store.send(.gatewayFrame(ready))
+    // An answer would unblock the still-detached agent, whose next events would be lost.
+    await store.send(.respondToApproval(token: token, approve: true, all: false))
+    #expect(store.state.answeringServerRequestID == nil)
+    #expect(!gateway.calls.value.map(\.method).contains("request.answer"))
+
+    gateway.hangsSince.setValue(false)
+    await store.receive(\.eventReplayResult.success)
+    await store.receive(\.activateResult.success)
+    // The hydrate refreshed the card in place; it is answerable once attached.
+    await store.send(.respondToApproval(token: token, approve: true, all: false))
+    await store.receive(\.serverRequestAnswered)
+    #expect(gateway.calls.value.map(\.method).contains("request.answer"))
     await store.send(.teardown)
   }
 

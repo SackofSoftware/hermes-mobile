@@ -578,7 +578,9 @@ public struct ChatFeature {
     /// True from the replay read's issue until its result (or a cancelling drop/teardown).
     /// The new socket is unattached until the trailing hydrate, so a healthy-socket
     /// `.foreground`/`.reattached` defers to that hydrate and sending/draining waits for it
-    /// (a `prompt.submit` would attach the socket mid-read).
+    /// (a `prompt.submit` would attach the socket mid-read), as does answering a prompt card
+    /// (an answer unblocks the agent, whose next events would land after the read's snapshot
+    /// and before the resume attaches the socket).
     var isReplayReadPending: Bool
 
     public enum Status: Equatable, Sendable {
@@ -1553,7 +1555,7 @@ public struct ChatFeature {
       case let .respondToApproval(token, approve, all):
         // Narrow, never widen: Approve needs `once` in the server's choice set, and
         // "approve all" falls back to `once` when `session` is not offered.
-        guard token == state.pendingInteractionToken,
+        guard token == state.pendingInteractionToken, !state.isReplayReadPending,
               let interaction = state.pendingInteraction, case let .approval(request) = interaction,
               !approve || request.allowsOnce
         else { return .none }
@@ -2435,7 +2437,10 @@ public struct ChatFeature {
       // optimistic; `message.start` is the agent's first beat). A hydrate mid-turn reconciles
       // the live elapsed timer against this instant. Tell the list this session is now
       // working so its row glow lights up immediately (server-confirmed).
-      return .merge(setTurnAnchor(state), startThinkingTimer(), runningChanged(true, state))
+      // A replay fold (#98) leaves the timer to its trailing hydrate (`reconcileTurnTimer`):
+      // only the authoritative `running` may start it.
+      let timer: Effect<Action> = state.isFoldingReplay ? .none : startThinkingTimer()
+      return .merge(setTurnAnchor(state), timer, runningChanged(true, state))
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
@@ -2709,7 +2714,8 @@ public struct ChatFeature {
     }
     state.serverRequests.removeAll()
     state.answeringServerRequestID = nil
-    state.expectsPendingApproval = false
+    // A replayed (#98) turn end is a past turn's: the push-tap hint is for the hydrate's.
+    if !state.isFoldingReplay { state.expectsPendingApproval = false }
   }
 
   /// Whether a hydrate came from a v7 (server→client request) server: `desktop_contract >= 7`,
@@ -2814,7 +2820,8 @@ public struct ChatFeature {
   /// Privacy: the value only ever travels in the answer RPC's params. The echo row, the
   /// banner and the `AnswerEcho` carry fixed copy, never the value.
   private func answerSecret(_ value: String?, into state: inout State) -> Effect<Action> {
-    guard let interaction = state.pendingInteraction, case let .secret(kind, prompt) = interaction
+    guard !state.isReplayReadPending,
+          let interaction = state.pendingInteraction, case let .secret(kind, prompt) = interaction
     else { return .none }
     let echoText = switch (kind, value) {
     case (.sudo, .some): "Password submitted"
@@ -2863,7 +2870,8 @@ public struct ChatFeature {
   ///   optimistic: the card goes and the echo row is appended at once; a throw patches that
   ///   row to "Failed to send" and banners (`legacyRespondFailed`).
   private func answerClarify(_ answers: [String: ClarifyAnswer]?, into state: inout State) -> Effect<Action> {
-    guard let interaction = state.pendingInteraction, case let .clarify(request) = interaction
+    guard !state.isReplayReadPending,
+          let interaction = state.pendingInteraction, case let .clarify(request) = interaction
     else { return .none }
     let echoText = Self.clarifyEchoText(request, answers)
     if let pending = state.presentedServerRequest {
@@ -3147,7 +3155,8 @@ public struct ChatFeature {
   ///   four legacy prompt events skipped (no `*.expire` handling: a card that expired in the
   ///   gap would stand forever), `message.delta`s skipped (the hydrate re-seeds the streaming
   ///   text) and the past turn boundaries' present-tense side effects suppressed
-  ///   (`isFoldingReplay`); the turn anchor gets one write, for the last boundary folded.
+  ///   (`isFoldingReplay`); the turn anchor gets one write, for the last boundary folded, and
+  ///   the thinking timer is left to the hydrate's `running`.
   ///   `open_requests` on the reply is ignored on purpose: the hydrate carries the same list.
   /// - a failure folds nothing; `-32601` latches replay off for the slot, and a timeout spends
   ///   the hydrate's same-socket timeout retry (a half-open socket redials after one more).
@@ -3188,7 +3197,8 @@ public struct ChatFeature {
   }
 
   /// The success-path fold of `applyEventReplayResult`: the seq gate, the legacy-prompt and
-  /// `message.delta` skips, and one turn-anchor write for the last boundary folded.
+  /// `message.delta` skips, and one turn-anchor write for the last boundary folded (the
+  /// thinking timer is the trailing hydrate's).
   private func foldReplayedEvents(
     _ events: [GatewayFrame], into state: inout State
   ) -> Effect<Action> {

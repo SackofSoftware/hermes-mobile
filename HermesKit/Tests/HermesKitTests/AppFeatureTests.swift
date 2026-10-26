@@ -4792,7 +4792,7 @@ struct AppFeatureTests {
       $0.hermesREST.archive = { @Sendable _, _, _, _ in }
       $0.chatSnapshot = .inMemory()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
-      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(.ready) } }
+      $0.hermesGateway.connect = { @Sendable _, _ in AsyncStream { $0.yield(GatewayFrame(.ready)) } }
       $0.hermesGateway.send = { @Sendable method, _ in
         methods.withValue { $0.append(method) }
         return .object([
@@ -4810,7 +4810,7 @@ struct AppFeatureTests {
     await store.receive(\.fillLiveChat)
     // The reducer dials the replacement seat; nothing but the archive was ever tapped.
     await store.receive(\.liveChat.task)
-    await store.receive(\.liveChat.gatewayEvent)
+    await store.receive(\.liveChat.gatewayFrame)
     await store.receive(\.liveChat.sessionResult.success)
     #expect(methods.value.contains("session.create"))
     #expect(store.state.liveChat?.liveSessionID == "seat-live")

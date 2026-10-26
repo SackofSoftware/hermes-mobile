@@ -34,15 +34,19 @@ bullets below are the compressed rules.
   fields. Mirror the desktop's behaviour where one exists; check the Hermes source. (#19's
   OAuth segment deliberately inverts `?? true` — see the OAuth bullet below.)
 - **Surface RPC failures** (set `errorBanner`, clear `isSending`/`activity`) — never
-  swallow them with `try?` (the logout hops are the carved-out exception, below).
+  swallow them with `try?` (the logout hops, below, and the #98 replay read — debug log
+  only — are the carved-out exceptions).
 - **Commit messages**: capitalized verb, no conventional-commit prefixes, concise.
 
 ## Gateway & session lifecycle
 
-- **Gateway socket**: one long-running cancellable effect funnels every event through
-  `.gatewayEvent`; outbound RPCs are discrete one-shot effects. Reconnect/backoff lives
+- **Gateway socket**: one long-running cancellable effect funnels every frame through
+  `.gatewayFrame`; outbound RPCs are discrete one-shot effects. Reconnect/backoff lives
   in the reducer, not the client. Per-request timeout 30s (`GatewayError.timedOut`);
-  the slash pipeline uses `HermesGatewayClient.longRunningMethods` → 120s.
+  the slash pipeline uses `HermesGatewayClient.longRunningMethods` → 120s. Reconnect (#98):
+  the gated `.ready` replays the gap from the `seq` cursor (`session.events.since`) BEFORE
+  the hydrate, no drain/turn-end side effects mid-fold, failure = plain hydrate
+  (`docs/architecture.md`).
 - **Session-not-found self-heal (#17)**: outbound RPCs re-resume (or `session.create`
   when there's no stored id) then replay the RPC **once** — single retry, no loop; the
   banner shows only if the heal also fails. The foreground `session.resume` likewise
@@ -88,9 +92,9 @@ bullets below are the compressed rules.
   `List(selection:)`. Details: `docs/features/ipad-layout.md`.
 - **Backgrounding gets ~30s grace** via `BackgroundTaskClient`: running slot →
   `persistNow` + begin; expiry while backgrounded → final persist +
-  `.teardownSocketOnly` (state stays in memory for the #26 catch-up); a stale expiry
-  racing `.active` is a guarded no-op. Idle slot persists only, no slot is a no-op —
-  either way no task, no battery burn.
+  `.teardownSocketOnly` (state + replay cursor stay in memory for the #98 replay / #26
+  catch-up); a stale expiry racing `.active` is a guarded no-op. Idle slot persists only,
+  no slot is a no-op — either way no task, no battery burn.
 - **Auth has three regimes** (`AuthSession`: `.token` | `.cookie` | `.bearer`). Token mode must
   stay byte-identical to the legacy single-token path (backward-compat guard). Gated modes:
   password-login cookies (refresh is transparent server-side — persist + resend the jar,

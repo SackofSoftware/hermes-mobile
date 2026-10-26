@@ -547,6 +547,42 @@ public struct ChatFeature {
     /// re-advertises; the client yields its failure only after that `.ready`).
     var serverRequestsUnavailable: String?
 
+    /// The last server event sequence number this slot has seen for one live session (#98).
+    struct ReplayCursor: Equatable, Sendable {
+      var sessionID: String
+      var seq: Int
+    }
+
+    /// Lossless reconnect watermark (#98): advanced by every stamped frame (`seq` present)
+    /// for the slot's session; a frame for another session id replaces it (the slot follows
+    /// one session, a re-minted live id starts over). In memory only, per slot: it survives
+    /// drops, the backoff redial, and `.teardownSocketOnly`, and dies with the slot. Never
+    /// persisted (a cold launch always hydrates). A seq-less frame (agent < v2026.8.27)
+    /// never starts one, so older agents never see a replay RPC.
+    var replayCursor: ReplayCursor?
+    /// The server process's `gateway.ready.replay_epoch`. A different epoch on a later ready
+    /// (gateway restart) clears `replayCursor` before it is adopted; a ready without one
+    /// (older agent) leaves it untouched.
+    var replayEpoch: String?
+    /// False once `session.events.since` answered `-32601` (pre-ring agent). Per slot,
+    /// unpersisted.
+    var replaySupported: Bool
+    /// This connection's ready said `session_authority: true` (canonical session authority
+    /// host, v0.22.3+): replay is skipped there. Reset by every ready frame.
+    var isSessionAuthority: Bool
+    /// True only while a replay batch is being folded. Turn-boundary events in the batch
+    /// describe the past, so the fold suppresses their present-tense side effects: the queue
+    /// drain and park, `runningChanged`, per-event turn-anchor writes, and assistant text
+    /// (the hydrate re-seeds or rebuilds it). The hydrate's `running` is the authority.
+    var isFoldingReplay: Bool
+    /// True from the replay read's issue until its result (or a cancelling drop/teardown).
+    /// The new socket is unattached until the trailing hydrate, so a healthy-socket
+    /// `.foreground`/`.reattached` defers to that hydrate and sending/draining waits for it
+    /// (a `prompt.submit` would attach the socket mid-read), as does answering a prompt card
+    /// (an answer unblocks the agent, whose next events would land after the read's snapshot
+    /// and before the resume attaches the socket).
+    var isReplayReadPending: Bool
+
     public enum Status: Equatable, Sendable {
       case connecting
       case ready
@@ -592,6 +628,12 @@ public struct ChatFeature {
       self.hasHydrated = false
       self.desktopContract = nil
       self.serverRequestsUnavailable = nil
+      self.replayCursor = nil
+      self.replayEpoch = nil
+      self.replaySupported = true
+      self.isSessionAuthority = false
+      self.isFoldingReplay = false
+      self.isReplayReadPending = false
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
       self.serverRequests = []
@@ -703,6 +745,8 @@ public struct ChatFeature {
         // stranding the chip on the *next* message. Bounded by the loader's per-provider
         // deadline, so the lock is always released.
         && pendingPasteCount == 0
+        // The reconnect replay read (#98): a submit would attach the socket mid-read.
+        && !isReplayReadPending
     }
 
     /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
@@ -758,7 +802,16 @@ public struct ChatFeature {
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
     case thinkingTick
+    /// One event to fold, bypassing the replay cursor. Sent by tests; the socket effect
+    /// sends `.gatewayFrame` and the replay fold calls `reduceGatewayEvent` directly, so all
+    /// three reduce through the same path.
     case gatewayEvent(GatewayEvent)
+    /// One inbound socket frame (#98): applies the ready rules (replay epoch, session
+    /// authority) and advances the replay cursor, then reduces exactly as `.gatewayEvent`.
+    case gatewayFrame(GatewayFrame)
+    /// The reconnect replay read (#98, `session.events.since`) answered: fold the gap's
+    /// events (or take a fallback), then hydrate.
+    case eventReplayResult(Result<ReplayBatch, GatewayError>)
     case gatewayClosed
     case reconnectTick
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
@@ -1026,6 +1079,9 @@ public struct ChatFeature {
   private enum CancelID: Hashable {
     case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer,
          thinkingTimer, persist
+    /// The reconnect `session.events.since` read (#98): one outstanding; a deliberate
+    /// teardown or a socket drop cancels it (the next `.ready` re-runs it).
+    case eventReplay
     /// One id per `config.set` key so a newer pick for that key supersedes the in-flight
     /// one: a cancelled effect never emits `.configSetFailed`, so a stale rejection can't
     /// roll the newer value back. The two keys never cancel each other.
@@ -1085,11 +1141,13 @@ public struct ChatFeature {
         return releaseVoiceResources(&state)
 
       case .teardown:
+        state.isReplayReadPending = false
         return .merge(
           releaseVoiceResources(&state),
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
           .cancel(id: CancelID.hydrate),
+          .cancel(id: CancelID.eventReplay),
           .cancel(id: CancelID.thinkingTimer),
           .cancel(id: CancelID.persist)
         )
@@ -1105,13 +1163,17 @@ public struct ChatFeature {
         // Also cancel any pending hydrate: socket cancellation resumes its RPC with
         // `.disconnected`, and a stale `.activateResult` reducing AFTER this deliberate
         // teardown could otherwise act on a socket we just chose to drop (e.g. redial
-        // while backgrounded after grace expiry, wasting a single-use ws-ticket).
+        // while backgrounded after grace expiry, wasting a single-use ws-ticket). The same
+        // goes for a pending replay read (#98): the foreground `.ready` re-runs it from the
+        // untouched cursor.
         state.status = .reconnecting
         state.hasRequestedSession = false
+        state.isReplayReadPending = false
         return .merge(
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
-          .cancel(id: CancelID.hydrate)
+          .cancel(id: CancelID.hydrate),
+          .cancel(id: CancelID.eventReplay)
         )
 
       case .loadOlderRequested:
@@ -1125,33 +1187,37 @@ public struct ChatFeature {
         return .none
 
       case let .gatewayEvent(event):
-        // Snapshot whether the user is parked at the bottom window *before* the fold appends any
-        // streaming rows, so we can re-pin afterward without yanking a user who scrolled up.
-        let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-        let effect = reduce(event: event, into: &state)
-        maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
-        // Write-back: any event that mutates the transcript / model / usage schedules a
-        // debounced snapshot persist so the next open paints instantly. Debounced (and
-        // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
-        // known session id — nothing to key the snapshot on (and nothing to persist) until
-        // the session resolves.
-        guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
-        else { return effect }
-        return .merge(effect, debouncedPersist())
+        return reduceGatewayEvent(event, into: &state)
+
+      case let .gatewayFrame(frame):
+        if case .ready = frame.event {
+          applyReadyReplayRules(frame, into: &state)
+        }
+        advanceReplayCursor(frame, into: &state)
+        return reduceGatewayEvent(frame.event, into: &state)
+
+      case let .eventReplayResult(result):
+        return applyEventReplayResult(result, into: &state)
 
       case .gatewayClosed:
         state.hasRequestedSession = false
         // Finalize anything mid-stream so a dropped socket doesn't leave a row
         // spinning forever; the transcript itself persists across the reconnect.
         finalizeInFlight(into: &state)
+        // A replay read in flight on the dead socket (#98) is moot: the next `.ready`
+        // re-runs it from the same cursor.
+        state.isReplayReadPending = false
         // A dead session already paused us (see `.authExpired`): the stream finishing is just
         // the tail of that — don't schedule a backoff reconnect, wait for re-auth.
-        guard !state.awaitingReauth else { return .cancel(id: CancelID.thinkingTimer) }
+        guard !state.awaitingReauth else {
+          return .merge(.cancel(id: CancelID.thinkingTimer), .cancel(id: CancelID.eventReplay))
+        }
         state.status = .reconnecting
         state.reconnectAttempt += 1
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
+          .cancel(id: CancelID.eventReplay),
           .run { [clock] send in
             try await clock.sleep(for: delay)
             await send(.reconnectTick)
@@ -1312,6 +1378,9 @@ public struct ChatFeature {
           state.hasRequestedSession = false
           return connect(state.connection)
         }
+        // A reconnect replay read is in flight (#98): its trailing hydrate is this re-hydrate.
+        // Hydrating now would attach the socket mid-read and land under the fold.
+        guard !state.isReplayReadPending else { return .none }
         // Socket healthy: hydrate directly against it — no reconnect, so the live socket
         // keeps streaming throughout (no event gap). A socket that silently died while
         // suspended still self-heals: the hydrate RPC fails, the receive loop finishes →
@@ -1486,7 +1555,7 @@ public struct ChatFeature {
       case let .respondToApproval(token, approve, all):
         // Narrow, never widen: Approve needs `once` in the server's choice set, and
         // "approve all" falls back to `once` when `session` is not offered.
-        guard token == state.pendingInteractionToken,
+        guard token == state.pendingInteractionToken, !state.isReplayReadPending,
               let interaction = state.pendingInteraction, case let .approval(request) = interaction,
               !approve || request.allowsOnce
         else { return .none }
@@ -2307,6 +2376,17 @@ public struct ChatFeature {
       // re-hydrate server-authoritatively via the unified `hydrate` path.
       if let stored = state.storedSessionID {
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
+        // Lossless reconnect (#98): a slot holding a watermark for its live session first
+        // reads the gap from the server's replay ring, folds it, THEN hydrates
+        // (`applyEventReplayResult`). This `.ready` is already past the advertisement gate, and
+        // the new socket is not attached to the session until the resume, so no live
+        // session frame can race the fold. No cursor (first connect, an agent without the
+        // ring), a `-32601` latch, or a session-authority host → today's plain hydrate.
+        if state.replaySupported, !state.isSessionAuthority,
+           let cursor = state.replayCursor, cursor.sessionID == state.liveSessionID {
+          state.isReplayReadPending = true
+          return replayEventGap(cursor: cursor)
+        }
         return hydrate(sessionID: stored, profile: state.profileName)
       }
       // A standing branch seed with no stored id (an interrupted replay on a branch
@@ -2357,7 +2437,10 @@ public struct ChatFeature {
       // optimistic; `message.start` is the agent's first beat). A hydrate mid-turn reconciles
       // the live elapsed timer against this instant. Tell the list this session is now
       // working so its row glow lights up immediately (server-confirmed).
-      return .merge(setTurnAnchor(state), startThinkingTimer(), runningChanged(true, state))
+      // A replay fold (#98) leaves the timer to its trailing hydrate (`reconcileTurnTimer`):
+      // only the authoritative `running` may start it.
+      let timer: Effect<Action> = state.isFoldingReplay ? .none : startThinkingTimer()
+      return .merge(setTurnAnchor(state), timer, runningChanged(true, state))
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
@@ -2368,12 +2451,17 @@ public struct ChatFeature {
       if let u = usage { state.usage = u }
       if let id = state.streamingRowID {
         state.transcript[id: id]?.kind = .message(role: .assistant, text: text, isComplete: true)
-      } else if !text.isEmpty {
-        // No deltas arrived (non-streamed reply) — materialise the row now.
+      } else if !text.isEmpty, !state.isFoldingReplay {
+        // No deltas arrived (non-streamed reply) — materialise the row now. Not in a replay
+        // fold (#98): a drop already finalized the pre-drop partial, so a second row would
+        // show the reply twice until the hydrate rebuilds it from history.
         state.transcript.append(ChatRow(id: uuid(), kind: .message(role: .assistant, text: text, isComplete: true)))
       }
       // else: empty tool-only turn → no row at all.
       state.streamingRowID = nil
+      // The turn's tool rows are history now: a later running hydrate (#26) must not
+      // re-append them next to their cooked history rows.
+      state.toolRowIDs = [:]
       // Move the thinking row below the answer, then freeze it in place so the turn ends as
       // […answer][Thought · <elapsed>].
       keepThinkingLast(into: &state)
@@ -2466,6 +2554,7 @@ public struct ChatFeature {
     case let .error(message):
       state.errorBanner = message
       state.isSending = false
+      state.toolRowIDs = [:]
       freezeThinking(into: &state)
       // Same staleness rule as `message.complete`: an errored turn is over, so any
       // standing approval card (real or recovered), the server request queue and the
@@ -2481,7 +2570,8 @@ public struct ChatFeature {
       if state.sendNowArmed {
         drain = drainQueueIfReady(into: &state)
       } else {
-        if !state.queuedPrompts.isEmpty { state.isQueueParked = true }
+        // A replayed past error (#98) does not park: the hydrate's idle edge decides.
+        if !state.queuedPrompts.isEmpty, !state.isFoldingReplay { state.isQueueParked = true }
         drain = .none
       }
       // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
@@ -2624,7 +2714,8 @@ public struct ChatFeature {
     }
     state.serverRequests.removeAll()
     state.answeringServerRequestID = nil
-    state.expectsPendingApproval = false
+    // A replayed (#98) turn end is a past turn's: the push-tap hint is for the hydrate's.
+    if !state.isFoldingReplay { state.expectsPendingApproval = false }
   }
 
   /// Whether a hydrate came from a v7 (server→client request) server: `desktop_contract >= 7`,
@@ -2729,7 +2820,8 @@ public struct ChatFeature {
   /// Privacy: the value only ever travels in the answer RPC's params. The echo row, the
   /// banner and the `AnswerEcho` carry fixed copy, never the value.
   private func answerSecret(_ value: String?, into state: inout State) -> Effect<Action> {
-    guard let interaction = state.pendingInteraction, case let .secret(kind, prompt) = interaction
+    guard !state.isReplayReadPending,
+          let interaction = state.pendingInteraction, case let .secret(kind, prompt) = interaction
     else { return .none }
     let echoText = switch (kind, value) {
     case (.sudo, .some): "Password submitted"
@@ -2778,7 +2870,8 @@ public struct ChatFeature {
   ///   optimistic: the card goes and the echo row is appended at once; a throw patches that
   ///   row to "Failed to send" and banners (`legacyRespondFailed`).
   private func answerClarify(_ answers: [String: ClarifyAnswer]?, into state: inout State) -> Effect<Action> {
-    guard let interaction = state.pendingInteraction, case let .clarify(request) = interaction
+    guard !state.isReplayReadPending,
+          let interaction = state.pendingInteraction, case let .clarify(request) = interaction
     else { return .none }
     let echoText = Self.clarifyEchoText(request, answers)
     if let pending = state.presentedServerRequest {
@@ -2998,15 +3091,157 @@ public struct ChatFeature {
     state.windowStart = min(max(0, state.windowStart), count)
   }
 
+  /// The one fold for an inbound event, shared by `.gatewayEvent` and `.gatewayFrame` (and the
+  /// #98 replay fold). Snapshots whether the user is parked at the bottom window *before* the
+  /// fold appends any streaming rows, so it can re-pin afterward without yanking a user who
+  /// scrolled up.
+  private func reduceGatewayEvent(_ event: GatewayEvent, into state: inout State) -> Effect<Action> {
+    let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+    let effect = reduce(event: event, into: &state)
+    maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+    // Write-back: any event that mutates the transcript / model / usage schedules a
+    // debounced snapshot persist so the next open paints instantly. Debounced (and
+    // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
+    // known session id — nothing to key the snapshot on (and nothing to persist) until
+    // the session resolves.
+    guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
+    else { return effect }
+    return .merge(effect, debouncedPersist())
+  }
+
+  /// The `gateway.ready` replay rules (#98), applied before the ready itself reduces (so the
+  /// `.ready` branch sees the fresh verdicts). The authority flag is per connection: every
+  /// ready resets it. A changed epoch drops the cursor (`adoptReplayEpochIfChanged`); a ready
+  /// also adopts the first epoch the slot sees; a ready without an epoch (older agent) leaves
+  /// both untouched.
+  private func applyReadyReplayRules(_ frame: GatewayFrame, into state: inout State) {
+    state.isSessionAuthority = frame.sessionAuthority
+    guard let epoch = frame.replayEpoch else { return }
+    adoptReplayEpochIfChanged(epoch, into: &state)
+    state.replayEpoch = epoch
+  }
+
+  /// The one epoch-change rule (#98): an `epoch` that differs from the stored one means a
+  /// gateway restart reset every counter, so the cursor is dropped and the new epoch adopted.
+  /// Returns whether that happened. With no stored epoch (or no `epoch`) nothing is compared,
+  /// so nothing changed.
+  @discardableResult
+  private func adoptReplayEpochIfChanged(_ epoch: String?, into state: inout State) -> Bool {
+    guard let epoch, let known = state.replayEpoch, epoch != known else { return false }
+    state.replayCursor = nil
+    state.replayEpoch = epoch
+    return true
+  }
+
+  /// Advance the replay watermark (#98) from a stamped frame. A frame without both a
+  /// `session_id` and a `seq` (older agent, session-less global, client-synthesized) is a
+  /// no-op; a non-increasing seq for the cursor's session is ignored (the event still
+  /// reduces); a frame for a different session replaces the cursor.
+  private func advanceReplayCursor(_ frame: GatewayFrame, into state: inout State) {
+    guard let sessionID = frame.sessionID, let seq = frame.seq else { return }
+    if let cursor = state.replayCursor, cursor.sessionID == sessionID, seq <= cursor.seq { return }
+    state.replayCursor = State.ReplayCursor(sessionID: sessionID, seq: seq)
+  }
+
+  /// Reduce the reconnect replay read (#98), then hydrate. Every branch ends in the ordinary
+  /// `session.resume` hydrate, which stays the authority (`applyActivate`: server wins, #26
+  /// running-turn row preservation, `inflight` re-seed, `open_requests` reconcile):
+  /// - an epoch mismatch (gateway restart between the ready and the read) drops the cursor,
+  ///   adopts the reply's epoch, and folds nothing;
+  /// - `truncated` (the gap fell off the ring) folds nothing and advances the cursor to
+  ///   `latest_seq` (desktop parity), so the next drop does not re-ask for the evicted window;
+  /// - otherwise the gap's events fold in order through the same path as live events, behind
+  ///   the seq gate (the cursor's session, `seq > cursor.seq`, advancing per event), with the
+  ///   four legacy prompt events skipped (no `*.expire` handling: a card that expired in the
+  ///   gap would stand forever), `message.delta`s skipped (the hydrate re-seeds the streaming
+  ///   text) and the past turn boundaries' present-tense side effects suppressed
+  ///   (`isFoldingReplay`); the turn anchor gets one write, for the last boundary folded, and
+  ///   the thinking timer is left to the hydrate's `running`.
+  ///   `open_requests` on the reply is ignored on purpose: the hydrate carries the same list.
+  /// - a failure folds nothing; `-32601` latches replay off for the slot, and a timeout spends
+  ///   the hydrate's same-socket timeout retry (a half-open socket redials after one more).
+  ///   A `.disconnected` / `.notConnected` result does not hydrate: the companion
+  ///   `.gatewayClosed` owns recovery.
+  ///
+  /// DELIBERATE carve-out from "surface RPC failures": a failed read is recorded only in the
+  /// debug log (by the `replayEventGap` effect), never as a banner. The user-visible outcome is
+  /// today's plain hydrate, and a banner would fire on every reconnect to an agent without
+  /// the ring.
+  private func applyEventReplayResult(
+    _ result: Result<ReplayBatch, GatewayError>, into state: inout State
+  ) -> Effect<Action> {
+    state.isReplayReadPending = false
+    // A late result over a dead or reconnecting socket: the next `.ready` re-runs the replay
+    // from the same cursor, so never hydrate over it here.
+    guard state.status == .ready, let stored = state.storedSessionID else { return .none }
+    var fold: Effect<Action> = .none
+    switch result {
+    case let .success(batch):
+      guard !adoptReplayEpochIfChanged(batch.epoch, into: &state) else { break }
+      if batch.truncated {
+        if let latest = batch.latestSeq, let cursor = state.replayCursor, latest > cursor.seq {
+          state.replayCursor?.seq = latest
+        }
+      } else {
+        fold = foldReplayedEvents(batch.events, into: &state)
+      }
+    case let .failure(error):
+      if error.isDisconnected || error == .notConnected {
+        state.status = .reconnecting
+        return .none
+      }
+      if error.isUnknownMethod { state.replaySupported = false }
+      if error.isTimedOut { state.hydrateRetriedAfterTimeout = true }
+    }
+    return .merge(fold, hydrate(sessionID: stored, profile: state.profileName))
+  }
+
+  /// The success-path fold of `applyEventReplayResult`: the seq gate, the legacy-prompt and
+  /// `message.delta` skips, and one turn-anchor write for the last boundary folded (the
+  /// thinking timer is the trailing hydrate's).
+  private func foldReplayedEvents(
+    _ events: [GatewayFrame], into state: inout State
+  ) -> Effect<Action> {
+    enum TurnBoundary { case started, ended }
+    var lastBoundary: TurnBoundary?
+    var effects: [Effect<Action>] = []
+    state.isFoldingReplay = true
+    for frame in events {
+      guard let cursor = state.replayCursor, frame.sessionID == cursor.sessionID,
+            let seq = frame.seq, seq > cursor.seq
+      else { continue }
+      state.replayCursor?.seq = seq
+      guard !frame.event.isLegacyPrompt else { continue }
+      switch frame.event {
+      case .messageDelta:
+        continue
+      case .messageStart:
+        lastBoundary = .started
+      case .messageComplete, .error:
+        lastBoundary = .ended
+      default:
+        break
+      }
+      effects.append(reduceGatewayEvent(frame.event, into: &state))
+    }
+    state.isFoldingReplay = false
+    switch lastBoundary {
+    case .started: effects.append(setTurnAnchor(state))
+    case .ended: effects.append(clearTurnAnchor(state))
+    case nil: break
+    }
+    return .merge(effects)
+  }
+
   // MARK: - Effects
 
   private func connect(_ connection: ServerConnection) -> Effect<Action> {
     .run { [gateway, debugLog] send in
       // Pass the full auth regime: `.token` → `?token=` (byte-identical); `.cookie` mints a
       // fresh single-use ws-ticket per connect. A dead session surfaces as `.authExpired`.
-      for await event in gateway.connect(connection.baseURL, connection.auth) {
-        debugLog.append(event) // mirror into the app-wide debug buffer (Task 12)
-        await send(.gatewayEvent(event))
+      for await frame in gateway.connect(connection.baseURL, connection.auth) {
+        debugLog.append(frame.event) // mirror into the app-wide debug buffer (Task 12)
+        await send(.gatewayFrame(frame))
       }
       await send(.gatewayClosed)
     }
@@ -3111,6 +3346,42 @@ public struct ChatFeature {
     // reduces afterwards (the socket cancellation would otherwise resume this RPC with
     // `.disconnected`, e.g. redialing while backgrounded after grace expiry).
     .cancellable(id: CancelID.hydrate, cancelInFlight: true)
+  }
+
+  /// The reconnect replay read (#98): `session.events.since {session_id, last_seen}` for the
+  /// cursor's live session, with nothing else — no `profile` (the legacy ring is
+  /// process-global by live id) and no `replay_epoch` (a canonical-authority field; the
+  /// method forbids unknown keys). Default 30 s budget: a slow read only delays the hydrate,
+  /// and its timeout spends the hydrate's same-socket retry (`applyEventReplayResult`).
+  ///
+  /// A failure is noted in the debug log and NOT surfaced as a banner — the deliberate
+  /// carve-out documented on `applyEventReplayResult`. A cancelled read (drop/teardown) is not a
+  /// failure and writes no note.
+  private func replayEventGap(cursor: State.ReplayCursor) -> Effect<Action> {
+    .run { [gateway, debugLog] send in
+      let params: JSONValue = .object([
+        "session_id": .string(cursor.sessionID),
+        "last_seen": .number(Double(cursor.seq)),
+      ])
+      let result: Result<ReplayBatch, GatewayError>
+      do {
+        let value = try await gateway.send("session.events.since", params)
+        if let batch = value.decoded(ReplayBatch.self) {
+          result = .success(batch)
+        } else {
+          result = .failure(.server("Malformed session.events.since result"))
+        }
+      } catch let error as GatewayError {
+        result = .failure(error)
+      } catch {
+        result = .failure(.disconnected)
+      }
+      if case let .failure(error) = result, !Task.isCancelled {
+        debugLog.note("session.events.since", error.message)
+      }
+      await send(.eventReplayResult(result))
+    }
+    .cancellable(id: CancelID.eventReplay, cancelInFlight: true)
   }
 
   /// Review finding 1's recovery probe: `session.resume` by the branch's PERSISTED
@@ -3850,6 +4121,11 @@ public struct ChatFeature {
   /// attempt freely. Head-only, one turn per entry: the next entry waits for this turn's
   /// own completion. A parked queue drains only when Send-now armed the one-shot override.
   private func drainQueueIfReady(into state: inout State) -> Effect<Action> {
+    // A replay fold (#98) replays the PAST: its `message.complete` / `request.cancel` /
+    // Send-now `.error` must not fire a queued prompt against a turn the server may still
+    // be running. The hydrate that follows every fold is the only trustworthy idle edge.
+    // While the read itself is pending, a `prompt.submit` would attach the socket mid-read.
+    guard !state.isFoldingReplay, !state.isReplayReadPending else { return .none }
     guard !state.queuedPrompts.isEmpty,
           state.drainingEntry == nil,
           !state.isSending, !state.slashExecInFlight,
@@ -3981,7 +4257,8 @@ public struct ChatFeature {
   /// server-confirmed (`message.start`/`complete`/`error` and the activate `running` flag) —
   /// never a cached guess.
   private func runningChanged(_ running: Bool, _ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    // A replay fold's (#98) past boundaries are not the present: the hydrate reports it.
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .send(.delegate(.runningChanged(sessionID: key, running: running)))
   }
 
@@ -3990,7 +4267,8 @@ public struct ChatFeature {
   /// **non-authoritative** — it only supplies the *start instant*; `running` decides whether
   /// the timer runs at all. Written on `prompt.submit`, reaffirmed on `message.start`.
   private func setTurnAnchor(_ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    // A replay fold (#98) writes once, for its last boundary (`applyEventReplayResult`).
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .run { [chatSnapshot, now] _ in
       chatSnapshot.setTurnAnchor(key, now)
     }
@@ -3999,7 +4277,7 @@ public struct ChatFeature {
   /// Drop the turn-start anchor at turn end (completion / error / interrupt) so a stopped
   /// turn never leaves a stale anchor that a later hydrate could mistake for a live timer.
   private func clearTurnAnchor(_ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .run { [chatSnapshot] _ in
       chatSnapshot.clearTurnAnchor(key)
     }

@@ -32,7 +32,10 @@ let project = Project(
   targets: [
     .target(
       name: "HermesMobile",
-      destinations: [.iPhone],
+      // iPad is a first-class destination (#80): the app lays out as a
+      // `NavigationSplitView` in regular width. No `UIRequiresFullScreen` — Slide Over and
+      // narrow iPadOS windows must resolve to the compact (stack) layout.
+      destinations: [.iPhone, .iPad],
       product: .app,
       bundleId: "com.hawes.HermesMobile",
       deploymentTargets: .iOS("18.0"),
@@ -55,6 +58,14 @@ let project = Project(
         "HermesDefaultServerURL": "$(HERMES_DEBUG_SERVER_URL)",
         "HermesDebugUsername": "$(HERMES_DEBUG_USERNAME)",
         "HermesDebugPassword": "$(HERMES_DEBUG_PASSWORD)",
+        // iPad rotates freely in every orientation; the split view adapts (side-by-side
+        // in landscape, overlay sidebar in portrait). iPhone keeps Tuist's default set.
+        "UISupportedInterfaceOrientations~ipad": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationPortraitUpsideDown",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight",
+        ],
         // The app connects to user-specified self-hosted servers over http (Tailscale/LAN),
         // so domain-scoped ATS exceptions aren't possible — allow cleartext loads.
         "NSAppTransportSecurity": [
@@ -134,7 +145,7 @@ let project = Project(
     ),
     .target(
       name: "HermesMobileTests",
-      destinations: [.iPhone],
+      destinations: [.iPhone, .iPad],
       product: .unitTests,
       bundleId: "com.hawes.HermesMobileTests",
       deploymentTargets: .iOS("18.0"),

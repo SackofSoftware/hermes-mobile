@@ -69,6 +69,38 @@ struct SelfHealTests {
     #expect(store.state.reasoningEffort == "xhigh")
   }
 
+  /// The heal gets its ONE replay and no more: when the replayed `config.set` fails too, exactly
+  /// one `.configSetFailed` surfaces (rollback + banner) and no third `config.set` goes out.
+  @Test func reasoningSelectionSurfacesFailureWhenReplayAlsoFails() async {
+    let calls = LockIsolated<[String]>([])
+    var initial = healableState()
+    initial.reasoningEffort = "medium"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.hermesGateway.send = { @Sendable method, _ in
+        calls.withValue { $0.append(method) }
+        switch method {
+        case "config.set": throw GatewayError.server("session not found")
+        case "session.resume": return self.resumePayload(liveID: "fresh-live")
+        default: return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.reasoningSelected("xhigh")) {
+      $0.reasoningEffort = "xhigh"
+    }
+    await store.receive(\.liveSessionIDRefreshed)
+    await store.receive(\.configSetFailed) {
+      $0.reasoningEffort = "medium"
+      $0.errorBanner = "Couldn’t change reasoning: session not found"
+    }
+    await store.finish()
+
+    #expect(calls.value == ["config.set", "session.resume", "config.set"])
+    #expect(store.state.extendedReasoningSupported) // a heal failure is no capability verdict
+  }
+
   // MARK: prompt.submit self-heal
 
   @Test func promptSubmitSelfHealsOnSessionNotFoundThenSucceeds() async {
@@ -469,6 +501,57 @@ struct SelfHealTests {
     #expect(calls.value.last?.sessionID == "recreated-live")
     #expect(store.state.errorBanner == nil)
     #expect(store.state.isSending)
+  }
+
+  // MARK: heal profile threading (#114)
+
+  /// The heal's re-resume (stored id known) and its recreate fallback (no stored id) both
+  /// carry the chat's profile VERBATIM — the literal `"default"` included, since an omitted
+  /// profile means the server's LAUNCH profile and the heal would otherwise resume/create in
+  /// the wrong profile. Only `profileName == nil` (no profiles API) omits it.
+  @Test(arguments: [nil, "default"] as [String?], [true, false])
+  func healThreadsLiteralProfile(profileName: String?, hasStoredID: Bool) async {
+    let healCall = LockIsolated<(method: String, params: JSONValue)?>(nil)
+    var initial = ChatFeature.State(connection: conn, profileName: profileName)
+    initial.liveSessionID = "stale-live"
+    initial.storedSessionID = hasStoredID ? "stored123" : nil
+    initial.composerText = "hello"
+    let store = TestStore(initialState: initial) { ChatFeature() } withDependencies: {
+      $0.uuid = .incrementing
+      $0.date = .constant(.init(timeIntervalSince1970: 0))
+      $0.chatSnapshot = .inMemory()
+      $0.hermesGateway.send = { @Sendable method, params in
+        switch method {
+        case "prompt.submit":
+          if params["session_id"]?.stringValue == "stale-live" {
+            throw GatewayError.server("session not found")
+          }
+          return .object(["status": .string("streaming")])
+        case "session.resume":
+          healCall.setValue((method, params))
+          return self.resumePayload(liveID: "fresh-live")
+        case "session.create":
+          healCall.setValue((method, params))
+          return .object([
+            "session_id": .string("fresh-live"),
+            "stored_session_id": .string("new-stored"),
+          ])
+        default:
+          return .object([:])
+        }
+      }
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.composerSubmitted)
+    await store.receive(\.liveSessionIDRefreshed)
+    await store.finish()
+
+    var expected: [String: JSONValue] = hasStoredID ? ["session_id": .string("stored123")] : [:]
+    if let profileName { expected["profile"] = .string(profileName) }
+    #expect(healCall.value?.method == (hasStoredID ? "session.resume" : "session.create"))
+    #expect(healCall.value?.params == .object(expected))
+    #expect(store.state.errorBanner == nil)
   }
 
   // MARK: malformed heal response

@@ -6,13 +6,28 @@ import SwiftUI
 /// past every model to the bottom of this list.
 ///
 /// Only configured providers are listed — set up new ones in Settings › Providers. Applies
-/// via `config.set`.
+/// via `config.set`, carrying the section's provider slug so the gateway routes the model to
+/// the provider it was shown under instead of guessing from the id (#100).
 struct ModelPickerSheet: View {
   let picker: ChatFeature.State.ModelPicker
   let currentModel: String?
   let isBusy: Bool
-  let onSelectModel: (String) -> Void
+  /// `(model id, provider selection slug)` — the slug is appended as `--provider <slug>`.
+  let onSelectModel: (String, String?) -> Void
   let onDone: () -> Void
+
+  @State private var searchText = ""
+
+  private var isSearching: Bool {
+    !searchText.trimmingCharacters(in: .whitespaces).isEmpty
+  }
+
+  /// Search-filtered providers (`ModelOptions.filteredProviders(matching:)`); the full
+  /// ordered list when the box is empty. Filtering keeps provider sections intact so
+  /// identical model names across providers stay unambiguous.
+  private var visibleProviders: [ModelOptions.Provider] {
+    (picker.options?.filteredProviders(matching: searchText)) ?? []
+  }
 
   /// Providers whose model list is expanded; nil until the user first toggles one.
   /// While nil the DEFAULT applies — only the current model's provider open — computed
@@ -40,15 +55,24 @@ struct ModelPickerSheet: View {
                                  description: Text(error))
         } else {
           List {
+            // An apply failure keeps the list usable — the rolled-back row is right below.
+            if let applyError = picker.applyError {
+              Section {
+                Label(applyError, systemImage: "exclamationmark.triangle")
+                  .font(.footnote).foregroundStyle(.red)
+              }
+            }
             if isBusy {
               Section {
                 Label("Finish or stop the current turn to switch models.", systemImage: "hourglass")
                   .font(.footnote).foregroundStyle(.secondary)
               }
             }
-            ForEach(picker.options?.orderedProviders ?? []) { provider in
+            // While searching every matching section is open — a hit hidden behind a
+            // collapsed header would read as "no results".
+            ForEach(visibleProviders) { provider in
               Section {
-                if effectiveExpanded.contains(provider.id) {
+                if isSearching || effectiveExpanded.contains(provider.id) {
                   configuredModels(provider)
                 }
               } header: {
@@ -56,10 +80,20 @@ struct ModelPickerSheet: View {
               }
             }
           }
+          .overlay {
+            if visibleProviders.isEmpty && isSearching {
+              ContentUnavailableView.search(text: searchText)
+            }
+          }
         }
       }
       .navigationTitle("Model")
       .navigationBarTitleDisplayMode(.inline)
+      .searchable(
+        text: $searchText,
+        placement: .navigationBarDrawer(displayMode: .always),
+        prompt: "Search models"
+      )
       .toolbar {
         ToolbarItem(placement: .confirmationAction) {
           Button("Done", action: onDone)
@@ -114,7 +148,7 @@ struct ModelPickerSheet: View {
         context: picker.contextWindows[model].map(ModelDisplay.contextLabel),
         selected: model == currentModel,
         icon: ProviderIconView(provider: provider.id, model: model)
-      ) { onSelectModel(model) }
+      ) { onSelectModel(model, provider.selectionSlug) }
     }
   }
 

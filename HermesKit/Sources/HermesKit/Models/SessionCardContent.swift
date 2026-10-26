@@ -1,0 +1,100 @@
+import Foundation
+
+/// What one session-list card (`SessionCardView`) shows — derived here so the rules are
+/// unit-tested; the view only lays it out.
+public struct SessionCardContent: Equatable, Sendable {
+  /// Header workspace label, or `nil` when the workspace is unknown (a search hit carries no
+  /// `cwd`), in which case the header leaves the slot out rather than claim "No workspace".
+  public let workspace: String?
+  /// `Session.displayName` — an untitled session promotes its preview here.
+  public let title: String
+  /// The preview line, only under a real title — never the title's text twice.
+  public let preview: String?
+  /// The raw server model id, shown verbatim like the chat's model chip.
+  public let model: String?
+  /// "N message(s)", or `nil` when the count is unknown or zero.
+  public let messageCountText: String?
+
+  /// - Parameter workspaceName: the agent's auto-classified workspace for this session
+  ///   (`hermes-workspaces` plugin), which wins over the `cwd` basename when present.
+  public init(session: Session, showsWorkspace: Bool = true, workspaceName: String? = nil) {
+    let assigned = workspaceName?.trimmingCharacters(in: .whitespaces)
+    workspace = showsWorkspace ? ((assigned?.isEmpty == false ? assigned : nil) ?? session.workspaceLabel) : nil
+    title = session.displayName
+    preview = session.resolvedTitle == nil ? nil : session.resolvedPreview
+    model = session.model
+    messageCountText = Self.messageCountText(session.messageCount)
+  }
+
+  private static func messageCountText(_ count: Int?) -> String? {
+    guard let count, count > 0 else { return nil }
+    return count == 1 ? "1 message" : "\(count) messages"
+  }
+
+  /// Whether the footer line (model · message count) renders at all.
+  public var hasFooter: Bool { model != nil || messageCountText != nil }
+
+  /// The card's one combined VoiceOver label, in visual order: workspace, title, preview,
+  /// model, message count, age, then the status and the pin.
+  public func accessibilityLabel(age: String?, status: SessionStatus, isPinned: Bool) -> String {
+    var parts = [workspace, title, preview, model, messageCountText, age].compactMap { $0 }
+    if let statusText = status.accessibilityText { parts.append(statusText) }
+    if isPinned { parts.append("Pinned") }
+    return parts.joined(separator: ", ")
+  }
+}
+
+/// The one state a card's leading status dot paints, mirroring the desktop's
+/// `SessionDotState` for the states mobile can know: a pending approval or clarify, a running
+/// turn, finished-while-away, or nothing. The desktop's stalled / background / draft states
+/// need live socket events for every session, which the list does not have.
+public enum SessionStatus: Equatable, Sendable {
+  /// An approval or clarify is blocking the turn — the one state that asks the user to act.
+  case needsInput
+  /// A turn is running.
+  case working
+  /// New activity since the user last opened the session.
+  case unread
+  /// Nothing to report.
+  case idle
+
+  /// Resolves the flags to one state, highest priority first (desktop order: needs-input
+  /// over working over unread).
+  public init(needsInput: Bool, isWorking: Bool, isUnread: Bool) {
+    if needsInput {
+      self = .needsInput
+    } else if isWorking {
+      self = .working
+    } else if isUnread {
+      self = .unread
+    } else {
+      self = .idle
+    }
+  }
+
+  /// What VoiceOver says for the dot; idle says nothing.
+  public var accessibilityText: String? {
+    switch self {
+    case .needsInput: "Needs input"
+    case .working: "Working"
+    case .unread: "Unread"
+    case .idle: nil
+    }
+  }
+}
+
+extension Session {
+  /// The card header's workspace label: the folder basename of `cwd`, else "No workspace".
+  /// Mirrors desktop `baseName(path) || path` (root "/" has no basename, so the path itself
+  /// is shown).
+  public var workspaceLabel: String {
+    guard let path = cwd?.trimmingCharacters(in: .whitespaces), !path.isEmpty else {
+      return "No workspace"
+    }
+    let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
+    if let base = trimmed.split(separator: "/").last, !base.isEmpty {
+      return String(base)
+    }
+    return path
+  }
+}

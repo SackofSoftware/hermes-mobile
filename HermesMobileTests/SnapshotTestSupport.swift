@@ -30,11 +30,6 @@ class SnapshotTestCase: XCTestCase {
     UUID(uuidString: "00000000-0000-0000-0000-\(String(format: "%012x", n))")!
   }
 
-  /// Dark appearance is pinned (the app is designed dark-first) so renders don't drift
-  /// with the simulator's appearance setting. Without this the baselines flip to light
-  /// mode on a light-mode simulator and every pixel mismatches.
-  private static let darkTraits = UITraitCollection(userInterfaceStyle: .dark)
-
   /// Whole-screen snapshot: composites the iOS 26 system chrome (`drawHierarchyInKeyWindow`),
   /// so it needs the host app and isn't pixel-exact — runs at `perceptualPrecision: 0.98`.
   ///
@@ -55,19 +50,46 @@ class SnapshotTestCase: XCTestCase {
   /// `ConnectionFailedSnapshotTests.testConnectionFailedView_retrying`). A budget is fungible
   /// — it can absorb a small regression ANYWHERE on the screen, not only in the region it was
   /// sized for — so pair it with a structural assertion of whatever it could hide.
-  func deviceImage<V: SwiftUI.View>(precision: Float = 0.98) -> Snapshotting<V, UIImage> {
-    .image(
+  ///
+  /// The appearance is PINNED (dark — the app is designed dark-first) so baselines don't flip
+  /// with the simulator's setting and mismatch every pixel; pass `.light` only for a screen
+  /// whose light rendering is itself under test (the sidebar's accent highlight over a light
+  /// list).
+  ///
+  /// `height` overrides the device's height (same width, safe area, and traits) for a screen
+  /// whose content under test runs past one phone screen — the date-sectioned session list.
+  func deviceImage<V: SwiftUI.View>(
+    precision: Float = 0.98,
+    appearance: UIUserInterfaceStyle = .dark,
+    height: CGFloat? = nil
+  ) -> Snapshotting<V, UIImage> {
+    var config = device
+    if let height, let width = device.size?.width {
+      config = ViewImageConfig(
+        safeArea: device.safeArea,
+        size: CGSize(width: width, height: height),
+        traits: device.traits
+      )
+    }
+    return .image(
       drawHierarchyInKeyWindow: true,
       precision: precision,
       perceptualPrecision: 0.98,
-      layout: .device(config: device),
-      traits: Self.darkTraits
+      layout: .device(config: config),
+      traits: UITraitCollection(userInterfaceStyle: appearance)
     )
   }
 
   /// Singular component snapshot: fast, deterministic layer render at `.sizeThatFits`.
-  func componentImage<V: SwiftUI.View>() -> Snapshotting<V, UIImage> {
-    .image(layout: .sizeThatFits, traits: Self.darkTraits)
+  /// Appearance pinned like `deviceImage`; pass `.light` only for a view whose light
+  /// appearance is itself under test (the hero, brand colours over a light background).
+  func componentImage<V: SwiftUI.View>(
+    appearance: UIUserInterfaceStyle = .dark
+  ) -> Snapshotting<V, UIImage> {
+    .image(
+      layout: .sizeThatFits,
+      traits: UITraitCollection(userInterfaceStyle: appearance)
+    )
   }
 
   /// Solid-color PNG so image-chip thumbnails render deterministically.

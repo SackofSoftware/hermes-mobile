@@ -14,7 +14,6 @@ struct SettingsFeatureTests {
     preferences.saveServerURL("http://mac.tailnet:9119")
     preferences.savePinnedIDs(["s1"])
     preferences.saveSeenCounts(["s1": 4])
-    preferences.saveGroupingMode(.chronological)
     preferences.saveDefaultSessionSwipeAction(.delete)
     preferences.saveSelectedProfileID("staging")
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
@@ -32,7 +31,6 @@ struct SettingsFeatureTests {
     #expect(preferences.loadServerURL() == nil) // logout forgets the server URL too
     #expect(preferences.loadPinnedIDs() == []) // pins are per-server — cleared on logout
     #expect(preferences.loadSeenCounts() == [:]) // unread state cleared too
-    #expect(preferences.loadGroupingMode() == .workspace) // grouping pref reset on logout
     #expect(preferences.loadDefaultSessionSwipeAction() == .archive) // swipe pref reset on logout
     #expect(preferences.loadSelectedProfileID() == nil) // selected profile cleared on logout
   }

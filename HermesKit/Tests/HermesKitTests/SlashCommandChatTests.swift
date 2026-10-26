@@ -2089,7 +2089,9 @@ struct SlashCommandChatTests {
     // reports FAKE success while this session is untouched. It falls through to a plain
     // `prompt.submit`, byte-identical to the old-agent / nil-catalog path (the LLM just sees
     // the literal text).
-    for command in ["/new", "/quit", "/branch retry", "/yolo", "/totallyunknown"] {
+    // `/reasoning` stays on the hide-list deliberately (#81): the reasoning picker chip is the
+    // mobile affordance, and the slash worker would not mirror the change onto this session.
+    for command in ["/new", "/quit", "/branch retry", "/yolo", "/reasoning max", "/totallyunknown"] {
       let calls = LockIsolated<[String]>([])
       let submitText = LockIsolated<String?>(nil)
       let store = TestStore(

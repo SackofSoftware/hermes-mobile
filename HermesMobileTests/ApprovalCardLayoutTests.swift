@@ -50,7 +50,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   private static let calloutLineHeight: CGFloat = 20.9
 
   /// Ceiling on the card's **compressed** fitting height: its floor
-  /// (``ApprovalCardView/contentMinHeight``) plus the rigid chrome around the content region —
+  /// (``PromptCardMetrics/contentMinHeight``) plus the rigid chrome around the content region —
   /// the title, the spacing and the Deny/Approve row. Measured at 254.7pt at `.large`; pinned
   /// about a quarter-line above that, so ordinary font-metric drift does not trip it but a rigid
   /// row added to the card does. See ``testTheCardsCompressedFittingSizeIsPinned`` for why the
@@ -129,7 +129,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     let region = try chat.region
 
     XCTAssertEqual(
-      region.bounds.height, ApprovalCardView.contentMinHeight, accuracy: 1,
+      region.bounds.height, PromptCardMetrics.contentMinHeight, accuracy: 1,
       "Sanity: this is the configuration where the region lands exactly on its floor"
     )
     XCTAssertGreaterThanOrEqual(
@@ -146,7 +146,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// The floor's "three legible command lines" is a **`.large`** contract, and this is the
   /// number it degrades to — stated, rather than left implied by an unqualified doc comment.
   ///
-  /// ``ApprovalCardView/contentMinHeight`` is deliberately unscaled, so the band above the ramp
+  /// ``PromptCardMetrics/contentMinHeight`` is deliberately unscaled, so the band above the ramp
   /// is a constant 64pt at every text size while a `.callout` line is not. Scaling the floor is
   /// not an available fix: three AX5 lines are ~210pt of floor, and reserving that on the
   /// shortest keyboard-up screen is measurably what pushes Deny/Approve out — the safety half
@@ -154,8 +154,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// region has any room at all, which is every configuration except the tightest.
   func testTheFloorsReadableBandDegradesWithDynamicType() {
     let band =
-      ApprovalCardView.contentMinHeight
-      - ApprovalCardView.fadeRampHeight(viewportHeight: ApprovalCardView.contentMinHeight)
+      PromptCardMetrics.contentMinHeight
+      - PromptCardMetrics.fadeRampHeight(viewportHeight: PromptCardMetrics.contentMinHeight)
       - ApprovalCardView.commandPadding
     XCTAssertEqual(band, 64, accuracy: 0.5, "the floor's readable band, by construction")
 
@@ -169,7 +169,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     XCTAssertGreaterThanOrEqual(
       lines(.large), 3, "three command lines at `.large` — the contract, \(lines(.large)) measured")
     // Characterisation, not an aspiration: if either of these goes red because the degradation
-    // improved, update the number here AND the contract stated on `contentMinHeight`.
+    // improved, update the number here AND the contract stated on `PromptCardMetrics.contentMinHeight`.
     XCTAssertEqual(
       lines(.accessibilityExtraLarge), 1.3, accuracy: 0.35,
       "AX3 degrades to about one and a third lines (\(lines(.accessibilityExtraLarge)) measured)")
@@ -314,7 +314,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
         """
       )
       XCTAssertLessThan(
-        try chat.region.bounds.height, ApprovalCardView.contentMaxHeightBase,
+        try chat.region.bounds.height, PromptCardMetrics.contentMaxHeightBase,
         "\(chat.label): sanity — the region is genuinely squeezed here, which is what makes it the test"
       )
     }
@@ -341,9 +341,11 @@ final class ApprovalCardLayoutTests: XCTestCase {
     )
   }
 
-  /// The clarify/secret card was never made compressible, so it gets **no** layout priority:
-  /// priority would only take the transcript's room without buying the card anything it can
-  /// use (measured with a long question at 393×516: transcript 160pt → 13pt).
+  /// A **single-question** clarify card gets **no** layout priority (only approvals and
+  /// multi-question clarify do — `isCompressibleCardPending`): priority would only take the
+  /// transcript's room (measured on the old rigid card with a long question at 393×516:
+  /// transcript 160pt → 13pt). Its question now scrolls in a bounded region, so a long one is
+  /// absorbed there instead. The multi-question card is covered by `ClarifyCardLayoutTests`.
   @MainActor
   func testTheClarifyCardDoesNotTakeTheTranscriptsRoom() throws {
     let chat = try hostedChat(
@@ -359,8 +361,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
     XCTAssertGreaterThanOrEqual(
       chat.transcript.bounds.height, 100,
       """
-      The approval card's layout priority must be scoped to approvals: a rigid clarify card \
-      cannot use the extra room, so granting it would only blank the transcript.
+      Layout priority must not reach a single-question clarify card: it cannot use the extra \
+      room, so granting it would only blank the transcript.
       """
     )
     let composer = chat.composer.convert(chat.composer.bounds, to: nil)
@@ -411,7 +413,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     let scroll = try contentRegion(for: Self.longCommand)
 
     XCTAssertEqual(
-      scroll.bounds.height, ApprovalCardView.contentMaxHeightBase, accuracy: 1,
+      scroll.bounds.height, PromptCardMetrics.contentMaxHeightBase, accuracy: 1,
       "Past the cap the region must stop growing at exactly the cap"
     )
     XCTAssertGreaterThan(
@@ -433,7 +435,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     // Reached the end, so the fade must be off — a permanently-faded bottom edge would leave
     // the command's last line unreadable, which is the very thing #65 is about.
     XCTAssertFalse(
-      ApprovalCardView.hasBottomOverflow(
+      PromptCardMetrics.hasBottomOverflow(
         visibleRect: CGRect(origin: scroll.contentOffset, size: scroll.bounds.size),
         contentHeight: scroll.contentSize.height
       ),
@@ -452,7 +454,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
       twenty, twoHundred, accuracy: 1,
       "A ten-times longer command must not make the card any taller — the cap decides"
     )
-    XCTAssertGreaterThan(twenty, ApprovalCardView.contentMaxHeightBase, "Sanity: at the cap")
+    XCTAssertGreaterThan(twenty, PromptCardMetrics.contentMaxHeightBase, "Sanity: at the cap")
   }
 
   /// The card alone in a tight region, with a greedy sibling above it.
@@ -480,7 +482,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
 
     let scroll = try XCTUnwrap(Self.onlyScrollView(in: host.view), "the region must be hosted")
     XCTAssertLessThan(
-      scroll.bounds.height, ApprovalCardView.contentMaxHeightBase,
+      scroll.bounds.height, PromptCardMetrics.contentMaxHeightBase,
       "The region must be the thing that yields when the space runs short"
     )
     XCTAssertGreaterThanOrEqual(
@@ -531,7 +533,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
       """
     )
     XCTAssertGreaterThan(
-      compressed, ApprovalCardView.contentMinHeight,
+      compressed, PromptCardMetrics.contentMinHeight,
       "Sanity: the floor is part of it — the card never compresses past its region's floor"
     )
   }
@@ -616,7 +618,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     // hosting-environment constant: the region must have grown by essentially the whole
     // remaining cap with no layout pass behind it.
     XCTAssertGreaterThan(
-      long - oneLine, ApprovalCardView.contentMaxHeightBase * 0.5,
+      long - oneLine, PromptCardMetrics.contentMaxHeightBase * 0.5,
       "With no layout pass the region must still ask for its capped height, not its padding"
     )
     XCTAssertEqual(
@@ -632,7 +634,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
       for: Self.longCommand, dynamicType: .accessibility5, windowHeight: 1400
     )
     XCTAssertEqual(
-      scroll.bounds.height, ApprovalCardView.contentMaxHeightCeiling, accuracy: 1,
+      scroll.bounds.height, PromptCardMetrics.contentMaxHeightCeiling, accuracy: 1,
       "At AX5 the scaled cap overshoots and must land on the ceiling"
     )
     XCTAssertGreaterThan(
@@ -640,7 +642,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
       "Clamping bounds what the region asks for, never what it holds — it still scrolls"
     )
     XCTAssertLessThan(
-      ApprovalCardView.contentMaxHeightCeiling, TranscriptLayout.shortestLayoutHeight,
+      PromptCardMetrics.contentMaxHeightCeiling, TranscriptLayout.shortestLayoutHeight,
       "The ceiling must leave room for the button row on the shortest screen"
     )
   }
@@ -652,7 +654,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
 
     XCTAssertGreaterThan(scroll.contentSize.height, 0, "The content must actually be laid out")
     XCTAssertLessThan(
-      scroll.bounds.height, ApprovalCardView.contentMaxHeightBase,
+      scroll.bounds.height, PromptCardMetrics.contentMaxHeightBase,
       "A one-line command must hug its content, not pad out to the cap"
     )
     XCTAssertEqual(
@@ -660,7 +662,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
       "Below the cap the region's height must equal its content's — no dead space, no scroll"
     )
     XCTAssertFalse(
-      ApprovalCardView.hasBottomOverflow(
+      PromptCardMetrics.hasBottomOverflow(
         visibleRect: CGRect(origin: .zero, size: scroll.bounds.size),
         contentHeight: scroll.contentSize.height
       ),
@@ -676,8 +678,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
   func testTheCapBoundaryFromBothSides() throws {
     let under = try contentRegion(for: Self.commandJustUnderTheCap)
     XCTAssertGreaterThan(
-      under.bounds.height, ApprovalCardView.contentMaxHeightBase * 0.6, "Sanity: near the cap")
-    XCTAssertLessThanOrEqual(under.bounds.height, ApprovalCardView.contentMaxHeightBase + 1)
+      under.bounds.height, PromptCardMetrics.contentMaxHeightBase * 0.6, "Sanity: near the cap")
+    XCTAssertLessThanOrEqual(under.bounds.height, PromptCardMetrics.contentMaxHeightBase + 1)
     XCTAssertEqual(
       under.contentSize.height, under.bounds.height, accuracy: 1,
       "Content that still fits the cap has nothing to scroll to"
@@ -685,7 +687,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
 
     let over = try contentRegion(for: Self.commandJustOverTheCap)
     XCTAssertEqual(
-      over.bounds.height, ApprovalCardView.contentMaxHeightBase, accuracy: 1,
+      over.bounds.height, PromptCardMetrics.contentMaxHeightBase, accuracy: 1,
       "One line past the cap the region must sit exactly on the cap, not a line above it"
     )
     XCTAssertGreaterThan(
@@ -738,16 +740,16 @@ final class ApprovalCardLayoutTests: XCTestCase {
     }
 
     // Nothing to scroll: content exactly fills the viewport.
-    XCTAssertFalse(ApprovalCardView.hasBottomOverflow(visibleRect: rect(0), contentHeight: 220))
-    XCTAssertFalse(ApprovalCardView.hasBottomOverflow(visibleRect: rect(0), contentHeight: 100))
+    XCTAssertFalse(PromptCardMetrics.hasBottomOverflow(visibleRect: rect(0), contentHeight: 220))
+    XCTAssertFalse(PromptCardMetrics.hasBottomOverflow(visibleRect: rect(0), contentHeight: 100))
     // Fractional layout slack must not switch the fade on.
-    XCTAssertFalse(ApprovalCardView.hasBottomOverflow(visibleRect: rect(0), contentHeight: 220.4))
+    XCTAssertFalse(PromptCardMetrics.hasBottomOverflow(visibleRect: rect(0), contentHeight: 220.4))
     // Long content, parked at the top and mid-scroll: more below, so fade.
-    XCTAssertTrue(ApprovalCardView.hasBottomOverflow(visibleRect: rect(0), contentHeight: 1258))
-    XCTAssertTrue(ApprovalCardView.hasBottomOverflow(visibleRect: rect(500), contentHeight: 1258))
+    XCTAssertTrue(PromptCardMetrics.hasBottomOverflow(visibleRect: rect(0), contentHeight: 1258))
+    XCTAssertTrue(PromptCardMetrics.hasBottomOverflow(visibleRect: rect(500), contentHeight: 1258))
     // …and scrolled to the very end: nothing below, so the last line reads clean.
     XCTAssertFalse(
-      ApprovalCardView.hasBottomOverflow(visibleRect: rect(1258 - 220), contentHeight: 1258))
+      PromptCardMetrics.hasBottomOverflow(visibleRect: rect(1258 - 220), contentHeight: 1258))
   }
 
   /// The ramp is a hint, so it may never be most of what is left to read. A constant 24pt is
@@ -756,20 +758,20 @@ final class ApprovalCardLayoutTests: XCTestCase {
   func testTheFadeRampNeverEatsMoreThanAQuarterOfTheViewport() {
     // Roomy: the constant is the binding limit.
     XCTAssertEqual(
-      ApprovalCardView.fadeRampHeight(viewportHeight: 320), ApprovalCardView.bottomFadeHeight)
+      PromptCardMetrics.fadeRampHeight(viewportHeight: 320), PromptCardMetrics.bottomFadeHeight)
     XCTAssertEqual(
-      ApprovalCardView.fadeRampHeight(viewportHeight: 96), ApprovalCardView.bottomFadeHeight)
+      PromptCardMetrics.fadeRampHeight(viewportHeight: 96), PromptCardMetrics.bottomFadeHeight)
     // Squeezed: the fraction takes over, so three quarters always stay fully opaque.
-    XCTAssertEqual(ApprovalCardView.fadeRampHeight(viewportHeight: 60), 15)
-    XCTAssertEqual(ApprovalCardView.fadeRampHeight(viewportHeight: 40), 10)
+    XCTAssertEqual(PromptCardMetrics.fadeRampHeight(viewportHeight: 60), 15)
+    XCTAssertEqual(PromptCardMetrics.fadeRampHeight(viewportHeight: 40), 10)
     // Degenerate geometry must not produce a negative ramp.
-    XCTAssertEqual(ApprovalCardView.fadeRampHeight(viewportHeight: 0), 0)
-    XCTAssertEqual(ApprovalCardView.fadeRampHeight(viewportHeight: -10), 0)
+    XCTAssertEqual(PromptCardMetrics.fadeRampHeight(viewportHeight: 0), 0)
+    XCTAssertEqual(PromptCardMetrics.fadeRampHeight(viewportHeight: -10), 0)
     // The invariant the two constants have to keep, stated once so they cannot drift back
     // into "the hint covers half the content".
     for viewport in stride(from: CGFloat(20), through: 400, by: 10) {
       XCTAssertLessThanOrEqual(
-        ApprovalCardView.fadeRampHeight(viewportHeight: viewport), viewport / 4,
+        PromptCardMetrics.fadeRampHeight(viewportHeight: viewport), viewport / 4,
         "At \(viewport)pt the ramp must leave three quarters legible"
       )
     }
@@ -980,8 +982,8 @@ final class ApprovalCardLayoutTests: XCTestCase {
   /// What a hosted `ChatView` gives back: the card's content region, the transcript and the
   /// composer, all live views, plus the window they were laid out in.
   private struct HostedChat {
-    /// The card's bounded content region — `nil` when the standing card is a clarify/secret
-    /// one (plain stacked content, no scroll view of its own) or when none is standing.
+    /// The first plain scroll view — the approval card's bounded content region (a clarify
+    /// card's region when one stands instead; `nil` for the secret card or no card).
     var regionIfAny: UIScrollView?
     var transcript: UIScrollView
     var composer: ComposerInputTextView
@@ -1221,7 +1223,7 @@ final class ApprovalCardLayoutTests: XCTestCase {
     // reported y=0 while the card's border was drawn 36pt lower).
     let rendered = try Self.render(region, file: file, line: line)
     let readableMaxY =
-      region.bounds.height - ApprovalCardView.fadeRampHeight(viewportHeight: region.bounds.height)
+      region.bounds.height - PromptCardMetrics.fadeRampHeight(viewportHeight: region.bounds.height)
     let block = Self.rgb(.secondarySystemBackground, window.traitCollection)
     let card = Self.rgb(.tertiarySystemBackground, window.traitCollection)
 
@@ -1357,11 +1359,11 @@ final class ApprovalCardLayoutTests: XCTestCase {
 
   /// Alpha (0–255) per y of the fade mask, rendered 20×100 at scale 1 over an opaque fill.
   @MainActor
-  private static func maskAlphas(_ fade: ApprovalCardView.FadeState) throws -> [Int] {
+  private static func maskAlphas(_ fade: PromptCardMetrics.FadeState) throws -> [Int] {
     let renderer = ImageRenderer(
       content: Color.black
         .frame(width: 20, height: 100)
-        .mask { ApprovalCardView.bottomFadeMask(fade) }
+        .mask { PromptCardMetrics.bottomFadeMask(fade) }
     )
     renderer.scale = 1
     let image = try XCTUnwrap(renderer.uiImage, "the mask must render")

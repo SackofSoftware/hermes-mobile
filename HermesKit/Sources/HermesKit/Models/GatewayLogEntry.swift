@@ -36,10 +36,14 @@ public extension GatewayEvent {
     case .toolStart: return "tool.start"
     case .toolComplete: return "tool.complete"
     case .approvalRequest: return "approval.request"
+    case let .serverRequest(request): return request.method.rawValue
+    case .requestCancel: return "request.cancel"
     case .clarifyRequest: return "clarify.request"
     case .sudoRequest: return "sudo.request"
     case .secretRequest: return "secret.request"
     case .error: return "error"
+    case .serverRequestFailed: return "(client) server request failed"
+    case .serverRequestsUnavailable: return "(client) server requests unavailable"
     case .reviewSummary: return "review.summary"
     // Client-synthesized, not a server frame (the gateway client yields it on a ws-ticket
     // 401) — labeled distinctly so it never reads as a real `auth.*` wire event in the log.
@@ -64,17 +68,27 @@ public extension GatewayEvent {
       let d = durationS.map { String(format: " (%.1fs)", $0) } ?? ""
       return (name ?? "") + d
     case let .approvalRequest(req): return req.command ?? req.detail ?? "approval"
+    // Prompt payloads only — a server request never carries an answer (or secret) value.
+    case let .serverRequest(request):
+      switch request.kind {
+      case let .approval(req): return req.command ?? req.detail ?? request.id
+      case let .clarify(req): return req.question
+      case let .secret(_, p): return p.prompt ?? p.command ?? p.envVar ?? request.id
+      }
+    case let .requestCancel(cancel):
+      return ([cancel.method, cancel.reason].compactMap { $0 } + [cancel.id]).joined(separator: " ")
     case let .clarifyRequest(req): return req.question
-    case let .sudoRequest(p): return p.prompt ?? p.requestID
-    case let .secretRequest(p): return p.prompt ?? p.requestID
-    case let .error(message): return message
+    case let .sudoRequest(p), let .secretRequest(p): return p.prompt ?? p.requestID ?? ""
+    case let .error(message), let .serverRequestFailed(message), let .serverRequestsUnavailable(message):
+      return message
     case let .reviewSummary(text): return Self.truncate(text)
     case .authExpired: return ""
     case .unknown: return ""
     }
   }
 
-  private static func truncate(_ text: String, max: Int = 80) -> String {
+  /// Collapse newlines and cap at `max` characters (shared with `DebugLogClient.note`).
+  internal static func truncate(_ text: String, max: Int = 80) -> String {
     let collapsed = text.replacingOccurrences(of: "\n", with: "⏎")
     return collapsed.count <= max ? collapsed : String(collapsed.prefix(max)) + "…"
   }

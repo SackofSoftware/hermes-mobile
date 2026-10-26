@@ -478,36 +478,224 @@ final class ChatSnapshotTests: SnapshotTestCase {
     assertSnapshot(of: view, as: componentImage())
   }
 
+  /// The server narrowed the choice set to `once` + `deny` (no `session`): the "Approve all in
+  /// this session" toggle is gone — the phone never widens what the server offers.
+  func testApprovalCard_noSessionChoice() {
+    let view = ApprovalCardView(
+      request: ApprovalRequest(
+        command: "git push --force origin main",
+        detail: "Overwrite the remote branch history",
+        patternKey: "force_push",
+        choices: ["once", "deny"]
+      ),
+      onApprove: { _ in },
+      onDeny: {}
+    )
+    // Height pinned for the reason on `testApprovalCard`.
+    .frame(width: device.size?.width ?? 390, height: 220)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// `choices: ["deny"]`: Approve is hidden and Deny fills the button row alone.
+  func testApprovalCard_denyOnly() {
+    let view = ApprovalCardView(
+      request: ApprovalRequest(
+        command: "rm -rf /var/lib/postgresql",
+        detail: "Blocked by policy: only denial is allowed",
+        choices: ["deny"]
+      ),
+      onApprove: { _ in },
+      onDeny: {}
+    )
+    // Height pinned for the reason on `testApprovalCard`.
+    .frame(width: device.size?.width ?? 390, height: 220)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
   // MARK: Clarify / secret cards
 
+  // Every clarify card's questions sit in a bounded, scrollable region, so each snapshot pins
+  // width AND height (the `testApprovalCard` reason: unpinned, `.sizeThatFits` records the
+  // compressed floor). The frames are generous enough for the card to lay out naturally.
+
+  /// Legacy `clarify.request` single-select: tap-to-submit rows and Skip — no Other row
+  /// (legacy keeps today's form) and so no Send.
   func testClarifyCard_choices() {
     let view = ClarifyCardView(
-      mode: .clarify(ClarifyRequest(
+      request: ClarifyRequest(
         requestID: "c1",
         question: "Which environment should I deploy to?",
         choices: ["staging", "production"]
-      )),
-      onSubmit: { _ in }
+      ),
+      onSubmit: { _ in },
+      onSkip: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 260)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 
+  /// A free-text question: the field sits in the region, Send (disabled until typed) and Skip
+  /// in the pinned row.
   func testClarifyCard_freeText() {
     let view = ClarifyCardView(
-      mode: .clarify(ClarifyRequest(requestID: "c2", question: "What should I name the branch?", choices: [])),
-      onSubmit: { _ in }
+      request: ClarifyRequest(requestID: "c2", question: "What should I name the branch?", choices: []),
+      onSubmit: { _ in },
+      onSkip: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 200)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// One multi-select question mid-answer: checkbox rows (two picked, in the server's order),
+  /// the Other row, and an enabled Submit.
+  func testClarifyCard_multiSelect() {
+    let request = ClarifyRequest(
+      requestID: nil,
+      questions: [ClarifyQuestion(
+        qid: "q0", question: "Which platforms should the build target?",
+        choices: ["iOS", "macOS", "visionOS"], multiSelect: true
+      )],
+      answerShape: .answers
+    )
+    var draft = ClarifyDraft()
+    draft.toggle("iOS", in: request.questions[0])
+    draft.toggle("visionOS", in: request.questions[0])
+    let view = ClarifyCardView(request: request, draft: draft, onSubmit: { _ in }, onSkip: {})
+      .frame(width: device.size?.width ?? 390, height: 360)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// A three-question batch (single-select, multi-select, free text): one section per question,
+  /// each with its own Skip, Confirm disabled until every question has an answer or a skip.
+  func testClarifyCard_multiQuestion() {
+    let view = ClarifyCardView(
+      request: Self.batchClarify(),
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 520)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// The server's `" (Recommended)"` suffix renders as a badge on the bare label — never a
+  /// preselection (v7 single-select: rows submit on tap, plus the Other row and Send).
+  func testClarifyCard_recommendedBadge() {
+    let view = ClarifyCardView(
+      request: ClarifyRequest(
+        requestID: nil,
+        questions: [ClarifyQuestion(
+          qid: "q0", question: "Which UI framework should the new screen use?",
+          choices: ["SwiftUI (Recommended)", "UIKit"]
+        )],
+        answerShape: .answers
+      ),
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 320)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// A replayed batch: the server already locked q0 (an answer) and q1 (a skip), so they
+  /// render read-only with a check; only q2 is still open.
+  func testClarifyCard_lockedAnswers() {
+    var request = Self.batchClarify()
+    request.lockedAnswers = ["q0": "SwiftUI", "q1": String?.none]
+    let view = ClarifyCardView(request: request, onSubmit: { _ in }, onSkip: {})
+      .frame(width: device.size?.width ?? 390, height: 340)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// The Other row with typed text on a single-select question: the text is the answer, so
+  /// Send is enabled.
+  func testClarifyCard_otherRow() {
+    let request = ClarifyRequest(
+      requestID: nil,
+      questions: [ClarifyQuestion(
+        qid: "q0", question: "Which environment should I deploy to?",
+        choices: ["staging", "production"]
+      )],
+      answerShape: .answers
+    )
+    var draft = ClarifyDraft()
+    draft.setText("canary in eu-west-1", for: request.questions[0])
+    let view = ClarifyCardView(request: request, draft: draft, onSubmit: { _ in }, onSkip: {})
+      .frame(width: device.size?.width ?? 390, height: 320)
+      .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// The batch fixture shared by the multi-question and locked-answer snapshots.
+  static func batchClarify() -> ClarifyRequest {
+    ClarifyRequest(
+      requestID: nil,
+      questions: [
+        ClarifyQuestion(qid: "q0", question: "Framework?", choices: ["SwiftUI (Recommended)", "UIKit"]),
+        ClarifyQuestion(qid: "q1", question: "Targets?", choices: ["iOS", "macOS"], multiSelect: true),
+        ClarifyQuestion(qid: "q2", question: "What should the app be called?"),
+      ],
+      answerShape: .answers
+    )
   }
 
   func testSecretCard_secure() {
-    let view = ClarifyCardView(
-      mode: .secret(.secret, SecretPrompt(requestID: "s1", prompt: "Enter the API key for the weather service")),
-      onSubmit: { _ in }
+    let view = SecretCardView(
+      kind: .secret,
+      prompt: SecretPrompt(requestID: "s1", prompt: "Enter the API key for the weather service"),
+      onSubmit: { _ in },
+      onSkip: {}
     )
-    .frame(width: device.size?.width ?? 390)
+    .frame(width: device.size?.width ?? 390, height: 200)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// v7 sudo (v2026.9.21+) carries the redacted command the password is for.
+  func testSudoCard_command() {
+    let view = SecretCardView(
+      kind: .sudo,
+      prompt: SecretPrompt(command: "apt install -y ripgrep fd-find"),
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 200)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// A sudo command far taller than the cap scrolls inside the card's bounded region, under a
+  /// bottom fade, while the field, Skip and send stay pinned below it. Height pinned for the
+  /// reason on `testApprovalCard` (a compressible region renders at its floor otherwise).
+  func testSudoCard_longCommandScrolls() {
+    let view = SecretCardView(
+      kind: .sudo,
+      prompt: SecretPrompt(command: ApprovalCardLayoutTests.longCommand),
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 460)
+    .background(Color(uiColor: .systemBackground))
+    assertSnapshot(of: view, as: componentImage())
+  }
+
+  /// v7 secret names the environment variable the value is saved under.
+  func testSecretCard_envVar() {
+    let view = SecretCardView(
+      kind: .secret,
+      prompt: SecretPrompt(prompt: "Weather API key", envVar: "OPENWEATHER_API_KEY"),
+      onSubmit: { _ in },
+      onSkip: {}
+    )
+    .frame(width: device.size?.width ?? 390, height: 200)
+    .background(Color(uiColor: .systemBackground))
     assertSnapshot(of: view, as: componentImage())
   }
 

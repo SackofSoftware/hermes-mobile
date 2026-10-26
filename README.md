@@ -4,15 +4,15 @@
 
 # Hermes Agent Mobile Companion
 
-**Drive your self-hosted Hermes agent from your iPhone.**
+**Drive your self-hosted Hermes agent from your iPhone or iPad.**
 
 Chat with sessions, watch the agent work in real time, and approve or clarify its
-actions — all from your pocket, while the real runtime stays on your Mac or server.
+actions — all on the go, while the real runtime stays on your Mac or server.
 
 <img src="app-store-preview.png" alt="Hermes Mobile screenshots" width="100%" />
 <br/>
 
-Native SwiftUI · [The Composable Architecture](https://github.com/pointfreeco/swift-composable-architecture) · no agent logic on the phone
+Native SwiftUI · [The Composable Architecture](https://github.com/pointfreeco/swift-composable-architecture) · no agent logic on the device
 
 </div>
 
@@ -20,24 +20,27 @@ Native SwiftUI · [The Composable Architecture](https://github.com/pointfreeco/s
 
 Hermes Mobile is a thin remote client for a self-hosted
 **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**. The agent
-keeps running on your machine; the phone is a window into it — so you can step away
-from your desk and still keep your agent moving.
+keeps running on your machine; your iPhone or iPad is a window into it — so you can step
+away from your desk and still keep your agent moving.
 
 - **Connect once.** Enter your server URL and sign in the way your agent is configured:
-  a username and password when the server runs gated auth (the recommended setup), or a
-  static token (loopback/`--insecure`). The app detects which methods the server offers
-  and shows the right fields. Credentials live in the iOS Keychain and the app
+  a username and password when the server runs gated auth (the recommended setup), your
+  identity provider via OAuth (Nous Research or your own OIDC server — it opens in Safari,
+  so your existing session and passkeys just work), or a static token
+  (loopback/`--insecure`). The app detects which methods the server offers and shows the
+  right options. Credentials live in the iOS Keychain and the app
   auto-logs-in on launch; if a gated session expires while you're using it, a quick
   re-auth prompt gets you back in without losing your place. And if the agent simply
   isn't reachable at launch — VPN/Tailscale off, no internet, agent down — you get a
   retry screen naming the server instead of a sign-in form (it retries by itself when
   you foreground the app, right after you flip the VPN on); only a real rejection sends
   you back to sign-in.
-- **Find any session.** Browse sessions grouped by workspace, search across all of
-  them, pin the ones you care about, rename or archive them — or permanently delete
-  the ones you're done with, from the main list or the archived view (a Settings
-  option picks whether a full swipe archives or deletes) — and resume or start a
-  new one.
+- **Find any session.** Browse sessions as inbox-style cards (workspace, title, preview,
+  model, message count) sorted into Today / Yesterday / Last week… sections, search
+  across all of them, pin the ones you care about, rename or archive them — or
+  permanently delete the ones you're done with, from the main list or the archived
+  view (a Settings option picks whether a full swipe archives or deletes) — and
+  resume or start a new one. Cron-job runs get their own collapsible section.
 - **Switch profiles.** Keep multiple Hermes profiles on one agent and switch between
   them from a Safari-style header pill — each profile has its own scoped session list,
   and new chats are created under the selected one. Create custom profiles (with an
@@ -61,7 +64,7 @@ from your desk and still keep your agent moving.
   catalog — built-ins like `/compress`, `/undo`, `/status`, plus your installed
   skills — with as-you-type filtering and tap-to-insert. Commands execute through
   the agent's real slash pipeline (skill commands stream like a normal turn), so
-  mid-conversation session control works from your pocket. On agents without
+  mid-conversation session control works on the go. On agents without
   command support the composer simply behaves as before.
 - **See how full the context is.** A color-coded pill in the composer shows
   used/max tokens and percent (mirroring the Hermes TUI thresholds); tap it for a
@@ -75,18 +78,33 @@ from your desk and still keep your agent moving.
   without derailing the original conversation. Branches show nested under their parent
   in the session list, desktop-style.
 - **Approve from anywhere.** The mobile-native payoff: respond to approval, clarify,
-  and `sudo`/`secret` prompts the moment they arrive. Even if the app was offline when
-  an approval fired, tapping its push notification still surfaces an approve/deny card
-  (generic, since no command content ever transits the push gateway) — with honest
-  "already handled elsewhere" feedback if it was resolved on another client.
+  and `sudo`/`secret` prompts the moment they arrive. Clarify questions come in every
+  form the desktop app shows: pick one choice, tick several, type your own answer with
+  "Other", or work through a batch of up to five questions on one card (the agent's
+  recommended choice is marked, never preselected). When several prompts are waiting,
+  they queue and show one at a time. Lost the connection, or opened the app from a push
+  notification? The open prompts come back exactly as the agent asked them, with the
+  command or question in full (no content ever transits the push gateway). If you
+  answer something already handled on another client, the app says so. Works with
+  current Hermes releases, which send prompts as server requests, and with older agents
+  that still use the event-based prompts (there, a push tap brings back a generic
+  approve/deny card, and the newer clarify forms are not available).
 - **Stays connected.** Automatic reconnect with backoff and a clear connection banner
-  when the link drops. Reopening a session — after navigating away, backgrounding the app,
-  or a cold relaunch — restores its live state: the right model, context usage, full
-  tool/thinking history, and an in-progress turn that keeps streaming with its timer ticking.
+  when the link drops. On current Hermes releases a reconnect also catches up on what a
+  running turn did while you were offline: the tool calls and thinking from the gap show up
+  right away instead of when the turn ends. Reopening a session — after navigating away,
+  backgrounding the app, or a cold relaunch — restores its live state: the right model,
+  context usage, full tool/thinking history, and an in-progress turn that keeps streaming
+  with its timer ticking.
   A running turn even keeps its live connection while you browse the session list, and for a
   short grace window after backgrounding — falling back to reconnect-and-restore beyond that.
+- **Native on iPad.** In a wide window the session list sits in a sidebar next to the
+  open chat (side by side in landscape, an overlay sidebar in portrait), the sidebar
+  highlights the session you're viewing, the chat column stays a readable width, and a
+  new chat opens on an empty-state hero instead of a blank screen. Slide Over and
+  narrow windows fall back to the phone layout.
 - **Get pinged when it needs you.** Opt in to push notifications and the agent can ping
-  your phone — even when the app is closed — when it needs an approval, asks you to
+  your device — even when the app is closed — when it needs an approval, asks you to
   clarify, finishes a longer turn, or hits an error. This rides a three-part
   setup: a plugin on your own agent triggers the notification, a tiny stateless gateway
   the app's publisher operates forwards it to Apple Push (it's the only place the APNs

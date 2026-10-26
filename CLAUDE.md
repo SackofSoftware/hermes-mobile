@@ -17,7 +17,8 @@ bullets below are the compressed rules.
   generated and gitignored.
 - **`HermesMobileTests/`** — iOS XCTest target for SwiftUI snapshot tests and view logic
   that needs a real UIKit host (separate from the SPM suite).
-- **`Probe/`** — throwaway protocol probe (gitignored fixtures).
+- **`Probe/`** — non-shipping harnesses, unreferenced by `Project.swift`: the protocol probe
+  (gitignored `Probe/fixtures/`) and the committed `LoopbackSpike/`.
 
 ## Core rules (every change)
 
@@ -30,17 +31,22 @@ bullets below are the compressed rules.
 - **Gate UI by server capability, not assumptions** — the shared pattern: a JSON-RPC
   `-32601` (`GatewayError.isUnknownMethod`) or REST 404 flips a `*Supported` flag off
   (attach, profiles, cron jobs, push, slash commands); `?? true` on unknown capability
-  fields. Mirror the desktop's behaviour where one exists; check the Hermes source.
+  fields. Mirror the desktop's behaviour where one exists; check the Hermes source. (#19's
+  OAuth segment deliberately inverts `?? true` — see the OAuth bullet below.)
 - **Surface RPC failures** (set `errorBanner`, clear `isSending`/`activity`) — never
-  swallow them with `try?`.
+  swallow them with `try?` (the logout hops, below, and the #98 replay read — debug log
+  only — are the carved-out exceptions).
 - **Commit messages**: capitalized verb, no conventional-commit prefixes, concise.
 
 ## Gateway & session lifecycle
 
-- **Gateway socket**: one long-running cancellable effect funnels every event through
-  `.gatewayEvent`; outbound RPCs are discrete one-shot effects. Reconnect/backoff lives
+- **Gateway socket**: one long-running cancellable effect funnels every frame through
+  `.gatewayFrame`; outbound RPCs are discrete one-shot effects. Reconnect/backoff lives
   in the reducer, not the client. Per-request timeout 30s (`GatewayError.timedOut`);
-  the slash pipeline uses `HermesGatewayClient.longRunningMethods` → 120s.
+  the slash pipeline uses `HermesGatewayClient.longRunningMethods` → 120s. Reconnect (#98):
+  the gated `.ready` replays the gap from the `seq` cursor (`session.events.since`) BEFORE
+  the hydrate, no drain/turn-end side effects mid-fold, failure = plain hydrate
+  (`docs/architecture.md`).
 - **Session-not-found self-heal (#17)**: outbound RPCs re-resume (or `session.create`
   when there's no stored id) then replay the RPC **once** — single retry, no loop; the
   banner shows only if the heal also fails. The foreground `session.resume` likewise
@@ -54,7 +60,8 @@ bullets below are the compressed rules.
   (open/foreground/cold-launch → `.ready` → hydrate): call `session.resume` (NOT
   `session.activate` — live-only, 404s stored sessions) and apply `info` / `running` /
   `inflight` from the response — rebuild rows wholesale, server wins, never merge; seed
-  the streaming row from `inflight`. Exception (#26): a foreground re-hydrate of a
+  the streaming row from `inflight`. `open_requests` (v7 prompt replay) is reconciled, not
+  rebuilt: absence authoritative, whatever `running` says. Exception (#26): a foreground re-hydrate of a
   still-RUNNING turn preserves the client's live thinking + tool rows (server `inflight`
   carries no reasoning/tools); a completed turn still replaces wholesale. Details:
   `docs/architecture.md`.
@@ -70,18 +77,46 @@ bullets below are the compressed rules.
   Never cancel-and-redial a healthy socket (`connect` only when `status != .ready`).
   View disappearance is `AppFeature.chatViewDisappeared`, handled AFTER the pop
   animation, never at `.popFrom` time. A slot with `hasQueuedWork` stays alive.
+- **"Detached" means `isChatDetached` = `layout == .compact && path.isEmpty` (#80)** —
+  never a bare `path.isEmpty`. `.regular` needs a regular size class AND the pad idiom (a
+  Max iPhone in landscape stays on the stack; Slide Over does too), reported via
+  `layoutChanged` and set FIRST so the column-move `chatViewDisappeared` is a no-op. The
+  `ChatScreen` marker is COMPACT-ONLY: in regular the slot IS the `NavigationSplitView`
+  detail, the path stays empty, and the chat is never detached (no pop/turn-end teardown).
+  Regular never shows a blank detail — every seat comes from `detailRefill`; narrowing drops
+  an `isPristineNewChat` seat instead of pushing it, and the seat follows the list's profile
+  (`profileReseatSignal` — deferred, never dropped, while composer input is in flight or the
+  window is narrow). A regular fill dials its chat from the reducer AND
+  bumps `slotGeneration`, which the detail view is `.id`-keyed on so nothing leaks between
+  sessions. Sidebar highlight is a plain optional (`highlightedSessionID`), never
+  `List(selection:)`. Details: `docs/features/ipad-layout.md`.
 - **Backgrounding gets ~30s grace** via `BackgroundTaskClient`: running slot →
   `persistNow` + begin; expiry while backgrounded → final persist +
-  `.teardownSocketOnly` (state stays in memory for the #26 catch-up); a stale expiry
-  racing `.active` is a guarded no-op. Idle slot persists only, no slot is a no-op —
-  either way no task, no battery burn.
-- **Auth has two regimes** (`AuthSession`: `.token` | `.cookie`). Token mode must stay
-  byte-identical to the legacy single-token path (backward-compat guard). Gated mode:
+  `.teardownSocketOnly` (state + replay cursor stay in memory for the #98 replay / #26
+  catch-up); a stale expiry racing `.active` is a guarded no-op. Idle slot persists only,
+  no slot is a no-op — either way no task, no battery burn.
+- **Auth has three regimes** (`AuthSession`: `.token` | `.cookie` | `.bearer`). Token mode must
+  stay byte-identical to the legacy single-token path (backward-compat guard). Gated modes:
   password-login cookies (refresh is transparent server-side — persist + resend the jar,
-  stored in `KeychainClient`) and a fresh single-use WS `?ticket=` minted per connect —
-  never cached; a 401 mint → `.sessionExpired` → `ReauthFeature` with identity-aware
-  routing (same user reconnects; different user pops + clears identity-scoped prefs).
-  The Password|Token toggle is capability-gated. Full protocol: `docs/architecture.md`.
+  stored in `KeychainClient`) or OAuth bearer tokens (#19), both with a fresh single-use WS
+  `?ticket=` minted per connect — never cached, and `.cookie`/`.bearer` SHARE the `connect`
+  branch so the cancellation choreography can't drift; a 401 mint → `.sessionExpired` →
+  `ReauthFeature` with identity-aware routing (same user reconnects; different user pops +
+  clears identity-scoped prefs). The Password | Token | \<provider\> toggle is capability-gated.
+  Full protocol: `docs/architecture.md`.
+- **`RequestAuth` is the ONE place either auth header is written**, and **every bearer read
+  goes through `BearerTokenStore.validAccessToken()`** — the store owns the token pair and is
+  the only refresh path; never read the Keychain or `expiresAt` directly. One synchronization
+  domain (no state outside its lock, no `await` under it); revocation = DELIBERATE abandonment
+  (`clear` requires a `BearerStoreClaim`). Ordering: `rest.logout`/`rest.unregisterPush` BEFORE
+  `bearerTokens.clear(claim:)`; `detachPersistence()` BEFORE every `keychain.deleteSession()`.
+  `rest.logout` is the one deliberate never-swallow exception. Details:
+  `docs/features/oauth-sign-in.md`.
+- **The OAuth segment needs positive evidence, not `?? true`**: an OAuth provider AND
+  `native_pkce` in `auth_flows`, else hidden. `isGated` is deliberately NOT a bare
+  `authRequired == true`. Loopback-only redirect (`ASWebAuthenticationSession` + in-app
+  `NWListener`), no WKWebView fallback, plain-text provider labels (App Store 5.2.1).
+  Details: `docs/features/oauth-sign-in.md`.
 - **Login help**: the `AgentSetupGuideView` sheet is the single connection-help surface
   (four entry points toggle one local `@State`; presentation stays out of the reducer).
   Keep the README quick-start and the sheet's commands verbatim-identical.
@@ -112,6 +147,15 @@ bullets below are the compressed rules.
   pure-SwiftUI engine was removed: it dropped tail messages). Stick-to-bottom is
   renderer-local, not reducer state; pure scroll-math helpers stay outside the
   `#if canImport(UIKit)` guard.
+- **The empty-chat hero swaps the transcript REGION on `ChatFeature.State.showsEmptyHero`**
+  (#80) — a HermesKit predicate (`transcript.isEmpty && !isSending && streamingRowID == nil
+  && (storedSessionID == nil || hasHydrated)`), never view-derived. `hasHydrated` is set on
+  `applyActivate` AND the `session.create` handshake so a resumed chat waiting on history
+  never flashes the hero; `ChatEmptyHeroView` is display-only with ONE tagline constant.
+- **The chat column is capped at `ChatLayout.readableMaxWidth` (760) on the OUTER
+  container only** — `.frame(maxWidth:)` + `.frame(maxWidth: .infinity)` on `ChatView`'s
+  outer `VStack`; phone widths are below it (compact unchanged); never on table cells
+  (`CappedWidthLayout` rule stands). Measured in `ChatColumnLayoutTests`.
 - **Markdown & tables**: block classification in `MarkdownSegment`, rendered by
   `MarkdownText`; only USER messages get a bubble; wide tables PAN in
   `MarkdownTableView` (direction-aware fade), cells capped by `CappedWidthLayout` —
@@ -124,11 +168,16 @@ bullets below are the compressed rules.
   guarded by strict `canBranch` gates with a client-held `BranchSeed` recovery protocol
   (probe-before-seed-replay; no probe budget). The trickiest state machine in the app —
   read `docs/features/message-actions-and-branching.md` before touching it.
-- **Approval/clarify/secret cards**: a pinned button row over ONE bounded scrollable
-  region (`BoundedHeightLayout`) — never plain stacked `Text`. Every card is keyed on
-  the monotonic `pendingInteractionToken`; **raise cards through `State.present(_:)`,
-  never by assigning `pendingInteraction`**. Layout floors/caps, keyboard handoff, and
-  push-tap approval recovery: `docs/features/approvals.md`.
+- **Prompt cards (#97)**: v7 prompts are server→client requests in ONE per-slot queue whose
+  head is the card, answered via `request.answer` in the request's shape (`expired` → "Already
+  handled elsewhere"; card stays until acknowledged); legacy `*.request` events stay as-is.
+  **Raise cards through `State.present(_:)`** (token-keyed) — `refreshPresented(_:)` (same srq
+  id, no token bump) is the ONE exception. 4404 only window-owned bridges; never answer any
+  other unrendered prompt; narrow the server's choices, never widen. Cards are a pinned row
+  over ONE `BoundedHeightLayout` region. `GatewayConnection` holds `.ready` until the
+  per-socket `client.capabilities` advertisement settles (5 s cap, no retry); its `-32601` is
+  NOT a `*Supported` verdict (`docs/architecture.md`). Queue, replay, decline matrix, clarify
+  forms, layout, push-tap recovery: `docs/features/approvals.md`.
 - **Context-usage pill**: display derives from `Usage` helpers in HermesKit (thresholds
   mirror the Hermes TUI, unit-tested); severity→color and popover are local `@State`.
 
@@ -157,6 +206,11 @@ bullets below are the compressed rules.
   turn. Everything funnels through `submitDraft` + `drainQueueIfReady`; Stop and turn
   `.error` park the queue; a failed drain re-parks at head (never silently lost, never
   shown twice); queue is in-memory only. Details: `docs/features/prompt-queue.md`.
+- **The `model · effort` chip is the only picker (#81)** — `config.set` inside the #17 heal,
+  optimistic then reconciled by `session.info`. Offer the FULL reasoning ladder always (the
+  server clamps per provider and publishes no per-model list); a failure rolls back BOTH keys
+  + banners, and only the 4002 `unknown reasoning value` verdict latches the per-slot,
+  unpersisted `extendedReasoningSupported`. Details: `docs/features/model-picker.md`.
 
 ## Session list
 
@@ -166,7 +220,7 @@ bullets below are the compressed rules.
   anchor only; server wins on hydrate, persistence debounced (flushed on
   `.background`), wiped on logout; behind the client boundary (no reactive `@FetchAll`).
 - **Persistence**: secrets → `KeychainClient`; non-secret prefs (URL, seen counts,
-  pins, grouping, profile) → `PreferencesClient`. Clients over `@Shared` for test
+  pins, swipe default, profile) → `PreferencesClient`. Clients over `@Shared` for test
   isolation; both have `.inMemory()`. **Logout must clear every prefs entry.**
 - **Pins are device-local; archive, rename, and delete are server-side**, optimistic
   with rollback (list → REST `PATCH`/`DELETE`; chat rename → `session.title`).
@@ -175,21 +229,29 @@ bullets below are the compressed rules.
   `PATCH`/`GET`) — silent, mirrored both ways with the archived sheet; the swipe-default
   pref (`SessionSwipeAction`, logout-cleared) clamps to Archive via
   `effectiveSwipeAction` when unsupported. Slot delete tears down with
-  `teardownSlot(flushSnapshot: false)` + snapshot wipe (flush would re-save it); the
+  `teardownSlot(flushSnapshot: false)` + snapshot wipe (flush would re-save it); archive
+  and delete both refill the regular-width detail (`thenFill: detailRefill`); the
   approval-badge entry clears only on the CONFIRMED delete (`sessionDeleteSucceeded`).
   Archived-sheet delete is immediate — no confirmation (deliberate) — and its DELETE
   round-trip runs in the parent list (a presented sheet's effects die on dismissal).
   A destructive success restarts (not bare-cancels) a pending fetch; a failure after a
   profile switch drops the rollback re-insert. Details: `docs/features/session-list.md`.
-- **Grouping, cron jobs, and branch nesting are display-only** over the one fetched
-  array: grouping is a persisted pref; cron sessions partition into an always-on
-  section grouped under jobs (capability-gated; no optimistic job-state mutation);
-  nesting via pure `flattenSessionsWithBranches` (orphans de-nest, never hidden;
-  search stays flat). Details: `docs/features/session-list.md`.
+- **Date sections, inbox cards, cron jobs, and branch nesting are display-only** over one
+  array fetched as TWO source slices (interactive + cron, never one shared page — cron runs
+  starve it): always-on update-date sections via pure `SessionDateBucket` /
+  `groupEntriesByDate` (no grouping pref); `SessionCardView` on every interactive row — its
+  header names the agent's auto-classified workspace (`workspaceAssignments`, the
+  `hermes-workspaces` plugin, best-effort) over the `cwd` basename;
+  compact `SessionRowView` only for cron runs + the archived sheet; cron sessions sit in
+  a job-grouped Cron Jobs TAB (bottom-bar pill only with cron content; views read
+  `effectiveTab`; unread badge on the tab; search is Sessions-only, opened from the toolbar);
+  nesting via pure `flattenSessionsWithBranches` (orphans de-nest; search stays flat).
+  Details: `docs/features/session-list.md`.
 - **Row affordances**: trailing swipe = destructive default FIRST (full-swipe target),
   then Rename; context menu always offers both Archive and Delete (gated); Copy ID
-  context-menu-only; 48pt row-content floor (never a cap) keeps swipe buttons
-  icon-over-label; animations respect reduce-motion. Confirmations follow the
+  context-menu-only; rows are natural-height — NO min-height floor (a floor for
+  icon-over-label swipe buttons was tried twice and reverted as too tall, #79);
+  animations respect reduce-motion. Confirmations follow the
   destructive-actions idiom below (`ConfirmationDialogState` + `.bottomActionSheet`).
 
 ## UI idioms
@@ -217,19 +279,21 @@ bullets below are the compressed rules.
   on sessions-list appearance. Repos, capability scheme, the four trigger hooks,
   cold-launch tap replay (#46), and fork filtering (#64):
   `docs/features/push-notifications.md`.
-- **Push-tap routing dedups against the slot (#32)**: matches slot with marker on top →
-  in-place hydrate, no navigation; matches slot from the list → push marker +
-  `.reattached`; different session → replace slot + SET the path to the single new
-  marker (never stack). Cold-launch taps replay through this same path.
+- **Push-tap routing dedups against the slot (#32)** under `isChatDetached`: matches slot
+  and not detached (compact marker on top, or any slot in regular) → in-place hydrate, no
+  navigation; matches a detached slot (compact only) → push marker + `.reattached`;
+  different session → replace slot + SET the path (single new marker in compact, empty in
+  regular; never stack). Cold-launch taps replay through this same path.
 
 ## Multi-profile
 
 - Device-local with per-call scoping: the selected profile *name* persists in
   `PreferencesClient`; never `POST /api/profiles/active` (mutates the server default
-  for all clients). Thread `profile` into `session.create`/`session.resume` and
-  session-scoped REST — **omitted for `"default"`** so single-profile agents get
-  byte-identical requests. Search is intentionally not profile-scoped. Add-profile is
-  create-then-PUT-soul; selector capability-gated; per-profile color omitted on mobile.
+  for all clients). Thread the literal name (incl. `"default"`) into `session.create`/
+  `resume` and session-scoped REST when the profiles API exists, else omit it — omitted =
+  the server's LAUNCH profile, not `"default"` (#114). Search is scoped too (as on desktop).
+  Add-profile is create-then-PUT-soul; selector capability-gated; no per-profile color.
+  Profile comparison and the persisted capability verdict: `docs/architecture.md`.
 
 ## Testing (required for every change)
 
@@ -240,18 +304,22 @@ bullets below are the compressed rules.
 - Snapshot tests: `make snapshot` (assert) / `make snapshot-record` (re-record — it
   `rm -rf`s the whole `__Snapshots__` dir; use only for a deliberate global re-render).
   To add ONE new snapshot test, run `make snapshot` twice (first records + fails by
-  design, second asserts clean). Row timestamps are pinned for determinism.
+  design, second asserts clean). Row timestamps (and the list's section calendar) are
+  pinned for determinism — `docs/development.md`.
 - **A snapshot of a SCROLLABLE view must pin an explicit size along its scroll axis** —
   `componentImage()` renders at `.sizeThatFits`, and a `ScrollView` offered nothing
   records a blank sliver. Pin both width and height for a vertical one.
+- **A `List` cannot be component-rendered at all** — `componentImage()` paints its section
+  headers and FAB but NO rows, and ignores the dark trait; list snapshots use
+  `deviceImage()` (both helpers take an `appearance:`; `deviceImage(height:)` for a tall list).
 - **Layout facts a snapshot cannot prove go in a measured `UIWindow`-hosted XCTest**
   (assert `contentSize` vs `bounds`, hosted `sizeThatFits`) — see
   `MarkdownTableLayoutTests.swift` and `ApprovalCardLayoutTests.swift`. Pin
   `.dynamicTypeSize(.large)`, and vary it where a `@ScaledMetric` cap is under test.
-- **The recorded baselines predate the current simulator runtime** — `make snapshot`
-  fails broadly (~92/161) with no code cause. Judge by size mismatch first: differing
-  render size = real regression; equal size with small pixel residual = drift. A global
-  re-record is the pending fix and must land as its own commit.
+- **`make snapshot` is clean** (242/242), so any failure is a real signal. A view change
+  re-records its own baselines in the same PR. If a future runtime drifts, judge by size
+  first: differing render size = regression; equal size with small pixel residual = drift,
+  re-recorded in its own commit. Details: `docs/development.md`.
 
 ## Gotchas
 
@@ -263,7 +331,7 @@ bullets below are the compressed rules.
 - **A `ScrollView` handed a concrete proposal along its scroll axis swallows it
   whole** — it reports the proposal, not its content, so `min(content, cap)` regions
   must probe with that dimension unspecified (custom `Layout`); see
-  `BoundedHeightLayout` in `ApprovalCardView.swift`.
+  `BoundedHeightLayout.swift`.
 - **`@Sendable` effect closures** must capture dependencies explicitly (`[gateway]`) —
   the reducer `self` is not `Sendable`.
 - **Deployment target is iOS 18**. Gate genuinely-newer APIs:

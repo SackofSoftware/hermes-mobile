@@ -45,7 +45,8 @@ make snapshot-record  # re-record SwiftUI snapshot baselines
 ```
 
 - **Simulator** (`scripts/run-sim.sh`) needs no signing. Override the device with
-  `SIM_NAME="iPhone 16" make run` or `scripts/run-sim.sh "iPhone 16"`.
+  `SIM_NAME="iPhone 16" make run` or `scripts/run-sim.sh "iPhone 16"`. iPad is a shipped
+  destination too — `SIM_NAME="iPad Pro 13-inch (M4)" make run` for the split layout.
 - **Device** (`scripts/run-device.sh`) needs automatic signing —
   `DEVELOPMENT_TEAM=<your 10-char team id> make run-device`. The team is baked in at
   generate time. See **Signing & contributor setup** below for running on your own
@@ -55,7 +56,14 @@ make snapshot-record  # re-record SwiftUI snapshot baselines
 - **Snapshots** (`scripts/snapshot.sh`) render the SwiftUI views via SnapshotTesting
   (iOS XCTest target `HermesMobileTests`, separate from the SPM suite). Baselines live
   in `HermesMobileTests/__Snapshots__/`. Row timestamps are pinned to a fixed reference
-  date so the images are deterministic.
+  date so the images are deterministic. Session-list snapshots also pin the section
+  calendar via `SessionListFeature.State(calendar:)` (UTC, `en_US`, Monday-first), or the
+  date-section headers would follow the simulator's time zone and week start;
+  `deviceImage(height:)` renders a list taller than one screen. The suite passes clean
+  (242 of 242) on iOS 26 / iPhone 17 Pro, so any failure is a real signal; a PR that
+  changes a view re-records that view's baselines itself. If a future runtime drifts
+  again, judge by render size first (a size mismatch is a real regression; equal size with
+  a small pixel residual is drift), and land the re-record as its own commit.
 
 ## Verifying the protocol
 

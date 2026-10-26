@@ -50,36 +50,6 @@ struct PreferencesClientTests {
     #expect(prefs.loadPinnedIDs() == ["a", "b"])
   }
 
-  @Test func inMemoryGroupingModeRoundTripAndDefault() {
-    let prefs = PreferencesClient.inMemory()
-    #expect(prefs.loadGroupingMode() == .workspace) // default when unset
-
-    prefs.saveGroupingMode(.chronological)
-    #expect(prefs.loadGroupingMode() == .chronological)
-
-    prefs.saveGroupingMode(.workspace)
-    #expect(prefs.loadGroupingMode() == .workspace)
-  }
-
-  @Test func liveGroupingModeBacksOntoProvidedDefaults() {
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping")
-    let prefs = PreferencesClient.live(defaults: suite)
-
-    #expect(prefs.loadGroupingMode() == .workspace) // default when unset
-    prefs.saveGroupingMode(.chronological)
-    #expect(suite.string(forKey: "hermes.session-grouping-mode") == "chronological")
-    #expect(prefs.loadGroupingMode() == .chronological)
-  }
-
-  @Test func liveGroupingModeDefaultsWhenValueIsGarbage() {
-    let suite = UserDefaults(suiteName: "hermes.prefs.test.grouping.garbage")!
-    suite.removePersistentDomain(forName: "hermes.prefs.test.grouping.garbage")
-    suite.set("not-a-mode", forKey: "hermes.session-grouping-mode")
-    let prefs = PreferencesClient.live(defaults: suite)
-    #expect(prefs.loadGroupingMode() == .workspace) // unknown raw value → default
-  }
-
   @Test func inMemoryDefaultSwipeActionRoundTripAndDefault() {
     let prefs = PreferencesClient.inMemory()
     #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // default when unset
@@ -108,6 +78,22 @@ struct PreferencesClientTests {
     suite.set("shred", forKey: "hermes.default-session-swipe-action")
     let prefs = PreferencesClient.live(defaults: suite)
     #expect(prefs.loadDefaultSessionSwipeAction() == .archive) // unknown raw value → default
+  }
+
+  @Test func liveClientDropsRetiredListPrefKeys() {
+    // The grouping mode and the cron-section hide / collapse toggles are retired (the list
+    // is always date-sectioned and cron runs have their own tab). A build that persisted any
+    // of them leaves the key behind; building the live client clears them, untranslated,
+    // and leaves the prefs that are still in use alone.
+    let suite = UserDefaults(suiteName: "hermes.prefs.test.retired.list.prefs")!
+    suite.removePersistentDomain(forName: "hermes.prefs.test.retired.list.prefs")
+    let retired = ["hermes.session-grouping-mode", "hermes.show-cron-section", "hermes.cron-section-collapsed"]
+    for key in retired { suite.set(true, forKey: key) }
+    suite.set("delete", forKey: "hermes.default-session-swipe-action")
+    let prefs = PreferencesClient.live(defaults: suite)
+
+    for key in retired { #expect(suite.object(forKey: key) == nil, "\(key) is cleared") }
+    #expect(prefs.loadDefaultSessionSwipeAction() == .delete)
   }
 
   @Test func inMemorySelectedProfileRoundTripAndClear() {

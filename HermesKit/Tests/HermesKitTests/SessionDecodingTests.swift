@@ -7,7 +7,8 @@ import Testing
 /// Upholds "decode leniently, never crash": reasoning arrives under any of
 /// `reasoning` / `reasoning_content` / `reasoning_details`, and `reasoning_details` may be a
 /// provider-shaped non-string array — which must be tolerated (decoded via `try?`) without
-/// throwing, with `reasoningText` resolving to the string variants.
+/// throwing, with `reasoningText` resolving to the string variants. Also covers the
+/// `/api/sessions` row's optional `model` (`SessionListDTO`), which older agents omit.
 struct SessionDecodingTests {
   private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
     try JSONDecoder().decode(T.self, from: Data(json.utf8))
@@ -100,5 +101,121 @@ struct SessionDecodingTests {
     """
     let resultMessage = try decode(SessionMessage.self, result)
     #expect(resultMessage.toolCallID == "call_1")
+  }
+
+  // MARK: - Session list row `model` (inbox card footer)
+
+  @Test func listRowModelDecodesWhenPresent() throws {
+    let row = try decode(
+      SessionListDTO.self,
+      #"{ "id": "s1", "model": "anthropic/claude-sonnet-4.5", "message_count": 3 }"#
+    )
+    #expect(row.asSession.model == "anthropic/claude-sonnet-4.5")
+    #expect(row.asSession.messageCount == 3)
+  }
+
+  @Test func listRowModelIsNilWhenAbsent() throws {
+    // Older agents omit the key entirely; the row must still decode.
+    let row = try decode(SessionListDTO.self, #"{ "id": "s1" }"#)
+    #expect(row.asSession.model == nil)
+  }
+
+  @Test func listRowModelIsNilWhenEmpty() throws {
+    let row = try decode(SessionListDTO.self, #"{ "id": "s1", "model": "" }"#)
+    #expect(row.asSession.model == nil)
+  }
+
+  @Test func listRowModelIsNilWhenNull() throws {
+    let row = try decode(SessionListDTO.self, #"{ "id": "s1", "model": null }"#)
+    #expect(row.asSession.model == nil)
+  }
+
+  // MARK: Wire-generation signal + open requests (#97)
+
+  /// `desktop_contract` is typed `int | str | None` upstream: an Int and a numeric String
+  /// both decode; anything else is nil — and never throws, because `ActivateResponse`
+  /// decodes `info` with `try?` and a throw would drop the model/usage fields with it.
+  @Test(arguments: [
+    (#""desktop_contract": 7,"#, 7),
+    (#""desktop_contract": "8","#, 8),
+    (#""desktop_contract": "x","#, nil),
+    (#""desktop_contract": null,"#, nil),
+    (#""desktop_contract": [7],"#, nil),
+    ("", nil),
+  ] as [(String, Int?)])
+  func desktopContractDecodesLenientlyAndKeepsTheRestOfInfo(field: String, expected: Int?) throws {
+    let json = """
+    {
+      "session_id": "live1",
+      "info": {
+        \(field)
+        "model": "claude-opus-4-8",
+        "usage": { "context_used": 42, "context_max": 200000, "context_percent": 0 }
+      }
+    }
+    """
+    let response = try decode(ActivateResponse.self, json)
+    let info = try #require(response.info)
+    #expect(info.desktopContract == expected)
+    #expect(info.model == "claude-opus-4-8")
+    #expect(info.usage == Usage(contextUsed: 42, contextMax: 200_000, contextPercent: 0))
+  }
+
+  @Test func openRequestsDecodeInOrderWithRawParams() throws {
+    let json = """
+    {
+      "session_id": "live1",
+      "running": false,
+      "open_requests": [
+        { "id": "srq-1a2b3c4d5e6f", "method": "approval",
+          "params": { "session_id": "live1", "request_id": "ab12", "command": "rm -rf build" } },
+        { "id": "srq-0f0e0d0c0b0a", "method": "clarify",
+          "params": { "questions": [{ "qid": "q0", "question": "Framework?", "choices": null }],
+                      "answers": { "q0": null } } },
+        { "id": "srq-bbbbbbbbbbbb", "method": "sudo" }
+      ]
+    }
+    """
+    let response = try decode(ActivateResponse.self, json)
+    #expect(response.openRequests.map(\.id) == ["srq-1a2b3c4d5e6f", "srq-0f0e0d0c0b0a", "srq-bbbbbbbbbbbb"])
+    #expect(response.openRequests.map(\.method) == ["approval", "clarify", "sudo"])
+    #expect(response.openRequests[0].params["command"] == .string("rm -rf build"))
+    #expect(response.openRequests[1].params["answers"] == .object(["q0": .null]))
+    #expect(response.openRequests[2].params == .null) // missing params → malformed later, not dropped here
+  }
+
+  @Test func absentOpenRequestsDecodeAsEmpty() throws {
+    let response = try decode(ActivateResponse.self, #"{ "session_id": "live1", "running": true }"#)
+    #expect(response.openRequests.isEmpty)
+    #expect(response.running == true)
+  }
+
+  /// One bad entry must not cost the others (the reconcile treats absence as authoritative,
+  /// so dropping the whole list would clear real cards); a non-array is empty; neither throws.
+  @Test func malformedOpenRequestsAreDroppedPerEntryWithoutFailingTheResponse() throws {
+    let json = """
+    {
+      "session_id": "live1",
+      "running": true,
+      "open_requests": [
+        { "id": 7, "method": "approval", "params": {} },
+        { "method": "clarify", "params": {} },
+        "srq-loose",
+        null,
+        { "id": "srq-ok", "method": "secret", "params": { "env_var": "TOKEN" } }
+      ]
+    }
+    """
+    let response = try decode(ActivateResponse.self, json)
+    #expect(response.openRequests == [
+      OpenRequest(id: "srq-ok", method: "secret", params: .object(["env_var": .string("TOKEN")])),
+    ])
+    #expect(response.running == true)
+
+    let notAnArray = try decode(
+      ActivateResponse.self, #"{ "session_id": "live1", "open_requests": { "id": "srq-x" } }"#
+    )
+    #expect(notAnArray.openRequests.isEmpty)
+    #expect(notAnArray.sessionID == "live1")
   }
 }

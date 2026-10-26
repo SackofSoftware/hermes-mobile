@@ -123,6 +123,55 @@ struct SessionListCronTests {
     #expect(noJobs.unmatchedCronSessions.isEmpty)
   }
 
+  @Test func jobsWithoutRunsKeepTheCronTabAndThePlaceholderFollowsTheTab() {
+    // No sessions at all (no runs in the fetched window), but the agent has a job: the
+    // Cron Jobs tab must stay so the job can still be run, paused, or resumed. The Sessions
+    // tab has nothing interactive, so it shows "No sessions"; the Cron tab never does.
+    var jobsOnly = SessionListFeature.State(
+      connection: connection,
+      cronJobs: [CronJob(id: "job1", name: "Digest")]
+    )
+    #expect(jobsOnly.cronSessions.isEmpty)
+    #expect(jobsOnly.cronJobGroups.map(\.id) == ["job1"])
+    #expect(jobsOnly.hasCronContent)
+    #expect(jobsOnly.showsTabBar)
+    #expect(jobsOnly.showsEmptyPlaceholder)
+    jobsOnly.selectedTab = .cron
+    #expect(!jobsOnly.showsEmptyPlaceholder)
+
+    // Search is a Sessions-only mode: an empty result set shows the placeholder.
+    var searching = jobsOnly
+    searching.searchQuery = "digest"
+    #expect(searching.showsEmptyPlaceholder)
+
+    // Jobs fetched but the API is unsupported → no Cron Jobs tab.
+    let unsupported = SessionListFeature.State(
+      connection: connection,
+      cronJobs: [CronJob(id: "job1")],
+      cronJobsSupported: false
+    )
+    #expect(!unsupported.hasCronContent)
+    #expect(unsupported.showsEmptyPlaceholder)
+
+    // Runs alone (flat fallback, no jobs) still make a Cron Jobs tab, and cron runs never
+    // count as Sessions-tab content.
+    let runsOnly = SessionListFeature.State(
+      connection: connection,
+      sessions: [cronSession("job1", stamp: "20260702_090000")]
+    )
+    #expect(runsOnly.hasCronContent)
+    #expect(runsOnly.showsEmptyPlaceholder)
+
+    // Nothing at all → placeholder, unless still loading or failed.
+    let empty = SessionListFeature.State(connection: connection)
+    #expect(!empty.hasCronContent)
+    #expect(empty.showsEmptyPlaceholder)
+    #expect(!SessionListFeature.State(connection: connection, isLoading: true).showsEmptyPlaceholder)
+    #expect(
+      !SessionListFeature.State(connection: connection, loadError: "boom").showsEmptyPlaceholder
+    )
+  }
+
   @Test func cronUnreadCountCountsOnlyUnreadCronSessions() {
     let state = SessionListFeature.State(
       connection: connection,
@@ -157,8 +206,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
-      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _ in [run] }
+      $0.hermesProfiles.sessions = { @Sendable _, _, _, _, _, _, _ in [run] }
       $0.hermesREST.cronJobs = { @Sendable _, profile in
         requestedProfile.setValue(profile)
         return [CronJob(id: "job1", name: "Digest")]
@@ -181,6 +229,65 @@ struct SessionListCronTests {
     #expect(requestedProfile.value == "work")
   }
 
+  /// Cron runs are always the newest rows, so one shared page let a busy job crowd the
+  /// interactive list out of the window. The load fetches two source-scoped slices instead.
+  @Test func loadFetchesInteractiveAndCronRunsAsSeparateSlices() async {
+    let requested = LockIsolated<[SessionSourceFilter]>([])
+    let chat = Session(id: "chat", title: "Chat", updatedAt: now.addingTimeInterval(-3600))
+    let run = cronSession("job1", stamp: "20260702_090000")
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, limit, _, _, source in
+        requested.withValue { $0.append(source) }
+        #expect(limit == 50)
+        return source == .cron ? [run] : [chat]
+      }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pulledToRefresh)
+    await store.receive(\.sessionsResponse.success) {
+      $0.sessions = [chat, run]
+    }
+    #expect(requested.value == [.interactive, .cron])
+  }
+
+  @Test func failedCronSliceFailsTheLoadAndKeepsTheRows() async {
+    let existing = Session(id: "kept", title: "Kept")
+    let store = TestStore(
+      initialState: SessionListFeature.State(connection: connection, sessions: [existing])
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, source in
+        if source == .cron { throw RESTError.unreachable }
+        return [Session(id: "fresh", title: "Fresh")]
+      }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.pulledToRefresh)
+    await store.receive(\.sessionsResponse.failure) {
+      $0.loadError = RESTError.unreachable.message
+    }
+    #expect(store.state.sessions.map(\.id) == ["kept"])
+  }
+
+  @Test func mergeKeepsInteractiveOrderAndDropsRepeatedRows() {
+    let a = Session(id: "a"), b = Session(id: "b")
+    let run = cronSession("job1", stamp: "20260702_090000")
+    #expect(mergeSessionSlices([a, b], [run]).map(\.id) == ["a", "b", run.id])
+    // An agent that ignores the scoping returns the same page twice: it merges to one copy.
+    #expect(mergeSessionSlices([a, run], [a, run]).map(\.id) == ["a", run.id])
+  }
+
   @Test func notFoundDisablesCronJobsAndSkipsLaterFetches() async {
     let fetchCount = LockIsolated(0)
     let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
@@ -188,8 +295,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in
         fetchCount.withValue { $0 += 1 }
         throw RESTError.notFound
@@ -200,10 +306,9 @@ struct SessionListCronTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
       $0.cronJobsSupported = false
     }
 
@@ -228,8 +333,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.unreachable }
     }
 
@@ -253,8 +357,7 @@ struct SessionListCronTests {
     } withDependencies: {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
-      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, profile in
         requestedProfile.setValue(profile)
         return []
@@ -265,11 +368,61 @@ struct SessionListCronTests {
       $0.now = self.now
       $0.isLoading = true
     }
-    await store.receive(\.sessionsResponse.success) {
+    await store.receive(\.sessionsResponse.success)
+    await store.receive(\.cronJobsResponse.success) {
       $0.isLoading = false
     }
-    await store.receive(\.cronJobsResponse.success)
     #expect(requestedProfile.value == nil)
+  }
+
+  @Test func jobsOnlyLoadSettlesOnceWithTheCronTab() async {
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", name: "Digest")] }
+    }
+
+    await store.send(.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    // An empty list is still loading until the sequential cron fetch lands, so neither the
+    // placeholder nor the tab bar appears ahead of the other.
+    await store.receive(\.sessionsResponse.success)
+    #expect(!store.state.showsEmptyPlaceholder)
+    #expect(!store.state.showsTabBar)
+    await store.receive(\.cronJobsResponse.success) {
+      $0.isLoading = false
+      $0.cronJobs = [CronJob(id: "job1", name: "Digest")]
+    }
+    #expect(store.state.showsTabBar)
+    #expect(store.state.showsEmptyPlaceholder, "the Sessions tab really is empty")
+  }
+
+  @Test func emptyLoadWithTransientCronFailureSettlesOnThePlaceholder() async {
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = TestClock()
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.unreachable }
+    }
+
+    await store.send(.pulledToRefresh) {
+      $0.now = self.now
+      $0.isLoading = true
+    }
+    await store.receive(\.sessionsResponse.success)
+    // A transient jobs failure still ends the load (no stuck spinner); no job is known.
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.isLoading = false
+    }
+    #expect(store.state.cronJobsSupported)
+    #expect(store.state.showsEmptyPlaceholder)
   }
 
   // MARK: Inline peek + unread-on-open
@@ -302,8 +455,7 @@ struct SessionListCronTests {
       $0.date = .constant(now)
       $0.continuousClock = TestClock()
       $0.hermesREST.triggerCronJob = { @Sendable _, id, _ in triggered.setValue(id) }
-      $0.hermesREST.workspaceAssignments = { @Sendable _ in [:] } // no plugin → cwd grouping
-      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _, _ in [] }
       $0.hermesREST.cronJobs = { @Sendable _, _ in [CronJob(id: "job1", state: "running")] }
     }
 
@@ -315,10 +467,9 @@ struct SessionListCronTests {
       $0.now = self.now
       $0.isLoading = true  // trigger → FULL load so the new run session appears
     }
-    await store.receive(\.sessionsResponse.success) {
-      $0.isLoading = false
-    }
+    await store.receive(\.sessionsResponse.success)
     await store.receive(\.cronJobsResponse.success) {
+      $0.isLoading = false
       $0.cronJobs = [CronJob(id: "job1", state: "running")]
     }
     #expect(triggered.value == "job1")

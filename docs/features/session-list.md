@@ -1,31 +1,157 @@
-# Session list: grouping, cron jobs, branch nesting, delete & swipe polish (#24, #34, #73)
+# Session list: date sections, inbox cards, cron jobs, branch nesting, delete & swipe polish (#24, #34, #73)
 
 Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The short rules live in
 `CLAUDE.md` → "Session list"; this doc is the full contract. Design history:
 `docs/plans/completed/`.
 
-## Grouping & archived
+## Date sections and inbox cards
 
-Session-list grouping is a persisted UI pref (`SessionGroupingMode`: `.workspace` /
-`.chronological`) in `PreferencesClient` — display-only over the one fetched `sessions` array
-(no fetch/order change), reset on logout. The list is a flat `.listStyle(.plain)`; grouping
-options + the **Archived sessions** entry live in a top-trailing `Menu`; "New chat" is a bottom
-bar via **`.safeAreaInset(edge: .bottom)`** (a `.bottomBar` toolbar renders blank in the
-snapshot host). **Archived** is a server query (`?archived=only`) shown in a sheet
-(`ArchivedSessionsFeature`); restore = `archive(id, false)`; tap-to-open bubbles up the existing
-`openSession` delegate.
+The list is the desktop's **Inbox style**, always on and the only list UI — there is no
+grouping pref or picker (the workspace/chronological `SessionGroupingMode` was removed; the
+card header names the workspace instead). The Sessions tab, top to bottom: the "Sessions"
+header, a **Pinned** section (pin order), then the **update-date sections**. Cron runs live in
+the **Cron Jobs tab** (below). All of it
+is display-only over the one `sessions` array. The list is a flat `.listStyle(.plain)` with no
+row or section separators, compact section headers (leading title + a hairline to the
+trailing edge, centred on the title; `defaultMinListHeaderHeight` 0, `listSectionSpacing(0)`,
+the header's own top inset as the only gap), and tighter card row insets than the plain
+default.
 
-## Cron sessions & the Cron Jobs section (#24)
+**The bottom bar** (`.safeAreaInset(edge: .bottom)` — a `.bottomBar` toolbar renders blank in
+the snapshot host) holds a glass `Sessions | Cron Jobs` tab pill on the leading side (icon over
+label; the selected tab on an inner capsule in the accent, slid by `matchedGeometryEffect`;
+the Cron Jobs tab carries the `cronUnreadCount` badge) and the round glass New chat button
+trailing (`GlassBackground`, material fallback below iOS 26). The pill shows only while
+`showsTabBar` holds — cron content exists (`hasCronContent`), the search field is closed, and
+no query is active (search is a Sessions-only mode) — else the bar is just New chat.
+`selectedTab` is in-memory (a launch
+starts on Sessions); views render `effectiveTab`, which falls back to Sessions whenever the pill
+is hidden, so a poll or profile switch that drops every cron row never strands an empty tab.
+
+**Search is opened from the toolbar** (Sessions tab only): a search button sits beside Archive
+in one trailing `ToolbarItemGroup` (one glass pill on iOS 26). `searchButtonTapped` sets
+`isSearchPresented`, which hides the nav bar row (settings, profile pill, Archive) and shows a
+glass capsule field — focused on open — beside a round glass close button in a top
+`safeAreaInset`. `searchCloseTapped` hides it and clears the query, reloading the normal list
+at once when a query was live (the same immediate `load` a cleared query gets through the
+binding). Typing still drives the 300 ms debounced search via the `searchQuery` binding.
+
+**The load fetches two source-scoped slices, never one shared page** (desktop parity): the
+interactive list with `exclude_sources=cron`, then up to 50 cron runs with `source=cron`
+(`SessionSourceFilter`, both endpoints), merged by id into `sessions` (`mergeSessionSlices`).
+Cron runs are always the newest rows, so in one 50-row page a busy job crowded real
+conversations out of the window — the list showed a handful while desktop showed dozens. An
+agent that predates the parameters returns the same unscoped page twice, which merges back to
+that page. A failed cron slice fails the load like any other (banner, previous rows kept).
+
+**Bucketing is pure HermesKit** (`SessionDateBucket`, unit-tested on macOS), a port of desktop
+`calendarBucket` (`apps/desktop/src/lib/time.ts`). Every date is mapped to its **nominal day**
+= its local calendar day, or the day before when the local hour is under `dayRolloverHour`
+(4: a 1 AM session still counts as the previous day; judged on the local hour, so a DST jump
+never moves the boundary), and buckets are judged on the injected `Calendar` (time zone,
+locale, `firstWeekday`):
+
+| Kind | Rule (nominal days) | Key | Label |
+|---|---|---|---|
+| `today` | day diff `<= 0` | `today` | Today |
+| `yesterday` | day diff `== 1` | `yesterday` | Yesterday |
+| `thisWeek` | on/after this calendar week's start | `this-week` | Earlier this week |
+| `lastWeek` | on/after the previous week's start | `last-week` | Last week |
+| `thisMonth` | same year + month | `this-month` | Earlier this month |
+| `month` | same year | `m-YYYY-M` | `MMMM` ("September") |
+| `monthYear` | prior year | `my-YYYY-M` | `MMMM yyyy` ("December 2025") |
+
+Month keys use the Calendar's **1-based** months (`m-2026-2` = February; desktop's JS keys are
+0-based — the key is a local section identity only, never shared); a leap month appends `L`
+and an era other than today's appends `-e<era>`, and the month/year rules compare calendar
+intervals, so non-Gregorian calendars never merge distinct months (Gregorian keys carry no
+suffix). Month labels come from `Date.FormatStyle` (wide month, + year) on the calendar's
+locale + time zone. "Today" is the top label (desktop's "Earlier today" only exists because
+of its unlabelled recent-head run, which is deliberately **not ported** — mobile labels every
+section).
+
+**Sections** (`SessionDateSection`, built by pure `groupEntriesByDate`) walk the
+branch-flattened `chronologicalEntries` in order and never re-sort:
+- a section opens only on a **top-level** entry whose key changes; branch children append to
+  the current section, so a parent + branches cluster never splits across a header;
+- a top-level entry buckets on its **cluster's freshest `updatedAt`** (itself + the branch
+  children beneath it) — the same key `flattenSessionsWithBranches` sorts clusters by, so a
+  stale parent lifted by a fresh branch lands in the fresh section;
+- **a key never repeats**: on a non-monotonic input the rows append to the current section
+  (desktop's `emitted` guard), so `ForEach` section ids stay unique; no empty section exists;
+- a cluster with no `updatedAt` goes to a trailing **"Older"** section (id `older`).
+
+`State.dateSections` is computed from `state.now` (poll-refreshed for the age labels and the
+cron countdown — headers re-bucket on the same cadence, no new ticker) and `State.calendar`,
+captured alongside `now` on load from the dedicated `\.sessionListCalendar` dependency (the
+library `\.calendar` has no test value), so TestStores and snapshots pin it.
+
+**Cards** (`SessionCardView`) render every interactive row — Pinned, date sections, AND search
+— so one column never mixes card and one-line geometry (desktop parity). What a card shows is
+derived in HermesKit by `SessionCardContent` (unit-tested); the view only lays it out.
+Anatomy:
+1. **Header**: the status dot (below), the branch elbow stem (`└─`/`├─`) when nested, the
+   workspace label (the agent's auto-classified workspace name from the `hermes-workspaces`
+   plugin when the list has one for this id — `SessionListFeature.State.workspaceAssignments`,
+   best-effort `GET /api/plugins/hermes-workspaces/assignments`, empty on agents without the
+   plugin; else `Session.workspaceLabel`: `cwd` last path component; a root path verbatim; else
+   "No workspace"), pin glyph, then the relative age on the trailing edge. Search passes
+   `showsWorkspace: false` — a search hit carries no `cwd`, so the slot is left out rather
+   than claim "No workspace".
+2. **Title**: `displayName` (`resolvedTitle ?? resolvedPreview ?? id`), headline, semibold —
+   bold when unread — up to two lines.
+3. **Preview**: one line, shown **only under a real title**. An untitled session promotes its
+   preview into the title slot and drops this line, so the text never shows twice. Search
+   results (no title, snippet as preview) therefore show the match snippet as the title.
+4. **Footer**: the raw `Session.model` id (verbatim like the chat chip; decoded from the list
+   DTO, nil on older agents) and "1 message" / "N messages" (plain English plural; hidden for
+   nil or 0). The whole line is omitted when both are absent.
+
+Cards are natural-height (no min-height floor — see "Rows are natural-height" below), carry
+their own working glow (`CardActiveGlow`, separate pulse state from the row's), and expose one
+combined accessibility label (`SessionCardContent.accessibilityLabel`: workspace, title,
+preview, model, count, age, then the status and Pinned). Nested branch cards keep a 16pt
+leading indent on top of the header stem, so the whole card reads as belonging to the parent.
+
+**The status dot** mirrors desktop's `SessionStatusDot` for the states mobile can know, one
+state resolved by `SessionStatus` (needs-input over working over unread): **amber** when an
+approval / clarify waits on the user (`AppFeature.State.needsInputSessionIDs` — unopened
+approval pushes plus the live chat while its card is up, passed in by `AppView`), the
+**accent** while a turn runs, **green** for unread, and a smaller faint dot when idle, always
+in a fixed-width slot so header text keeps one left edge. Desktop's stalled / background /
+draft states need live events for every session and are not shown. The compact row's unread
+dot keeps the accent.
+
+**The compact `SessionRowView` stays only on dense surfaces**: cron run peeks, the flat cron
+fallback, unmatched cron runs (`cronRunRow(_:)`), and the archived sheet. Cards (`row(_:)`) and
+compact rows share one affordance funnel, `sessionRow(_:content:)` — tap, highlight +
+`isSelected` trait, swipes, context menu are identical for both.
+
+**Archived** is a direct top-trailing **"Archived sessions" toolbar button** (`archivebox`;
+the former organize `Menu` — grouping picker, cron toggle, Archived — is gone) presenting a
+sheet backed by a server query (`?archived=only`, `ArchivedSessionsFeature`); restore =
+`archive(id, false)`; tap-to-open bubbles up the existing `openSession` delegate.
+
+**Stale prefs**: `PreferencesClient.live(defaults:)` removes the retired
+`hermes.session-grouping-mode`, `hermes.show-cron-section` and `hermes.cron-section-collapsed`
+keys once, when it is built (no migration — cron runs have their own tab now).
+
+## Cron sessions & the Cron Jobs tab (#24)
 
 **Cron sessions** (`source == "cron"`, decoded onto `Session` via `SessionListDTO`) are pulled
-into an **always-on, separate "Cron Jobs" section** — orthogonal to the grouping mode (no new
-`SessionGroupingMode` case). The partition lives in the reducer's computed state (`cronSessions`
-vs the non-cron `interactiveSessions` that feeds
-`pinnedSessions`/`groups`/`chronologicalSessions`), so cron rows never appear in
-Pinned/workspace/chronological. Rendered with a `clock`-icon header below the interactive
-sections, and **not shown during search** (search stays flat).
+into the **Cron Jobs tab**. The partition lives in the reducer's computed state
+(`cronSessions` vs the non-cron `interactiveSessions` that feeds
+`pinnedSessions`/`unpinnedSessions` → `chronologicalSessions` → `dateSections`), so cron rows
+never appear in Pinned or the date sections. The tab exists whenever `hasCronContent` holds
+(any cron run OR any fetched job, so a job with no runs in the fetched window stays
+reachable); it renders a "Cron Jobs" title row and the jobs, and is never searched. The "No
+sessions" placeholder follows `showsEmptyPlaceholder`: the Sessions tab with no search hit (or,
+outside search, no interactive session), not loading or failed. An empty non-search list with
+no jobs known holds `isLoading` until the load's cron-jobs response lands (`awaitsCronJobs`),
+so the placeholder and the tab pill appear together; a transient cron failure there settles on
+the placeholder.
 
-**The Cron Jobs section groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
+**The Cron Jobs tab groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
 fetched sequentially INSIDE the session-load effect (after `.sessionsResponse`, same CancelID —
 deterministic TestStore order, no racy merge); a run session binds to its job via the
 id-embedded prefix (`cron_{job_id}_{ts}` → `CronJob.jobID(fromSessionID:)`) — upstream has a
@@ -36,14 +162,32 @@ is orange and would be indistinguishable from amber; red error, gray inactive),
 unread dot judged over ALL the job's runs (not just the peeked 5), and a context menu (Run now /
 Pause / Resume → `cronActionInFlightIDs` double-fire guard; success refetches — full load after
 trigger, jobs-only for pause/resume; **no optimistic job-state mutation**). Tap = single-open
-inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the standard `row(_:)`;
-runs matching no fetched job render flat below (`unmatchedCronSessions` — never hide output).
-The header carries the aggregate `cronUnreadCount` badge; cron sessions ride the same
-`seenCounts` unread pipeline as interactive rows. **Capability-gated**: a 404 flips
+inline peek (`expandedCronJobID`) of the newest `cronPeekLimit` runs via the compact
+`cronRunRow(_:)`; runs matching no fetched job render flat below (`unmatchedCronSessions` —
+never hide output).
+The tab carries the aggregate `cronUnreadCount` badge; cron sessions use the same shared
+server-backed unread state as interactive rows (with the legacy device-local `seenCounts`
+fallback below). **Capability-gated**: a 404 flips
 `cronJobsSupported` off → flat run list, fetch skipped thereafter; transient failures keep the
 previous jobs (no flapping). Jobs are fetched with the LITERAL selected profile name when
 `profilesSupported` (matching the scoped session list, so a job's runs are actually present),
 unscoped otherwise.
+
+## Shared unread state
+
+On agents that return the optional `unread` field, the backend owns read state: its
+`last_read_at` watermark is shared with Desktop, so opening a row on either client clears the
+other client's dot on its next poll, and later server activity raises it everywhere. Mobile
+PATCHes `{"unread": false}` on **every** open—even when the row already says false—because false
+also represents an untracked legacy row (`last_read_at == NULL`); the first acknowledgement is
+what makes later activity observable. A completion received while the chat remains visible
+acknowledges again after the new activity, so the reply being watched is not rediscovered as
+unread on Desktop. The write is optimistic and best-effort: a failed PATCH is reconciled by the
+next authoritative list poll.
+
+Older agents omit `unread`. For those rows only, mobile preserves its existing device-local
+`seenCounts` behavior (`message_count > last seen`), including first-sight seeding. This is a
+per-row fallback—not a server-wide capability latch—so mixed/transitional responses stay safe.
 
 ## Branch nesting is display-only (#34)
 
@@ -52,7 +196,8 @@ unscoped otherwise.
 sort, group-recency lift, recursion, cycle-safe, trailing sweep, **`byVisibleID` lineage
 aliasing**: `_lineage_root_id` → `Session.lineageRootID` keeps a branch nested after its parent
 auto-compresses and the row id rotates to the continuation tip) runs per rendered lane (pinned /
-workspace / chronological) after the cron partition, emitting `└─`/`├─` stems. Recency is
+chronological — the latter then split into date sections without breaking a cluster) after the
+cron partition, emitting `└─`/`├─` stems. Recency is
 `updatedAt ?? .distantPast` — deliberately the SAME rule the lanes sort by (no desktop
 `started_at` fallback), so nesting never reorders flat rows. Orphans (parent absent from the
 lane) de-nest — never hidden; the Pinned lane keeps pin order (`sortTopLevelByRecency: false`; a
@@ -61,8 +206,8 @@ archived / cron stay flat. Row identity and swipe/context affordances are unchan
 
 ## Session delete (#73)
 
-**Delete is permanent and server-side**: REST `DELETE /api/sessions/{id}` (+`?profile=` only
-when non-default — same per-call scoping rule as archive), idempotent upstream (`already_absent`
+**Delete is permanent and server-side**: REST `DELETE /api/sessions/{id}` (+`?profile=` per
+the per-call scoping rule in `docs/architecture.md`, same as archive), idempotent upstream (`already_absent`
 is success by contract; a ghost row never 404s). The main-list flow **mirrors archive exactly**:
 `deleteButtonTapped` raises a `ConfirmationDialogState` ("This permanently deletes the session
 and its history."), `confirmDelete` captures a full rollback payload (session + index + pin
@@ -90,7 +235,8 @@ fetch restarts instead and lands an authoritative post-RPC response. A **cleared
 search debounce — `load` raises `isLoading`, which is what keeps that pending reload visible
 to `cancelOrRestartFetch` (the debounced search effect raises no flag, and with the query
 empty `isSearching` no longer covers the window). Delete is offered on every row variant
-(pinned, cron runs, branch children) — all sections funnel through the one `row(_:)` builder.
+(pinned, cron runs, branch children) — cards and compact rows alike funnel through the one
+`sessionRow(_:content:)` builder.
 
 **Capability gate — the 405 wrinkle**: `deleteSupported` defaults `true` and flips off lazily
 on a definitive verdict from an actual delete (no pre-probe). The verdict is `.notFound` **or**
@@ -107,7 +253,9 @@ list's flag on present, and a verdict inside the sheet mirrors back via
 the non-authoritative cache. When the deleted id matches the live-chat slot, tear it down too
 with **`teardownSlot(flushSnapshot: false)`** — skipping the `persistNow` flush is the point:
 the flush would re-save the very snapshot the wipe deletes. Every other teardown keeps the
-flush. Same deliberate asymmetry as archive: if the DELETE later fails, the list restores the
+flush. Archive and delete both pass `thenFill: detailRefill(state)`, which reseats the
+regular-width detail column and is `nil` in compact (`docs/features/ipad-layout.md`).
+Same deliberate asymmetry as archive: if the DELETE later fails, the list restores the
 row but the slot and cache stay cleared — re-opening simply resumes the session fresh.
 The **pending-approval badge entry is the exception**: it's dropped on
 `sessionDeleteSucceeded` (server-confirmed), NOT at initiation — a failed delete leaves the
@@ -159,16 +307,14 @@ Leading swipe (Pin) unchanged. The context menu always offers BOTH Archive and D
 (Delete capability-gated) regardless of the swipe pref. In the archived sheet Delete is
 likewise listed first (full-swipe deletes, immediately).
 
-**Row min-height floor**: `SessionRowView.contentMinHeight = 44` pt on the row *content*
-(incl. its 2pt vertical padding; natural one-line content is ~24pt). The floor exists so iOS
-renders trailing swipe buttons in the full icon-over-label style instead of collapsing them
-into cramped text-only capsules on short rows — **44 clears that threshold** (verified by a
-real swipe in the iOS 26.5 simulator). The value is a deliberate compromise iterated with
-the user on #73: 48 was tried first (~70pt cells — too tall), then no floor (~44pt cells —
-compact, but capsule swipe buttons), then 44 (+20pt over natural). It is a **floor, never a
-cap** — two-line previews and large Dynamic Type grow past it freely; the fact is pinned by
-a measured `UIWindow`-hosted XCTest (`SessionRowLayoutTests`: exact floor at `.large`,
-floor-not-cap, AX3 grows).
+**Rows are natural-height — no min-height floor** (inbox cards included): a one-line row
+lands around ~44pt total, and its trailing swipe buttons render as iOS's compact text capsules
+(the icon-over-label style needs a taller row). A content floor was tried twice for #73 — 48pt (~70pt cells) and
+then 44pt (+20pt over natural, shipped to TestFlight in `df56ca0`) — and **reverted both
+times** (#79: testers reported the list "way too high"). The compact list is worth more than
+the fuller swipe-button style; the swipe buttons are plain `Button`s, so nothing else keys off
+the row height. Don't reintroduce a floor (or a density setting — considered and declined in
+#79) for the swipe-button rendering without revisiting that trade-off.
 
 **Confirmations present via `BottomActionSheet`, not `.confirmationDialog`**: on iOS 26 no
 system presentation docks at the bottom any more — SwiftUI's `confirmationDialog` renders as a

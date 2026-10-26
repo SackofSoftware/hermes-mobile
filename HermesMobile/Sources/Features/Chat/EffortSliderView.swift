@@ -15,9 +15,14 @@ struct EffortSliderView: View {
   let effort: String?
   /// Disabled mid-turn, matching the rest of the picker.
   var isBusy: Bool = false
+  /// `ChatFeature.State.extendedReasoningSupported`: false drops `max`/`ultra` from the
+  /// stops after this slot's agent rejected one.
+  var extendedReasoningSupported: Bool = true
   let onSelect: (String) -> Void
 
-  private var levels: [String] { ModelOptions.reasoningEfforts }
+  private var levels: [String] {
+    ModelOptions.offeredEfforts(extendedSupported: extendedReasoningSupported)
+  }
 
   private var index: Int {
     guard let effort, let i = levels.firstIndex(of: effort.lowercased()) else {

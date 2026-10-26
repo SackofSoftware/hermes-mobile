@@ -66,7 +66,7 @@ final class ContextUsageSnapshotTests: SnapshotTestCase {
       isSending: false, canSend: true,
       model: "claude-opus-4-8", reasoningEffort: "high",
       usage: Usage(total: 170_000, contextUsed: 170_000, contextMax: 200_000, contextPercent: 85),
-      onModelTap: {}, onSend: {}, onInterrupt: {}
+      onModelTap: {}, onEffortTap: {}, onSend: {}, onInterrupt: {}
     )
     .frame(width: device.size?.width ?? 390)
     assertSnapshot(of: view, as: componentImage())

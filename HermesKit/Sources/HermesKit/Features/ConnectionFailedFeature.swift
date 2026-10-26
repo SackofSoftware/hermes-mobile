@@ -330,7 +330,7 @@ public struct ConnectionFailedFeature {
     let connection = state.connection
     return .run { [rest] send in
       do {
-        _ = try await rest.sessions(connection, 1, 0, .recent)
+        _ = try await rest.sessions(connection, 1, 0, .recent, .all)
         await send(.retrySucceeded)
       } catch {
         await send(.retryFailed(asRESTError(error)))

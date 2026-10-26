@@ -8,6 +8,7 @@ import SwiftUI
 struct EffortSheet: View {
   let effort: String?
   let isBusy: Bool
+  var extendedReasoningSupported: Bool = true
   let onSelect: (String) -> Void
   let onDone: () -> Void
 
@@ -17,7 +18,10 @@ struct EffortSheet: View {
         Spacer()
         Button("Done", action: onDone).fontWeight(.semibold)
       }
-      EffortSliderView(effort: effort, isBusy: isBusy, onSelect: onSelect)
+      EffortSliderView(
+        effort: effort, isBusy: isBusy,
+        extendedReasoningSupported: extendedReasoningSupported, onSelect: onSelect
+      )
       Text("Higher effort means slower, more thorough answers. Applies to the selected model.")
         .font(.caption)
         .foregroundStyle(.secondary)

@@ -18,27 +18,30 @@ struct ChatView: View {
           CopiedToastView(token: store.copiedIDToastToken)
         }
       footer
-      // A standing *approval* outranks the greedy transcript for the fixed region's height.
-      // Without it a `VStack` offers each child `remaining / remainingCount` in flexibility
-      // order, so the card — less flexible than the transcript — is offered roughly *half*
-      // of what is left and its scrollable region collapses onto its floor with the keyboard
-      // up: measured at the floor on every iPhone, i.e. the two-line window #65 was filed
-      // about. With the priority the card is offered the whole remainder first; it hands a
-      // tap target's worth back (`BoundedHeightLayout.reserve`) so the transcript — the
-      // context for the decision — is not starved to 0pt. Applied here rather than inside
-      // `pendingCard`'s `switch`: a trait written inside a `@ViewBuilder` branch does not
-      // reach the enclosing stack (measured — the region stayed on its floor).
+      // A standing approval or multi-question clarify outranks the greedy transcript for the
+      // fixed region's height. Without it a `VStack` offers each child
+      // `remaining / remainingCount` in flexibility order, so the card — less flexible than
+      // the transcript — is offered roughly *half* of what is left and its scrollable region
+      // collapses onto its floor with the keyboard up: measured at the floor on every iPhone,
+      // i.e. the two-line window #65 was filed about. With the priority the card is offered
+      // the whole remainder first; it hands a tap target's worth back
+      // (`BoundedHeightLayout.reserve`) so the transcript — the context for the decision — is
+      // not starved to 0pt. Applied here rather than inside `pendingCard`'s `switch`: a trait
+      // written inside a `@ViewBuilder` branch does not reach the enclosing stack (measured —
+      // the region stayed on its floor).
       //
-      // Scoped to `.approval` because only that card is compressible: `ClarifyCardView` is
-      // plain stacked content with rigid choice buttons, so priority would only take room
-      // from the transcript (measured: 160pt → 13pt with a long question) without giving the
-      // card anything it can use. Every card gets a fresh identity per presentation — a
-      // replacement that does not pass through `nil` (a queued approval, a second secret
-      // prompt) must not inherit the previous one's `@State`: its scroll offset, its
-      // "Approve all" toggle, or — worst — a typed sudo password.
+      // Scoped by `isCompressibleCardPending`: the approval card and the multi-question
+      // clarify card (up to five sections) are the bounded, scrollable cards tall enough to
+      // need the room. A one-question clarify and the secret card are short forms whose
+      // region hugs them, so priority there would only take room from the
+      // transcript (measured on the old rigid clarify card: 160pt → 13pt with a long
+      // question) without giving the card anything it uses. Every card gets a fresh identity
+      // per presentation — a replacement that does not pass through `nil` (a queued request, a
+      // second secret prompt) must not inherit the previous one's `@State`: its scroll offset,
+      // its "Approve all" toggle, its clarify selections, or — worst — a typed sudo password.
       pendingCard
         .id(store.pendingInteractionToken)
-        .layoutPriority(store.isApprovalPending ? 1 : 0)
+        .layoutPriority(store.isCompressibleCardPending ? 1 : 0)
       queuedPromptsPanel
       suggestionPanel
       Divider()
@@ -75,6 +78,17 @@ struct ChatView: View {
         onPasteImages: { store.send(.attachmentsPasted($0)) }
       )
     }
+    // The readable-width cap (#80): in a wide column (the iPad detail pane) the whole chat —
+    // banner, transcript + toast, footer, cards, panels, and composer — lives in ONE container
+    // limited to `ChatLayout.readableMaxWidth` and centered by the greedy outer frame, so a
+    // line of prose never runs the full width of a 1024pt window and the composer sits under
+    // the text it belongs to. Every phone width is below the cap, so compact rendering is
+    // byte-identical. The cap is on this OUTER container only: table cells keep
+    // `CappedWidthLayout` (a `.frame(maxWidth:)` cannot cap anything inside a horizontal
+    // `ScrollView` — `docs/features/markdown-rendering.md`), and `MarkdownTableView` still pans
+    // inside the column. Measured in `ChatColumnLayoutTests`.
+    .frame(maxWidth: ChatLayout.readableMaxWidth)
+    .frame(maxWidth: .infinity)
     // Animates the suggestion panel in/out (and the layout shift it causes). Keyed to
     // emptiness so mere filtering while typing never animates; nil under reduce-motion,
     // so the panel then appears/disappears instantly.
@@ -86,18 +100,10 @@ struct ChatView: View {
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
-        Menu {
-          // Icons on every item — a `Menu` reserves the glyph gutter as soon as one item
-          // has an image, so a bare "Rename" would sit in a blank column.
-          Button("Rename", systemImage: "pencil") { store.send(.renameButtonTapped) }
-            .disabled(!store.canRename)
-          // `sessionKey` is `storedSessionID ?? liveSessionID` — nil only before a session
-          // exists at all (a brand-new chat that hasn't been created yet).
-          Button("Copy ID", systemImage: "doc.on.doc") { store.send(.copySessionIDTapped) }
-            .disabled(store.sessionKey == nil)
-        } label: {
-          Image(systemName: "ellipsis.circle")
-        }
+        // A separate view, not an inline `Menu`: this body re-runs on every streaming
+        // event, and an inline menu was rebuilt (and its toolbar button re-animated) each
+        // time — the #82 flicker loop. `ChatMenuButton` observes only its own two fields.
+        ChatMenuButton(store: store)
       }
     }
     .alert("Rename session", isPresented: renameBinding) {
@@ -139,7 +145,7 @@ struct ChatView: View {
             picker: picker,
             currentModel: store.model,
             isBusy: store.isSending,
-            onSelectModel: { store.send(.modelSelected($0)) },
+            onSelectModel: { store.send(.modelSelected(model: $0, provider: $1)) },
             onDone: { store.send(.modelPickerDismissed) }
           )
         }
@@ -147,6 +153,7 @@ struct ChatView: View {
         EffortSheet(
           effort: store.reasoningEffort,
           isBusy: store.isSending,
+          extendedReasoningSupported: store.extendedReasoningSupported,
           onSelect: { store.send(.reasoningSelected($0)) },
           onDone: { store.send(.effortSheetDismissed) }
         )
@@ -194,31 +201,41 @@ struct ChatView: View {
     )
   }
 
-  /// The transcript, rendered behind the shared renderer boundary (`SwiftUITranscriptView`).
-  /// The reducer owns no scroll state — stick-to-bottom / pin behaviour is renderer-local.
-  /// `canLoadOlder` (= `hasMoreAbove`) gates the top sentinel so it can't page past the start
-  /// and can't get stuck mid-load when already at the true top of history.
+  /// The transcript REGION: the hero while the chat is empty (#80), otherwise the transcript
+  /// rendered behind the shared renderer boundary. The reducer owns no scroll state —
+  /// stick-to-bottom / pin behaviour is renderer-local. `canLoadOlder` (= `hasMoreAbove`)
+  /// gates the top sentinel so it can't page past the start and can't get stuck mid-load
+  /// when already at the true top of history.
+  ///
+  /// The swap is on `showsEmptyHero` — a HermesKit predicate (fresh new chat, or a resumed
+  /// session whose first hydrate landed empty), so a resumed chat waiting on history never
+  /// flashes the hero. Both branches are greedy in the same way, so the copy-toast overlay
+  /// and the approval-card `layoutPriority` at the call site behave identically for either.
   @ViewBuilder
   private var transcript: some View {
-    let rows = Array(store.visibleRows)
-    let turnState: TurnState = store.isSending ? .streaming : .idle
-    let canLoadOlder = store.hasMoreAbove
-    let onLoadOlder = { _ = store.send(.loadOlderRequested) }
+    if store.showsEmptyHero {
+      ChatEmptyHeroView()
+    } else {
+      let rows = Array(store.visibleRows)
+      let turnState: TurnState = store.isSending ? .streaming : .idle
+      let canLoadOlder = store.hasMoreAbove
+      let onLoadOlder = { _ = store.send(.loadOlderRequested) }
 
-    // The transcript is rendered by the `UICollectionView`-backed engine (the only engine):
-    // a diffable data source keyed on the deterministic row id gives stable diffing, scroll
-    // restoration, and prepend-preservation that the pure-SwiftUI `ScrollView` couldn't.
-    CollectionTranscriptView(
-      rows: rows,
-      turnState: turnState,
-      canLoadOlder: canLoadOlder,
-      onLoadOlder: onLoadOlder,
-      cell: transcriptCell
-    )
-    // Keyboard dismissal is drag-driven (`.interactively`). We intentionally do NOT add a
-    // `.simultaneousGesture(TapGesture())` here: it would swallow the hosted
-    // `ScrollToBottomButton`'s tap.
-    .scrollDismissesKeyboard(.interactively)
+      // The transcript is rendered by the `UICollectionView`-backed engine (the only engine):
+      // a diffable data source keyed on the deterministic row id gives stable diffing, scroll
+      // restoration, and prepend-preservation that the pure-SwiftUI `ScrollView` couldn't.
+      CollectionTranscriptView(
+        rows: rows,
+        turnState: turnState,
+        canLoadOlder: canLoadOlder,
+        onLoadOlder: onLoadOlder,
+        cell: transcriptCell
+      )
+      // Keyboard dismissal is drag-driven (`.interactively`). We intentionally do NOT add a
+      // `.simultaneousGesture(TapGesture())` here: it would swallow the hosted
+      // `ScrollToBottomButton`'s tap.
+      .scrollDismissesKeyboard(.interactively)
+    }
   }
 
   @ViewBuilder
@@ -349,6 +366,7 @@ struct ChatView: View {
 
   @ViewBuilder
   private var pendingCard: some View {
+    let token = store.pendingInteractionToken
     switch store.pendingInteraction {
     case let .approval(request):
       // The per-presentation identity that keeps this card's `@State` (scroll offset,
@@ -356,17 +374,22 @@ struct ChatView: View {
       // `VStack` call site, so it covers the clarify/secret branches too — see there.
       ApprovalCardView(
         request: request,
-        onApprove: { all in store.send(.respondToApproval(approve: true, all: all)) },
-        onDeny: { store.send(.respondToApproval(approve: false, all: false)) }
+        onApprove: { all in store.send(.respondToApproval(token: token, approve: true, all: all)) },
+        onDeny: { store.send(.respondToApproval(token: token, approve: false, all: false)) }
       )
     case let .clarify(request):
-      ClarifyCardView(mode: .clarify(request)) { answer in
-        store.send(.respondToClarify(answer: answer))
-      }
+      ClarifyCardView(
+        request: request,
+        onSubmit: { answers in store.send(.submitClarify(token: token, answers: answers)) },
+        onSkip: { store.send(.skipClarify(token: token)) }
+      )
     case let .secret(kind, prompt):
-      ClarifyCardView(mode: .secret(kind, prompt)) { value in
-        store.send(.respondToSecret(value: value))
-      }
+      SecretCardView(
+        kind: kind,
+        prompt: prompt,
+        onSubmit: { value in store.send(.respondToSecret(token: token, value: value)) },
+        onSkip: { store.send(.skipSecret(token: token)) }
+      )
     case .none:
       EmptyView()
     }

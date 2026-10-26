@@ -10,13 +10,19 @@ public struct Session: Equatable, Sendable, Identifiable {
   public var title: String?
   public var updatedAt: Date?
   public var preview: String?
-  /// Working directory of the session — the workspace it belongs to. Used to group the
-  /// list like the desktop app (see `SessionGroup`). Nil/empty → "No workspace".
+  /// Working directory of the session — the workspace it belongs to; the session card's
+  /// header label (`workspaceLabel`). Search hits carry none.
   public var cwd: String?
-  /// Original start time; used to order rows within a workspace group (desktop parity).
+  /// Original start time (decoded for parity with the desktop row; the list orders by
+  /// `updatedAt`).
   public var startedAt: Date?
-  /// Number of messages — compared against the last-seen count to flag unread activity.
+  /// Number of messages — the session card footer's count (`SessionCardContent`), and the
+  /// unread fallback for older agents that omit the server-backed `unread` field.
   public var messageCount: Int?
+  /// Server-backed read state (`last_read_at` vs activity), shared by Desktop and every
+  /// mobile client. Nil means an older agent omitted the field; the list then falls back
+  /// to this device's message-count watermark.
+  public var unread: Bool?
   /// Whether the session is currently active (a turn ran recently).
   public var isActive: Bool?
   /// Where the session originated (`cron`, `cli`, `telegram`, `discord`, `slack`,
@@ -34,6 +40,10 @@ public struct Session: Equatable, Sendable, Identifiable {
   /// `flattenSessionsWithBranches` so branches keep nesting under a compressed parent
   /// (desktop `byVisibleId` aliasing). `nil` for un-compressed sessions and old agents.
   public var lineageRootID: String?
+  /// The raw server model id (`model` on REST `GET /api/sessions`), shown verbatim in the
+  /// session card footer exactly as the chat's model chip shows it. `nil` on older agents
+  /// that omit the field (or send it blank).
+  public var model: String?
 
   public init(
     id: String,
@@ -43,10 +53,12 @@ public struct Session: Equatable, Sendable, Identifiable {
     cwd: String? = nil,
     startedAt: Date? = nil,
     messageCount: Int? = nil,
+    unread: Bool? = nil,
     isActive: Bool? = nil,
     source: String? = nil,
     parentSessionID: String? = nil,
-    lineageRootID: String? = nil
+    lineageRootID: String? = nil,
+    model: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -55,15 +67,20 @@ public struct Session: Equatable, Sendable, Identifiable {
     self.cwd = cwd
     self.startedAt = startedAt
     self.messageCount = messageCount
+    self.unread = unread
     self.isActive = isActive
     self.source = source
     self.parentSessionID = parentSessionID
     self.lineageRootID = lineageRootID
+    self.model = model
   }
 
   /// Whether this is a cron-scheduled session — the single source of truth for the
   /// Cron Jobs list partition (mirrors the desktop's `source === "cron"` special-case).
-  public var isCron: Bool { source == "cron" }
+  public var isCron: Bool { source == Self.cronSource }
+
+  /// The `source` value of a cron-scheduled run.
+  public static let cronSource = "cron"
 
   /// A real, user-facing title: non-empty and not the server's `"Untitled"` placeholder
   /// (the agent sends that for auto-named/cron sessions before a real title exists).
@@ -139,6 +156,10 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
   public var info: SessionInfo?
   public var running: Bool?
   public var inflight: SessionInflight?
+  /// The session's still-open server→client requests (`open_requests`, v7), oldest first.
+  /// Present on a live reattach (`session.resume` / `session.activate`) when non-empty;
+  /// absent → `[]`. Decoded per entry: a malformed entry is dropped, the rest kept.
+  public var openRequests: [OpenRequest]
 
   enum CodingKeys: String, CodingKey {
     case sessionID = "session_id"
@@ -150,11 +171,13 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     // whose stored/persisted id key is `session_key`.
     case sessionKey = "session_key"
     case messages, info, running, inflight
+    case openRequests = "open_requests"
   }
 
   public init(
     sessionID: String, storedSessionID: String? = nil, messages: [SessionMessage] = [],
-    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil
+    info: SessionInfo? = nil, running: Bool? = nil, inflight: SessionInflight? = nil,
+    openRequests: [OpenRequest] = []
   ) {
     self.sessionID = sessionID
     self.storedSessionID = storedSessionID
@@ -162,6 +185,7 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     self.info = info
     self.running = running
     self.inflight = inflight
+    self.openRequests = openRequests
   }
 
   public init(from decoder: Decoder) throws {
@@ -178,6 +202,33 @@ public struct ActivateResponse: Equatable, Sendable, Decodable {
     info = try? c.decodeIfPresent(SessionInfo.self, forKey: .info)
     running = try? c.decodeIfPresent(Bool.self, forKey: .running)
     inflight = try? c.decodeIfPresent(SessionInflight.self, forKey: .inflight)
+    let rawOpenRequests = (try? c.decodeIfPresent([JSONValue].self, forKey: .openRequests)) ?? nil
+    openRequests = (rawOpenRequests ?? []).compactMap { $0.decoded(OpenRequest.self) }
+  }
+}
+
+/// One entry of `open_requests` (v7): a server→client request still waiting on an answer,
+/// in the same `{id, method, params}` shape as the live request frame. `params` stays raw —
+/// the reconcile decodes it per `method`, exactly as a live frame is. A missing `params`
+/// decodes as `.null` (the per-kind decode then rejects it).
+public struct OpenRequest: Equatable, Sendable, Decodable {
+  public var id: String
+  public var method: String
+  public var params: JSONValue
+
+  enum CodingKeys: String, CodingKey { case id, method, params }
+
+  public init(id: String, method: String, params: JSONValue = .null) {
+    self.id = id
+    self.method = method
+    self.params = params
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(String.self, forKey: .id)
+    method = try c.decode(String.self, forKey: .method)
+    params = (try? c.decodeIfPresent(JSONValue.self, forKey: .params)) ?? .null
   }
 }
 

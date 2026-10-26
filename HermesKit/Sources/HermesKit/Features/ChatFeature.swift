@@ -1,6 +1,18 @@
 import ComposableArchitecture
 import Foundation
 
+/// Layout constants for the chat column (#80). Lives in HermesKit so the view and the
+/// measured layout tests read ONE value.
+public enum ChatLayout {
+  /// The readable-width cap on full-width content in wide (iPad regular) layouts: the
+  /// transcript, footer, cards, panels, and composer are wrapped in one OUTER container
+  /// limited to this width and centered, and `ConnectionView`'s onboarding form uses the
+  /// same cap for the same reason. Phone widths are below the cap, so compact rendering is
+  /// unchanged. The cap is never applied to table cells — those stay under
+  /// `CappedWidthLayout` (see `docs/features/markdown-rendering.md`).
+  public static let readableMaxWidth: CGFloat = 760
+}
+
 /// The live chat surface for one session. Owns the WebSocket lifecycle, folds the
 /// gateway event stream into a transcript, sends prompts, and reconnects with backoff.
 ///
@@ -20,10 +32,12 @@ public struct ChatFeature {
     static let pageSize = 50
 
     public var connection: ServerConnection
-    /// The active profile this chat is scoped to. `nil` (or `"default"`) means the
-    /// default profile — session create/resume and history hydration omit the `profile`
-    /// param, byte-identical to the single-profile behavior. A custom profile name is
-    /// threaded into `session.create`/`session.resume` and the REST `messages` fetch.
+    /// The profile this chat is scoped to, seeded from `SessionListFeature.State
+    /// .scopedProfileName`: the literal selected name (including `"default"`, #114) whenever
+    /// the agent has the profiles API, threaded verbatim into `session.create`/
+    /// `session.resume` (incl. the #17 heal and branch create). `nil` means the profiles API is
+    /// unsupported (or not yet probed) — the `profile` param is omitted, so the server uses
+    /// its launch profile and requests stay byte-identical for single-profile agents.
     public var profileName: String?
     public var title: String?
     public var transcript: IdentifiedArrayOf<ChatRow>
@@ -58,13 +72,17 @@ public struct ChatFeature {
     /// *cannot* assign one without the token). Assigning `nil` to dismiss is fine — a card
     /// that is gone has no identity to keep.
     public internal(set) var pendingInteraction: PendingInteraction?
-    /// Is the standing card an *approval*? The only card `ChatView` gives layout priority
-    /// over the transcript — it is the one built to absorb the squeeze (a bounded, scrollable
-    /// region), so priority buys it readable command lines; the clarify/secret card is rigid
-    /// stacked content and priority would only take room from the transcript.
-    public var isApprovalPending: Bool {
-      if case .approval = pendingInteraction { return true }
-      return false
+    /// Does the standing card earn layout priority over the transcript? `ChatView` gives it to
+    /// the cards built to absorb the squeeze AND tall enough to need it: an approval (its
+    /// command) and a multi-question clarify (up to five sections) — priority buys their
+    /// bounded region readable lines. A single-question clarify and the secret card hug a
+    /// short form, so priority there would only take room from the transcript.
+    public var isCompressibleCardPending: Bool {
+      switch pendingInteraction {
+      case .approval: return true
+      case let .clarify(request): return request.isMultiQuestion
+      case .secret, .none: return false
+      }
     }
     /// Monotonic count of blocking requests *presented* — bumped by ``present(_:)`` every
     /// time a card is raised, never reset. The view uses it as the card's identity so a
@@ -83,15 +101,52 @@ public struct ChatFeature {
       pendingInteraction = interaction
       pendingInteractionToken &+= 1
     }
+    /// Open v7 server requests (`PendingServerRequest`), oldest first — the `open_requests`
+    /// order. **While non-empty, its head IS the presented card** (raised through
+    /// ``present(_:)``); the rest wait their turn. A new arrival appends; answering it,
+    /// `expired`, a matching `request.cancel` or turn end removes it, and the next head is
+    /// presented with a fresh token. Every v7 hydrate reconciles it with the server's
+    /// `open_requests` (absence is authoritative, whatever `running` says). Per slot,
+    /// unpersisted.
+    public internal(set) var serverRequests: IdentifiedArrayOf<PendingServerRequest>
+    /// The srq id whose `request.answer` is in flight. The card stays up until the server
+    /// confirms (`ok` / `expired`) so a failed answer leaves it answerable; this guards a
+    /// second tap meanwhile from sending a second answer.
+    var answeringServerRequestID: String?
+    /// The server request behind the presented card, if the card is one (`nil` for a legacy
+    /// `*.request` card or the push-tap recovered approval).
+    public var presentedServerRequest: PendingServerRequest? {
+      pendingInteraction == nil ? nil : serverRequests.first
+    }
+    /// Replace the presented card's payload with a re-delivered copy of the SAME server
+    /// request (same srq id) WITHOUT bumping ``pendingInteractionToken`` — the card keeps its
+    /// `@State` (scroll offset, typed text, selections). **The one sanctioned exception to
+    /// "raise a card through ``present(_:)``"**: it never raises a different card, so the
+    /// token's identity contract holds. A no-op for any other id.
+    mutating func refreshPresented(_ request: PendingServerRequest) {
+      guard presentedServerRequest?.id == request.id else { return }
+      pendingInteraction = request.kind
+    }
+    /// After the presented head left the queue: raise the new head (fresh token) or dismiss.
+    mutating func presentNextServerRequest() {
+      if let head = serverRequests.first {
+        present(head.kind)
+      } else {
+        pendingInteraction = nil
+      }
+    }
     /// One-shot push-tap approval-recovery hint (client-side workaround for hermes-agent
-    /// #30: an `approval.request` that fired while the socket was down is gone — the
-    /// server does not re-surface pending approvals on `session.resume`). Set by
+    /// #30: on a legacy agent an `approval.request` that fired while the socket was down is
+    /// gone — `session.resume` does not re-surface it; v7 replays it in `open_requests`). Set by
     /// `AppFeature` when an approval-typed push tap puts this session's chat on screen;
-    /// consumed (reset to `false`) by the next hydrate, which synthesizes a generic
-    /// command-less approval card when the turn is still `running` and no real blocking
-    /// request arrived over the socket. Transient: deliberately NOT persisted in
+    /// consumed (reset to `false`) by the next hydrate. On a legacy server that hydrate
+    /// synthesizes a generic command-less approval card when the turn is still `running` and
+    /// no real blocking request arrived over the socket; on v7 the hydrate's `open_requests`
+    /// replay restores the real card instead, and an empty replay means nothing to recover
+    /// (no card). Transient: deliberately NOT persisted in
     /// `ChatSnapshotClient` (a snapshot repaint must never resurrect a card), and cleared
-    /// by a real `.approvalRequest` (the real event wins — no later re-synthesis).
+    /// by a real approval (`.approvalRequest` or a v7 `.serverRequest`), by answering one, and
+    /// at turn end (the real event wins — no later re-synthesis).
     public var expectsPendingApproval: Bool
     /// The tool/skill row whose detail sheet is open, if any (Task 4).
     public var presentedTool: ChatRow?
@@ -102,6 +157,15 @@ public struct ChatFeature {
     /// model with no reasoning shows no effort control at all. Defaults true (the
     /// desktop's own `caps?.reasoning ?? true`) and tightens once picker options load.
     public var supportsReasoning = true
+    /// Rollback target for an in-flight `config.set`, keyed by config key — the value the
+    /// SERVER last confirmed, captured before the FIRST optimistic pick of a run. A second
+    /// same-key pick must NOT capture the first pick's still-unconfirmed value: when the first
+    /// is superseded (`CancelID.configSet`) and the second is then rejected, rolling back to it
+    /// would leave the chip showing a value the server never accepted. Written on a pick, and
+    /// dropped again either by the rollback (`.configSetFailed`) or by the next authoritative
+    /// confirmation of that key (`session.info` / hydrate), after which the chip IS the server's
+    /// value and the next pick captures it fresh. Internal and unpersisted.
+    var pendingConfigRollback: [String: String?]
     /// Latest context-window usage (from `session.info` / `message.complete`), driving the
     /// composer's context pill. `nil` until the agent reports usage (old agents never do).
     public var usage: Usage?
@@ -124,10 +188,15 @@ public struct ChatFeature {
     /// the switch with `confirm_expensive_model: true`.
     public struct ModelConfirm: Equatable, Sendable {
       public var model: String
+      /// The exact `config.set` value to resend on confirm — the model id plus the
+      /// picker section's `--provider <slug>` so the confirmed switch routes the same way
+      /// the original pick did.
+      public var wireValue: String
       public var message: String
 
-      public init(model: String, message: String) {
+      public init(model: String, wireValue: String? = nil, message: String) {
         self.model = model
+        self.wireValue = wireValue ?? model
         self.message = message
       }
     }
@@ -170,6 +239,14 @@ public struct ChatFeature {
     /// slash commands. Suppresses future catalog fetches; typed `/text` then goes out as a
     /// plain prompt, byte-identical to the pre-feature behavior (backward-compat guard).
     public var commandsUnsupported: Bool
+    /// Whether the agent accepts the extended reasoning levels `max`/`ultra` (upstream #62650,
+    /// 2026-07-12). Optimistically `true`: unlike the attach/commands gates there is no probe —
+    /// an older gateway answers a `config.set {key:"reasoning"}` with server error 4002
+    /// `unknown reasoning value: <v>`, so this flips only on that verdict
+    /// (`GatewayError.isUnknownReasoningValue`), never on a transport failure or any other
+    /// server error. Per chat slot and unpersisted (same lifetime as `commandsUnsupported`): a
+    /// fresh slot re-offers the levels, so an agent upgrade is picked up on the next chat (#81).
+    public var extendedReasoningSupported: Bool
     /// True while a `slash.exec`/`command.dispatch` round-trip is outstanding (#36).
     ///
     /// A slash exec locks the composer (`isSending`) but is explicitly **NOT a turn**: no
@@ -230,6 +307,64 @@ public struct ChatFeature {
     /// queued work must not be torn down at turn end (the drain fires the next turn
     /// into it), and an idle pop must not destroy a parked queue.
     public var hasQueuedWork: Bool { !queuedPrompts.isEmpty || drainingEntry != nil }
+
+    /// No prompt has been sent yet — but the composer may hold a draft. This chat was
+    /// created as a NEW session (`resumesStoredSession` false, no branch attach), nothing is
+    /// rendered, no turn is in flight, no prompts are queued. The app-level "new session"
+    /// policy reads this: filling a fresh chat over one that has never been prompted would
+    /// tear down and redial a socket for an identical result, so it clears the composer
+    /// draft instead — the draft and staged attachments are exactly what that no-op clears.
+    /// A connected-but-unprompted chat still qualifies: its `session.create` handshake holds
+    /// nothing worth keeping (the server creates the DB row lazily, on the first prompt).
+    /// That handshake is also why the test is `resumesStoredSession`, not
+    /// `storedSessionID == nil` — the handle carries a `stored_session_id` the moment the
+    /// socket is ready, so the id alone stops telling a fresh seat from a resumed session.
+    public var isUnpromptedNewChat: Bool {
+      !resumesStoredSession && attachLiveSessionID == nil && branchSeed == nil
+        && transcript.isEmpty && !isSending && !hasQueuedWork
+    }
+
+    /// Nothing typed, staged, sent, or still arriving — an `isDiscardableNewChat` with an
+    /// empty composer and no attachments, i.e. the regular-width detail seat exactly as it
+    /// was seated. Narrowing to the stack drops such a seat instead of pushing an empty chat
+    /// over the session list.
+    public var isPristineNewChat: Bool {
+      isDiscardableNewChat && composerText.isEmpty && attachments.isEmpty
+    }
+
+    /// Composer input still resolving outside the draft itself: a clipboard load whose batch
+    /// lands later (#54, paired by `pendingPasteCount`) or voice input mid
+    /// permission/recording/transcription. Clearing `composerText`/`attachments` under either
+    /// is not a reset — the in-flight result appends into the supposedly fresh composer, and
+    /// the mic keeps running; tearing the chat down loses the result outright (the paste's
+    /// pairing token is per-`State`, and `.teardown` releases the mic).
+    public var hasInFlightComposerInput: Bool {
+      pendingPasteCount > 0 || recording.isBusy
+    }
+
+    /// The seat holds nothing the user would lose: an `isUnpromptedNewChat` whose composer
+    /// input has all landed. This is the single predicate every app-level "this seat can be
+    /// reused, dropped, or reseated" decision is built on (`isPristineNewChat` here; the
+    /// "New session" reuse shortcut and the regular-width profile reseat in `AppFeature`),
+    /// so the three cannot judge the same seat differently.
+    public var isDiscardableNewChat: Bool {
+      isUnpromptedNewChat && !hasInFlightComposerInput
+    }
+
+    /// Whether the transcript REGION renders the empty-chat hero (#80) instead of the
+    /// transcript. True only when there is provably nothing to show: no rows, no turn in
+    /// flight, no streaming row — and, for a RESUMED session (`storedSessionID != nil`),
+    /// only once its first hydrate has landed. A resumed chat opened without a snapshot
+    /// cache has an empty transcript for the round-trip before history arrives; without
+    /// the `hasHydrated` clause the hero would flash and be replaced by the history. A
+    /// resumed session whose server history is genuinely empty shows the hero after the
+    /// hydrate (correct). A brand-new chat (`storedSessionID == nil`) shows it at once.
+    /// Pure state — `CollectionTranscriptView` stays the only transcript renderer; the
+    /// view swaps the region, it never derives this.
+    public var showsEmptyHero: Bool {
+      transcript.isEmpty && !isSending && streamingRowID == nil
+        && (storedSessionID == nil || hasHydrated)
+    }
 
     /// Pastes whose clipboard providers are still loading (#54) — a counter, not a flag,
     /// because two pastes in quick succession chain in the view's coordinator and both must
@@ -305,21 +440,36 @@ public struct ChatFeature {
     public struct ModelPicker: Equatable, Sendable {
       public var isLoading: Bool
       public var options: ModelOptions?
+      /// The `model.options` LOAD failure — the sheet has no list to show at all.
       public var error: String?
       /// model id → context window (tokens), joined in as the per-provider fetches land.
       /// Cosmetic: rows without an entry just show no number.
       public var contextWindows: [String: Int] = [:]
+      /// The last `config.set` rejection while this sheet was up. Rendered inline over a
+      /// still-usable list (the rollback happens in the rows behind it); cleared by the
+      /// next selection.
+      public var applyError: String?
 
-      public init(isLoading: Bool = true, options: ModelOptions? = nil, error: String? = nil) {
+      public init(
+        isLoading: Bool = true, options: ModelOptions? = nil, error: String? = nil,
+        applyError: String? = nil
+      ) {
         self.isLoading = isLoading
         self.options = options
         self.error = error
+        self.applyError = applyError
       }
     }
 
     // Bookkeeping (internal).
     var liveSessionID: String?
     var storedSessionID: String?
+    /// This chat was opened to RESUME an existing session (a list tap, a push tap, a branch
+    /// primed from its create) rather than created as a new chat. Fixed at init from
+    /// `resumeStoredID` and never mutated — `storedSessionID` can't answer the question
+    /// after the fact, because a new chat's `session.create` handshake writes one too.
+    /// Read only by `isUnpromptedNewChat` (and through it the regular-width seat policy).
+    let resumesStoredSession: Bool
     /// Set when this chat was opened from a branch `session.create` (#34): the session is
     /// live in server memory but has NO DB row until its first prompt (the server creates
     /// it lazily), so every hydrate must attach by THIS live id via `session.activate` —
@@ -423,6 +573,60 @@ public struct ChatFeature {
     /// over the SAME socket; only a second consecutive timeout concludes half-open and
     /// redials. Reset on hydrate success and at every fresh hydrate issuance.
     var hydrateRetriedAfterTimeout: Bool
+    /// Set once this slot's first server handshake has landed: a successful
+    /// `activateResult` (the `session.resume`/`session.activate` hydrate — `applyActivate`)
+    /// or the fresh-session `session.create` handle (`sessionResult`). Never cleared —
+    /// per-slot lifetime, unpersisted. Only `showsEmptyHero` reads it: "the transcript is
+    /// empty because the server said so" vs "empty because history hasn't arrived yet".
+    var hasHydrated: Bool
+    /// The server's prompt-wire generation (`info.desktop_contract`; `>= 7` = server→client
+    /// requests, 6 = the legacy `*.request` / `*.respond` wire). Recorded from every hydrate
+    /// (`applyActivate`) and from `session.info` events that carry it. Receiving needs no
+    /// gate (the two wires never coexist on one server); this is for proactive choices only
+    /// (push-tap recovery, legacy clearing). Per-slot, unpersisted.
+    var desktopContract: Int?
+    /// This connection's `client.capabilities` failure (`.serverRequestsUnavailable`): the
+    /// server won't route prompts to the phone until the next connect. The ready/hydrate
+    /// "stale connection banner" clears restore it instead of wiping it, so the notice
+    /// outlives the hydrate that lands right after it. Reset by `.ready` (a new socket
+    /// re-advertises; the client yields its failure only after that `.ready`).
+    var serverRequestsUnavailable: String?
+
+    /// The last server event sequence number this slot has seen for one live session (#98).
+    struct ReplayCursor: Equatable, Sendable {
+      var sessionID: String
+      var seq: Int
+    }
+
+    /// Lossless reconnect watermark (#98): advanced by every stamped frame (`seq` present)
+    /// for the slot's session; a frame for another session id replaces it (the slot follows
+    /// one session, a re-minted live id starts over). In memory only, per slot: it survives
+    /// drops, the backoff redial, and `.teardownSocketOnly`, and dies with the slot. Never
+    /// persisted (a cold launch always hydrates). A seq-less frame (agent < v2026.8.27)
+    /// never starts one, so older agents never see a replay RPC.
+    var replayCursor: ReplayCursor?
+    /// The server process's `gateway.ready.replay_epoch`. A different epoch on a later ready
+    /// (gateway restart) clears `replayCursor` before it is adopted; a ready without one
+    /// (older agent) leaves it untouched.
+    var replayEpoch: String?
+    /// False once `session.events.since` answered `-32601` (pre-ring agent). Per slot,
+    /// unpersisted.
+    var replaySupported: Bool
+    /// This connection's ready said `session_authority: true` (canonical session authority
+    /// host, v0.22.3+): replay is skipped there. Reset by every ready frame.
+    var isSessionAuthority: Bool
+    /// True only while a replay batch is being folded. Turn-boundary events in the batch
+    /// describe the past, so the fold suppresses their present-tense side effects: the queue
+    /// drain and park, `runningChanged`, per-event turn-anchor writes, and assistant text
+    /// (the hydrate re-seeds or rebuilds it). The hydrate's `running` is the authority.
+    var isFoldingReplay: Bool
+    /// True from the replay read's issue until its result (or a cancelling drop/teardown).
+    /// The new socket is unattached until the trailing hydrate, so a healthy-socket
+    /// `.foreground`/`.reattached` defers to that hydrate and sending/draining waits for it
+    /// (a `prompt.submit` would attach the socket mid-read), as does answering a prompt card
+    /// (an answer unblocks the agent, whose next events would land after the read's snapshot
+    /// and before the resume attaches the socket).
+    var isReplayReadPending: Bool
 
     public enum Status: Equatable, Sendable {
       case connecting
@@ -430,14 +634,9 @@ public struct ChatFeature {
       case reconnecting
     }
 
-    /// A blocking interactive request the agent is waiting on.
-    public enum PendingInteraction: Equatable, Sendable {
-      case approval(ApprovalRequest)
-      case clarify(ClarifyRequest)        // wired in Task 10
-      case secret(SecretKind, SecretPrompt) // wired in Task 10
-
-      public enum SecretKind: Equatable, Sendable { case sudo, secret }
-    }
+    /// A blocking interactive request the agent is waiting on (the models-layer enum, shared
+    /// with `PendingServerRequest`).
+    public typealias PendingInteraction = HermesKit.PendingInteraction
 
     public init(
       connection: ServerConnection,
@@ -451,6 +650,7 @@ public struct ChatFeature {
       self.connection = connection
       self.profileName = profileName
       self.storedSessionID = resumeStoredID
+      self.resumesStoredSession = resumeStoredID != nil
       self.title = title
       self.transcript = transcript
       self.composerText = composerText
@@ -470,12 +670,24 @@ public struct ChatFeature {
       self.hasStarted = false
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
+      self.hasHydrated = false
+      self.desktopContract = nil
+      self.serverRequestsUnavailable = nil
+      self.replayCursor = nil
+      self.replayEpoch = nil
+      self.replaySupported = true
+      self.isSessionAuthority = false
+      self.isFoldingReplay = false
+      self.isReplayReadPending = false
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
+      self.serverRequests = []
+      self.answeringServerRequestID = nil
       self.expectsPendingApproval = false
       self.presentedTool = nil
       self.model = nil
       self.reasoningEffort = nil
+      self.pendingConfigRollback = [:]
       self.usage = nil
       self.modelPicker = nil
       self.renameDraft = nil
@@ -489,6 +701,7 @@ public struct ChatFeature {
       self.attachmentsUnsupported = false
       self.commandCatalog = nil
       self.commandsUnsupported = false
+      self.extendedReasoningSupported = true
       self.slashExecInFlight = false
       self.isBranching = false
       self.pendingPasteCount = 0
@@ -577,6 +790,8 @@ public struct ChatFeature {
         // stranding the chip on the *next* message. Bounded by the loader's per-provider
         // deadline, so the lock is always released.
         && pendingPasteCount == 0
+        // The reconnect replay read (#98): a submit would attach the socket mid-read.
+        && !isReplayReadPending
     }
 
     /// Rename is only meaningful once we have a live session id (otherwise `confirmRename`
@@ -602,16 +817,6 @@ public struct ChatFeature {
     public var slashSuggestions: [SlashSuggestion] {
       guard !commandsUnsupported, pendingInteraction == nil else { return [] }
       return SlashSuggestionFilter.suggestions(for: composerText, catalog: commandCatalog)
-    }
-
-    /// The profile name to thread into session create/resume + REST scoping, or `nil` for
-    /// the default profile. Treating the default name as `nil` keeps requests byte-identical
-    /// to the single-profile behavior. The canonical default name lives on
-    /// `SessionListFeature.State.defaultProfileName` (single source of truth).
-    var scopedProfile: String? {
-      guard let name = profileName, name != SessionListFeature.State.defaultProfileName
-      else { return nil }
-      return name
     }
   }
 
@@ -642,7 +847,16 @@ public struct ChatFeature {
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
     case thinkingTick
+    /// One event to fold, bypassing the replay cursor. Sent by tests; the socket effect
+    /// sends `.gatewayFrame` and the replay fold calls `reduceGatewayEvent` directly, so all
+    /// three reduce through the same path.
     case gatewayEvent(GatewayEvent)
+    /// One inbound socket frame (#98): applies the ready rules (replay epoch, session
+    /// authority) and advances the replay cursor, then reduces exactly as `.gatewayEvent`.
+    case gatewayFrame(GatewayFrame)
+    /// The reconnect replay read (#98, `session.events.since`) answered: fold the gap's
+    /// events (or take a fallback), then hydrate.
+    case eventReplayResult(Result<ReplayBatch, GatewayError>)
     case gatewayClosed
     case reconnectTick
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
@@ -660,9 +874,10 @@ public struct ChatFeature {
     /// cancel-and-redialed — the dial gap would drop streamed events). Shares its handler
     /// with `.reattached`.
     case foreground
-    /// The slot's marker was re-pushed over LIVE, surviving chat state (`AppFeature`'s
-    /// re-open policy): always re-hydrate (server authority; `applyActivate`'s #26 path
-    /// preserves a still-running turn's live thinking/tool rows), but do NOT
+    /// The slot's own session was re-opened over LIVE, surviving chat state (`AppFeature`'s
+    /// re-open policy — a re-pushed marker in compact, a plain sidebar tap on the detail
+    /// column's session in regular): always re-hydrate (server authority; `applyActivate`'s
+    /// #26 path preserves a still-running turn's live thinking/tool rows), but do NOT
     /// cancel-and-redial a healthy socket — the dial gap would drop streamed events.
     /// Only a dead/dialing socket reconnects (then `.ready` re-hydrates). Shares its
     /// handler with `.foreground`.
@@ -696,17 +911,38 @@ public struct ChatFeature {
     /// (already over, or lost on a reconnecting socket). Safe to send any time; every
     /// precondition is re-checked in `drainQueueIfReady`.
     case maybeDrainQueue
-    case respondToApproval(approve: Bool, all: Bool)
-    /// Outcome of the awaited `approval.respond` RPC. `resolved` carries the server's
-    /// `{"resolved": n}` count — `0` means the per-session queue was already empty (the
-    /// approval was handled elsewhere), so the optimistic "Approved"/"Denied" status row
-    /// at `rowID` is patched to say so. `nil` means the RPC threw → user-facing banner.
-    /// The effect feeds back only those two actionable outcomes: a `resolved >= 1` or
-    /// missing-key (older agent, lenient decode) success sends nothing — the optimistic
-    /// row is already correct.
+    /// The card answers (`respondToApproval`, `submitClarify`, `skipClarify`,
+    /// `respondToSecret`, `skipSecret`) carry the `pendingInteractionToken` of the card that
+    /// sent them; one whose token is not the presented card's is dropped, so a tap reduced
+    /// after a cancel or hydrate replaced the card never answers its successor.
+    case respondToApproval(token: Int, approve: Bool, all: Bool)
+    /// Outcome of the LEGACY `approval.respond`. `resolved == 0` patches the optimistic row
+    /// to "Already handled elsewhere"; `nil` surfaces a send failure. Successful answers
+    /// need no action: the optimistic row is already correct.
     case approvalRespondResult(rowID: ChatRow.ID, resolved: Int?)
-    case respondToClarify(answer: String)
-    case respondToSecret(value: String)
+    /// Outcome of a v7 `request.answer {id, result}`: `.ok` → the entry leaves the queue
+    /// with the `echo` row; `.expired` → it leaves with "Already handled elsewhere"; a
+    /// failure → `errorBanner`, and the card stays (the request is still open server-side).
+    case serverRequestAnswered(id: String, echo: AnswerEcho, Result<AnswerStatus, GatewayError>)
+    /// Answer the presented clarify card, keyed by qid (`""` for the `nil`-qid question of
+    /// the intermediate / legacy single forms). The reducer builds the wire shape from the
+    /// request's `answerShape`: v7 → `request.answer` (`{answers}` or `{answer}`), legacy →
+    /// `clarify.respond`. A question missing from `answers` (and not locked) is skipped;
+    /// replayed locks are re-sent with the final set and win over `answers`.
+    case submitClarify(token: Int, answers: [String: ClarifyAnswer])
+    /// Skip the whole clarify card: v0.21.6+ `{}` (cancel all), intermediate single
+    /// `{answer: ""}`, legacy an empty `clarify.respond`.
+    case skipClarify(token: Int)
+    /// A legacy `*.respond` send threw: patch its optimistic echo row to "Failed to send"
+    /// and banner (the card is already gone — the legacy path is optimistic).
+    case legacyRespondFailed(rowID: ChatRow.ID, banner: String)
+    /// Answer the presented sudo / secret card with the typed value: v7 →
+    /// `request.answer {value}`; legacy → `sudo.respond {password}` / `secret.respond
+    /// {value}`. The value is never stored, logged or echoed into the transcript.
+    case respondToSecret(token: Int, value: String)
+    /// Skip the presented sudo / secret card: v7 `{value: ""}`; legacy the same respond with
+    /// an empty value.
+    case skipSecret(token: Int)
     case copyRow(id: ChatRow.ID)
     case copyCode(text: String, token: String)
     case copyFeedbackExpired(token: String)
@@ -752,11 +988,20 @@ public struct ChatFeature {
     case modelContextWindowsLoaded([String: Int])
     /// The server wants explicit confirmation before switching to a pricier model.
     /// `previous` restores the chip so it never lies while the alert is up.
-    case modelConfirmRequired(model: String, message: String, previous: String?)
+    case modelConfirmRequired(model: String, wireValue: String, message: String, previous: String?)
     case modelConfirmAccepted
     case modelConfirmCancelled
-    case modelSelected(String)
+    /// The provider SLUG of the section the row was tapped in (nil for a programmatic
+    /// selection with no section context). Appended to the `config.set` value as
+    /// `--provider <slug>` so the gateway routes the model to the provider the picker
+    /// showed it under, instead of guessing from the model id (a `openai/…` OpenRouter
+    /// row would otherwise resolve to the direct OpenAI provider and fail on its key).
+    case modelSelected(model: String, provider: String?)
     case reasoningSelected(String)
+    /// A `config.set` that failed for good (the #17 heal has already had its single replay).
+    /// Carries the rejected `value` so the latch banner can name it and `previousValue` so the
+    /// optimistic picker write can roll back. One path serves both keys (#81).
+    case configSetFailed(key: String, value: String, previousValue: String?, error: GatewayError)
     case modelPickerDismissed
     case renameButtonTapped
     case confirmRename
@@ -871,9 +1116,30 @@ public struct ChatFeature {
     }
   }
 
-  private enum CancelID {
+  /// What an answered server request leaves behind: the transcript status row appended on
+  /// `ok` (never a secret value), and the banner shown when the answer fails to send.
+  public struct AnswerEcho: Equatable, Sendable {
+    public var kind: String
+    public var text: String
+    public var failureBanner: String
+
+    public init(kind: String, text: String, failureBanner: String) {
+      self.kind = kind
+      self.text = text
+      self.failureBanner = failureBanner
+    }
+  }
+
+  private enum CancelID: Hashable {
     case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer,
          thinkingTimer, persist
+    /// The reconnect `session.events.since` read (#98): one outstanding; a deliberate
+    /// teardown or a socket drop cancels it (the next `.ready` re-runs it).
+    case eventReplay
+    /// One id per `config.set` key so a newer pick for that key supersedes the in-flight
+    /// one: a cancelled effect never emits `.configSetFailed`, so a stale rejection can't
+    /// roll the newer value back. The two keys never cancel each other.
+    case configSet(String)
   }
 
   /// Debounce window for write-back so heavy streaming doesn't thrash SQLite.
@@ -929,11 +1195,13 @@ public struct ChatFeature {
         return releaseVoiceResources(&state)
 
       case .teardown:
+        state.isReplayReadPending = false
         return .merge(
           releaseVoiceResources(&state),
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
           .cancel(id: CancelID.hydrate),
+          .cancel(id: CancelID.eventReplay),
           .cancel(id: CancelID.thinkingTimer),
           .cancel(id: CancelID.persist)
         )
@@ -949,13 +1217,17 @@ public struct ChatFeature {
         // Also cancel any pending hydrate: socket cancellation resumes its RPC with
         // `.disconnected`, and a stale `.activateResult` reducing AFTER this deliberate
         // teardown could otherwise act on a socket we just chose to drop (e.g. redial
-        // while backgrounded after grace expiry, wasting a single-use ws-ticket).
+        // while backgrounded after grace expiry, wasting a single-use ws-ticket). The same
+        // goes for a pending replay read (#98): the foreground `.ready` re-runs it from the
+        // untouched cursor.
         state.status = .reconnecting
         state.hasRequestedSession = false
+        state.isReplayReadPending = false
         return .merge(
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
-          .cancel(id: CancelID.hydrate)
+          .cancel(id: CancelID.hydrate),
+          .cancel(id: CancelID.eventReplay)
         )
 
       case .loadOlderRequested:
@@ -969,33 +1241,37 @@ public struct ChatFeature {
         return .none
 
       case let .gatewayEvent(event):
-        // Snapshot whether the user is parked at the bottom window *before* the fold appends any
-        // streaming rows, so we can re-pin afterward without yanking a user who scrolled up.
-        let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
-        let effect = reduce(event: event, into: &state)
-        maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
-        // Write-back: any event that mutates the transcript / model / usage schedules a
-        // debounced snapshot persist so the next open paints instantly. Debounced (and
-        // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
-        // known session id — nothing to key the snapshot on (and nothing to persist) until
-        // the session resolves.
-        guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
-        else { return effect }
-        return .merge(effect, debouncedPersist())
+        return reduceGatewayEvent(event, into: &state)
+
+      case let .gatewayFrame(frame):
+        if case .ready = frame.event {
+          applyReadyReplayRules(frame, into: &state)
+        }
+        advanceReplayCursor(frame, into: &state)
+        return reduceGatewayEvent(frame.event, into: &state)
+
+      case let .eventReplayResult(result):
+        return applyEventReplayResult(result, into: &state)
 
       case .gatewayClosed:
         state.hasRequestedSession = false
         // Finalize anything mid-stream so a dropped socket doesn't leave a row
         // spinning forever; the transcript itself persists across the reconnect.
         finalizeInFlight(into: &state)
+        // A replay read in flight on the dead socket (#98) is moot: the next `.ready`
+        // re-runs it from the same cursor.
+        state.isReplayReadPending = false
         // A dead session already paused us (see `.authExpired`): the stream finishing is just
         // the tail of that — don't schedule a backoff reconnect, wait for re-auth.
-        guard !state.awaitingReauth else { return .cancel(id: CancelID.thinkingTimer) }
+        guard !state.awaitingReauth else {
+          return .merge(.cancel(id: CancelID.thinkingTimer), .cancel(id: CancelID.eventReplay))
+        }
         state.status = .reconnecting
         state.reconnectAttempt += 1
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
+          .cancel(id: CancelID.eventReplay),
           .run { [clock] send in
             try await clock.sleep(for: delay)
             await send(.reconnectTick)
@@ -1025,6 +1301,10 @@ public struct ChatFeature {
         state.liveSessionID = handle.sessionID
         state.storedSessionID = handle.storedSessionID ?? state.storedSessionID
         state.status = .ready
+        // The create handshake IS this chat's hydrate (#80): the handle may carry a
+        // `stored_session_id`, which would otherwise flip `showsEmptyHero` off for a chat
+        // whose only history is the nothing the server just created.
+        state.hasHydrated = true
         // A fresh session never hydrates (`session.create` resolves directly to ready), so
         // this is its catalog-fetch point (#36) — without it a brand-new chat would have no
         // slash panel until the first foreground re-hydrate.
@@ -1073,7 +1353,7 @@ public struct ChatFeature {
           // concurrent submit's own independent self-heal from racing this recovery with
           // a second, untracked `session.create`.
           state.liveSessionID = nil
-          return probeBranchResume(sessionID: storedID, profile: state.scopedProfile)
+          return probeBranchResume(sessionID: storedID, profile: state.profileName)
         }
         return handleActivateFailure(error, into: &state)
 
@@ -1152,6 +1432,9 @@ public struct ChatFeature {
           state.hasRequestedSession = false
           return connect(state.connection)
         }
+        // A reconnect replay read is in flight (#98): its trailing hydrate is this re-hydrate.
+        // Hydrating now would attach the socket mid-read and land under the fold.
+        guard !state.isReplayReadPending else { return .none }
         // Socket healthy: hydrate directly against it — no reconnect, so the live socket
         // keeps streaming throughout (no event gap). A socket that silently died while
         // suspended still self-heals: the hydrate RPC fails, the receive loop finishes →
@@ -1173,7 +1456,7 @@ public struct ChatFeature {
         }
         state.hasRequestedSession = true
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
-        return hydrate(sessionID: sessionID, profile: state.scopedProfile)
+        return hydrate(sessionID: sessionID, profile: state.profileName)
 
       case .composerSubmitted:
         // Mid-turn the draft QUEUES instead of submitting (#66): the send arrow returns as
@@ -1323,32 +1606,60 @@ public struct ChatFeature {
       case .maybeDrainQueue:
         return drainQueueIfReady(into: &state)
 
-      case let .respondToApproval(approve, all):
-        guard case .approval = state.pendingInteraction,
-              let sessionID = state.liveSessionID
+      case let .respondToApproval(token, approve, all):
+        // Narrow, never widen: Approve needs `once` in the server's choice set, and
+        // "approve all" falls back to `once` when `session` is not offered.
+        guard token == state.pendingInteractionToken, !state.isReplayReadPending,
+              let interaction = state.pendingInteraction, case let .approval(request) = interaction,
+              !approve || request.allowsOnce
         else { return .none }
-        state.pendingInteraction = nil
+        // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
+        // just this command; "session" persists the pattern for the rest of the session.
+        // Newer gateways require request-bound responses and ignore `all` when a
+        // request id is present. Older gateways retain the session FIFO wire shape.
+        let effectiveChoice = approve
+          ? (all && request.allowsSessionChoice ? "session" : "once")
+          : "deny"
         // Answering ANY approval moots the push-tap recovery hint (#30 workaround) — an
         // armed hint left behind (e.g. a tap whose consuming hydrate raced past it) must
         // not make a later, unrelated hydrate synthesize a phantom card.
         state.expectsPendingApproval = false
+        // v7 server request: `request.answer`, and the card stays until the server
+        // acknowledges — only `ok` / `expired` remove it (`serverRequestAnswered`).
+        if let pending = state.presentedServerRequest {
+          return answerServerRequest(
+            pending,
+            result: .object(["choice": .string(effectiveChoice)]),
+            echoText: approve ? "Approved" : "Denied",
+            failureBanner: Self.approvalFailureBanner,
+            state: &state
+          )
+        }
+        guard let sessionID = state.liveSessionID else { return .none }
+        state.pendingInteraction = nil
         let rowID = uuid()
         state.transcript.append(
-          ChatRow(id: rowID, kind: .status(kind: "approval", text: approve ? "Approved" : "Denied"))
+          ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: approve ? "Approved" : "Denied"))
         )
-        // Choice vocabulary matches `tools/approval.py`: "deny" blocks; "once" allows
-        // just this command; "session" persists the pattern for the rest of the session
-        // (the "Approve all in this session" toggle). Approvals are resolved by the
-        // server's per-session queue, so NO `request_id` is sent (unlike clarify/secret);
-        // `all` maps to `resolve_all` to clear any other queued approvals at once.
-        let choice = approve ? (all ? "session" : "once") : "deny"
+        let params: JSONValue
+        if let requestID = request.requestID {
+          params = .object([
+            "session_id": .string(sessionID),
+            "request_id": .string(requestID),
+            "choice": .string(effectiveChoice),
+            "all": .bool(false),
+          ])
+        } else {
+          let choice = approve ? (all ? "session" : "once") : "deny"
+          params = .object([
+            "session_id": .string(sessionID),
+            "choice": .string(choice),
+            "all": .bool(all),
+          ])
+        }
         return .run { [gateway] send in
           do {
-            let result = try await gateway.send("approval.respond", .object([
-              "session_id": .string(sessionID),
-              "choice": .string(choice),
-              "all": .bool(all),
-            ]))
+            let result = try await gateway.send("approval.respond", params)
             // The server answers `{"resolved": n}` — the count of queue entries this
             // respond resolved. `0` means the queue was already empty (handled on another
             // client, or a recovered-card blind respond after the fact), so the optimistic
@@ -1362,6 +1673,35 @@ public struct ChatFeature {
           }
         }
 
+      case let .serverRequestAnswered(id, echo, result):
+        if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
+        // A settled answer for the presented card takes down an earlier attempt's failure
+        // banner (never another one, and never from a card already gone — the banner may be
+        // the presented card's own).
+        if case .success = result, state.presentedServerRequest?.id == id,
+           state.errorBanner == echo.failureBanner {
+          state.errorBanner = nil
+        }
+        switch result {
+        case .success(.ok):
+          state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: echo.text)))
+          removeServerRequest(id: id, into: &state)
+        case .success(.expired):
+          // Another surface answered first (or it timed out): say so, never a false
+          // "Approved"/"Denied".
+          state.transcript.append(
+            ChatRow(id: uuid(), kind: .status(kind: echo.kind, text: "Already handled elsewhere"))
+          )
+          removeServerRequest(id: id, into: &state)
+        case .failure:
+          // The request is still open server-side, so the card stays answerable.
+          state.errorBanner = echo.failureBanner
+          return .none
+        }
+        // A card raised on an idle turn (a stopped snapshot's open request) was holding the
+        // #66 queue back; its leaving is an idle edge.
+        return drainQueueIfReady(into: &state)
+
       case let .approvalRespondResult(rowID, resolved):
         switch resolved {
         case .some(0):
@@ -1369,11 +1709,14 @@ public struct ChatFeature {
           // handled elsewhere. Patch the optimistic status row honestly; the next hydrate
           // replaces it wholesale with deterministic ids anyway (server wins), and a row
           // already replaced by such a hydrate is a silent nil-lookup no-op.
-          state.transcript[id: rowID]?.kind = .status(kind: "approval", text: "Already handled elsewhere")
+          if case let .status(kind, _) = state.transcript[id: rowID]?.kind {
+            state.transcript[id: rowID]?.kind = .status(kind: kind, text: "Already handled elsewhere")
+          }
         case .none:
           // The RPC threw — the card is already dismissed, so surface the failure instead
-          // of silently swallowing it (never a false "Approved").
-          state.errorBanner = "Failed to send the approval response."
+          // of silently swallowing it. The optimistic row stands: whether the answer reached
+          // the server is unknowable here, and the banner is the signal.
+          state.errorBanner = Self.approvalFailureBanner
         default:
           // Defensive only: the effect never feeds back a resolved >= 1 (the optimistic
           // "Approved"/"Denied" row is already correct, no action needed).
@@ -1381,46 +1724,29 @@ public struct ChatFeature {
         }
         return .none
 
-      case let .respondToClarify(answer):
-        guard case let .clarify(request) = state.pendingInteraction,
-              let sessionID = state.liveSessionID
-        else { return .none }
-        state.pendingInteraction = nil
-        // Echo the answer so the transcript records what was chosen/typed.
-        state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "clarify", text: answer))
-        )
-        let requestID = request.requestID
-        return .run { [gateway] _ in
-          _ = try? await gateway.send("clarify.respond", .object([
-            "session_id": .string(sessionID),
-            "request_id": .string(requestID),
-            "answer": .string(answer),
-          ]))
-        }
+      case let .submitClarify(token, answers):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerClarify(answers, into: &state)
 
-      case let .respondToSecret(value):
-        guard case let .secret(kind, prompt) = state.pendingInteraction,
-              let sessionID = state.liveSessionID
-        else { return .none }
-        state.pendingInteraction = nil
-        // Never echo the secret value into the transcript.
-        let label = kind == .sudo ? "Password submitted" : "Secret submitted"
-        state.transcript.append(
-          ChatRow(id: uuid(), kind: .status(kind: "secret", text: label))
-        )
-        // Method + value key differ per kind (verified against tui_gateway/server.py):
-        // sudo.respond → "password", secret.respond → "value".
-        let method = kind == .sudo ? "sudo.respond" : "secret.respond"
-        let valueKey = kind == .sudo ? "password" : "value"
-        let requestID = prompt.requestID
-        return .run { [gateway] _ in
-          _ = try? await gateway.send(method, .object([
-            "session_id": .string(sessionID),
-            "request_id": .string(requestID),
-            valueKey: .string(value),
-          ]))
+      case let .skipClarify(token):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerClarify(nil, into: &state)
+
+      case let .legacyRespondFailed(rowID, banner):
+        // The optimistic echo row must stop claiming an answer the server never got.
+        if case let .status(kind, _) = state.transcript[id: rowID]?.kind {
+          state.transcript[id: rowID]?.kind = .status(kind: kind, text: "Failed to send")
         }
+        state.errorBanner = banner
+        return .none
+
+      case let .respondToSecret(token, value):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerSecret(value, into: &state)
+
+      case let .skipSecret(token):
+        guard token == state.pendingInteractionToken else { return .none }
+        return answerSecret(nil, into: &state)
 
       case let .copyRow(id):
         guard let text = state.transcript[id: id]?.copyText, !text.isEmpty else { return .none }
@@ -1476,7 +1802,7 @@ public struct ChatFeature {
         let seed = State.BranchSeed(text: text, parentSessionID: parentID)
         state.pendingBranchSeed = seed
         state.isBranching = true
-        return branchSession(seed: seed, profile: state.scopedProfile)
+        return branchSession(seed: seed, profile: state.profileName)
 
       case let .branchResult(.success(handle)):
         state.isBranching = false
@@ -1543,7 +1869,7 @@ public struct ChatFeature {
         // asking follow-ups about it.
         state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
         state.branchSeed = nil
-        return createSession(profile: state.scopedProfile)
+        return createSession(profile: state.profileName)
 
       case .copySessionIDTapped:
         // No session yet (brand-new chat before `session.create` resolves) — nothing to
@@ -1993,35 +2319,54 @@ public struct ChatFeature {
         state.modelPicker?.error = error.message
         return .none
 
-      case let .modelSelected(model):
+      case let .modelSelected(model, providerSlug):
+        // Blocked mid-turn (server returns 4009); the picker disables selection too.
         guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
-        let previous = state.model
+        // Roll back to the last SERVER-confirmed value, not to a still-in-flight pick's.
+        let previousModel = state.pendingConfigRollback["model"] ?? state.model
+        state.pendingConfigRollback.updateValue(previousModel, forKey: "model")
         state.model = model // optimistic; reconciled by the next session.info
         if let options = state.modelPicker?.options {
           state.supportsReasoning = options.supportsReasoning(model)
         }
-        return setModel(
-          model, confirmExpensive: false, previous: previous, sessionID: sessionID,
+        clearConfigError(&state)
+        // Desktop parity (`use-model-controls.ts`): the value carries the picker
+        // section's provider slug so the gateway's model routing never guesses from
+        // the model id alone. A nil slug (no section context) stays a bare model id —
+        // the gateway's own detection ladder handles it exactly as before.
+        let wireValue = providerSlug.map { "\(model) --provider \($0)" } ?? model
+        return configSet(
+          key: "model", value: wireValue, previousValue: previousModel, sessionID: sessionID,
           storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
-          profile: state.scopedProfile
+          profile: state.profileName, confirmModel: model
         )
 
-      case let .modelConfirmRequired(model, message, previous):
-        // Roll the chip back to the truth; the pick only sticks if you confirm.
+      case let .modelConfirmRequired(model, wireValue, message, previous):
+        // Roll the chip back to the truth; the pick only sticks if you confirm. The server
+        // did nothing, so there is no in-flight value left to roll back later either.
         state.model = previous ?? state.model
-        state.modelConfirm = State.ModelConfirm(model: model, message: message)
+        state.pendingConfigRollback.removeValue(forKey: "model")
+        if let options = state.modelPicker?.options, let current = state.model {
+          state.supportsReasoning = options.supportsReasoning(current)
+        }
+        state.modelConfirm = State.ModelConfirm(model: model, wireValue: wireValue, message: message)
         return .none
 
       case .modelConfirmAccepted:
         guard let confirm = state.modelConfirm else { return .none }
         state.modelConfirm = nil
         guard let sessionID = state.liveSessionID else { return .none }
-        let previous = state.model
+        let previousModel = state.pendingConfigRollback["model"] ?? state.model
+        state.pendingConfigRollback.updateValue(previousModel, forKey: "model")
         state.model = confirm.model
-        return setModel(
-          confirm.model, confirmExpensive: true, previous: previous, sessionID: sessionID,
-          storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
-          profile: state.scopedProfile
+        if let options = state.modelPicker?.options {
+          state.supportsReasoning = options.supportsReasoning(confirm.model)
+        }
+        return configSet(
+          key: "model", value: confirm.wireValue, previousValue: previousModel,
+          sessionID: sessionID, storedSessionID: state.storedSessionID,
+          branchSeed: state.branchSeed, profile: state.profileName,
+          confirmModel: confirm.model, confirmExpensive: true
         )
 
       case .modelConfirmCancelled:
@@ -2030,12 +2375,41 @@ public struct ChatFeature {
 
       case let .reasoningSelected(effort):
         guard !state.isSending, let sessionID = state.liveSessionID else { return .none }
+        let previousEffort = state.pendingConfigRollback["reasoning"] ?? state.reasoningEffort
+        state.pendingConfigRollback.updateValue(previousEffort, forKey: "reasoning")
         state.reasoningEffort = effort
+        clearConfigError(&state)
         return configSet(
-          key: "reasoning", value: effort, sessionID: sessionID,
+          key: "reasoning", value: effort, previousValue: previousEffort, sessionID: sessionID,
           storedSessionID: state.storedSessionID, branchSeed: state.branchSeed,
-          profile: state.scopedProfile
+          profile: state.profileName
         )
+
+      case let .configSetFailed(key, value, previousValue, error):
+        // Roll the optimistic picker write back so the chip stops lying (the next authoritative
+        // `session.info` wins again anyway), then surface the failure — never swallowed.
+        switch key {
+        case "model": state.model = previousValue
+        case "reasoning": state.reasoningEffort = previousValue
+        default: break
+        }
+        state.pendingConfigRollback.removeValue(forKey: key)
+        // ONLY the 4002 verdict is a capability statement; a transport failure or any other
+        // server error (e.g. a mid-turn 4009) says nothing about the agent's ladder (#62 logic).
+        let message: String
+        if key == "reasoning", error.isUnknownReasoningValue {
+          state.extendedReasoningSupported = false
+          message = "This agent doesn’t support \"\(value)\" reasoning."
+        } else {
+          message = "Couldn’t change \(key): \(error.message)"
+        }
+        state.errorBanner = message
+        // The banner sits behind the still-presented sheet, so the picker carries the same
+        // text inline — otherwise the pick just silently snaps back.
+        state.modelPicker?.applyError = message
+        // Deliberately no `isSending`/`activity` change: a config change is not a turn. The
+        // sheet stays open, the row deselects under the inline error (desktop parity).
+        return .none
 
       case .modelPickerDismissed:
         if state.chipSheet == .modelPicker { state.chipSheet = nil }
@@ -2065,7 +2439,7 @@ public struct ChatFeature {
         state.renameDraft = nil
         state.errorBanner = nil
         let stored = state.storedSessionID
-        let profile = state.scopedProfile
+        let profile = state.profileName
         return .run { [gateway] send in
           func rename(_ targetID: String) async throws {
             _ = try await gateway.send("session.title", .object([
@@ -2105,7 +2479,10 @@ public struct ChatFeature {
       state.reconnectAttempt = 0
       // The socket is (re)connected — clear any stale connection banner (e.g. a "Connection
       // lost." left over from a lock/unlock drop) so it doesn't linger after we reconnect.
+      // A new socket also re-advertises, so the previous one's advertisement failure goes
+      // too (this connection's own failure, if any, is yielded after this `.ready`).
       state.errorBanner = nil
+      state.serverRequestsUnavailable = nil
       guard !state.hasRequestedSession else { return .none }
       state.hasRequestedSession = true
       // An unpersisted branch (#34) attaches to its already-live session by LIVE id —
@@ -2118,7 +2495,18 @@ public struct ChatFeature {
       // re-hydrate server-authoritatively via the unified `hydrate` path.
       if let stored = state.storedSessionID {
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
-        return hydrate(sessionID: stored, profile: state.scopedProfile)
+        // Lossless reconnect (#98): a slot holding a watermark for its live session first
+        // reads the gap from the server's replay ring, folds it, THEN hydrates
+        // (`applyEventReplayResult`). This `.ready` is already past the advertisement gate, and
+        // the new socket is not attached to the session until the resume, so no live
+        // session frame can race the fold. No cursor (first connect, an agent without the
+        // ring), a `-32601` latch, or a session-authority host → today's plain hydrate.
+        if state.replaySupported, !state.isSessionAuthority,
+           let cursor = state.replayCursor, cursor.sessionID == state.liveSessionID {
+          state.isReplayReadPending = true
+          return replayEventGap(cursor: cursor)
+        }
+        return hydrate(sessionID: stored, profile: state.profileName)
       }
       // A standing branch seed with no stored id (an interrupted replay on a branch
       // whose create returned no session_key) recovers the branch here — never a
@@ -2127,12 +2515,12 @@ public struct ChatFeature {
       if let seed = state.branchSeed {
         if !state.hasReplayedBranchSeed {
           state.hasReplayedBranchSeed = true
-          return replayBranchSeed(seed, profile: state.scopedProfile)
+          return replayBranchSeed(seed, profile: state.profileName)
         }
         state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
         state.branchSeed = nil
       }
-      return createSession(profile: state.scopedProfile)
+      return createSession(profile: state.profileName)
 
     case .messageStart:
       // Defer creating the assistant row until the first delta — a tool-only turn emits
@@ -2169,7 +2557,10 @@ public struct ChatFeature {
       // optimistic; `message.start` is the agent's first beat). A hydrate mid-turn reconciles
       // the live elapsed timer against this instant. Tell the list this session is now
       // working so its row glow lights up immediately (server-confirmed).
-      return .merge(setTurnAnchor(state), startThinkingTimer(), runningChanged(true, state))
+      // A replay fold (#98) leaves the timer to its trailing hydrate (`reconcileTurnTimer`):
+      // only the authoritative `running` may start it.
+      let timer: Effect<Action> = state.isFoldingReplay ? .none : startThinkingTimer()
+      return .merge(setTurnAnchor(state), timer, runningChanged(true, state))
 
     case let .messageDelta(text):
       appendToStreamingMessage(text, into: &state)
@@ -2192,10 +2583,12 @@ public struct ChatFeature {
           finalText = String(text.dropFirst(priorText.count))
         }
         state.transcript[id: id]?.kind = .message(role: .assistant, text: finalText, isComplete: true)
-      } else if !text.isEmpty {
+      } else if !text.isEmpty, !state.isFoldingReplay {
         // No open segment. If earlier segments already rendered this turn's text (tools
         // closed the last one), the glued full text is a duplicate — only append what
-        // the segments DON'T already contain.
+        // the segments DON'T already contain. Not in a replay fold (#98): a drop already
+        // finalized the pre-drop partial, so a second row would show the reply twice until
+        // the hydrate rebuilds it from history.
         let shown = state.turnSegmentIDs.compactMap { sid -> String? in
           if case let .message(_, t, _) = state.transcript[id: sid]?.kind { return t }
           return nil
@@ -2215,6 +2608,9 @@ public struct ChatFeature {
       // else: empty tool-only turn → no row at all.
       state.streamingRowID = nil
       state.turnSegmentIDs = []
+      // The turn's tool rows are history now: a later running hydrate (#26) must not
+      // re-append them next to their cooked history rows.
+      state.toolRowIDs = [:]
       // Move the thinking row below the answer, then freeze it in place so the turn ends as
       // […answer][Thought · <elapsed>].
       keepThinkingLast(into: &state)
@@ -2223,9 +2619,10 @@ public struct ChatFeature {
       // A turn can never legitimately COMPLETE with an approval still queued (the server
       // blocks on the queue), so a standing approval card here is stale — most visibly a
       // push-tap-recovered card (#30 workaround) whose approval was answered on another
-      // client, letting the turn run to completion. Drop it (and the armed hint) so the
-      // finished chat isn't stuck behind a phantom card locking the composer.
-      clearStaleApproval(into: &state)
+      // client, letting the turn run to completion. Drop it, every queued server request
+      // (one answered by another client's response frame gets no `request.cancel`) and the
+      // armed hint, so the finished chat isn't stuck behind a phantom card.
+      clearStalePrompts(into: &state)
       // A stale draining entry here means the start event was lost/reordered — the turn
       // demonstrably ran, so the entry is consumed either way (never re-queued).
       clearDrainingEntry(into: &state)
@@ -2300,13 +2697,27 @@ public struct ChatFeature {
       keepThinkingLast(into: &state)
       return .none
 
+    case let .serverRequestFailed(message):
+      // Advertisement/decline/automatic-denial failures do not end the agent turn.
+      state.errorBanner = message
+      return .none
+
+    case let .serverRequestsUnavailable(message):
+      // Surfaced like any RPC failure, and kept standing for this connection so the
+      // hydrate's stale-banner clear (which lands right after) restores it. No turn ends.
+      state.serverRequestsUnavailable = message
+      state.errorBanner = message
+      return .none
+
     case let .error(message):
       state.errorBanner = message
       state.isSending = false
+      state.toolRowIDs = [:]
       freezeThinking(into: &state)
       // Same staleness rule as `message.complete`: an errored turn is over, so any
-      // standing approval card (real or recovered) and the recovery hint are moot.
-      clearStaleApproval(into: &state)
+      // standing approval card (real or recovered), the server request queue and the
+      // recovery hint are moot.
+      clearStalePrompts(into: &state)
       // The errored turn consumed any draining entry (#66) — it ran; never re-queue it.
       clearDrainingEntry(into: &state)
       // An error PARKS the queue rather than draining it (#66): auto-firing the next entry
@@ -2317,7 +2728,8 @@ public struct ChatFeature {
       if state.sendNowArmed {
         drain = drainQueueIfReady(into: &state)
       } else {
-        if !state.queuedPrompts.isEmpty { state.isQueueParked = true }
+        // A replayed past error (#98) does not park: the hydrate's idle edge decides.
+        if !state.queuedPrompts.isEmpty, !state.isFoldingReplay { state.isQueueParked = true }
         drain = .none
       }
       // Turn ended in error — drop the anchor (prevents a phantom timer on the next hydrate)
@@ -2336,6 +2748,32 @@ public struct ChatFeature {
         .cancel(id: CancelID.thinkingTimer),
         .send(.delegate(.sessionExpired))
       )
+
+    case let .serverRequest(request):
+      // A real approval moots the push-tap recovery hint, as the legacy event does.
+      if case .approval = request.kind { state.expectsPendingApproval = false }
+      if state.serverRequests[id: request.id] != nil {
+        // Re-delivered (a replay): refresh in place — no token bump, the card keeps its state.
+        state.serverRequests[id: request.id] = request
+        state.refreshPresented(request)
+      } else {
+        state.serverRequests.append(request)
+        // A new head is raised; anything else waits behind the presented card.
+        if state.serverRequests.count == 1 {
+          state.presentNextServerRequest()
+        }
+      }
+      return .none
+
+    case let .requestCancel(cancel):
+      guard let entry = state.serverRequests[id: cancel.id] else { return .none }
+      if state.presentedServerRequest?.id == cancel.id, cancel.reason == "timeout" {
+        state.transcript.append(ChatRow(id: uuid(), kind: .status(kind: entry.kind.statusKind, text: "Timed out")))
+      }
+      removeServerRequest(id: cancel.id, into: &state)
+      // A card raised on an idle turn (a stopped snapshot's open request) was holding the
+      // #66 queue back; its leaving is an idle edge.
+      return drainQueueIfReady(into: &state)
 
     case let .approvalRequest(request):
       // Nice-to-have skipped: the thinking timer keeps running while a blocking card is the
@@ -2367,6 +2805,8 @@ public struct ChatFeature {
         state.supportsReasoning = options.supportsReasoning(state.model)
       }
       if let u = info.usage { state.usage = u }
+      if let contract = info.desktopContract { state.desktopContract = contract }
+      confirmConfigKeys(info, into: &state)
       return .none
 
     case let .reviewSummary(text):
@@ -2420,18 +2860,276 @@ public struct ChatFeature {
     }
   }
 
-  /// Drop a standing approval card + the push-tap recovery hint when the turn is known
-  /// to be over (turn-end events, or a hydrate reporting `running == false`). The server
-  /// never ends a turn with an approval still queued, so a card outliving its turn is
-  /// stale by definition — answered on another client (the mainline recovered-card
-  /// false-positive path, #30 workaround) or timed out. Scoped to `.approval` only:
-  /// clarify/secret are request-id-keyed and out of this workaround's scope. NOT called
-  /// on socket drop (`finalizeInFlight`) — the turn may still be running server-side.
-  private func clearStaleApproval(into state: inout State) {
-    if case .approval = state.pendingInteraction {
+  /// Drop every stale prompt + the push-tap recovery hint when the turn is known to be over
+  /// (turn-end events, or a LEGACY hydrate reporting `running == false` — a v7 hydrate
+  /// reconciles with `open_requests` instead, see `reconcileServerRequests`): the whole v7 server
+  /// request queue (desktop clears its prompts at turn end too — `request.cancel` is not sent
+  /// when another client answered by response frame), and a standing legacy approval card.
+  /// The server never ends a turn with an approval still queued, so a card outliving its
+  /// turn is stale by definition — answered on another client (the mainline recovered-card
+  /// false-positive path, #30 workaround) or timed out. Legacy clarify/secret cards are
+  /// request-id-keyed and stay as they were. NOT called on socket drop (`finalizeInFlight`)
+  /// — the turn may still be running server-side.
+  private func clearStalePrompts(into state: inout State) {
+    if state.presentedServerRequest != nil {
+      state.pendingInteraction = nil
+    } else if case .approval = state.pendingInteraction {
       state.pendingInteraction = nil
     }
-    state.expectsPendingApproval = false
+    state.serverRequests.removeAll()
+    state.answeringServerRequestID = nil
+    // A replayed (#98) turn end is a past turn's: the push-tap hint is for the hydrate's.
+    if !state.isFoldingReplay { state.expectsPendingApproval = false }
+  }
+
+  /// Whether a hydrate came from a v7 (server→client request) server: `desktop_contract >= 7`,
+  /// or — positive evidence on its own — a non-empty `open_requests` (only v7 servers send
+  /// it). Never a version string.
+  static func isServerRequestWire(contract: Int?, response: ActivateResponse) -> Bool {
+    (contract ?? 0) >= 7 || !response.openRequests.isEmpty
+  }
+
+  /// Reconcile the server-request queue with a hydrate's `open_requests` (v7). Absence is
+  /// authoritative: an id the replay does not list is dropped (answered elsewhere, timed out,
+  /// or its turn ended). A listed id already queued keeps its place and takes the replayed
+  /// params (fresh batch-clarify locks); a new id is appended in replay (oldest-first) order.
+  /// Entries the app does not render — or whose params do not decode — are not queued and get
+  /// no answer: the reducer never answers on its own. A request raised while no client was
+  /// attached never reached the live path either, so it waits out its deadline unless another
+  /// client answers it (accepted, `docs/features/approvals.md`).
+  /// The head is presented with a fresh token unless the same srq id is already up, in which
+  /// case it is refreshed in place (``State/refreshPresented(_:)`` — no token bump, the card
+  /// keeps its scroll offset and edits). A standing non-server card (a legacy or push-tap
+  /// recovered card) is replaced by the head, or dismissed when the replay holds nothing.
+  private func reconcileServerRequests(with openRequests: [OpenRequest], into state: inout State) {
+    let previouslyPresentedID = state.presentedServerRequest?.id
+    var replay = IdentifiedArrayOf<PendingServerRequest>()
+    for entry in openRequests where replay[id: entry.id] == nil {
+      if let request = PendingServerRequest(id: entry.id, method: entry.method, params: entry.params) {
+        replay.append(request)
+      }
+    }
+    var reconciled = IdentifiedArrayOf<PendingServerRequest>()
+    for kept in state.serverRequests {
+      if let refreshed = replay[id: kept.id] { reconciled.append(refreshed) }
+    }
+    for new in replay where reconciled[id: new.id] == nil {
+      reconciled.append(new)
+    }
+    state.serverRequests = reconciled
+    if let answering = state.answeringServerRequestID, reconciled[id: answering] == nil {
+      state.answeringServerRequestID = nil
+    }
+    guard let head = reconciled.first else {
+      state.pendingInteraction = nil
+      return
+    }
+    if head.id == previouslyPresentedID {
+      state.refreshPresented(head)
+    } else {
+      state.present(head.kind)
+    }
+  }
+
+  /// Remove one server request from the queue; when it was the presented card, raise the
+  /// next head with a fresh token (or dismiss). A no-op for an unknown id.
+  private func removeServerRequest(id: String, into state: inout State) {
+    let wasPresented = state.presentedServerRequest?.id == id
+    guard state.serverRequests.remove(id: id) != nil else { return }
+    if state.answeringServerRequestID == id { state.answeringServerRequestID = nil }
+    if wasPresented { state.presentNextServerRequest() }
+  }
+
+  /// Send `request.answer {id, result}` for a presented server request. Plain `gateway.send`
+  /// (so `wireEncoder`, the 30 s budget and a surfaced error come for free); the outcome
+  /// feeds `serverRequestAnswered` with an echo built here, so a late acknowledgement (the
+  /// card already gone) still knows its row kind. A status other than `ok` / `expired` is a
+  /// failure. A no-op while an answer is already in flight.
+  private func answerServerRequest(
+    _ pending: PendingServerRequest, result: JSONValue, echoText: String, failureBanner: String,
+    state: inout State
+  ) -> Effect<Action> {
+    guard state.answeringServerRequestID == nil else { return .none }
+    let id = pending.id
+    let echo = AnswerEcho(kind: pending.kind.statusKind, text: echoText, failureBanner: failureBanner)
+    state.answeringServerRequestID = id
+    return .run { [gateway] send in
+      let outcome: Result<AnswerStatus, GatewayError>
+      do {
+        let response = try await gateway.send("request.answer", .object(["id": .string(id), "result": result]))
+        outcome = .success(try AnswerStatus(response: response))
+      } catch {
+        outcome = .failure((error as? GatewayError) ?? .server(error.localizedDescription))
+      }
+      await send(.serverRequestAnswered(id: id, echo: echo, outcome))
+    }
+  }
+
+  static let approvalFailureBanner = "Failed to send the approval response."
+
+  static let clarifyFailureBanner = "Failed to send the clarify response."
+
+  static func secretFailureBanner(_ kind: SecretKind) -> String {
+    kind == .sudo ? "Failed to send the password." : "Failed to send the secret."
+  }
+
+  /// Answer (or, with `value == nil`, skip) the presented sudo / secret card:
+  /// - v7 (a queued server request) → `request.answer {id, result: {value}}` (skip:
+  ///   `{value: ""}`); the card stays until the server acknowledges (`serverRequestAnswered`);
+  /// - legacy event → today's `sudo.respond {session_id, request_id, password}` /
+  ///   `secret.respond {session_id, request_id, value}` (skip: an empty value), optimistic: the
+  ///   card goes and the echo row is appended at once; a throw patches that row to "Failed to
+  ///   send" and banners (`legacyRespondFailed`).
+  ///
+  /// Privacy: the value only ever travels in the answer RPC's params. The echo row, the
+  /// banner and the `AnswerEcho` carry fixed copy, never the value.
+  private func answerSecret(_ value: String?, into state: inout State) -> Effect<Action> {
+    guard !state.isReplayReadPending,
+          let interaction = state.pendingInteraction, case let .secret(kind, prompt) = interaction
+    else { return .none }
+    let echoText = switch (kind, value) {
+    case (.sudo, .some): "Password submitted"
+    case (.secret, .some): "Secret submitted"
+    case (.sudo, .none): "Password skipped"
+    case (.secret, .none): "Secret skipped"
+    }
+    let banner = Self.secretFailureBanner(kind)
+    if let pending = state.presentedServerRequest {
+      return answerServerRequest(
+        pending,
+        result: .object(["value": .string(value ?? "")]),
+        echoText: echoText,
+        failureBanner: banner,
+        state: &state
+      )
+    }
+    guard let requestID = prompt.requestID, let sessionID = state.liveSessionID else { return .none }
+    state.pendingInteraction = nil
+    let rowID = uuid()
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: echoText)))
+    // Method + value key differ per kind (verified against tui_gateway/server.py):
+    // sudo.respond → "password", secret.respond → "value".
+    let method = kind == .sudo ? "sudo.respond" : "secret.respond"
+    let params: JSONValue = .object([
+      "session_id": .string(sessionID),
+      "request_id": .string(requestID),
+      (kind == .sudo ? "password" : "value"): .string(value ?? ""),
+    ])
+    return .run { [gateway] send in
+      do {
+        _ = try await gateway.send(method, params)
+      } catch {
+        await send(.legacyRespondFailed(rowID: rowID, banner: banner))
+      }
+    }
+  }
+
+  /// Answer (or, with `answers == nil`, skip) the presented clarify card in the shape the
+  /// request arrived in:
+  /// - v7 (the card is a queued server request) → `request.answer {id, result}`; the card
+  ///   stays until the server acknowledges (`serverRequestAnswered`): `.answers` →
+  ///   `{answers: {qid: text|null}}`, skip `{}`; `.singleAnswer` → `{answer}`, skip
+  ///   `{answer: ""}`;
+  /// - legacy event → `clarify.respond` (``legacyClarifyRespondParams(_:_:sessionID:)``),
+  ///   optimistic: the card goes and the echo row is appended at once; a throw patches that
+  ///   row to "Failed to send" and banners (`legacyRespondFailed`).
+  private func answerClarify(_ answers: [String: ClarifyAnswer]?, into state: inout State) -> Effect<Action> {
+    guard !state.isReplayReadPending,
+          let interaction = state.pendingInteraction, case let .clarify(request) = interaction
+    else { return .none }
+    let echoText = Self.clarifyEchoText(request, answers)
+    if let pending = state.presentedServerRequest {
+      return answerServerRequest(
+        pending,
+        result: Self.clarifyResult(request, answers),
+        echoText: echoText,
+        failureBanner: Self.clarifyFailureBanner,
+        state: &state
+      )
+    }
+    guard request.answerShape == .legacyRespond, let sessionID = state.liveSessionID else { return .none }
+    state.pendingInteraction = nil
+    let rowID = uuid()
+    state.transcript.append(ChatRow(id: rowID, kind: .status(kind: interaction.statusKind, text: echoText)))
+    let calls = Self.legacyClarifyRespondParams(request, answers, sessionID: sessionID)
+    return .run { [gateway] send in
+      do {
+        // Sequential, as desktop sends a legacy batch: the LAST lock resolves the tool, so
+        // every earlier one must already have landed.
+        for params in calls {
+          _ = try await gateway.send("clarify.respond", params)
+        }
+      } catch {
+        await send(.legacyRespondFailed(rowID: rowID, banner: Self.clarifyFailureBanner))
+      }
+    }
+  }
+
+  /// The legacy `clarify.respond` params for an answer (`nil` = skip the card):
+  /// - the single form (top-level `question`) → one `{session_id, request_id, answer}` with
+  ///   the raw choice text, exactly as the app always sent it (legacy wire byte-identity); a
+  ///   skip is `answer: ""`;
+  /// - a legacy batch (``ClarifyRequest/isBatch``, whatever its length) → one
+  ///   `{…, question_id, answer}` per question, in order (desktop's
+  ///   per-question locks: the bare label, a multi-select's JSON-array string, `""` for a
+  ///   skipped question); skipping the card is the question-less `answer: ""` (cancel-all).
+  static func legacyClarifyRespondParams(
+    _ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?, sessionID: String
+  ) -> [JSONValue] {
+    func params(_ extra: [String: JSONValue]) -> JSONValue {
+      .object(extra.merging([
+        "session_id": .string(sessionID), "request_id": .string(request.requestID ?? ""),
+      ]) { current, _ in current })
+    }
+    guard let answers, request.isBatch else {
+      return [params(["answer": .string(singleWireText(request, answers, stripsRecommended: false))])]
+    }
+    return request.questions.map { question in
+      params([
+        "question_id": .string(question.answerKey),
+        "answer": .string((answers[question.answerKey] ?? .skipped).wireText(for: question) ?? ""),
+      ])
+    }
+  }
+
+  /// The v7 `request.answer` result for a clarify request (`nil` answers = skip all).
+  /// Only the v7 shapes reach here — a legacy card has no server request behind it.
+  static func clarifyResult(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> JSONValue {
+    guard request.answerShape == .answers else {
+      return .object(["answer": .string(singleWireText(request, answers, stripsRecommended: true))])
+    }
+    guard let answers else { return .object([:]) } // cancel all
+    var map: [String: JSONValue] = [:]
+    for (qid, locked) in request.lockedAnswers {
+      map[qid] = locked.map(JSONValue.string) ?? .null
+    }
+    for question in request.questions {
+      guard let qid = question.qid, !request.lockedAnswers.keys.contains(qid) else { continue }
+      map[qid] = (answers[qid] ?? .skipped).wireText(for: question).map(JSONValue.string) ?? .null
+    }
+    return .object(["answers": .object(map)])
+  }
+
+  /// The one answer of a single-form request (`""` for a skip).
+  private static func singleWireText(
+    _ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?, stripsRecommended: Bool
+  ) -> String {
+    guard let question = request.questions.first,
+          let answer = answers?[question.answerKey]
+    else { return "" }
+    return answer.wireText(for: question, stripsRecommended: stripsRecommended) ?? ""
+  }
+
+  /// The transcript echo for a clarify answer: the answer itself for one question, one
+  /// `question: answer` line per question for several (locks included), "Skipped" for a skip.
+  static func clarifyEchoText(_ request: ClarifyRequest, _ answers: [String: ClarifyAnswer]?) -> String {
+    guard let answers else { return "Skipped" }
+    func display(_ question: ClarifyQuestion) -> String {
+      request.lockedDisplayText(for: question)
+        ?? (answers[question.answerKey] ?? .skipped).displayText
+    }
+    guard request.isMultiQuestion else { return request.questions.first.map(display) ?? "" }
+    return request.questions.map { "\($0.question): \(display($0))" }.joined(separator: "\n")
   }
 
   /// Close out any row that was still streaming when the socket dropped: mark the
@@ -2558,15 +3256,157 @@ public struct ChatFeature {
     state.windowStart = min(max(0, state.windowStart), count)
   }
 
+  /// The one fold for an inbound event, shared by `.gatewayEvent` and `.gatewayFrame` (and the
+  /// #98 replay fold). Snapshots whether the user is parked at the bottom window *before* the
+  /// fold appends any streaming rows, so it can re-pin afterward without yanking a user who
+  /// scrolled up.
+  private func reduceGatewayEvent(_ event: GatewayEvent, into state: inout State) -> Effect<Action> {
+    let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+    let effect = reduce(event: event, into: &state)
+    maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+    // Write-back: any event that mutates the transcript / model / usage schedules a
+    // debounced snapshot persist so the next open paints instantly. Debounced (and
+    // cancel-in-flight) so heavy streaming coalesces into one SQLite write. Gated on a
+    // known session id — nothing to key the snapshot on (and nothing to persist) until
+    // the session resolves.
+    guard persistRelevant(event), state.storedSessionID != nil || state.liveSessionID != nil
+    else { return effect }
+    return .merge(effect, debouncedPersist())
+  }
+
+  /// The `gateway.ready` replay rules (#98), applied before the ready itself reduces (so the
+  /// `.ready` branch sees the fresh verdicts). The authority flag is per connection: every
+  /// ready resets it. A changed epoch drops the cursor (`adoptReplayEpochIfChanged`); a ready
+  /// also adopts the first epoch the slot sees; a ready without an epoch (older agent) leaves
+  /// both untouched.
+  private func applyReadyReplayRules(_ frame: GatewayFrame, into state: inout State) {
+    state.isSessionAuthority = frame.sessionAuthority
+    guard let epoch = frame.replayEpoch else { return }
+    adoptReplayEpochIfChanged(epoch, into: &state)
+    state.replayEpoch = epoch
+  }
+
+  /// The one epoch-change rule (#98): an `epoch` that differs from the stored one means a
+  /// gateway restart reset every counter, so the cursor is dropped and the new epoch adopted.
+  /// Returns whether that happened. With no stored epoch (or no `epoch`) nothing is compared,
+  /// so nothing changed.
+  @discardableResult
+  private func adoptReplayEpochIfChanged(_ epoch: String?, into state: inout State) -> Bool {
+    guard let epoch, let known = state.replayEpoch, epoch != known else { return false }
+    state.replayCursor = nil
+    state.replayEpoch = epoch
+    return true
+  }
+
+  /// Advance the replay watermark (#98) from a stamped frame. A frame without both a
+  /// `session_id` and a `seq` (older agent, session-less global, client-synthesized) is a
+  /// no-op; a non-increasing seq for the cursor's session is ignored (the event still
+  /// reduces); a frame for a different session replaces the cursor.
+  private func advanceReplayCursor(_ frame: GatewayFrame, into state: inout State) {
+    guard let sessionID = frame.sessionID, let seq = frame.seq else { return }
+    if let cursor = state.replayCursor, cursor.sessionID == sessionID, seq <= cursor.seq { return }
+    state.replayCursor = State.ReplayCursor(sessionID: sessionID, seq: seq)
+  }
+
+  /// Reduce the reconnect replay read (#98), then hydrate. Every branch ends in the ordinary
+  /// `session.resume` hydrate, which stays the authority (`applyActivate`: server wins, #26
+  /// running-turn row preservation, `inflight` re-seed, `open_requests` reconcile):
+  /// - an epoch mismatch (gateway restart between the ready and the read) drops the cursor,
+  ///   adopts the reply's epoch, and folds nothing;
+  /// - `truncated` (the gap fell off the ring) folds nothing and advances the cursor to
+  ///   `latest_seq` (desktop parity), so the next drop does not re-ask for the evicted window;
+  /// - otherwise the gap's events fold in order through the same path as live events, behind
+  ///   the seq gate (the cursor's session, `seq > cursor.seq`, advancing per event), with the
+  ///   four legacy prompt events skipped (no `*.expire` handling: a card that expired in the
+  ///   gap would stand forever), `message.delta`s skipped (the hydrate re-seeds the streaming
+  ///   text) and the past turn boundaries' present-tense side effects suppressed
+  ///   (`isFoldingReplay`); the turn anchor gets one write, for the last boundary folded, and
+  ///   the thinking timer is left to the hydrate's `running`.
+  ///   `open_requests` on the reply is ignored on purpose: the hydrate carries the same list.
+  /// - a failure folds nothing; `-32601` latches replay off for the slot, and a timeout spends
+  ///   the hydrate's same-socket timeout retry (a half-open socket redials after one more).
+  ///   A `.disconnected` / `.notConnected` result does not hydrate: the companion
+  ///   `.gatewayClosed` owns recovery.
+  ///
+  /// DELIBERATE carve-out from "surface RPC failures": a failed read is recorded only in the
+  /// debug log (by the `replayEventGap` effect), never as a banner. The user-visible outcome is
+  /// today's plain hydrate, and a banner would fire on every reconnect to an agent without
+  /// the ring.
+  private func applyEventReplayResult(
+    _ result: Result<ReplayBatch, GatewayError>, into state: inout State
+  ) -> Effect<Action> {
+    state.isReplayReadPending = false
+    // A late result over a dead or reconnecting socket: the next `.ready` re-runs the replay
+    // from the same cursor, so never hydrate over it here.
+    guard state.status == .ready, let stored = state.storedSessionID else { return .none }
+    var fold: Effect<Action> = .none
+    switch result {
+    case let .success(batch):
+      guard !adoptReplayEpochIfChanged(batch.epoch, into: &state) else { break }
+      if batch.truncated {
+        if let latest = batch.latestSeq, let cursor = state.replayCursor, latest > cursor.seq {
+          state.replayCursor?.seq = latest
+        }
+      } else {
+        fold = foldReplayedEvents(batch.events, into: &state)
+      }
+    case let .failure(error):
+      if error.isDisconnected || error == .notConnected {
+        state.status = .reconnecting
+        return .none
+      }
+      if error.isUnknownMethod { state.replaySupported = false }
+      if error.isTimedOut { state.hydrateRetriedAfterTimeout = true }
+    }
+    return .merge(fold, hydrate(sessionID: stored, profile: state.profileName))
+  }
+
+  /// The success-path fold of `applyEventReplayResult`: the seq gate, the legacy-prompt and
+  /// `message.delta` skips, and one turn-anchor write for the last boundary folded (the
+  /// thinking timer is the trailing hydrate's).
+  private func foldReplayedEvents(
+    _ events: [GatewayFrame], into state: inout State
+  ) -> Effect<Action> {
+    enum TurnBoundary { case started, ended }
+    var lastBoundary: TurnBoundary?
+    var effects: [Effect<Action>] = []
+    state.isFoldingReplay = true
+    for frame in events {
+      guard let cursor = state.replayCursor, frame.sessionID == cursor.sessionID,
+            let seq = frame.seq, seq > cursor.seq
+      else { continue }
+      state.replayCursor?.seq = seq
+      guard !frame.event.isLegacyPrompt else { continue }
+      switch frame.event {
+      case .messageDelta:
+        continue
+      case .messageStart:
+        lastBoundary = .started
+      case .messageComplete, .error:
+        lastBoundary = .ended
+      default:
+        break
+      }
+      effects.append(reduceGatewayEvent(frame.event, into: &state))
+    }
+    state.isFoldingReplay = false
+    switch lastBoundary {
+    case .started: effects.append(setTurnAnchor(state))
+    case .ended: effects.append(clearTurnAnchor(state))
+    case nil: break
+    }
+    return .merge(effects)
+  }
+
   // MARK: - Effects
 
   private func connect(_ connection: ServerConnection) -> Effect<Action> {
     .run { [gateway, debugLog] send in
       // Pass the full auth regime: `.token` → `?token=` (byte-identical); `.cookie` mints a
       // fresh single-use ws-ticket per connect. A dead session surfaces as `.authExpired`.
-      for await event in gateway.connect(connection.baseURL, connection.auth) {
-        debugLog.append(event) // mirror into the app-wide debug buffer (Task 12)
-        await send(.gatewayEvent(event))
+      for await frame in gateway.connect(connection.baseURL, connection.auth) {
+        debugLog.append(frame.event) // mirror into the app-wide debug buffer (Task 12)
+        await send(.gatewayFrame(frame))
       }
       await send(.gatewayClosed)
     }
@@ -2575,8 +3415,8 @@ public struct ChatFeature {
 
   /// Create a brand-new session (`session.create`). New sessions send no title so the
   /// server auto-names from the first message (passing any title disables Hermes'
-  /// auto-title generation). The default/nil profile is omitted → byte-identical to the
-  /// single-profile request.
+  /// auto-title generation). A nil profile (no profiles API) is omitted → byte-identical
+  /// to the single-profile request; any name, including `"default"`, is sent (#114).
   private func createSession(profile: String?) -> Effect<Action> {
     .run { [gateway] send in
       await send(.sessionResult(createSessionRPC(fields: [:], profile: profile, gateway: gateway)))
@@ -2585,8 +3425,8 @@ public struct ChatFeature {
 
   /// Branch a message into a new chat (#34): the desktop-parity `session.create` carrying
   /// a single-message seed (`messages`) + `parent_session_id`. Otherwise byte-identical to
-  /// `createSession` — no `title` (the server auto-names on the first submit), the
-  /// default/nil profile omitted. The server stores the parent link in memory and creates
+  /// `createSession` — no `title` (the server auto-names on the first submit), same
+  /// profile threading. The server stores the parent link in memory and creates
   /// the DB row lazily on the first prompt, so an abandoned branch never appears in the
   /// session list (documented v1 behavior — no optimistic insert).
   private func branchSession(seed: State.BranchSeed, profile: String?) -> Effect<Action> {
@@ -2673,6 +3513,42 @@ public struct ChatFeature {
     .cancellable(id: CancelID.hydrate, cancelInFlight: true)
   }
 
+  /// The reconnect replay read (#98): `session.events.since {session_id, last_seen}` for the
+  /// cursor's live session, with nothing else — no `profile` (the legacy ring is
+  /// process-global by live id) and no `replay_epoch` (a canonical-authority field; the
+  /// method forbids unknown keys). Default 30 s budget: a slow read only delays the hydrate,
+  /// and its timeout spends the hydrate's same-socket retry (`applyEventReplayResult`).
+  ///
+  /// A failure is noted in the debug log and NOT surfaced as a banner — the deliberate
+  /// carve-out documented on `applyEventReplayResult`. A cancelled read (drop/teardown) is not a
+  /// failure and writes no note.
+  private func replayEventGap(cursor: State.ReplayCursor) -> Effect<Action> {
+    .run { [gateway, debugLog] send in
+      let params: JSONValue = .object([
+        "session_id": .string(cursor.sessionID),
+        "last_seen": .number(Double(cursor.seq)),
+      ])
+      let result: Result<ReplayBatch, GatewayError>
+      do {
+        let value = try await gateway.send("session.events.since", params)
+        if let batch = value.decoded(ReplayBatch.self) {
+          result = .success(batch)
+        } else {
+          result = .failure(.server("Malformed session.events.since result"))
+        }
+      } catch let error as GatewayError {
+        result = .failure(error)
+      } catch {
+        result = .failure(.disconnected)
+      }
+      if case let .failure(error) = result, !Task.isCancelled {
+        debugLog.note("session.events.since", error.message)
+      }
+      await send(.eventReplayResult(result))
+    }
+    .cancellable(id: CancelID.eventReplay, cancelInFlight: true)
+  }
+
   /// Review finding 1's recovery probe: `session.resume` by the branch's PERSISTED
   /// `storedSessionID` (server `session_key`) — NOT the live id `session.activate` just
   /// answered "not found" for (review iteration 2 finding a: those are different values;
@@ -2727,12 +3603,16 @@ public struct ChatFeature {
     state.status = .ready
     state.hydrateRetriedAfterTimeout = false // hydrate landed: the timeout-retry budget resets
     state.hasReplayedBranchSeed = false // and so does the branch seed-replay budget (#34)
-    // A successful hydrate means we're connected — clear any stale connection banner.
-    state.errorBanner = nil
+    state.hasHydrated = true // the transcript below is now server-authoritative (#80 hero gate)
+    // A successful hydrate means we're connected — clear any stale connection banner, but
+    // keep this connection's standing advertisement failure up (it is not stale).
+    state.errorBanner = state.serverRequestsUnavailable
 
     // Runtime info: model / reasoning / usage straight from the response (fixes the blank
     // model + context-0 bugs on re-open).
     if let info = response.info {
+      // The hydrate's `info` is a full snapshot, so its contract (or its absence) wins.
+      state.desktopContract = info.desktopContract
       var target = RuntimeInfoTarget(
         model: state.model, reasoningEffort: state.reasoningEffort, usage: state.usage
       )
@@ -2740,6 +3620,7 @@ public struct ChatFeature {
       state.model = target.model
       state.reasoningEffort = target.reasoningEffort
       state.usage = target.usage
+      confirmConfigKeys(info, into: &state)
     }
 
     // Working indicator from the authoritative `running` flag — except while a slash exec
@@ -2750,27 +3631,38 @@ public struct ChatFeature {
     let running = response.running ?? false
     state.isSending = running || state.slashExecInFlight
 
-    // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
-    // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
-    // the single synthesis point. Synthesize the generic card only when the authoritative
-    // `running` says the agent is still blocked AND the socket didn't already deliver a
-    // real blocking request. Not running → the approval resolved/denied/timed out while
-    // we were detached → drop silently (no phantom card). Consuming the hint first means
-    // a double hydrate of the same running turn can't synthesize twice.
-    if state.expectsPendingApproval {
+    if Self.isServerRequestWire(contract: state.desktopContract, response: response) {
+      // v7: the server's `open_requests` is the authoritative list of open prompts, whatever
+      // `running` says — a `running == false` snapshot can still have a bridge parked on an
+      // open request (desktop #83319), and a finished turn simply lists none. An armed
+      // push-tap hint is consumed: the replay IS the recovered card (the real one), and a
+      // replay without an approval means there is nothing to recover — no generic card.
       state.expectsPendingApproval = false
-      if running, state.pendingInteraction == nil {
-        state.present(.approval(Self.recoveredApprovalRequest))
+      reconcileServerRequests(with: response.openRequests, into: &state)
+    } else {
+      // Legacy (`desktop_contract < 7`): today's behaviour, byte for byte.
+      // Push-tap approval recovery (#30 workaround): consume the one-shot hint here — every
+      // open/foreground/cold-launch/reattach path funnels through this hydrate, so this is
+      // the single synthesis point. Synthesize the generic card only when the authoritative
+      // `running` says the agent is still blocked AND the socket didn't already deliver a
+      // real blocking request. Not running → the approval resolved/denied/timed out while
+      // we were detached → drop silently (no phantom card). Consuming the hint first means
+      // a double hydrate of the same running turn can't synthesize twice.
+      if state.expectsPendingApproval {
+        state.expectsPendingApproval = false
+        if running, state.pendingInteraction == nil {
+          state.present(.approval(Self.recoveredApprovalRequest))
+        }
       }
-    }
-    // The inverse staleness rule: the authoritative "not running" means no approval can
-    // be pending server-side (the server never ends a turn with one queued), so a card
-    // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
-    // answered on another client while the socket was down and the turn ended — must be
-    // dropped, or it would sit over a finished transcript locking the composer. (The
-    // helper's hint-clear is a no-op here: the block above already consumed it.)
-    if !running {
-      clearStaleApproval(into: &state)
+      // The inverse staleness rule: the authoritative "not running" means no approval can
+      // be pending server-side (the server never ends a turn with one queued), so a card
+      // still standing — e.g. a recovered card synthesized on an earlier hydrate, then
+      // answered on another client while the socket was down and the turn ended — must be
+      // dropped, or it would sit over a finished transcript locking the composer. (The
+      // helper's hint-clear is a no-op here: the block above already consumed it.)
+      if !running {
+        clearStalePrompts(into: &state)
+      }
     }
 
     // #26: when the hydrate reports a STILL-RUNNING turn, the agent is mid-turn and the
@@ -2920,7 +3812,7 @@ public struct ChatFeature {
       state.attachLiveSessionID = nil // re-armed by the replay's fresh live id
       state.hasRequestedSession = true // the replayed create is the in-flight request
       state.hasReplayedBranchSeed = true
-      return replayBranchSeed(seed, profile: state.scopedProfile)
+      return replayBranchSeed(seed, profile: state.profileName)
     }
     // A real server "session not found" from the foreground `session.resume` is NOT a
     // benign socket drop: the stored id the agent had is gone (e.g. it expired/rebuilt).
@@ -2946,7 +3838,7 @@ public struct ChatFeature {
       state.liveSessionID = nil
       state.attachLiveSessionID = nil
       state.hasRequestedSession = true // createSession is the in-flight request
-      return createSession(profile: state.scopedProfile)
+      return createSession(profile: state.profileName)
     }
     // Offline / connection error: keep the cached instant-paint on screen (never blank
     // it) and show a subtle reconnecting status. The cached rows stay until a successful
@@ -2987,7 +3879,7 @@ public struct ChatFeature {
       }
       if !state.hydrateRetriedAfterTimeout, let sessionID = state.sessionKey {
         state.hydrateRetriedAfterTimeout = true
-        return hydrate(sessionID: sessionID, profile: state.scopedProfile)
+        return hydrate(sessionID: sessionID, profile: state.profileName)
       }
       state.hydrateRetriedAfterTimeout = false
       state.hasRequestedSession = false
@@ -3169,7 +4061,7 @@ public struct ChatFeature {
     guard refresh, let sessionID = state.liveSessionID else { return runningChanged(false, state) }
     return .merge(
       runningChanged(false, state),
-      refreshAfterSlashCommand(sessionID: sessionID, profile: state.scopedProfile)
+      refreshAfterSlashCommand(sessionID: sessionID, profile: state.profileName)
     )
   }
 
@@ -3206,7 +4098,7 @@ public struct ChatFeature {
       // reap only removed them server-side).
       let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
       let seed = state.branchSeed
-      let profile = state.scopedProfile
+      let profile = state.profileName
       return .merge(anchor, .run { [gateway, uuid] send in
         // The uploads + submit target the live id, which can be stale after a
         // background→foreground; self-heal the whole upload→submit sequence once on a
@@ -3306,7 +4198,7 @@ public struct ChatFeature {
       // client-held seed, not by resuming a row-less stored id).
       let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
       let seed = state.branchSeed
-      let profile = state.scopedProfile
+      let profile = state.profileName
       let focusTopic = parseSlashCommand(text).arg
       return .run { [gateway] send in
         await executeCompress(
@@ -3344,7 +4236,7 @@ public struct ChatFeature {
       // parent link rebuilt) exactly like the plain-prompt / attachments paths do.
       let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
       let seed = state.branchSeed
-      let profile = state.scopedProfile
+      let profile = state.profileName
       // Resolve a typed ALIAS to its canonical name for the WIRE command only (#36
       // follow-up): the gateway's live handler recognizes only canonical names, so a
       // raw alias (`/compact`) would fall through to the isolated slash-worker and
@@ -3376,7 +4268,7 @@ public struct ChatFeature {
     // (context + parent link rebuilt) instead of resuming.
     let stored = state.attachLiveSessionID == nil ? state.storedSessionID : nil
     let seed = state.branchSeed
-    let profile = state.scopedProfile
+    let profile = state.profileName
     return .merge(anchor, .run { [gateway] send in
       await submitPrompt(
         sessionID: sessionID, storedSessionID: stored, branchSeed: seed,
@@ -3398,6 +4290,11 @@ public struct ChatFeature {
   /// attempt freely. Head-only, one turn per entry: the next entry waits for this turn's
   /// own completion. A parked queue drains only when Send-now armed the one-shot override.
   private func drainQueueIfReady(into state: inout State) -> Effect<Action> {
+    // A replay fold (#98) replays the PAST: its `message.complete` / `request.cancel` /
+    // Send-now `.error` must not fire a queued prompt against a turn the server may still
+    // be running. The hydrate that follows every fold is the only trustworthy idle edge.
+    // While the read itself is pending, a `prompt.submit` would attach the socket mid-read.
+    guard !state.isFoldingReplay, !state.isReplayReadPending else { return .none }
     guard !state.queuedPrompts.isEmpty,
           state.drainingEntry == nil,
           !state.isSending, !state.slashExecInFlight,
@@ -3467,8 +4364,8 @@ public struct ChatFeature {
       // Blank text is dropped by the fold with zero state change — don't schedule a
       // pointless snapshot write for it.
       return Self.hasRenderableReviewText(text)
-    case .ready, .error, .authExpired, .approvalRequest, .clarifyRequest,
-         .sudoRequest, .secretRequest, .unknown:
+    case .ready, .error, .serverRequestFailed, .serverRequestsUnavailable, .authExpired, .approvalRequest,
+         .serverRequest, .requestCancel, .clarifyRequest, .sudoRequest, .secretRequest, .unknown:
       return false
     }
   }
@@ -3495,9 +4392,12 @@ public struct ChatFeature {
   /// the single row-tail cap (`maxRowsPerSession`), so we pass the full transcript. Attachment
   /// image bytes never reach the cache: `ChatRow`'s `Codable` omits `attachmentImages` (so the
   /// store can't persist them even if we passed them through) — they can't be re-hydrated from
-  /// the server and base64 blobs would bloat the cache.
+  /// the server and base64 blobs would bloat the cache. An `isUnpromptedNewChat` is skipped
+  /// too: its key comes from a `session.create` handshake the server has no DB row for until
+  /// the first prompt, so the row would be an empty cache entry for a session the list can
+  /// never show and nothing prunes.
   private func persistSnapshotNow(_ state: State) -> Effect<Action> {
-    guard let sessionID = state.sessionKey else { return .none }
+    guard let sessionID = state.sessionKey, !state.isUnpromptedNewChat else { return .none }
     let snapshot = ChatSnapshot(
       model: state.model,
       reasoningEffort: state.reasoningEffort,
@@ -3526,7 +4426,8 @@ public struct ChatFeature {
   /// server-confirmed (`message.start`/`complete`/`error` and the activate `running` flag) —
   /// never a cached guess.
   private func runningChanged(_ running: Bool, _ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    // A replay fold's (#98) past boundaries are not the present: the hydrate reports it.
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .send(.delegate(.runningChanged(sessionID: key, running: running)))
   }
 
@@ -3535,7 +4436,8 @@ public struct ChatFeature {
   /// **non-authoritative** — it only supplies the *start instant*; `running` decides whether
   /// the timer runs at all. Written on `prompt.submit`, reaffirmed on `message.start`.
   private func setTurnAnchor(_ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    // A replay fold (#98) writes once, for its last boundary (`applyEventReplayResult`).
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .run { [chatSnapshot, now] _ in
       chatSnapshot.setTurnAnchor(key, now)
     }
@@ -3544,22 +4446,45 @@ public struct ChatFeature {
   /// Drop the turn-start anchor at turn end (completion / error / interrupt) so a stopped
   /// turn never leaves a stale anchor that a later hydrate could mistake for a live timer.
   private func clearTurnAnchor(_ state: State) -> Effect<Action> {
-    guard let key = anchorKey(state) else { return .none }
+    guard !state.isFoldingReplay, let key = anchorKey(state) else { return .none }
     return .run { [chatSnapshot] _ in
       chatSnapshot.clearTurnAnchor(key)
     }
   }
 
-  /// Switch the session's model, honouring the server's expensive-model guard.
+  /// Drop the previous `config.set` rejection when a new pick is made, so a successful retry
+  /// isn't read under a stale failure (nothing else clears it: success has no action and
+  /// `session.info` leaves the banner alone).
+  /// Drop the rollback target for every key this authoritative `SessionInfo` carries: the chip
+  /// now holds the server's own value, so the next pick captures it fresh instead of an older
+  /// one. Keys the info omits keep their entry — an absent field preserves, it doesn't confirm.
+  private func confirmConfigKeys(_ info: SessionInfo, into state: inout State) {
+    if info.model?.nonEmpty != nil { state.pendingConfigRollback.removeValue(forKey: "model") }
+    if info.reasoningEffort?.nonEmpty != nil {
+      state.pendingConfigRollback.removeValue(forKey: "reasoning")
+    }
+  }
+
+  private func clearConfigError(_ state: inout State) {
+    state.errorBanner = nil
+    state.modelPicker?.applyError = nil
+  }
+
+  /// Change a session setting (model / reasoning) over the gateway. If iOS resumed with a
+  /// reaped live id, refresh it and replay once rather than letting the optimistic picker value
+  /// snap back when the next authoritative `session.info` arrives. A failure that survives that
+  /// single replay is surfaced as `.configSetFailed` (rollback + banner, and the 4002 latch for
+  /// `reasoning`) — never swallowed.
   ///
   /// `config.set model` doesn't always switch: for models Hermes prices as expensive it
-  /// returns `confirm_required` + a message and DOES NOTHING until the client resends
-  /// with `confirm_expensive_model: true`. The old fire-and-forget path dropped that
-  /// response, so picking a Claude model silently no-oped and the chip "switched back"
-  /// on the next session.info. Now the refusal surfaces as a confirmation alert.
-  private func setModel(
-    _ model: String, confirmExpensive: Bool, previous: String?, sessionID: String,
-    storedSessionID: String?, branchSeed: State.BranchSeed?, profile: String?
+  /// returns `confirm_required` + a message and DOES NOTHING until the client resends with
+  /// `confirm_expensive_model: true`. A fire-and-forget path drops that response, so picking a
+  /// Claude model silently no-ops and the chip "switches back" on the next session.info. With
+  /// `confirmModel` set, the refusal surfaces as `.modelConfirmRequired` instead.
+  private func configSet(
+    key: String, value: String, previousValue: String?, sessionID: String,
+    storedSessionID: String?, branchSeed: State.BranchSeed?, profile: String?,
+    confirmModel: String? = nil, confirmExpensive: Bool = false
   ) -> Effect<Action> {
     .run { [gateway] send in
       struct ConfigSetResult: Decodable {
@@ -3574,47 +4499,36 @@ public struct ChatFeature {
       func setConfig(_ targetID: String) async throws {
         var fields: [String: JSONValue] = [
           "session_id": .string(targetID),
-          "key": .string("model"),
-          "value": .string(model),
+          "key": .string(key),
+          "value": .string(value),
         ]
         if confirmExpensive { fields["confirm_expensive_model"] = .bool(true) }
         let result = try await gateway.send("config.set", .object(fields))
-        if let decoded = result.decoded(ConfigSetResult.self), decoded.confirmRequired == true {
+        if let confirmModel,
+           let decoded = result.decoded(ConfigSetResult.self), decoded.confirmRequired == true {
           await send(.modelConfirmRequired(
-            model: model,
+            model: confirmModel,
+            wireValue: value,
             message: decoded.confirmMessage?.nonEmpty
               ?? "This model is priced as expensive. Switch anyway?",
-            previous: previous
+            previous: previousValue
           ))
         }
       }
-      _ = try? await withSessionHeal(
-        setConfig, sessionID: sessionID, storedSessionID: storedSessionID,
-        branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
-      )
-    }
-  }
-
-  /// Change a session setting (model / reasoning) over the gateway. If iOS resumed with a
-  /// reaped live id, refresh it and replay once rather than letting the optimistic picker value
-  /// snap back when the next authoritative `session.info` arrives.
-  private func configSet(
-    key: String, value: String, sessionID: String,
-    storedSessionID: String?, branchSeed: State.BranchSeed?, profile: String?
-  ) -> Effect<Action> {
-    .run { [gateway] send in
-      func setConfig(_ targetID: String) async throws {
-        _ = try await gateway.send("config.set", .object([
-          "session_id": .string(targetID),
-          "key": .string(key),
-          "value": .string(value),
-        ]))
+      do {
+        _ = try await withSessionHeal(
+          setConfig, sessionID: sessionID, storedSessionID: storedSessionID,
+          branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
+        )
+      } catch let error as GatewayError {
+        await send(.configSetFailed(key: key, value: value, previousValue: previousValue, error: error))
+      } catch {
+        await send(.configSetFailed(
+          key: key, value: value, previousValue: previousValue, error: .disconnected
+        ))
       }
-      _ = try? await withSessionHeal(
-        setConfig, sessionID: sessionID, storedSessionID: storedSessionID,
-        branchSeed: branchSeed, profile: profile, gateway: gateway, send: send
-      )
     }
+    .cancellable(id: CancelID.configSet(key), cancelInFlight: true)
   }
 
 }
@@ -3629,8 +4543,9 @@ private func backoffDelay(attempt: Int) -> Duration {
 /// recreating one (`session.create`). Applies the fresh id to state via
 /// `.liveSessionIDRefreshed` (no transcript rebuild, so the optimistic row survives the retry)
 /// and returns it so the caller can replay the original RPC ONCE. Throws if the heal itself
-/// fails (the caller surfaces the banner — no second retry, no recursion). The default/nil
-/// profile is omitted so single-profile/token-mode requests stay byte-identical.
+/// fails (the caller surfaces the banner — no second retry, no recursion). A nil profile
+/// (no profiles API) is omitted so those requests stay byte-identical; any name, including
+/// the literal `"default"`, is threaded (#114).
 private func healLiveSessionID(
   storedSessionID: String?,
   branchSeed: ChatFeature.State.BranchSeed? = nil,
@@ -3680,7 +4595,7 @@ private func branchSeedFields(_ seed: ChatFeature.State.BranchSeed) -> [String: 
 
 /// One `session.create` round-trip shared by the fresh-chat and branch (#34) effects:
 /// `fields` carries the per-call extras (empty for a plain create; seed `messages` +
-/// `parent_session_id` for a branch), the default/nil profile is omitted (byte-identical
+/// `parent_session_id` for a branch), a nil profile is omitted (byte-identical
 /// to the single-profile request), and the result decodes to a `SessionHandle` — a
 /// malformed shape or a non-`GatewayError` throw maps to the same failures each caller
 /// previously produced inline.

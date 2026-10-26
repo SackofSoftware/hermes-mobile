@@ -38,6 +38,35 @@ import Testing
     #expect(!GatewayError.ticketUnavailable.isSessionNotFound)
   }
 
+  // MARK: isUnknownReasoningValue
+
+  @Test func unknownReasoningValueMatchesServerText() {
+    #expect(GatewayError.server("unknown reasoning value: max").isUnknownReasoningValue)
+    #expect(GatewayError.server("unknown reasoning value: ultra").isUnknownReasoningValue)
+  }
+
+  @Test func unknownReasoningValueMatchesDifferentCasing() {
+    #expect(GatewayError.server("Unknown Reasoning Value: max").isUnknownReasoningValue)
+    #expect(GatewayError.server("UNKNOWN REASONING VALUE: ultra").isUnknownReasoningValue)
+  }
+
+  @Test func unknownReasoningValueFalseForOtherServerMessages() {
+    // Prefix-anchored like `isUnknownMethod`: only the gateway's own 4002 text counts.
+    #expect(!GatewayError.server("unknown method: config.set").isUnknownReasoningValue)
+    #expect(!GatewayError.server("session not found").isUnknownReasoningValue)
+    #expect(!GatewayError.server("cannot switch model mid-turn").isUnknownReasoningValue)
+    #expect(!GatewayError.server("").isUnknownReasoningValue)
+    #expect(!GatewayError.server("error: unknown reasoning value: max").isUnknownReasoningValue)
+  }
+
+  @Test func unknownReasoningValueFalseForNonServerCases() {
+    #expect(!GatewayError.timedOut(method: "config.set").isUnknownReasoningValue)
+    #expect(!GatewayError.disconnected.isUnknownReasoningValue)
+    #expect(!GatewayError.notConnected.isUnknownReasoningValue)
+    #expect(!GatewayError.authExpired.isUnknownReasoningValue)
+    #expect(!GatewayError.ticketUnavailable.isUnknownReasoningValue)
+  }
+
   // MARK: cross-check the matchers stay distinct
 
   @Test func sessionNotFoundAndUnknownMethodAreMutuallyExclusive() {
@@ -48,5 +77,14 @@ import Testing
     let unknown = GatewayError.server("unknown method: foo")
     #expect(unknown.isUnknownMethod)
     #expect(!unknown.isSessionNotFound)
+  }
+
+  @Test func unknownReasoningValueIsDistinctFromTheOtherMatchers() {
+    let rejected = GatewayError.server("unknown reasoning value: max")
+    #expect(rejected.isUnknownReasoningValue)
+    #expect(!rejected.isUnknownMethod)
+    #expect(!rejected.isSessionNotFound)
+    #expect(!rejected.isDisconnected)
+    #expect(!rejected.isTimedOut)
   }
 }

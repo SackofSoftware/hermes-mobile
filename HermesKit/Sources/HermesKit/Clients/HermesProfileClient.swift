@@ -31,25 +31,35 @@ public struct HermesProfileClient: Sendable {
   public var rename: @Sendable (_ connection: ServerConnection, _ name: String, _ newName: String) async throws -> Void
   /// `DELETE /api/profiles/{name}`.
   public var delete: @Sendable (_ connection: ServerConnection, _ name: String) async throws -> Void
-  /// `GET /api/profiles/sessions?profile=&archived=&order=&limit=&offset=` →
-  /// `{ sessions, profile_totals }` (we use only `sessions`).
+  /// `GET /api/profiles/sessions?profile=&archived=&order=&limit=&offset=` (+ the
+  /// `SessionSourceFilter` scoping) → `{ sessions, profile_totals }` (we use only `sessions`).
   public var sessions: @Sendable (
     _ connection: ServerConnection,
     _ profile: String,
     _ archived: ProfileArchivedFilter,
     _ order: SessionOrder,
     _ limit: Int,
-    _ offset: Int
+    _ offset: Int,
+    _ source: SessionSourceFilter
   ) async throws -> [Session]
 }
 
 public extension HermesProfileClient {
   /// Live implementation over `URLSession` (injectable for `URLProtocol` stubs).
-  static func live(session: URLSession = .shared) -> HermesProfileClient {
-    HermesProfileClient(
+  /// `tokenStore` is injectable for the same reason `HermesRESTClient.live` takes one.
+  static func live(
+    session: URLSession = .shared,
+    tokenStore: BearerTokenStore = .shared
+  ) -> HermesProfileClient {
+    // Same one-resolution-point rule as `HermesRESTClient.live`: profile REST is ordinary
+    // `/api/*` traffic, so it authenticates through whichever regime the connection carries.
+    let authFor: @Sendable (ServerConnection) async throws -> RequestAuth = { conn in
+      try await resolveAuth(for: conn, session: session, tokenStore: tokenStore)
+    }
+    return HermesProfileClient(
       list: { conn in
         let url = try makeURL(conn.baseURL, "/api/profiles")
-        let response: ProfilesResponse = try await get(url, token: conn.token, session: session)
+        let response: ProfilesResponse = try await get(url, auth: authFor(conn), session: session)
         return response.profiles
       },
       create: { conn, name, cloneFromDefault in
@@ -58,31 +68,33 @@ public extension HermesProfileClient {
           "name": name,
           "clone_from_default": cloneFromDefault,
         ] as [String: Any])
-        try await send(url, method: "POST", body: body, token: conn.token, session: session)
+        try await send(url, method: "POST", body: body, auth: authFor(conn), session: session)
       },
       updateSoul: { conn, name, content in
         let url = try makeURL(conn.baseURL, "/api/profiles/\(name)/soul")
         let body = try JSONSerialization.data(withJSONObject: ["content": content])
-        try await send(url, method: "PUT", body: body, token: conn.token, session: session)
+        try await send(url, method: "PUT", body: body, auth: authFor(conn), session: session)
       },
       rename: { conn, name, newName in
         let url = try makeURL(conn.baseURL, "/api/profiles/\(name)")
         let body = try JSONSerialization.data(withJSONObject: ["new_name": newName])
-        try await send(url, method: "PATCH", body: body, token: conn.token, session: session)
+        try await send(url, method: "PATCH", body: body, auth: authFor(conn), session: session)
       },
       delete: { conn, name in
         let url = try makeURL(conn.baseURL, "/api/profiles/\(name)")
-        try await send(url, method: "DELETE", body: nil, token: conn.token, session: session)
+        try await send(url, method: "DELETE", body: nil, auth: authFor(conn), session: session)
       },
-      sessions: { conn, profile, archived, order, limit, offset in
+      sessions: { conn, profile, archived, order, limit, offset, source in
         let url = try makeURL(conn.baseURL, "/api/profiles/sessions", query: [
           .init(name: "profile", value: profile),
           .init(name: "archived", value: archived.rawValue),
           .init(name: "order", value: order.rawValue),
           .init(name: "limit", value: String(limit)),
           .init(name: "offset", value: String(offset)),
-        ])
-        let response: ProfileSessionsResponse = try await get(url, token: conn.token, session: session)
+        ] + source.queryItems)
+        let response: ProfileSessionsResponse = try await get(
+          url, auth: authFor(conn), session: session
+        )
         return response.sessions.map(\.asSession)
       }
     )
@@ -115,7 +127,7 @@ public extension HermesProfileClient {
         store.withValue { $0.removeAll { $0.name == name } }
         souls.withValue { $0[name] = nil }
       },
-      sessions: { _, _, _, _, _, _ in [] }
+      sessions: { _, _, _, _, _, _, _ in [] }
     )
   }
 }

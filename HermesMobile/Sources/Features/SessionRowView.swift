@@ -1,17 +1,14 @@
 import HermesKit
 import SwiftUI
 
-/// One row in the session list. Like the desktop sidebar: a human-readable name
-/// (`Session.displayName`: title → preview → id) + relative age + an unread dot. A
-/// *secondary* preview line is shown only for search results (`showsPreview`); when a
-/// session has no real title the preview is promoted to the headline everywhere.
+/// The compact one-line session row for dense surfaces — cron run peeks, the flat cron
+/// fallback, unmatched cron runs, and the archived sheet (interactive rows are
+/// `SessionCardView` cards). Like the desktop sidebar: a human-readable name
+/// (`Session.displayName`: title → preview → id) + relative age + an unread dot.
 struct SessionRowView: View {
   let session: Session
   /// Reference date the timestamp is relative to (injected so it's controllable).
   var now: Date = Date()
-  /// Show the preview as a *secondary* line under a real title (search results). The
-  /// preview is still promoted to the headline for untitled sessions regardless of this.
-  var showsPreview: Bool = false
   /// New activity since the user last opened this session.
   var isUnread: Bool = false
   /// Whether this session is pinned (shows a small pin glyph).
@@ -23,16 +20,6 @@ struct SessionRowView: View {
   /// Drives the gentle opacity pulse of the active glow (held flat when reduce-motion is on).
   @State private var pulsing = false
 
-  /// Floor (never a cap — Dynamic Type and two-line previews grow past it) on the row
-  /// content's height. A one-line row's natural content is ~24pt; iOS collapses trailing
-  /// swipe buttons into cramped text-only capsules on rows that short.
-  ///
-  /// 38pt is the current setting: still comfortably above Apple's 34pt threshold for
-  /// icon-over-label swipe buttons, but 6pt tighter per row than the previous 44 — which
-  /// across a full screen of sessions is most of a row's worth of reclaimed space. Do NOT
-  /// drop below ~36 without re-checking a real swipe: the buttons degrade to text-only.
-  static let contentMinHeight: CGFloat = 38
-
   private static let relativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
     formatter.dateTimeStyle = .named
@@ -41,10 +28,8 @@ struct SessionRowView: View {
 
   var body: some View {
     // Never show the raw `session.id` as a name: with no real title (incl. the server's
-    // "Untitled" placeholder), promote the first-message preview to the headline — in the
-    // grouped list too, not just search. `displayName` is the shared rule (title → preview → id).
-    let snippet = session.resolvedPreview
-    let promotesSnippet = session.resolvedTitle == nil && snippet != nil
+    // "Untitled" placeholder), promote the first-message preview to the headline.
+    // `displayName` is the shared rule (title → preview → id).
     let headline = session.displayName
 
     return VStack(alignment: .leading, spacing: 4) {
@@ -54,12 +39,19 @@ struct SessionRowView: View {
             .accessibilityLabel("Unread")
         }
         Text(headline)
-          // .headline is 17pt semibold — heavy for a dense list where every row shouts.
-          // .subheadline (15pt) with weight carrying the unread signal instead reads
-          // calmer and fits more on screen, while unread rows still stand out.
-          .font(.subheadline)
+          .font(.headline)
           .fontWeight(isUnread ? .semibold : .regular)
-          .lineLimit(promotesSnippet ? 2 : 1)
+          // Two lines for every headline, titled or promoted: one line truncates most real
+          // titles, and the iPad sidebar is narrower than a phone's full width, so a single
+          // line loses the part that distinguishes one session from the next.
+          //
+          // `fixedSize(vertical:)` is LOAD-BEARING, not decoration: in an `HStack` every child
+          // is offered the stack's height, which is the tallest child's IDEAL height — one line
+          // for a `Text`. Without it the headline is handed a one-line height, so it truncates
+          // at the first line and `lineLimit(2)` never takes effect (the promoted-preview branch
+          // carried a dead `lineLimit(2)` for exactly this reason until #80).
+          .lineLimit(2)
+          .fixedSize(horizontal: false, vertical: true)
         if isPinned {
           Image(systemName: "pin.fill")
             .font(.caption2)
@@ -69,24 +61,12 @@ struct SessionRowView: View {
         Spacer()
         if let updatedAt = session.updatedAt {
           Text(Self.relativeFormatter.localizedString(for: updatedAt, relativeTo: now))
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-            .lineLimit(1)
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
       }
-      // Show the snippet as a secondary line only when it isn't already the headline.
-      if showsPreview, !promotesSnippet, let preview = snippet {
-        Text(preview)
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          .lineLimit(2)
-      }
     }
-    // No vertical padding: `contentMinHeight` below already sets the row's height, so
-    // padding on top of it only inflates every row by a further 4pt.
-    // Floor so short rows still earn icon-over-label swipe buttons; taller content
-    // (two-line previews, large Dynamic Type) grows freely past it.
-    .frame(minHeight: Self.contentMinHeight, alignment: .leading)
+    .padding(.vertical, 2)
     .modifier(ActiveGlow(isActive: isActive, reduceMotion: reduceMotion, pulsing: pulsing))
     .onAppear { updatePulsing() }
     // Drive the pulse off `isActive` too: when a poll flips it true on a row that's

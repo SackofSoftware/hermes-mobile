@@ -226,6 +226,7 @@ public struct SettingsFeature {
   @Dependency(\.debugLog) var debugLog
   @Dependency(\.hermesREST) var rest
   @Dependency(\.push) var push
+  @Dependency(\.bearerTokens) var bearerTokens
   @Dependency(\.continuousClock) var clock
   @Dependency(\.dismiss) var dismiss
 
@@ -507,13 +508,16 @@ public struct SettingsFeature {
 
       case .clearTokenTapped:
         // Clear the full session (token + any gated cookies in the shared jar), not just the
-        // token — a gated logout must leave no cookie behind.
+        // token — a gated logout must leave no cookie behind. In the bearer regime the token
+        // store has to stop writing BEFORE the entry goes (see `detachPersistence`); the
+        // server-side half of this logout is `AppFeature.serverSideLogout`, reached through
+        // the `.disconnect` delegate below.
+        bearerTokens.detachPersistence()
         try? keychain.deleteSession()
         preferences.clearServerURL()
         preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
         preferences.saveSeenCounts([:]) // unread state is per-server; drop it too
-        preferences.saveGroupingMode(.default) // reset the list grouping pref on logout
-        preferences.saveDefaultSessionSwipeAction(.default) // reset the swipe-action pref too
+        preferences.saveDefaultSessionSwipeAction(.default) // reset the swipe-action pref on logout
         preferences.clearSelectedProfileID() // selected profile is per-server — clear on logout
         chatSnapshot.wipeAll() // snapshots + turn anchors are per-server — wipe on logout
         return .merge(

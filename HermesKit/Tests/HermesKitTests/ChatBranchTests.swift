@@ -74,17 +74,20 @@ struct ChatBranchTests {
     #expect(messages.first?["role"]?.stringValue == "assistant")
     #expect(messages.first?["content"]?.stringValue == "# The answer\n\nUse *plan B*.")
     #expect(params?["parent_session_id"]?.stringValue == "stored123")
-    // No title (server auto-names on first submit), no source, and the default/nil
-    // profile is OMITTED — byte-identical to the plain create otherwise.
+    // No title (server auto-names on first submit), no source, and a nil profile (no
+    // profiles API) is OMITTED — byte-identical to the plain create otherwise.
     #expect(params?["title"] == nil)
     #expect(params?["source"] == nil)
     #expect(params?["profile"] == nil)
     #expect(store.state.errorBanner == nil)
   }
 
-  @Test func branchThreadsSelectedProfile() async {
+  /// The selected profile is threaded verbatim — the literal `"default"` included (#114: an
+  /// omitted profile means the server's launch profile, not `"default"`).
+  @Test(arguments: ["work", "default"])
+  func branchThreadsSelectedProfile(profileName: String) async {
     let sent = LockIsolated<JSONValue?>(nil)
-    var initial = ChatFeature.State(connection: conn, profileName: "work", status: .ready)
+    var initial = ChatFeature.State(connection: conn, profileName: profileName, status: .ready)
     initial.liveSessionID = "live"
     initial.storedSessionID = "stored123"
     initial.transcript = [
@@ -116,9 +119,9 @@ struct ChatBranchTests {
       )
     )
 
-    // A non-default profile is threaded (same convention as create/resume), and the
-    // parent link is the PERSISTED id (the one REST list rows carry, so nesting works).
-    #expect(sent.value?["profile"]?.stringValue == "work")
+    // The profile is threaded (same convention as create/resume), and the parent link
+    // is the PERSISTED id (the one REST list rows carry, so nesting works).
+    #expect(sent.value?["profile"]?.stringValue == profileName)
     #expect(sent.value?["parent_session_id"]?.stringValue == "stored123")
   }
 
@@ -301,6 +304,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "branch-live"
       $0.storedSessionID = "branch-stored"
       $0.status = .ready
+      $0.hasHydrated = true
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
       $0.transcript = [ChatRow(
@@ -351,6 +355,7 @@ struct ChatBranchTests {
       $0.hasRequestedSession = true
     }
     await store.receive(\.activateResult.success) {
+      $0.hasHydrated = true
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
     }
@@ -461,6 +466,7 @@ struct ChatBranchTests {
     }
     await store.receive(\.activateResult.success) {
       $0.status = .ready
+      $0.hasHydrated = true
       $0.hasReplayedBranchSeed = false // attach landed: the replay budget resets
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
@@ -528,6 +534,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "fresh-live"
       $0.storedSessionID = "fresh-stored"
       $0.status = .ready
+      $0.hasHydrated = true
     }
     // The banner survives the fresh create — the degrade is honest, never silent.
     #expect(store.state.errorBanner == "Couldn’t restore the branch — starting a fresh chat.")
@@ -559,6 +566,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "plain-live"
       $0.storedSessionID = "plain-stored"
       $0.status = .ready
+      $0.hasHydrated = true
     }
   }
 
@@ -589,6 +597,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "fresh-live"
       $0.storedSessionID = "fresh-stored"
       $0.status = .ready
+      $0.hasHydrated = true
     }
   }
 
@@ -626,6 +635,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "fresh-live"
       $0.storedSessionID = "fresh-stored"
       $0.status = .ready
+      $0.hasHydrated = true
     }
     #expect(methods.value == ["session.create"])
   }
@@ -862,6 +872,7 @@ struct ChatBranchTests {
     }
     await store.receive(\.activateResult.success) {
       $0.status = .ready
+      $0.hasHydrated = true
       $0.hasReplayedBranchSeed = false
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
@@ -894,7 +905,7 @@ struct ChatBranchTests {
   /// `.gatewayClosed` for minutes) — keep the seed, refund the budget, and redial
   /// ourselves so the chat isn't stranded in `.reconnecting` with the seed parked.
   @Test func replayTimeoutKeepsSeedAndRedials() async {
-    let continuation = LockIsolated<AsyncStream<GatewayEvent>.Continuation?>(nil)
+    let continuation = LockIsolated<AsyncStream<GatewayFrame>.Continuation?>(nil)
     let dialed = LockIsolated(false)
     var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
     initial.attachLiveSessionID = "branch-live"
@@ -908,7 +919,7 @@ struct ChatBranchTests {
       }
       $0.hermesGateway.connect = { @Sendable _, _ in
         dialed.setValue(true)
-        let (stream, cont) = AsyncStream<GatewayEvent>.makeStream()
+        let (stream, cont) = AsyncStream<GatewayFrame>.makeStream()
         continuation.setValue(cont) // hold the socket open — the fresh `.ready` is live's
         return stream
       }
@@ -961,6 +972,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "plain-live"
       $0.storedSessionID = "plain-stored"
       $0.status = .ready
+      $0.hasHydrated = true
     }
     // With the seed gone, a later heal CANNOT mis-arm attach-by-live-id mode.
     await store.send(.liveSessionIDRefreshed(liveSessionID: "healed-live", storedSessionID: nil)) {
@@ -1018,6 +1030,7 @@ struct ChatBranchTests {
       $0.attachLiveSessionID = "fresh-live"
     }
     await store.receive(\.activateResult.success) {
+      $0.hasHydrated = true
       $0.hasReplayedBranchSeed = false
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
@@ -1089,6 +1102,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "branch-live-2"
       $0.storedSessionID = "branch-stored"
       $0.status = .ready
+      $0.hasHydrated = true
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
       $0.transcript = [
@@ -1183,6 +1197,7 @@ struct ChatBranchTests {
       $0.liveSessionID = "branch-live-2"
       $0.storedSessionID = "branch-stored"
       $0.status = .ready
+      $0.hasHydrated = true
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 0, contextMax: 200_000, contextPercent: 0)
       $0.transcript = [

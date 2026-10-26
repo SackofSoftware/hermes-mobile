@@ -36,6 +36,18 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
 
     public var id: String { slug ?? name }
 
+    /// The identifier to send as `--provider` on a model switch. The SLUG only — desktop
+    /// parity (`use-model-controls.ts` sends `provider.slug`, no fallback). The gateway's
+    /// `parse_model_flags_detailed` splits the value on whitespace and
+    /// `resolve_provider_full` never matches display names, so a name fallback (e.g.
+    /// "Ollama Cloud") would parse as provider `Ollama`, model `… Cloud` — worse than a
+    /// bare id. Nil (no slug) sends the model out bare and the gateway's own detection
+    /// ladder routes it; today every gateway row builder passes a slug, so nil is rare.
+    public var selectionSlug: String? {
+      let slugValue = (slug ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      return slugValue.isEmpty ? nil : slugValue
+    }
+
     /// Configured + usable: authenticated with at least one model. Unconfigured providers
     /// come back authenticated=false with an empty model list and a `warning`.
     public var isConfigured: Bool { (authenticated ?? false) && !models.isEmpty }
@@ -90,6 +102,41 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
     providers.filter(\.isConfigured)
   }
 
+  /// Filters `orderedProviders` against a free-text query while preserving the picker's
+  /// provider grouping. A provider whose NAME matches the query keeps all of its models;
+  /// otherwise only models whose name matches are kept, and a provider left with no
+  /// matching models is dropped. An empty or whitespace-only query returns the full
+  /// ordered list unchanged. Matching is a case- and diacritic-insensitive substring
+  /// (`"dee"` matches `deepseek-…`, `"cafe"` matches `café-…`).
+  public func filteredProviders(matching query: String) -> [Provider] {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return orderedProviders }
+    let needle = ModelOptions.normalizedForSearch(trimmed)
+
+    return orderedProviders.compactMap { provider in
+      if ModelOptions.normalizedForSearch(provider.name).contains(needle) {
+        return provider
+      }
+      let matchingModels = provider.models.filter {
+        ModelOptions.normalizedForSearch($0).contains(needle)
+      }
+      guard !matchingModels.isEmpty else { return nil }
+      return Provider(
+        name: provider.name,
+        slug: provider.slug,
+        models: matchingModels,
+        authenticated: provider.authenticated,
+        warning: provider.warning,
+        capabilities: provider.capabilities
+      )
+    }
+  }
+
+  /// Case- and diacritic-insensitive form used for search comparison.
+  private static func normalizedForSearch(_ string: String) -> String {
+    string.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+  }
+
   /// Whether `model` supports reasoning, per the provider capabilities map. Defaults to
   /// `true` when the model isn't found or has no capability entry (matches the desktop's
   /// `caps?.reasoning ?? true`), so the effort control isn't hidden on unknown models.
@@ -103,8 +150,28 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
     return true
   }
 
-  /// Valid reasoning-effort levels (verified: `hermes_constants.VALID_REASONING_EFFORTS`
-  /// plus "none"). Sent via `config.set {key:"reasoning", value}`. The server accepts any
-  /// level regardless of model; they only take effect on reasoning-capable models.
-  public static let reasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh"]
+  /// Valid reasoning-effort levels: `hermes_constants.VALID_REASONING_EFFORTS` verbatim,
+  /// with "none" first (`parse_reasoning_effort` accepts it too). `max`/`ultra` were added
+  /// upstream on 2026-07-12 (#62650). Sent via `config.set {key:"reasoning", value}`.
+  ///
+  /// The client offers the FULL scale on every model and never filters by model: the
+  /// transports clamp per provider on the wire (gpt-5.6 maps `ultra`→`max`, xAI tops out
+  /// at `high`, OpenAI-compatible tops out at `max`), and `hermes_cli/inventory.py`
+  /// `_apply_capabilities` deliberately does not forward per-model `supported_efforts`
+  /// (it under-reports), so there is no server-published list to filter against.
+  public static let reasoningEfforts = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+  ]
+
+  /// Levels a pre-#62650 gateway rejects with server error 4002
+  /// ("unknown reasoning value: <v>"); one such verdict latches them out of the picker
+  /// for that chat slot. See `GatewayError.isUnknownReasoningValue`.
+  public static let extendedReasoningEfforts: Set<String> = ["max", "ultra"]
+
+  /// The levels the picker should offer: the full ladder, or — once an agent has rejected
+  /// an extended level — the ladder minus `max`/`ultra`. Order is preserved either way.
+  public static func offeredEfforts(extendedSupported: Bool) -> [String] {
+    guard !extendedSupported else { return reasoningEfforts }
+    return reasoningEfforts.filter { !extendedReasoningEfforts.contains($0) }
+  }
 }
